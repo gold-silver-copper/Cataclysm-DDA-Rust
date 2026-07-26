@@ -49,12 +49,14 @@ rendering, windowing, or audio features.
 
 The server must be runnable:
 
-- As a dedicated standalone process
+- As a dedicated standalone process on macOS and Linux
 - Locally for a hosted or single-player session
 - In automated tests without a GPU, window server, or audio device
 
 Client and server may share simulation and protocol crates, but the server must
-not depend on the graphical client.
+not depend on the graphical client. macOS is a mandatory development platform
+for both binaries from the first vertical slice; server compatibility cannot be
+deferred until after Linux deployment works.
 
 ### Run a persistent shared-world server
 
@@ -105,9 +107,10 @@ the first implementation optimizes for correctness and a good
 
 ### Target native desktop clients and a dedicated server
 
-The initial client platforms are Windows, macOS, and Linux. A headless x86-64
-Linux dedicated server is required. Windows and macOS dedicated-server builds
-are not initial release requirements.
+The initial client platforms are Windows, macOS, and Linux. Required headless
+dedicated-server platforms are macOS 13 or newer on Apple silicon and Intel,
+plus x86-64 GNU/Linux with glibc 2.35 or newer. A Windows dedicated-server build
+is not an initial release requirement.
 
 Browser, mobile, console, and platform-specific network services are outside
 the initial target.
@@ -528,15 +531,18 @@ before execution.
 
 ## Performance and supported hardware
 
-The minimum client target is a four-core x86-64 CPU, 8 GiB RAM, and a GPU with
+The minimum x86-64 client target is a four-core CPU, 8 GiB RAM, and a GPU with
 2 GiB VRAM supporting Direct3D 12 on Windows 10+, Metal on macOS 13+, or Vulkan
-1.2 on x86-64 GNU/Linux with glibc 2.35 or newer and X11 or Wayland. macOS also
-supports Apple silicon. The client must sustain 60 frames per second at 1920 by
-1080 in the standard tiles view on this class of hardware.
+1.2 on GNU/Linux with glibc 2.35 or newer and X11 or Wayland. The minimum Apple
+silicon client is a base Apple M1 with 8 GiB unified memory on macOS 13. Every
+required client target must sustain 60 frames per second at 1920 by 1080 in the
+standard tiles view on its minimum hardware.
 
-The 16-player dedicated-server target is four dedicated x86-64 CPU cores, 8 GiB
-RAM, NVMe storage, and 20 Mbit/s symmetric network capacity. Under the standard
-16-client workload:
+The 16-player dedicated-server target is four dedicated CPU cores on x86-64 or
+four Apple silicon performance cores, 8 GiB RAM, NVMe storage, and 20 Mbit/s
+symmetric network capacity. Run the standard 16-client workload natively on
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`x86_64-unknown-linux-gnu`:
 
 - Simulation tick time is below 35 ms at p95 and 50 ms at p99.
 - Server resident memory remains below 4 GiB.

@@ -23,7 +23,7 @@ CDDA reference version, redesigned around:
   players disconnect
 - A world clock that continues while no players are connected
 - Native Windows, macOS, and Linux clients
-- A headless Linux dedicated server
+- Native headless macOS and Linux dedicated servers
 
 Preserve all in-scope observable CDDA mechanics and content. Apply only the
 locked multiplayer adaptations and the minimum-change adaptation rule in this
@@ -93,8 +93,8 @@ Implement these decisions as written:
 13. The global world clock advances with zero connected players.
 14. Simulation time, network send rate, and client rendering time are separate
     concepts.
-15. Windows, macOS, and Linux are the initial client platforms. A headless
-    Linux dedicated server is required.
+15. Windows, macOS, and Linux are the initial client platforms. Headless macOS
+    and Linux dedicated servers are required.
 16. Simulation runs at 20 Hz, sends network state at 10 Hz, and maps one
     simulation second to one wall-clock second.
 17. Players cannot pause or accelerate time. Only the administrative
@@ -148,6 +148,11 @@ Maintain strict dependency direction:
   presentation.
 - Lightyear and SQLite sit behind project-owned interfaces so domain logic does
   not depend on transport or database APIs.
+
+The client and headless server must both build and run on the macOS development
+host from the first vertical slice. Required standalone server targets are
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`x86_64-unknown-linux-gnu`. Windows server support is outside the initial gate.
 
 ### Toolchain and foundational crates
 
@@ -339,7 +344,8 @@ same reconnect session or an administrator may replace or transfer it.
 Run one authoritative server runtime and one SQLite database per persistent
 world. Do not shard or federate a world. Dedicated operators expose one HTTPS
 control endpoint and one UDP gameplay endpoint. Accounts and roles are local to
-that server world.
+that server world. Ship native headless server binaries for Apple silicon and
+Intel macOS 13 or newer and for x86-64 GNU/Linux with glibc 2.35 or newer.
 
 Clients connect directly by hostname or IP address and can store favorites.
 There is no central account service, matchmaking service, public server
@@ -456,17 +462,20 @@ ship an asset whose license or provenance is unknown or incompatible.
 
 ### Supported hardware and performance gates
 
-The minimum client target is a four-core x86-64 CPU, 8 GiB RAM, and a GPU with
+The minimum x86-64 client target is a four-core CPU, 8 GiB RAM, and a GPU with
 2 GiB VRAM supporting Direct3D 12 on Windows 10+, Metal on macOS 13+, or Vulkan
-1.2 on x86-64 GNU/Linux with glibc 2.35 or newer and X11 or Wayland. Apple
-silicon is also a required macOS target. Sustain 60 frames per second at 1920 by
-1080 in the standard tiles view on this class of hardware.
+1.2 on GNU/Linux with glibc 2.35 or newer and X11 or Wayland. The minimum Apple
+silicon client is a base Apple M1 with 8 GiB unified memory on macOS 13. Every
+required client target must sustain 60 frames per second at 1920 by 1080 in the
+standard tiles view on its minimum hardware.
 
-The 16-player server target is four dedicated x86-64 CPU cores, 8 GiB RAM,
-NVMe storage, and 20 Mbit/s symmetric network capacity. The standard release
-workload has 16 connected clients plus 64 additional disconnected characters
-distributed across representative Active, Warm, and Dormant regions. It must
-meet all of these gates:
+The 16-player server target is four dedicated CPU cores on x86-64 or four Apple
+silicon performance cores, 8 GiB RAM, NVMe storage, and 20 Mbit/s symmetric
+network capacity. Run the standard release workload natively on
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`x86_64-unknown-linux-gnu`. It has 16 connected clients plus 64 additional
+disconnected characters distributed across representative Active, Warm, and
+Dormant regions. All three server targets must meet every gate:
 
 - Simulation tick time below 35 ms at p95 and 50 ms at p99
 - Server resident memory below 4 GiB
@@ -611,7 +620,7 @@ features as implemented.
 Build the port through expanding end-to-end slices. Keep the main branch
 buildable and the current slice runnable.
 
-The first architecture slice must:
+The first architecture slice must run on the macOS development host and must:
 
 1. Start a persistent headless server.
 2. Connect two Bevy clients, including an in-process test mode.
@@ -710,8 +719,11 @@ Also add and maintain:
 - Performance benchmarks for active simulation, content loading, pathfinding,
   chunk streaming, serialization, and database commits
 - A 16-client soak test with representative active and disconnected characters
-- Platform CI for Linux, Windows, and macOS clients and the Linux server
-- Clean-machine build and dedicated-server deployment tests
+- Platform CI for Linux, Windows, and macOS clients and native headless-server
+  jobs for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+  `x86_64-unknown-linux-gnu`
+- Clean-machine dedicated-server build, run, and deployment tests on all three
+  required server targets
 - Dependency license and vulnerability checks
 
 Never weaken, skip, or delete a failing test merely to obtain a green build.
@@ -745,8 +757,10 @@ The assignment is complete only when all of the following are true:
    architecture-authorized, tested multiplayer adaptation. Only the fixed
    exclusions in this prompt may be marked out of scope.
 3. Native clients build and pass required checks on Windows, macOS, and Linux.
-4. The headless Linux server builds, deploys, runs, shuts down, backs up,
-   restores, and recovers from tested failures.
+4. Headless servers for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+   `x86_64-unknown-linux-gnu` build, deploy, run, shut down, back up, restore,
+   recover from tested failures, and pass the performance and 24-hour soak gates
+   natively.
 5. Sixteen connected clients and 64 additional disconnected characters pass
    the specified 24-hour soak and every stated performance budget.
 6. The server remains authoritative under hostile, malformed, late, duplicated,
