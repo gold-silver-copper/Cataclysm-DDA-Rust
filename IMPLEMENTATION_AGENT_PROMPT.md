@@ -16,7 +16,7 @@ Create a production-quality Rust port of the gameplay and content of the pinned
 CDDA reference version, redesigned around:
 
 - A Bevy graphical client
-- A minimal headless Bevy server
+- A plain-Rust headless server with no Bevy dependencies
 - A persistent server-authoritative multiplayer world
 - Real-time simultaneous play for up to 16 connected players initially
 - Durable characters that remain physically present and vulnerable after their
@@ -75,18 +75,23 @@ Implement these decisions as written:
 1. This is a derivative multiplayer Rust port of CDDA, not an original game
    merely inspired by it.
 2. The port is semantic, not a line-by-line C++ translation.
-3. The client uses Bevy.
-4. The authoritative server uses minimal/headless `bevy_app` and `bevy_ecs`
-   without renderer dependencies.
-5. The simulation uses a hybrid ECS design.
-6. Dense terrain and spatial data use chunked world storage; tiles are not ECS
-   entities.
+3. The client uses Bevy for presentation. Bevy is prohibited from every other
+   workspace crate and all non-client transitive dependency graphs.
+4. The authoritative server is an ordinary Rust/Tokio application. It uses no
+   `bevy`, `bevy_app`, `bevy_ecs`, `bevy_time`, `bevy_tasks`, or other Bevy
+   crate.
+5. The authoritative simulation is a plain-Rust domain model, not ECS. Do not
+   create a partial ECS migration, dual representation, or server-side ECS
+   abstraction anywhere in this implementation.
+6. Dense terrain and spatial data use chunked world storage; tiles are
+   chunk-owned domain data.
 7. Persistent domain objects use explicit typed stable IDs. Bevy `Entity`
-   values never serve as save-file or wire identity.
+   values exist only in the client presentation layer and never serve as
+   canonical, save-file, or wire identity.
 8. Clients send commands and intentions. Only the server validates and mutates
    canonical gameplay state.
 9. The protocol uses explicit commands, events, snapshots, and relevance-
-   filtered deltas. It does not mirror arbitrary Bevy component mutations.
+   filtered deltas. It never exposes client presentation components.
 10. Tests and replay execution do not require rendering.
 11. The persistent world targets 16 simultaneously connected players initially.
 12. Disconnected player characters remain present, simulated, and vulnerable.
@@ -94,7 +99,8 @@ Implement these decisions as written:
 14. Simulation time, network send rate, and client rendering time are separate
     concepts.
 15. Windows, macOS, and Linux are the initial client platforms. Headless macOS
-    and Linux dedicated servers are required.
+    and Linux dedicated servers are required. The initial Windows client is
+    remote-client-only and does not host local worlds.
 16. Simulation runs at 20 Hz, sends network state at 10 Hz, and maps one
     simulation second to one wall-clock second.
 17. Players cannot pause or accelerate time. Only the administrative
@@ -102,8 +108,8 @@ Implement these decisions as written:
 18. Disconnected characters use the survival autopilot specified below.
 19. Map chunks are 12 by 12 tile CDDA submaps with the fixed Active, Warm, and
     Dormant tier rules below.
-20. Networking uses Lightyear 0.28.0 over UDP/Netcode with explicit domain
-    messages and bincode encoding.
+20. Networking uses exactly `iroh` 1.0.3 authenticated QUIC with explicit
+    domain messages, Postcard encoding, and the stream/datagram layout below.
 21. Persistence uses bundled SQLite through `rusqlite` 0.40.1 with WAL,
     versioned Postcard records, and Zstandard compression.
 22. Canonical simulation is bit-for-bit deterministic across the supported
@@ -140,19 +146,54 @@ Maintain strict dependency direction:
 
 - `sim` cannot depend on `client`, rendering, windowing, or network transport.
 - `protocol` must work in client, server, headless tests, and replay tools.
-- `persistence` serializes versioned domain records rather than the raw Bevy
-  `World`.
+- `persistence` serializes versioned domain records rather than client or
+  framework state.
 - `server` owns time, identity allocation, randomness, validation, persistence,
   interest management, and canonical outcomes.
 - `client` translates local input into commands and authoritative events into
   presentation.
-- Lightyear and SQLite sit behind project-owned interfaces so domain logic does
+- Iroh and SQLite sit behind project-owned interfaces so domain logic does
   not depend on transport or database APIs.
+- Only `client` may declare or transitively depend on `bevy` or a `bevy_*`
+  crate. `sim`, `content`, `protocol`, `persistence`, `server`, and `tools` must
+  remain Bevy-free.
+
+Run networking, connection tasks, signals, timers, and bounded background work
+on a Tokio multithread runtime. Run the 20 Hz simulation loop on one dedicated
+OS thread that exclusively owns canonical `WorldState`. It drains bounded
+command queues only at tick boundaries and publishes immutable output batches
+to networking and persistence. Never hold or borrow canonical world state
+across an `.await`. Keep the prescribed single persistence worker separate from
+the simulation thread.
+
+Use these fixed thread-boundary capacities:
+
+- Network-to-simulation ingress: 4,096 envelopes or 16 MiB.
+- Simulation-to-persistence: 64 journal batches or 32 MiB plus two coalescible
+  snapshot jobs.
+- Global simulation-to-network reliable output: 256 batches or 32 MiB.
+- Per-client reliable delivery: 128 frames or 8 MiB.
+- Unreliable state: one latest-value slot per state class, never a queue.
+
+When ingress is full, return `ServerBusy` for reliable commands and drop
+unreliable samples. When a per-client reliable queue is full, disconnect that
+slow client and require a relevance-filtered snapshot on reconnect; do not
+stall the simulation. Before each 100-millisecond journal batch, reserve one
+persistence slot and one global reliable-output slot and retain a reversible
+pre-batch checkpoint until SQLite acknowledges the commit. On capacity failure,
+persistence failure, or global dispatcher failure, stop command admission,
+start no later tick, roll back the uncommitted batch, publish no uncommitted
+outcome, and enter maintenance after the last durable boundary. Snapshot jobs
+may coalesce dirty sets because the journal is authoritative; never drop journal
+or critical-event batches. Add fault-injection tests for every queue saturation,
+worker failure, rollback, disconnect, and maintenance transition.
 
 The client and headless server must both build and run on the macOS development
 host from the first vertical slice. Required standalone server targets are
 `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu`. Windows server support is outside the initial gate.
+`x86_64-unknown-linux-gnu`. Windows server support is outside the initial gate,
+so local single-player and locally hosted worlds are available only on macOS
+and Linux in the initial release.
 
 ### Toolchain and foundational crates
 
@@ -163,41 +204,51 @@ resulting `Cargo.lock`:
 | --- | --- |
 | Rust | Rust 1.97.1 in `rust-toolchain.toml`, edition 2024 |
 | Client | Bevy 0.19.0 with only the required 2D, UI, audio, asset, input, accessibility, and native-platform features |
-| Server | `bevy_app`, `bevy_ecs`, `bevy_time`, and `bevy_tasks` 0.19.0 without rendering, window, or audio features |
-| Multiplayer | Lightyear 0.28.0 over native UDP with Netcode |
-| Wire encoding | Registered Serde messages, Lightyear bincode serialization, protocol version 1 |
+| Server | Plain Rust on Tokio 1.53.1 with no Bevy crate in its dependency graph |
+| Multiplayer | `iroh` 1.0.3 authenticated QUIC using ALPN `cdda-rust/game/1` |
+| Wire encoding | Explicit versioned Serde domain messages encoded with `postcard` 1.1.3 |
 | Database | Bundled SQLite through `rusqlite` 0.40.1 |
 | Durable blobs | `postcard` 1.1.3 plus `zstd` 0.13.3 |
-| Control API | Tokio 1.53.1, Axum 0.8.9, `axum-server` 0.8.0, and rustls 0.23.42 HTTPS |
+| Async runtime | Tokio 1.53.1 for iroh I/O, signals, timers, and bounded background work |
 | Passwords | RustCrypto `argon2` 0.5.3 using Argon2id |
 | Randomness and hashing | `rand_chacha` 0.10.0 `ChaCha8Rng` and BLAKE3 1.8.5 |
-| Observability | `tracing` 0.1.44, `tracing-subscriber` 0.3.23, and a Prometheus-format metrics endpoint |
+| Observability | `tracing` 0.1.44, `tracing-subscriber` 0.3.23, and a loopback-only Prometheus-format metrics endpoint |
 
-### Hybrid ECS rules
+Only `crates/client/Cargo.toml` may declare Bevy dependencies. Add a repository
+dependency-boundary check based on `cargo metadata` that fails if a package
+named `bevy` or starting with `bevy_` is reachable from any non-client workspace
+crate. Run it in the standard local and CI gates.
 
-Use ECS for independently acting objects that participate in multiple systems.
-Use domain aggregates and dense collections when atomic invariants, spatial
-layout, or containment dominate.
+### Plain-Rust authoritative simulation
+
+Represent canonical state once, with typed Rust records, aggregates, stable-ID
+registries, containment graphs, chunk stores, deterministic queues, and indexes.
+Implement simulation phases as ordinary functions and focused services over
+that state. Do not introduce an ECS trait layer, component storage, archetypes,
+entity handles, shadow components, or dual writes in the server or shared
+crates. A server-side ECS migration is outside this assignment.
 
 Required representations:
 
 | Concept | Representation |
 | --- | --- |
-| Players, NPCs, monsters | ECS entities with coarse domain components |
-| Actor health, position, movement, faction | ECS components |
-| Status effects | Domain collection component |
-| Vehicles | ECS entity containing a vehicle aggregate |
+| Players, NPCs, monsters | Stable-ID keyed actor records in domain registries |
+| Actor health, position, movement, faction | Actor-owned fields and invariant-preserving substructures |
+| Status effects | Collections owned by affected domain objects |
+| Vehicles | Stable-ID keyed vehicle aggregates |
 | Vehicle parts | Dense vehicle-owned collection |
 | Terrain, furniture, traps, fields | Chunk-owned dense/sparse data |
 | Items and pockets | Stable `ItemId` records and containment graph |
 | Ground item piles | Chunk-local stable item references |
 | Recipes and type definitions | Immutable validated registries |
 | Activities | Explicit interruptible state machines |
-| Projectiles and active explosions | Short-lived ECS entities |
-| Sprites and UI | Client-only presentation entities |
+| Projectiles and active explosions | Stable-ID keyed short-lived records and ordered work queues |
+| Sprites and UI | Client-only Bevy presentation entities |
 
-Do not create an entity for every tile, nested item part, recipe, or static
-definition simply to maximize ECS usage.
+Derived indexes may accelerate spatial and cross-system queries, but canonical
+records remain the source of truth and indexes must be rebuildable and checked
+for consistency. The Bevy client may create and destroy presentation entities
+freely from stable-ID keyed snapshots and events.
 
 ### Stable identity
 
@@ -209,9 +260,17 @@ allocator reserves blocks of 4,096 counters by advancing the persisted
 high-water mark in a dedicated SQLite transaction before issuing any ID from a
 block. Unused or rolled-back IDs are skipped permanently.
 
+Record `IdBlockReserved` and `IdBlockAbandoned` as authoritative recovery inputs
+and replay records. If a crash leaves SQLite's high-water mark ahead of the last
+journaled allocator cursor, recovery records `IdBlockAbandoned` for that entire
+unconfirmed remainder before allocating again. Replay consumes these records
+instead of reserving fresh database ranges so burned IDs and allocator state are
+identical.
+
 Bevy `Entity` values, memory addresses, array positions, and database row IDs
-are never durable or wire identities. Maintain runtime maps between stable IDs
-and ECS entities. Never reuse an ID after deletion, rollback, or a crash.
+are never canonical, durable, or wire identities. Only the client maintains a
+disposable map between stable IDs and Bevy presentation entities. Never reuse a
+stable ID after deletion, rollback, or a crash.
 
 ### Time and scheduling
 
@@ -237,9 +296,9 @@ Use a stable priority queue keyed by `(due_tick, event_sequence)` for scheduled
 work. Order same-tick conflicts by phase, actor readiness, stable `ActorId`, and
 command sequence.
 
-Do not depend on incidental Bevy parallel-system ordering. Order conflicting
-phases explicitly, and parallelize only computations whose result is invariant
-to execution order.
+Do not depend on task scheduling, hash iteration, or incidental execution order.
+Order conflicting phases explicitly, and parallelize only computations whose
+result is invariant to execution order.
 
 Players cannot pause or accelerate the world. Menus leave the simulation
 running; an actor finishes its current action and guards in place. Crafting,
@@ -302,35 +361,109 @@ divergence and emit a diagnostic event.
 
 ### Networking
 
-Use Lightyear 0.28.0 with Bevy 0.19.0, native UDP, the Netcode connection layer,
-registered Serde messages, Lightyear's bincode serializer, and protocol version
-1. Do not automatically replicate the canonical Bevy world.
+Use exactly `iroh = "=1.0.3"` with its authenticated, encrypted QUIC
+connections. Keep iroh behind a project-owned transport adapter; protocol,
+simulation, persistence, and replay types cannot depend on iroh APIs. The
+network topology is client-to-authoritative-server only. Do not establish
+client-to-client gameplay connections or infer gameplay trust from iroh's
+peer-to-peer transport.
 
-Use these channels:
+Persist one iroh `SecretKey` per server world and advertise the corresponding
+serialized `EndpointAddr`. Client favorites pin its cryptographic `EndpointId`.
+Persist one iroh secret key per client installation. Use the fixed ALPN
+`cdda-rust/game/1`. Key rotation is an explicit operator action that produces a
+new address to distribute out of band; never accept a silent endpoint identity
+change. Generate endpoint keys with the operating system CSPRNG and store them
+with owner-only file permissions or equivalent platform ACLs.
 
-- Redundant unreliable-sequenced input for held movement and vehicle steering
-- Reliable-ordered semantic commands, results, chat, and administration
-- Reliable-ordered entity lifecycle and critical domain events
-- Reliable-unordered fragmented chunk snapshots and content manifests
-- Unreliable-sequenced actor and vehicle state deltas
+Map protocol messages to QUIC as follows:
 
-Every payload uses fixed-width domain numbers, typed stable IDs, bounded
-collections, explicit versions, and server-side authorization. Implement an
-in-process Lightyear transport for integration tests and simulate latency,
-jitter, loss, duplication, and reordering.
+- One long-lived bidirectional control stream carries handshake, authentication,
+  character selection, session lifecycle, chat, administration, semantic
+  commands, and typed command results.
+- One server-opened long-lived unidirectional event stream carries reliable
+  ordered entity lifecycle changes and critical domain events.
+- Each content manifest, initial-state bundle, and chunk snapshot uses a new
+  short-lived reliable unidirectional stream, avoiding per-stream head-of-line
+  blocking while remaining subject to shared connection budgets.
+- QUIC datagrams carry sequence-numbered held movement, vehicle steering, and
+  actor/vehicle state deltas. Each datagram is self-contained and bounded;
+  receivers discard stale sequences. Send oversized state on a reliable
+  snapshot stream instead of application-fragmenting datagrams.
 
-The rustls HTTPS control API uses Tokio, Axum, and `axum-server` for login,
-character selection, and issuance of 30-second Netcode connection tokens.
-Production requires a CA-valid certificate; local development generates and
-pins a local certificate. Plaintext remote authentication is prohibited.
+Reliable frames have a 32-bit big-endian byte length followed by a Postcard
+1.1.3 payload. Every message envelope includes protocol version 1 and a message
+kind. All payloads use fixed-width domain numbers, typed stable IDs, bounded
+collections, documented maximum encoded and decoded sizes, and server-side
+authorization. Reject unknown versions and kinds before decoding their bodies.
+
+The first control-stream exchange compares protocol version, pinned CDDA
+baseline, content-manifest hash, ordered enabled-mod list, and server
+`EndpointId`, then performs password or resume-token authentication and
+character selection. Iroh authenticates and encrypts transport endpoints, but
+does not replace account authentication. There is no parallel web control API,
+separate connection-token exchange, or plaintext authentication path. Bind an
+issued application session to the authenticated client `EndpointId`. Await the
+full QUIC handshake and do not use `into_0rtt` or send authentication, session,
+command, or gameplay data in 0-RTT.
+
+Protocol version 1 requires QUIC datagram support and an initial
+`max_datagram_size()` of at least 1,024 bytes. Reject the connection during the
+control handshake if that requirement is not met. Before every send, query the
+current `max_datagram_size()` and cap the payload to the smaller of that value
+and 1,200 bytes. Use non-waiting sends: a full send buffer drops superseded
+real-time state. If datagram support disappears or the current maximum falls
+below 1,024 bytes, close the connection as transport-incompatible. Handle all
+other send errors explicitly, and move state too large for the current path to
+a reliable snapshot stream.
+
+Enforce these fixed resource limits:
+
+- At most 64 established QUIC connections per server: at most 32
+  pre-authentication connections, 16 authenticated gameplay sessions, and 16
+  authenticated non-gameplay control or administration sessions.
+- New-connection token buckets of 60 per minute with burst 20 globally and six
+  per minute with burst three per `EndpointId`. Expire idle rate-limit keys
+  after 30 minutes, cap keyed tables at 4,096 entries, and apply only the global
+  bucket on overflow without allocating another key.
+- Protocol/content negotiation and authentication completed within 15 seconds
+  of QUIC establishment.
+- At most two concurrent Argon2 verifications and a bounded queue of eight that
+  waits at most two seconds before returning a typed busy rejection.
+- Exactly one client-opened bidirectional control stream and zero client-opened
+  unidirectional streams. Close on any additional client-opened stream.
+- Maximum encoded/decoded frame sizes of 64/256 KiB for control, 256 KiB/1 MiB
+  for events, and 8/32 MiB for bulk snapshots. Check declared and decompressed
+  sizes before allocation, and require every frame to make progress within five
+  seconds.
+- At most four concurrent bulk streams and 16 MiB of encoded bulk data in flight
+  per client. Apply a per-client 512 KiB/s bulk token bucket with a 2 MiB burst
+  and a server-wide 1.5 MiB/s bulk bucket with a 3 MiB burst. On the minimum 20
+  Mbit/s server link this reserves more than 7 Mbit/s for control, events, and
+  real-time deltas. Globally drain control and critical-event output across all
+  connections before scheduling bulk with weighted-fair queuing, and assign
+  those streams higher QUIC priority within each connection. Separate streams
+  and connections still share host, path, and relay congestion.
+- A heartbeat every five seconds and disconnect after 15 seconds without
+  inbound traffic.
+- Control ingress at 40 messages per second with burst 80 and datagram ingress
+  at 60 per second with burst 120. Reject reliable excess and drop unreliable
+  excess before either reaches the simulation queue.
+
+Pure simulation tests invoke domain commands without a transport. Protocol
+tests use a deterministic in-memory harness at the project adapter boundary.
+End-to-end network tests use real ephemeral iroh endpoints on loopback and an
+application test shim that injects latency, loss, duplication, reordering, and
+disconnects without replacing iroh in the production path.
 
 Account names match `[a-z0-9_]{3,32}`. Passwords are 12 through 256 bytes and
 are stored as Argon2id PHC strings using 64 MiB, three iterations, four lanes, a
 random 16-byte salt, and a 32-byte output. Public registration is disabled;
 administrators create accounts or one-use invites with the CLI. Limit failed
-authentication to five attempts per account and source address per 15 minutes.
-Generate salts, invitation tokens, session tokens, and Netcode private keys with
-the operating system CSPRNG.
+authentication to five attempts per account and client `EndpointId` per 15
+minutes and 100 failures globally per 15 minutes.
+Generate salts, invitation tokens, session tokens, and iroh endpoint secret
+keys with the operating system CSPRNG.
 
 Successful login returns an opaque random 256-bit token whose BLAKE3 hash is
 stored. It expires after 24 hours and is revoked by password changes or admin
@@ -339,21 +472,60 @@ expiration policy. Roles are player, moderator, and administrator. Exactly one
 gameplay connection per account and per character is active at a time; only the
 same reconnect session or an administrator may replace or transfer it.
 
+Implement default-deny authorization with this exact capability matrix:
+
+| Role | Allowed capabilities |
+| --- | --- |
+| Player | Change its own password; manage its own sessions and characters; command only its currently controlled character; read only ownership/perception/ordinary-UI state; use chat and submit reports |
+| Moderator | Every player capability for its own character; view account name/ID, character name, connection state, chat, reports, and moderation history; mute, kick, and suspend an account for at most 24 hours |
+| Administrator | Every moderator capability; create/disable accounts and invitations; reset credentials; grant/revoke roles; permanently ban; replace sessions; transfer character ownership/control; inspect canonical/private state; issue recorded debug/world mutations; enter maintenance; shut down; configure, migrate, back up, and restore the world |
+
+Moderators cannot view credentials, session tokens, private inventories, or
+unseen state; transfer or control characters; change accounts or roles;
+permanently ban; mutate gameplay; pause/configure the world; or run backup,
+restore, migration, or shutdown. No role can read passwords or raw session
+tokens because they are not stored. Require password reauthentication within
+five minutes for administrator maintenance, restore, role, credential-reset,
+ownership-transfer, and debug-mutation commands. Journal every moderation and
+administration attempt with actor account, role, target, tick, typed safe
+metadata, status, and any resulting recovery input. Implement a per-command
+allowlist audit serializer; never serialize raw arguments or results. Never log
+passwords, password-reset values, raw invitation/session tokens, endpoint secret
+keys, reauthentication material, or other credentials. Token operations log
+only the persisted record ID, stored hash identifier, expiry, and result status.
+Treat the privileged CLI as a separately audited local administrator surface
+that never grants a network client privileges. Generate authorization tests for
+every command/role pair, cross-account ownership,
+expired reauthentication, and unknown-command default denial.
+
 ### Deployment and content handshake
 
 Run one authoritative server runtime and one SQLite database per persistent
-world. Do not shard or federate a world. Dedicated operators expose one HTTPS
-control endpoint and one UDP gameplay endpoint. Accounts and roles are local to
-that server world. Ship native headless server binaries for Apple silicon and
-Intel macOS 13 or newer and for x86-64 GNU/Linux with glibc 2.35 or newer.
+world. Do not shard or federate a world. Dedicated operators expose one iroh
+endpoint. Accounts and roles are local to that server world. Ship native
+headless server binaries for Apple silicon and Intel macOS 13 or newer and for
+x86-64 GNU/Linux with glibc 2.35 or newer.
 
-Clients connect directly by hostname or IP address and can store favorites.
-There is no central account service, matchmaking service, public server
-directory, relay, or automatic NAT traversal. Local play embeds the same
-headless server crates in the client process. Single-player uses the in-process
-transport only; locally hosted multiplayer also exposes the HTTPS and UDP
-endpoints for remote clients. The host's client-facing command boundary remains
-identical and non-authoritative.
+Construct client and server endpoints with iroh's `endpoint::presets::N0`
+configuration. Prefer direct QUIC, use its default address lookup and hole
+punching, and allow its end-to-end-encrypted N0 relay fallback when a direct path
+cannot be established. There is no project-operated central account service,
+matchmaking service, or public server directory. Custom relay operation is
+outside this completion scope. Players join using an operator-provided
+serialized `EndpointAddr`. Store its `EndpointId` as the favorite's pinned
+identity and treat its direct/relay addresses as refreshable hints; a bare
+hostname or IP without the expected `EndpointId` is not a valid remote server
+identity.
+
+On macOS and Linux, local play launches the standalone Bevy-free server
+executable as a separate child process and connects through iroh's local direct
+path. Never link or embed server crates into the Bevy client process. Closing
+the client only disconnects its character; the local server remains running
+until explicitly stopped. An explicit stop first enters the administrative
+maintenance procedure, so planned downtime freezes world time. A crash, forced
+termination, or other unexpected process downtime uses the persisted-UTC
+deterministic catch-up policy. The initial Windows client connects to remote
+servers only. The host client remains non-authoritative.
 
 The connection handshake compares protocol version, baseline commit,
 content-manifest hash, and ordered enabled-mod list before character selection.
@@ -371,11 +543,21 @@ Use bundled SQLite through `rusqlite` 0.40.1 with `journal_mode=WAL`,
 numbered, forward-only SQL migrations after an automatic backup; do not support
 downgrades.
 
-Commit accepted commands and authoritative events to an append-only journal
-every network frame (100 milliseconds) before acknowledging durable outcomes.
-Write dirty entity and submap snapshots every five seconds in atomic batches.
-Recover by loading the latest snapshots and replaying later journal entries.
-Checkpoint WAL every 60 seconds and at graceful shutdown.
+Every 100 milliseconds, commit one atomic append-only journal batch containing
+the authoritative recovery inputs—accepted commands plus administrative,
+connection-control, and wall-clock events that affect simulation—and an audit
+copy and BLAKE3 hash of the ordered domain events those inputs produced. Do not
+acknowledge durable outcomes before this commit. Record the batch's first and
+last `SimTick`, including frames with no player commands, so replay regenerates
+AI and environmental work. Write dirty entity and submap snapshots every five
+seconds with the last included journal sequence.
+
+Recover from the latest mutually consistent snapshots by replaying only later
+recovery-input records through the simulation. Regenerate domain events and
+require their ordered hash to equal the stored audit hash. Never apply stored
+output events as a second mutation path. Abort startup with a corruption or
+determinism error on any mismatch. Checkpoint WAL every 60 seconds and at
+graceful shutdown.
 
 Roll compressed replay archives hourly and retain 30 days. After a verified
 snapshot and replay-archive write, daily compaction removes recovery-journal
@@ -384,16 +566,40 @@ crash recovery and recent desync diagnosis without unbounded journal growth.
 Compaction never removes a snapshot object referenced by a retained replay.
 
 Encode versioned domain blobs with Postcard 1.1.3 and compress them with
-`zstd` 0.13.3. Never serialize raw Bevy worlds. Create verified online backups
-hourly; retain 24 hourly and 30 daily generations. Include the database,
+`zstd` 0.13.3. Never serialize client presentation or framework state. Create
+verified online backups hourly; retain 24 hourly and 30 daily generations.
+Include the database,
 content-manifest hash, baseline commit, schema/protocol versions, and BLAKE3
-checksums. Restore verifies integrity and replays the journal before opening.
+checksums. Restore verifies integrity and replays only authoritative
+recovery-input records before opening.
 
 ### Determinism and replay
 
 Canonical simulation uses integer or fixed-point arithmetic. Floating-point
 values are presentation-only. Any collection iteration that affects outcomes is
 ordered by stable ID; hash-map iteration order must never affect simulation.
+
+Use exact integer newtypes whenever CDDA defines a canonical unit, including
+ticks and domain-specific distance, mass, volume, energy, and temperature
+types. Represent every remaining fractional simulation value as signed Q32.32
+fixed point in `i64`. Multiplication and division use checked `i128`
+intermediates and round to nearest with ties to even. Check conversions,
+division by zero, and overflow; never wrap, saturate, use platform-default
+rounding, or fall back to floating point. Reject a command-caused numeric error
+before assignment. Treat background-system overflow as a fatal deterministic
+invariant failure: commit no part of that tick and enter maintenance recovery
+from the preceding journal boundary.
+
+Define `CanonicalStateV1` as a BLAKE3 Merkle tree. Encode leaf DTOs with
+versioned Postcard and order them by
+`(domain_type_tag, stable_id_or_chunk_coordinate)`. Include global simulation
+state, content and schema versions, world seed and namespace, `SimTick`, command
+and event sequences, allocator high-water state, every persistent domain object
+and chunk, and scheduled work. Exclude derived indexes, caches, network
+connections, wall-clock timestamps, diagnostics, and client presentation. Hash
+ordered child hashes with explicit tree-level domain tags. Use this exact root
+for replay, persistence verification, and cross-platform conformance; change it
+only through an explicit version migration.
 
 Each world stores a 256-bit seed. Derive named ChaCha8 streams with BLAKE3 from
 the world seed, a domain tag, relevant stable IDs, tick, and event sequence.
@@ -403,10 +609,14 @@ random draw in one domain cannot perturb another.
 The replay format is a versioned Postcard stream compressed with Zstandard.
 Its header contains the baseline commit, content-manifest hash, protocol and
 schema versions, world namespace, seed, initial snapshot hash, and start tick.
-Records contain accepted commands, administrative world events,
-connection-control changes that affect actors, and periodic BLAKE3 canonical
-state hashes recorded every 100 ticks. The same replay must produce identical
-hashes on Windows, macOS, and Linux.
+Records contain every authoritative recovery input in journal order: accepted
+commands, administrative and connection-control events, commandless tick spans,
+`IdBlockReserved`, `IdBlockAbandoned`, and
+`UnexpectedDowntimeCatchUp { previous_utc_anchor, observed_utc, elapsed_ticks }`.
+Replay uses recorded elapsed ticks and allocator operations instead of a live
+clock or database. Record periodic BLAKE3 canonical state roots every 100 ticks.
+The same replay, including one continued across a crash and recovery, must
+produce identical roots on Windows, macOS, and Linux.
 
 At each hourly replay roll, persist an immutable canonical initial-snapshot
 object addressed by its BLAKE3 hash before writing the replay header. Retain the
@@ -427,6 +637,12 @@ Import `data/core`, `data/json`, `data/names`, `data/raw`, and all bundled
 Import `TEST_DATA` and `Standard_Combat_Tests` only as test fixtures. Import
 fonts, sound, title, shaders, and tileset assets only with recorded compatible
 licenses. Exclude Android, browser, screenshot, packaging, and XDG artifacts.
+
+The pinned Git commit's tracked `lang/po` directory contains only a placeholder;
+upstream release automation fetches non-English catalogs from mutable Transifex
+state. Ship the pinned English source strings and English UI only. Do not fetch
+translations during import or build. External non-English catalogs and runtime
+language switching are explicitly outside this completion scope.
 
 Generate a manifest for every imported file containing upstream path, commit,
 BLAKE3 hash, license, and destination. Fail the import on unknown provenance.
@@ -538,7 +754,7 @@ In-scope parity includes all of these pinned-baseline areas:
 - Character creation, scenarios, professions, traits, achievements, memorials,
   and progression
 - Save/load behavior, world options, configuration, keybindings, accessibility,
-  localization, sound, and supported tiles/content presentation
+  English text, sound, and supported tiles/content presentation
 - Core CDDA data and every bundled mod in the pinned content scope
 - Data-driven scripting and effects required by included content
 - Debug and administration capabilities necessary to test and operate the port
@@ -546,9 +762,11 @@ In-scope parity includes all of these pinned-baseline areas:
 Mobile, browser, console, Android, and iOS clients and platform services are out
 of scope. `TEST_DATA` and `Standard_Combat_Tests` are test fixtures rather than
 player-selectable mods. Assets with unknown or incompatible licenses are not
-shipped. Upstream developer and release tools that are unnecessary to build,
-validate, import, test, or operate the port are replaced by equivalent Rust
-tooling. These are the only standing parity exclusions.
+shipped. Non-English translation catalogs and runtime language switching are out
+of scope because they are not reproducibly identified by the pinned Git commit.
+Upstream developer and release tools that are unnecessary to build, validate,
+import, test, or operate the port are replaced by equivalent Rust tooling. These
+are the only standing parity exclusions.
 
 ## Persistent multiplayer requirements
 
@@ -623,7 +841,8 @@ buildable and the current slice runnable.
 The first architecture slice must run on the macOS development host and must:
 
 1. Start a persistent headless server.
-2. Connect two Bevy clients, including an in-process test mode.
+2. Connect two Bevy clients to the separate server through iroh, including a
+   loopback automated test mode.
 3. Load and replicate one validated world chunk.
 4. Spawn actors with stable IDs.
 5. Move both actors simultaneously through server-authoritative commands.
@@ -693,13 +912,14 @@ possibly stale conversational summary.
 
 Create fast local checks first, then broaden them as functionality grows.
 
-After the workspace exists, the standard local gate includes all four commands:
+After the workspace exists, the standard local gate includes all five commands:
 
 ```text
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
+cargo xtask verify-dependency-boundaries
 ```
 
 Also add and maintain:
@@ -712,6 +932,8 @@ Also add and maintain:
 - Deterministic replay tests and canonical state hashes
 - Network tests with latency, jitter, loss, reordering, duplication,
   disconnects, reconnects, and malformed messages
+- End-to-end iroh tests using real loopback endpoints for handshake, endpoint-ID
+  pinning, authentication, streams, datagrams, reconnect, and clean shutdown
 - Security tests and fuzzing for content, save, and network parsing
 - Persistence tests covering transactions, crashes, partial writes, migrations,
   backup, and restore
@@ -786,6 +1008,12 @@ The assignment is complete only when all of the following are true:
     high-severity correctness, security, persistence, or licensing issue.
 17. There are no placeholders, stubs, ignored unsupported content fields, or
     undocumented manual steps being counted as completed features.
+18. Bevy appears only in the client dependency graph. The dependency-boundary
+    check proves that every non-client workspace crate, including the server and
+    all of its transitive dependencies, is free of `bevy` and `bevy_*` packages.
+19. The delivered network transport is iroh 1.0.3 using the prescribed ALPN,
+    endpoint identity, stream/datagram mapping, and direct/relay policy; no
+    second gameplay or authentication transport remains.
 
 If the environment, permissions, hardware, or an external service prevents a
 required completion check, do not claim the port is complete. Report the exact
