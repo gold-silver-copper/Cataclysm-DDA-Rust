@@ -23,12 +23,12 @@ CDDA reference version, redesigned around:
   players disconnect
 - A world clock that continues while no players are connected
 - Native Windows, macOS, and Linux clients
-- A headless Linux dedicated server
+- Native headless macOS and Linux dedicated servers
 
-Preserve CDDA's observable mechanics and content unless persistent real-time
-multiplayer requires an intentional adaptation. Reimplement behavior cleanly in
-Rust; do not mechanically transliterate C++ classes or reproduce accidental
-legacy architecture.
+Preserve all in-scope observable CDDA mechanics and content. Apply only the
+locked multiplayer adaptations and the minimum-change adaptation rule in this
+prompt. Reimplement behavior cleanly in Rust; do not mechanically transliterate
+C++ classes or reproduce accidental legacy architecture.
 
 ## Workspace and authoritative inputs
 
@@ -54,10 +54,10 @@ Treat the upstream reference checkout as read-only. Do not mix port changes
 into it. It may be built, tested, instrumented, and inspected to establish
 behavioral baselines.
 
-Before porting behavior, record the exact upstream Git commit in the Rust
-project's documentation and parity metadata. That commit is the fixed initial
-parity target. Do not continually move the baseline while trying to reach
-parity. Upstream synchronization comes after the initial baseline is complete.
+The fixed upstream parity target is commit
+`4dfd36038b16650dc1b5cb9d79a3e42363174b05`. Verify that the reference
+checkout is at that commit and record it in project metadata. Do not move the
+baseline until the completion gate is satisfied.
 
 When instructions disagree, use this precedence:
 
@@ -70,7 +70,7 @@ When instructions disagree, use this precedence:
 
 ## Locked product and architecture decisions
 
-Do not casually reopen these decisions:
+Implement these decisions as written:
 
 1. This is a derivative multiplayer Rust port of CDDA, not an original game
    merely inspired by it.
@@ -93,40 +93,33 @@ Do not casually reopen these decisions:
 13. The global world clock advances with zero connected players.
 14. Simulation time, network send rate, and client rendering time are separate
     concepts.
-15. Windows, macOS, and Linux are the initial client platforms. A headless
-    Linux dedicated server is required.
+15. Windows, macOS, and Linux are the initial client platforms. Headless macOS
+    and Linux dedicated servers are required.
+16. Simulation runs at 20 Hz, sends network state at 10 Hz, and maps one
+    simulation second to one wall-clock second.
+17. Players cannot pause or accelerate time. Only the administrative
+    maintenance procedure can freeze the world.
+18. Disconnected characters use the survival autopilot specified below.
+19. Map chunks are 12 by 12 tile CDDA submaps with the fixed Active, Warm, and
+    Dormant tier rules below.
+20. Networking uses Lightyear 0.28.0 over UDP/Netcode with explicit domain
+    messages and bincode encoding.
+21. Persistence uses bundled SQLite through `rusqlite` 0.40.1 with WAL,
+    versioned Postcard records, and Zstandard compression.
+22. Canonical simulation is bit-for-bit deterministic across the supported
+    platforms, uses fixed-point/integer arithmetic, and uses named ChaCha8 RNG
+    streams derived with BLAKE3.
+23. Content scope, authentication, command queues, prediction, reconciliation,
+    backup retention, and performance budgets are exactly those specified in
+    this prompt and `ARCHITECTURE_DECISIONS.md`.
 
-If a locked decision proves technically unworkable, document concrete evidence
-from an implementation spike, propose the smallest viable change, and request a
-user decision. Do not silently replace it.
-
-## Open product decisions
-
-Some behavior remains intentionally open, including:
-
-- Disconnected-character standing orders and autonomous behavior
-- Gameplay pause and administrative pause rules
-- Treatment of long activities in a continuously running world
-- Inactive-region coarse simulation
-- Exact fixed-step and scheduled-event split
-- Command buffering, cancellation, and interruption
-- Prediction and reconciliation scope
-- Authentication and account policy
-- Detailed mod compatibility strategy
-
-Resolve reversible engineering details through measured prototypes and record
-the result. When an unresolved choice would materially change player experience
-or invalidate large amounts of work, summarize the tradeoff and request a user
-decision while continuing independent work that is not blocked.
-
-Do not leave an open question unresolved merely because it is difficult. Make a
-clear recommendation supported by code, tests, benchmarks, or upstream
-behavior.
+Do not replace a locked choice with an alternative library or product policy.
+Solve implementation problems behind the prescribed interfaces and record
+non-product engineering details in ADRs.
 
 ## Architecture
 
-Start with this Cargo workspace direction and refine it only when actual
-dependencies justify a change:
+Use this Cargo workspace structure:
 
 ```text
 ./
@@ -153,8 +146,32 @@ Maintain strict dependency direction:
   interest management, and canonical outcomes.
 - `client` translates local input into commands and authoritative events into
   presentation.
-- Transport and database libraries sit behind project-owned interfaces so they
-  can be replaced without rewriting domain logic.
+- Lightyear and SQLite sit behind project-owned interfaces so domain logic does
+  not depend on transport or database APIs.
+
+The client and headless server must both build and run on the macOS development
+host from the first vertical slice. Required standalone server targets are
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`x86_64-unknown-linux-gnu`. Windows server support is outside the initial gate.
+
+### Toolchain and foundational crates
+
+Use exact `=` version constraints for these direct dependencies and commit the
+resulting `Cargo.lock`:
+
+| Area | Required implementation |
+| --- | --- |
+| Rust | Rust 1.97.1 in `rust-toolchain.toml`, edition 2024 |
+| Client | Bevy 0.19.0 with only the required 2D, UI, audio, asset, input, accessibility, and native-platform features |
+| Server | `bevy_app`, `bevy_ecs`, `bevy_time`, and `bevy_tasks` 0.19.0 without rendering, window, or audio features |
+| Multiplayer | Lightyear 0.28.0 over native UDP with Netcode |
+| Wire encoding | Registered Serde messages, Lightyear bincode serialization, protocol version 1 |
+| Database | Bundled SQLite through `rusqlite` 0.40.1 |
+| Durable blobs | `postcard` 1.1.3 plus `zstd` 0.13.3 |
+| Control API | Tokio 1.53.1, Axum 0.8.9, `axum-server` 0.8.0, and rustls 0.23.42 HTTPS |
+| Passwords | RustCrypto `argon2` 0.5.3 using Argon2id |
+| Randomness and hashing | `rand_chacha` 0.10.0 `ChaCha8Rng` and BLAKE3 1.8.5 |
+| Observability | `tracing` 0.1.44, `tracing-subscriber` 0.3.23, and a Prometheus-format metrics endpoint |
 
 ### Hybrid ECS rules
 
@@ -162,9 +179,9 @@ Use ECS for independently acting objects that participate in multiple systems.
 Use domain aggregates and dense collections when atomic invariants, spatial
 layout, or containment dominate.
 
-Expected starting representations:
+Required representations:
 
-| Concept | Representation direction |
+| Concept | Representation |
 | --- | --- |
 | Players, NPCs, monsters | ECS entities with coarse domain components |
 | Actor health, position, movement, faction | ECS components |
@@ -176,83 +193,243 @@ Expected starting representations:
 | Ground item piles | Chunk-local stable item references |
 | Recipes and type definitions | Immutable validated registries |
 | Activities | Explicit interruptible state machines |
+| Projectiles and active explosions | Short-lived ECS entities |
 | Sprites and UI | Client-only presentation entities |
 
 Do not create an entity for every tile, nested item part, recipe, or static
 definition simply to maximize ECS usage.
 
+### Stable identity
+
+Use typed 128-bit IDs including `WorldId`, `ActorId`, `ItemId`, `VehicleId`,
+`MissionId`, and `EventId`. The upper 64 bits are the persistent random world
+namespace and the lower 64 bits are a monotonically allocated counter. The
+world namespace is generated with the operating system CSPRNG. The server
+allocator reserves blocks of 4,096 counters by advancing the persisted
+high-water mark in a dedicated SQLite transaction before issuing any ID from a
+block. Unused or rolled-back IDs are skipped permanently.
+
+Bevy `Entity` values, memory addresses, array positions, and database row IDs
+are never durable or wire identities. Maintain runtime maps between stable IDs
+and ECS entities. Never reuse an ID after deletion, rollback, or a crash.
+
 ### Time and scheduling
 
-Represent authoritative simulation time with integer types such as `SimTick`
-and `SimDuration`; do not use floating-point wall time as canonical state.
+Use `SimTick(u64)` and `SimDuration` at 20 Hz; one tick is 50 milliseconds and
+one simulation second is one wall-clock second. Send network state at 10 Hz.
+Rendering is variable-rate and interpolated. Headless tests and replays drive
+the same clock without sleeping.
 
-Validate a hybrid scheduler early:
+Every tick runs these ordered phases:
 
-- A fixed authoritative step for latency-sensitive movement, vehicle motion,
-  projectiles, collision, and immediate interactions
-- Scheduled completion events for long or sparse activities
-- Coarser periodic jobs for weather, needs, fields, decay, and inactive regions
-- Explicit ordered simulation phases wherever outcome order matters
+1. Network ingress and input collection
+2. Authentication/ownership and command validation
+3. Action start and interruption
+4. Movement, vehicle motion, projectiles, and collision
+5. Action completion and combat resolution
+6. Effects, needs, fields, weather, and environmental processing
+7. AI decisions
+8. Cleanup, stable-ID allocation, and dirty marking
+9. Persistence journal batching
+10. Relevance calculation and replication
 
-Rendering interpolates between authoritative states. Network update frequency
-may be lower than the simulation rate. Headless tests and replays drive the same
-simulation without sleeping for wall time.
+Use a stable priority queue keyed by `(due_tick, event_sequence)` for scheduled
+work. Order same-tick conflicts by phase, actor readiness, stable `ActorId`, and
+command sequence.
 
 Do not depend on incidental Bevy parallel-system ordering. Order conflicting
 phases explicitly, and parallelize only computations whose result is invariant
 to execution order.
 
+Players cannot pause or accelerate the world. Menus leave the simulation
+running; an actor finishes its current action and guards in place. Crafting,
+reading, construction, healing, sleep, and travel take their real simulation
+durations and continue after disconnect. Threats interrupt them according to
+CDDA rules.
+
+Administrative maintenance pause stops command intake, checkpoints SQLite,
+disconnects clients, and then freezes `SimTick`. Planned maintenance does not
+advance time. Unexpected process downtime does: use the persisted UTC anchor to
+perform deterministic catch-up before accepting clients.
+
+### Region activation
+
+Use 12 by 12 tile, single-z-level CDDA submaps as atomic map chunks.
+
+- **Active:** full 20 Hz simulation in an 11 by 11 submap square centered on
+  each connected player, on the current and adjacent z-levels, and in chunks
+  containing combat, moving vehicles, projectiles, explosions, or immediate
+  hazards.
+- **Warm:** 1 Hz coarse spatial simulation in the same-size bubble around each
+  disconnected character, NPC camp, persistent fire, or live anchor. Hostile
+  contact or a complex hazard promotes affected chunks to Active until resolved.
+- **Dormant:** unloaded state represented by scheduled events and
+  `last_sim_tick`; deterministic catch-up processes needs, rot, plants, weather,
+  power, fields, and elapsed-time systems before activation.
+
+Network prefetch uses a 13 by 13 submap square. Merge overlaps and apply the
+highest tier. Tier changes occur only at tick boundaries.
+
+### Disconnected-character autopilot
+
+On disconnect, clear held movement and steering input at the next tick. Continue
+the current activity; normal danger rules interrupt it only when its activity
+definition permits interruption. Enable survival autopilot when the activity
+completes or is interrupted. It may defend, flee nearby threats, extinguish
+fire, leave dangerous terrain or atmosphere, seek shelter inside the current
+reality bubble, use ordinary food and medicine, use wielded equipment, and sleep
+when safe.
+
+It does not initiate combat, loot, leave the current bubble, begin projects,
+spend unique resources, make dialogue/faction choices, or change equipment
+loadouts. Reconnection returns control at the next tick without moving,
+healing, canceling, or protecting the character.
+
+### Commands and client prediction
+
+Each actor has one active action and at most two queued semantic commands.
+Canceling queued work is free. Active work is cancelable only when its activity
+definition is interruptible; elapsed time and already-paid costs remain.
+Invalid commands return a typed rejection and are removed. Held movement and
+vehicle steering are stateful inputs rather than queued commands.
+
+Predict only the controlled actor's locomotion, vehicle steering, camera, and
+cosmetic effects. Never predict inventory, combat, projectiles, RNG outcomes,
+item use, crafting, dialogue, or world interaction. Interpolate remote actors
+100 milliseconds behind authoritative time. Smooth valid corrections of at
+most one tile over 150 milliseconds; snap larger or collision-invalid
+divergence and emit a diagnostic event.
+
 ### Networking
 
-Begin by evaluating Lightyear 0.28 with Bevy 0.19 behind a narrow networking
-adapter. Validate at least:
+Use Lightyear 0.28.0 with Bevy 0.19.0, native UDP, the Netcode connection layer,
+registered Serde messages, Lightyear's bincode serializer, and protocol version
+1. Do not automatically replicate the canonical Bevy world.
 
-- Headless dedicated server support
-- Explicit command/event messages containing project stable IDs
-- In-process transport for deterministic integration tests
-- UDP transport for native clients
-- Reliable ordered, reliable unordered, and unreliable channels as needed
-- Tick synchronization
-- Relevance/interest filtering by chunks and visibility
-- Local movement prediction and authoritative reconciliation
-- Snapshot interpolation for remote actors
-- Reconnection to a still-existing character
-- Simulated latency, jitter, duplication, reordering, and loss
+Use these channels:
 
-Do not automatically replicate the canonical Bevy world. Use Lightyear's
-message, timing, transport, prediction, and presentation facilities selectively.
+- Redundant unreliable-sequenced input for held movement and vehicle steering
+- Reliable-ordered semantic commands, results, chat, and administration
+- Reliable-ordered entity lifecycle and critical domain events
+- Reliable-unordered fragmented chunk snapshots and content manifests
+- Unreliable-sequenced actor and vehicle state deltas
 
-If the spike demonstrates that Lightyear imposes harmful coupling or prevents
-the explicit-domain protocol, evaluate `bevy_renet` 5.0 using the same tests.
-Record benchmark results and the decision in an ADR before committing the wider
-codebase to either library.
+Every payload uses fixed-width domain numbers, typed stable IDs, bounded
+collections, explicit versions, and server-side authorization. Implement an
+in-process Lightyear transport for integration tests and simulate latency,
+jitter, loss, duplication, and reordering.
+
+The rustls HTTPS control API uses Tokio, Axum, and `axum-server` for login,
+character selection, and issuance of 30-second Netcode connection tokens.
+Production requires a CA-valid certificate; local development generates and
+pins a local certificate. Plaintext remote authentication is prohibited.
+
+Account names match `[a-z0-9_]{3,32}`. Passwords are 12 through 256 bytes and
+are stored as Argon2id PHC strings using 64 MiB, three iterations, four lanes, a
+random 16-byte salt, and a 32-byte output. Public registration is disabled;
+administrators create accounts or one-use invites with the CLI. Limit failed
+authentication to five attempts per account and source address per 15 minutes.
+Generate salts, invitation tokens, session tokens, and Netcode private keys with
+the operating system CSPRNG.
+
+Successful login returns an opaque random 256-bit token whose BLAKE3 hash is
+stored. It expires after 24 hours and is revoked by password changes or admin
+action. One-use invitation tokens use the same size, storage, and 24-hour
+expiration policy. Roles are player, moderator, and administrator. Exactly one
+gameplay connection per account and per character is active at a time; only the
+same reconnect session or an administrator may replace or transfer it.
+
+### Deployment and content handshake
+
+Run one authoritative server runtime and one SQLite database per persistent
+world. Do not shard or federate a world. Dedicated operators expose one HTTPS
+control endpoint and one UDP gameplay endpoint. Accounts and roles are local to
+that server world. Ship native headless server binaries for Apple silicon and
+Intel macOS 13 or newer and for x86-64 GNU/Linux with glibc 2.35 or newer.
+
+Clients connect directly by hostname or IP address and can store favorites.
+There is no central account service, matchmaking service, public server
+directory, relay, or automatic NAT traversal. Local play embeds the same
+headless server crates in the client process. Single-player uses the in-process
+transport only; locally hosted multiplayer also exposes the HTTPS and UDP
+endpoints for remote clients. The host's client-facing command boundary remains
+identical and non-authoritative.
+
+The connection handshake compares protocol version, baseline commit,
+content-manifest hash, and ordered enabled-mod list before character selection.
+Reject a mismatch with all differing values in the diagnostic response. Do not
+download or execute content from a server automatically. Third-party mods are
+outside the pinned completion scope; an operator using one installs the exact
+same files manually on server and clients, and those files participate in the
+manifest hash. Multiplayer communication includes server-routed text chat;
+voice chat is out of scope.
 
 ### Persistence
 
-Begin by evaluating SQLite through `rusqlite`, with WAL and explicit
-transactions, behind a persistence trait. Validate:
+Use bundled SQLite through `rusqlite` 0.40.1 with `journal_mode=WAL`,
+`synchronous=FULL`, foreign keys, and one persistence worker. Use transactional,
+numbered, forward-only SQL migrations after an automatic backup; do not support
+downgrades.
 
-- Atomic saving of related chunk and entity changes
-- Crash recovery
-- Incremental dirty-chunk persistence
-- Versioned schema migration
-- Backups and restore verification
-- Efficient lookup by stable IDs and chunk coordinates
-- A single authoritative writer with non-blocking read/inspection tools
-- Scheduled events and offline characters surviving process restarts
+Commit accepted commands and authoritative events to an append-only journal
+every network frame (100 milliseconds) before acknowledging durable outcomes.
+Write dirty entity and submap snapshots every five seconds in atomic batches.
+Recover by loading the latest snapshots and replaying later journal entries.
+Checkpoint WAL every 60 seconds and at graceful shutdown.
 
-Store versioned domain records or binary payloads, never opaque serialized Bevy
-world internals. Keep command/event replay records separate from operational
-logs. If SQLite fails measured scale or recovery requirements, evaluate a
-replacement using the same persistence conformance suite rather than changing
-storage ad hoc.
+Roll compressed replay archives hourly and retain 30 days. After a verified
+snapshot and replay-archive write, daily compaction removes recovery-journal
+rows older than that snapshot; SQLite reuses the freed pages. This preserves
+crash recovery and recent desync diagnosis without unbounded journal growth.
+Compaction never removes a snapshot object referenced by a retained replay.
+
+Encode versioned domain blobs with Postcard 1.1.3 and compress them with
+`zstd` 0.13.3. Never serialize raw Bevy worlds. Create verified online backups
+hourly; retain 24 hourly and 30 daily generations. Include the database,
+content-manifest hash, baseline commit, schema/protocol versions, and BLAKE3
+checksums. Restore verifies integrity and replays the journal before opening.
+
+### Determinism and replay
+
+Canonical simulation uses integer or fixed-point arithmetic. Floating-point
+values are presentation-only. Any collection iteration that affects outcomes is
+ordered by stable ID; hash-map iteration order must never affect simulation.
+
+Each world stores a 256-bit seed. Derive named ChaCha8 streams with BLAKE3 from
+the world seed, a domain tag, relevant stable IDs, tick, and event sequence.
+Use separate domains for combat, map generation, weather, loot, and AI so a new
+random draw in one domain cannot perturb another.
+
+The replay format is a versioned Postcard stream compressed with Zstandard.
+Its header contains the baseline commit, content-manifest hash, protocol and
+schema versions, world namespace, seed, initial snapshot hash, and start tick.
+Records contain accepted commands, administrative world events,
+connection-control changes that affect actors, and periodic BLAKE3 canonical
+state hashes recorded every 100 ticks. The same replay must produce identical
+hashes on Windows, macOS, and Linux.
+
+At each hourly replay roll, persist an immutable canonical initial-snapshot
+object addressed by its BLAKE3 hash before writing the replay header. Retain the
+object for at least as long as every archive that references it and delete it
+only when no replay or backup references it. The replay export tool emits a
+self-contained bundle containing the replay stream, its snapshot object, and
+the matching content manifest; importing verifies all hashes before execution.
 
 ### Content compatibility
 
-Prefer directly loading compatible CDDA JSON where practical. When upstream
-data depends on C++-specific loader behavior, implement a documented
-compatibility layer or a reproducible importer instead of manually rewriting
-thousands of files.
+Vendor the pinned CDDA content with a reproducible importer. Preserve upstream
+JSON without semantic rewrites and implement its parser, inheritance,
+finalization, dependency, replacement, and effect-on-condition behavior in
+Rust. Do not introduce RON or a replacement content language.
+
+Import `data/core`, `data/json`, `data/names`, `data/raw`, and all bundled
+`data/mods` from commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05`.
+Import `TEST_DATA` and `Standard_Combat_Tests` only as test fixtures. Import
+fonts, sound, title, shaders, and tileset assets only with recorded compatible
+licenses. Exclude Android, browser, screenshot, packaging, and XDG artifacts.
+
+Generate a manifest for every imported file containing upstream path, commit,
+BLAKE3 hash, license, and destination. Fail the import on unknown provenance.
 
 Content work must include:
 
@@ -265,15 +442,54 @@ Content work must include:
 - Effect-on-condition and other data-driven behavior required by baseline
   content
 - Provenance and licensing metadata for imported assets and data
-- Tests using representative core and bundled-mod content
+- Tests using all core content and every bundled mod in the pinned scope
+
+Test core alone and test every player-selectable bundled mod in a
+dependency-resolved load set. Do not force mutually exclusive mods into one
+world merely to claim coverage.
 
 Do not silently ignore unsupported fields. Reject them clearly, implement them,
 or track them as explicit parity failures.
 
+### Licensing and attribution
+
+License original Rust source and project documentation under CC BY-SA 3.0 and
+include the complete license text. Preserve upstream attribution and mark
+ported or transformed upstream material with its source path and commit.
+Retain separately licensed dependencies, fonts, sounds, tilesets, and other
+assets under their own compatible licenses and include their notices. Do not
+ship an asset whose license or provenance is unknown or incompatible.
+
+### Supported hardware and performance gates
+
+The minimum x86-64 client target is a four-core CPU, 8 GiB RAM, and a GPU with
+2 GiB VRAM supporting Direct3D 12 on Windows 10+, Metal on macOS 13+, or Vulkan
+1.2 on GNU/Linux with glibc 2.35 or newer and X11 or Wayland. The minimum Apple
+silicon client is a base Apple M1 with 8 GiB unified memory on macOS 13. Every
+required client target must sustain 60 frames per second at 1920 by 1080 in the
+standard tiles view on its minimum hardware.
+
+The 16-player server target is four dedicated CPU cores on x86-64 or four Apple
+silicon performance cores, 8 GiB RAM, NVMe storage, and 20 Mbit/s symmetric
+network capacity. Run the standard release workload natively on
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`x86_64-unknown-linux-gnu`. It has 16 connected clients plus 64 additional
+disconnected characters distributed across representative Active, Warm, and
+Dormant regions. All three server targets must meet every gate:
+
+- Simulation tick time below 35 ms at p95 and 50 ms at p99
+- Server resident memory below 4 GiB
+- Steady-state egress below 256 Kbit/s per connected client on average
+- Playable state delivered within five seconds of reconnect on a 20 Mbit/s link
+- Cold startup and full content validation completed within 60 seconds
+- A 24-hour soak with no crash, desync, database corruption, unbounded growth,
+  or missed tick deadline rate above 0.1 percent
+
 ## Fixed baseline and parity accounting
 
-Create and continuously maintain `PORTING_MATRIX.md`. Generate portions of it
-from source, data, tests, and documentation where possible.
+Create and continuously maintain `PORTING_MATRIX.md`. Mechanically generate the
+source-, data-, and test-derived portions and hand-maintain behavioral evidence
+that cannot be generated.
 
 Each subsystem and content category must be classified as one of:
 
@@ -283,9 +499,14 @@ Each subsystem and content category must be classified as one of:
 - Implemented but unverified
 - Behaviorally verified
 - Intentionally adapted for multiplayer
-- Out of scope with approved rationale
+- Out of scope by this prompt
 
-Every intentional multiplayer adaptation must document:
+The time model, offline-character policy, simultaneous command resolution, and
+other adaptations explicitly prescribed by this prompt are authorized. When a
+new pinned behavior cannot coexist with those locked rules, implement the
+smallest deterministic behavioral change that preserves CDDA's player-visible
+intent. Record that change in an ADR and the parity matrix; do not wait for a
+new product decision. Every adaptation must document:
 
 - The pinned CDDA behavior
 - Why it fails or produces poor results in persistent real time
@@ -297,7 +518,7 @@ Do not use raw file count, type count, compilation, or content parsing alone as
 evidence of parity. A subsystem is verified only when its important observable
 behavior is tested.
 
-In-scope parity includes, at minimum, the pinned baseline's applicable:
+In-scope parity includes all of these pinned-baseline areas:
 
 - World generation, overmaps, maps, terrain, furniture, traps, fields, weather,
   seasons, map extras, specials, and regional settings
@@ -318,14 +539,16 @@ In-scope parity includes, at minimum, the pinned baseline's applicable:
   and progression
 - Save/load behavior, world options, configuration, keybindings, accessibility,
   localization, sound, and supported tiles/content presentation
-- Core CDDA data and the bundled mods designated in the pinned parity scope
+- Core CDDA data and every bundled mod in the pinned content scope
 - Data-driven scripting and effects required by included content
 - Debug and administration capabilities necessary to test and operate the port
 
-Excluded target platforms such as mobile, browser, and consoles do not require
-platform-specific parity unless the user later expands scope. Developer tools
-that are not needed to build, validate, import, test, or operate the Rust port
-may be replaced with equivalent Rust tooling instead of copied exactly.
+Mobile, browser, console, Android, and iOS clients and platform services are out
+of scope. `TEST_DATA` and `Standard_Combat_Tests` are test fixtures rather than
+player-selectable mods. Assets with unknown or incompatible licenses are not
+shipped. Upstream developer and release tools that are unnecessary to build,
+validate, import, test, or operate the port are replaced by equivalent Rust
+tooling. These are the only standing parity exclusions.
 
 ## Persistent multiplayer requirements
 
@@ -397,7 +620,7 @@ features as implemented.
 Build the port through expanding end-to-end slices. Keep the main branch
 buildable and the current slice runnable.
 
-The first architecture slice must:
+The first architecture slice must run on the macOS development host and must:
 
 1. Start a persistent headless server.
 2. Connect two Bevy clients, including an in-process test mode.
@@ -421,7 +644,7 @@ For each subsystem:
 
 1. Study upstream source, data, tests, and observable behavior.
 2. Write a concise behavior specification and identify multiplayer conflicts.
-3. Add characterization or golden tests where feasible.
+3. Add characterization or golden tests for every observable behavior boundary.
 4. Implement the smallest complete end-to-end behavior.
 5. Integrate persistence, networking, UI, content, and replay handling rather
    than postponing those boundaries indefinitely.
@@ -429,8 +652,8 @@ For each subsystem:
 7. Update the parity matrix and documentation.
 8. Conduct a fresh review before declaring the subsystem verified.
 
-Prefer a working thin path through all layers over a broad collection of
-unconnected domain types.
+Maintain a working thin path through all layers instead of accumulating a broad
+collection of unconnected domain types.
 
 ### Track progress durably
 
@@ -450,9 +673,11 @@ possibly stale conversational summary.
 
 ### Work autonomously
 
-- Make reasonable, reversible assumptions and record them.
-- Ask the user only when a missing choice is materially product-defining,
-  legally consequential, destructive, or impossible to infer safely.
+- Do not reopen the product, architecture, scope, or release choices fixed in
+  this prompt and `ARCHITECTURE_DECISIONS.md`.
+- For routine implementation mechanics beneath the locked interfaces, use the
+  simplest compliant design, record consequential engineering selections in
+  ADRs, and continue without requesting another product decision.
 - If one workstream is blocked, continue other valuable in-scope work.
 - Use bounded subagents for independent research, implementation, testing, and
   review when the environment permits them. Give each a concrete scope and
@@ -468,7 +693,7 @@ possibly stale conversational summary.
 
 Create fast local checks first, then broaden them as functionality grows.
 
-The standard local gate should include, as applicable:
+After the workspace exists, the standard local gate includes all four commands:
 
 ```text
 cargo fmt --all --check
@@ -494,12 +719,16 @@ Also add and maintain:
 - Performance benchmarks for active simulation, content loading, pathfinding,
   chunk streaming, serialization, and database commits
 - A 16-client soak test with representative active and disconnected characters
-- Platform CI for Linux, Windows, and macOS clients and the Linux server
-- Clean-machine build and dedicated-server deployment tests
+- Platform CI for Linux, Windows, and macOS clients and native headless-server
+  jobs for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+  `x86_64-unknown-linux-gnu`
+- Clean-machine dedicated-server build, run, and deployment tests on all three
+  required server targets
 - Dependency license and vulnerability checks
 
 Never weaken, skip, or delete a failing test merely to obtain a green build.
-Determine whether the test or implementation is wrong and document the evidence.
+Diagnose it as an implementation defect or a faulty assertion and document the
+evidence before changing either side.
 
 ## Review discipline
 
@@ -525,13 +754,15 @@ The assignment is complete only when all of the following are true:
 
 1. The pinned baseline and exact in-scope content set are recorded.
 2. Every in-scope row of `PORTING_MATRIX.md` is behaviorally verified or has an
-   explicit user-approved adaptation/out-of-scope rationale.
+   architecture-authorized, tested multiplayer adaptation. Only the fixed
+   exclusions in this prompt may be marked out of scope.
 3. Native clients build and pass required checks on Windows, macOS, and Linux.
-4. The headless Linux server builds, deploys, runs, shuts down, backs up,
-   restores, and recovers from tested failures.
-5. Sixteen clients can play simultaneously in one persistent world for the
-   defined soak duration without correctness, stability, or unacceptable
-   performance failures.
+4. Headless servers for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+   `x86_64-unknown-linux-gnu` build, deploy, run, shut down, back up, restore,
+   recover from tested failures, and pass the performance and 24-hour soak gates
+   natively.
+5. Sixteen connected clients and 64 additional disconnected characters pass
+   the specified 24-hour soak and every stated performance budget.
 6. The server remains authoritative under hostile, malformed, late, duplicated,
    reordered, and conflicting client commands.
 7. Disconnected characters remain physically present and vulnerable, and can
@@ -542,14 +773,15 @@ The assignment is complete only when all of the following are true:
 10. Save data, migrations, crash recovery, backup, and restore pass the
     persistence conformance suite.
 11. Rendering-independent replay reproduces verified outcomes and state hashes.
-12. Applicable CDDA mechanics and included content are usable through the Bevy
+12. All in-scope CDDA mechanics and included content are usable through the Bevy
     client, not merely parsed or represented internally.
 13. Operator, player, contributor, protocol, persistence, content, and testing
     documentation matches the delivered behavior.
 14. Required licensing, attribution, provenance, and third-party notices are
     complete and audited.
 15. Formatting, linting, tests, documentation, platform CI, fuzz targets,
-    security checks, benchmarks, and soak tests pass at the agreed release gate.
+    security checks, benchmarks, and the specified soak test pass at the fixed
+    release gates in this prompt.
 16. A final independent full-project review finds no unresolved critical or
     high-severity correctness, security, persistence, or licensing issue.
 17. There are no placeholders, stubs, ignored unsupported content fields, or
@@ -574,7 +806,8 @@ Lead progress reports with working outcomes. Keep them concise but precise:
 Do not report activity as progress merely because files were created or code
 compiled. Report behavior that now works and evidence that it works.
 
-Begin by reading the authoritative inputs, pinning and recording the upstream
-baseline, creating the Rust workspace and durable status/parity documents, and
-implementing the first architecture slice. Then continue expanding verified
-vertical slices until the completion gate is genuinely satisfied.
+Begin by reading the authoritative inputs, verifying and recording the pinned
+upstream baseline, creating the Rust workspace and durable status/parity
+documents, and implementing the first architecture slice. Then continue
+expanding verified vertical slices until the completion gate is genuinely
+satisfied.
