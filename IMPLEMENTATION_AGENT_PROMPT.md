@@ -1,918 +1,261 @@
 # Agent Prompt: Complete the CDDA Rust Multiplayer Port
 
-You are the primary implementation agent responsible for completely
-implementing a persistent multiplayer Rust port of Cataclysm: Dark Days Ahead
-(CDDA). Work autonomously and persistently until the completion gate in this
-prompt is satisfied.
+You are the primary implementation agent. Completely implement the pinned
+Cataclysm: Dark Days Ahead (CDDA) gameplay and content in Rust as a persistent,
+real-time multiplayer game. Continue until the completion gate is satisfied;
+scaffolding, a prototype, or one vertical slice is not completion.
 
-This is an implementation assignment, not a request for an architecture essay
-or a one-time prototype. Planning, investigation, documentation, and prototypes
-are means to the end. Do not stop after scaffolding, a proof of concept, one
-vertical slice, or a list of work that somebody else must finish.
+## Authority and operating contract
 
-## Mission
+At every fresh or resumed session:
 
-Create a production-quality Rust port of the gameplay and content of the pinned
-CDDA reference version, redesigned around:
+1. Read every applicable `AGENTS.md` and `ARCHITECTURE_DECISIONS.md` completely.
+2. Read `IMPLEMENTATION_STATUS.md`, `PORTING_MATRIX.md`, and recent ADRs when
+   present; create the required status files before implementation if absent.
+3. Inspect staged, unstaged, and untracked files; preserve user work.
+4. Verify the read-only reference checkout at `../Cataclysm-DDA/` and continue
+   existing work rather than recreating it.
 
-- A Bevy graphical client
-- A plain-Rust headless server with no Bevy dependencies
-- A persistent server-authoritative multiplayer world
-- Real-time simultaneous play for up to 16 connected players initially
-- Durable characters that remain physically present and vulnerable after their
-  players disconnect
-- A world clock that continues while no players are connected
-- Native Windows, macOS, and Linux clients
-- Native headless macOS and Linux dedicated servers
+The fixed upstream baseline is
+`4dfd36038b16650dc1b5cb9d79a3e42363174b05`; do not move it before completion.
+Instruction precedence is system/developer/`AGENTS.md`, current user,
+`ARCHITECTURE_DECISIONS.md`, this prompt, then reasonable implementation
+judgment. The architecture document supplies detailed limits omitted here for
+brevity and is binding unless this prompt explicitly supersedes it.
 
-Preserve all in-scope observable CDDA mechanics and content. Apply only the
-locked multiplayer adaptations and the minimum-change adaptation rule in this
-prompt. Reimplement behavior cleanly in Rust; do not mechanically transliterate
-C++ classes or reproduce accidental legacy architecture.
+Work autonomously on in-scope engineering choices and record consequential
+ones in ADRs. Do not publish, push, open PRs, deploy public servers, or mutate
+external services without explicit permission. Breaking pre-release APIs and
+schemas is allowed; distributed worlds require migrations.
 
-## Workspace and authoritative inputs
+## Locked product decisions
 
-At the beginning of every fresh or resumed work session:
+- This is a derivative semantic Rust port of CDDA, not an original game and not
+  a line-by-line or class-by-class C++ translation.
+- Support 16 connected players in one persistent authoritative world.
+- The world runs in real time at 20 simulation ticks/s, sends state at 10 Hz,
+  and advances when zero players are connected.
+- Disconnected characters remain physically present, simulated, vulnerable,
+  and killable; disconnecting never grants safety, movement, or teleportation.
+- Windows, macOS, and Linux clients are required. Dedicated servers target
+  Apple-silicon and Intel macOS 13+ and x86-64 Linux/glibc 2.35+.
+- The initial Windows client is remote-only. Local macOS/Linux play launches the
+  standalone server process and connects through iroh; never embed the server.
+- Bevy is client-only. The server and every shared/non-client crate have no
+  direct or transitive `bevy` or `bevy_*` dependency.
+- The authoritative simulation is plain Rust, never ECS: use typed records,
+  aggregates, stable-ID registries, containment graphs, queues, and chunk stores.
+- Clients send intentions; only the server validates and mutates canonical state.
+- Rendering-independent tests and replay files are mandatory.
 
-1. Read every applicable `AGENTS.md` completely.
-2. Read `ARCHITECTURE_DECISIONS.md` completely.
-3. Read the current implementation status, parity matrix, and recent decision
-   log described below.
-4. Inspect the working tree, including staged, unstaged, and untracked files.
-5. Continue existing work rather than recreating or overwriting it.
+## Workspace and stack
 
-Use these workspace locations:
-
-- The repository root containing this prompt is the Rust implementation root.
-- `../Cataclysm-DDA/` is the expected upstream reference checkout. If the
-  workspace is laid out differently, discover and record the equivalent path
-  rather than cloning a duplicate blindly.
-- `ARCHITECTURE_DECISIONS.md` at the repository root is the living
-  architectural authority.
-
-Treat the upstream reference checkout as read-only. Do not mix port changes
-into it. It may be built, tested, instrumented, and inspected to establish
-behavioral baselines.
-
-The fixed upstream parity target is commit
-`4dfd36038b16650dc1b5cb9d79a3e42363174b05`. Verify that the reference
-checkout is at that commit and record it in project metadata. Do not move the
-baseline until the completion gate is satisfied.
-
-When instructions disagree, use this precedence:
-
-1. System, developer, and applicable `AGENTS.md` instructions
-2. Explicit current user instructions
-3. `ARCHITECTURE_DECISIONS.md`
-4. This implementation prompt
-5. Existing project documentation and plans
-6. Reasonable implementation judgment
-
-## Locked product and architecture decisions
-
-Implement these decisions as written:
-
-1. This is a derivative multiplayer Rust port of CDDA, not an original game
-   merely inspired by it.
-2. The port is semantic, not a line-by-line C++ translation.
-3. The client uses Bevy for presentation. Bevy is prohibited from every other
-   workspace crate and all non-client transitive dependency graphs.
-4. The authoritative server is an ordinary Rust/Tokio application. It uses no
-   `bevy`, `bevy_app`, `bevy_ecs`, `bevy_time`, `bevy_tasks`, or other Bevy
-   crate.
-5. The authoritative simulation is a plain-Rust domain model, not ECS. Do not
-   create a partial ECS migration, dual representation, or server-side ECS
-   abstraction anywhere in this implementation.
-6. Dense terrain and spatial data use chunked world storage; tiles are
-   chunk-owned domain data.
-7. Persistent domain objects use explicit typed stable IDs. Bevy `Entity`
-   values exist only in the client presentation layer and never serve as
-   canonical, save-file, or wire identity.
-8. Clients send commands and intentions. Only the server validates and mutates
-   canonical gameplay state.
-9. The protocol uses explicit commands, events, snapshots, and relevance-
-   filtered deltas. It never exposes client presentation components.
-10. Tests and replay execution do not require rendering.
-11. The persistent world targets 16 simultaneously connected players initially.
-12. Disconnected player characters remain present, simulated, and vulnerable.
-13. The global world clock advances with zero connected players.
-14. Simulation time, network send rate, and client rendering time are separate
-    concepts.
-15. Windows, macOS, and Linux are the initial client platforms. Headless macOS
-    and Linux dedicated servers are required. The initial Windows client is
-    remote-client-only and does not host local worlds.
-16. Simulation runs at 20 Hz, sends network state at 10 Hz, and maps one
-    simulation second to one wall-clock second.
-17. Players cannot pause or accelerate time. Only the administrative
-    maintenance procedure can freeze the world.
-18. Disconnected characters use the survival autopilot specified below.
-19. Map chunks are 12 by 12 tile CDDA submaps with the fixed Active, Warm, and
-    Dormant tier rules below.
-20. Networking uses exactly `iroh` 1.0.3 authenticated QUIC with explicit
-    domain messages, Postcard encoding, and the stream/datagram layout below.
-21. Persistence uses bundled SQLite through `rusqlite` 0.40.1 with WAL,
-    versioned Postcard records, and Zstandard compression.
-22. Canonical simulation is bit-for-bit deterministic across the supported
-    platforms, uses fixed-point/integer arithmetic, and uses named ChaCha8 RNG
-    streams derived with BLAKE3.
-23. Content scope, authentication, command queues, prediction, reconciliation,
-    backup retention, and performance budgets are exactly those specified in
-    this prompt and `ARCHITECTURE_DECISIONS.md`.
-
-Do not replace a locked choice with an alternative library or product policy.
-Solve implementation problems behind the prescribed interfaces and record
-non-product engineering details in ADRs.
-
-## Architecture
-
-Use this Cargo workspace structure:
+Use this dependency direction:
 
 ```text
-./
-  Cargo.toml
-  crates/
-    sim/          authoritative mechanics, time, and world state
-    content/      CDDA data loading, validation, and migrations
-    protocol/     stable IDs, commands, events, snapshots, and wire types
-    persistence/  chunk/entity storage, journaling, backups, and migrations
-    server/       sessions, auth, networking, interest, and simulation runner
-    client/       Bevy rendering, UI, input, audio, and prediction
-    tools/        importers, validators, replay tools, benchmarks, and admin CLI
-  tests/
-  docs/
+crates/
+  sim/          canonical mechanics, time, world state
+  content/      CDDA data loading, validation, migrations
+  protocol/     stable IDs, commands, events, snapshots, wire DTOs
+  persistence/  SQLite, journal, snapshots, recovery, backups
+  server/       Tokio, iroh, connections, interest, simulation runner
+  client/       Bevy presentation, UI, input, audio, prediction
+  tools/        import, validation, replay, benchmark, admin CLI
 ```
 
-Maintain strict dependency direction:
+Domain crates cannot depend on transport, storage, rendering, or Bevy. Only
+`client` may declare Bevy. Enforce this with a `cargo metadata`-based
+`cargo xtask verify-dependency-boundaries` check.
 
-- `sim` cannot depend on `client`, rendering, windowing, or network transport.
-- `protocol` must work in client, server, headless tests, and replay tools.
-- `persistence` serializes versioned domain records rather than client or
-  framework state.
-- `server` owns time, identity allocation, randomness, validation, persistence,
-  interest management, and canonical outcomes.
-- `client` translates local input into commands and authoritative events into
-  presentation.
-- Iroh and SQLite sit behind project-owned interfaces so domain logic does
-  not depend on transport or database APIs.
-- Only `client` may declare or transitively depend on `bevy` or a `bevy_*`
-  crate. `sim`, `content`, `protocol`, `persistence`, `server`, and `tools` must
-  remain Bevy-free.
+Pin direct dependencies exactly and commit `Cargo.lock`:
 
-Run networking, connection tasks, signals, timers, and bounded background work
-on a Tokio multithread runtime. Run the 20 Hz simulation loop on one dedicated
-OS thread that exclusively owns canonical `WorldState`. It drains bounded
-command queues only at tick boundaries and publishes immutable output batches
-to networking and persistence. Never hold or borrow canonical world state
-across an `.await`. Keep the prescribed single persistence worker separate from
-the simulation thread.
-
-Use these fixed thread-boundary capacities:
-
-- Network-to-simulation ingress: 4,096 envelopes or 16 MiB.
-- Simulation-to-persistence: 64 journal batches or 32 MiB plus two coalescible
-  snapshot jobs.
-- Global simulation-to-network reliable output: 256 batches or 32 MiB.
-- Per-client reliable delivery: 128 frames or 8 MiB.
-- Unreliable state: one latest-value slot per state class, never a queue.
-
-When ingress is full, return `ServerBusy` for reliable commands and drop
-unreliable samples. When a per-client reliable queue is full, disconnect that
-slow client and require a relevance-filtered snapshot on reconnect; do not
-stall the simulation. Before each 100-millisecond journal batch, reserve one
-persistence slot and one global reliable-output slot and retain a reversible
-pre-batch checkpoint until SQLite acknowledges the commit. On capacity failure,
-persistence failure, or global dispatcher failure, stop command admission,
-start no later tick, roll back the uncommitted batch, publish no uncommitted
-outcome, and enter maintenance after the last durable boundary. Snapshot jobs
-may coalesce dirty sets because the journal is authoritative; never drop journal
-or critical-event batches. Add fault-injection tests for every queue saturation,
-worker failure, rollback, disconnect, and maintenance transition.
-
-The client and headless server must both build and run on the macOS development
-host from the first vertical slice. Required standalone server targets are
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu`. Windows server support is outside the initial gate,
-so local single-player and locally hosted worlds are available only on macOS
-and Linux in the initial release.
-
-### Toolchain and foundational crates
-
-Use exact `=` version constraints for these direct dependencies and commit the
-resulting `Cargo.lock`:
-
-| Area | Required implementation |
+| Area | Version/choice |
 | --- | --- |
-| Rust | Rust 1.97.1 in `rust-toolchain.toml`, edition 2024 |
-| Client | Bevy 0.19.0 with only the required 2D, UI, audio, asset, input, accessibility, and native-platform features |
-| Server | Plain Rust on Tokio 1.53.1 with no Bevy crate in its dependency graph |
-| Multiplayer | `iroh` 1.0.3 authenticated QUIC using ALPN `cdda-rust/game/1` |
-| Wire encoding | Explicit versioned Serde domain messages encoded with `postcard` 1.1.3 |
-| Database | Bundled SQLite through `rusqlite` 0.40.1 |
-| Durable blobs | `postcard` 1.1.3 plus `zstd` 0.13.3 |
-| Async runtime | Tokio 1.53.1 for iroh I/O, signals, timers, and bounded background work |
-| Passwords | RustCrypto `argon2` 0.5.3 using Argon2id |
-| Randomness and hashing | `rand_chacha` 0.10.0 `ChaCha8Rng` and BLAKE3 1.8.5 |
-| Observability | `tracing` 0.1.44, `tracing-subscriber` 0.3.23, and a loopback-only Prometheus-format metrics endpoint |
+| Rust | 1.97.1, edition 2024 |
+| Client | Bevy 0.19.0, minimal required native features |
+| Runtime/network | Tokio 1.53.1 and `iroh = "=1.0.3"` |
+| Wire/durable data | Serde + Postcard 1.1.3; Zstandard 0.13.3 for bounded bulk/durable blobs |
+| Database | bundled SQLite via `rusqlite` 0.40.1, WAL |
+| Determinism | `rand_chacha` 0.10.0 `ChaCha8Rng`, BLAKE3 1.8.5 |
+| Diagnostics | `tracing` 0.1.44, `tracing-subscriber` 0.3.23, loopback Prometheus metrics |
 
-Only `crates/client/Cargo.toml` may declare Bevy dependencies. Add a repository
-dependency-boundary check based on `cargo metadata` that fails if a package
-named `bevy` or starting with `bevy_` is reachable from any non-client workspace
-crate. Run it in the standard local and CI gates.
+## Iroh identity, authorization, and networking
 
-### Plain-Rust authoritative simulation
+Iroh endpoint identity is the only authentication mechanism. Do not implement
+passwords, password hashes, bearer/session tokens, login endpoints, OAuth,
+application certificates, invitation secrets, or a second authentication
+transport.
 
-Represent canonical state once, with typed Rust records, aggregates, stable-ID
-registries, containment graphs, chunk stores, deterministic queues, and indexes.
-Implement simulation phases as ordinary functions and focused services over
-that state. Do not introduce an ECS trait layer, component storage, archetypes,
-entity handles, shadow components, or dual writes in the server or shared
-crates. A server-side ECS migration is outside this assignment.
+- Persist one iroh `SecretKey` per server world and per client installation.
+  Its `EndpointId` is the authenticated public identity. Store secret keys with
+  OS credential protection or owner-only permissions/ACLs; never log or sync them.
+- Pin the server `EndpointId` from its operator-provided `EndpointAddr`; reject
+  silent identity changes. Use `endpoint::presets::N0` for discovery, direct
+  QUIC/hole punching, and encrypted relay fallback.
+- Await the full handshake and use `Connection::remote_id()` for authorization.
+  Disable 0-RTT for all authentication, enrollment, commands, and gameplay.
+- Use ALPN `cdda-rust/game/1` for gameplay, `cdda-rust/enroll/1` only to prove a
+  preauthorized key, and `cdda-rust/admin/1` for sensitive administration.
 
-Required representations:
+Store `AccountId`, display name, role, status, owned character IDs, and endpoint
+bindings. Enabled accounts have at least one active `EndpointId`; initial and
+recovery-locked accounts cannot play. The local admin CLI creates the first
+ten-minute pending enrollment for an exact ID. An authenticated account may add
+another pending ID or revoke any but its last active ID. The pending client uses
+the enrollment ALPN; activate it only when `remote_id()` exactly matches. If all
+keys are lost, the local CLI atomically revokes old IDs, locks the account, and
+creates an exact pending replacement. Expiry leaves it locked until the CLI
+retries. There is no public registration, invitation secret, or remote recovery.
+Each `EndpointId` belongs permanently to at most one account per world; enforce
+this durably and atomically, reject races, and never rebind a revoked ID.
 
-| Concept | Representation |
-| --- | --- |
-| Players, NPCs, monsters | Stable-ID keyed actor records in domain registries |
-| Actor health, position, movement, faction | Actor-owned fields and invariant-preserving substructures |
-| Status effects | Collections owned by affected domain objects |
-| Vehicles | Stable-ID keyed vehicle aggregates |
-| Vehicle parts | Dense vehicle-owned collection |
-| Terrain, furniture, traps, fields | Chunk-owned dense/sparse data |
-| Items and pockets | Stable `ItemId` records and containment graph |
-| Ground item piles | Chunk-local stable item references |
-| Recipes and type definitions | Immutable validated registries |
-| Activities | Explicit interruptible state machines |
-| Projectiles and active explosions | Stable-ID keyed short-lived records and ordered work queues |
-| Sprites and UI | Client-only Bevy presentation entities |
+Reject disabled, banned, and revoked identities after the handshake. Otherwise
+permit only active IDs, except the exact unexpired pending ID on the enrollment
+ALPN. Bind connection ownership to `remote_id()` for its entire
+lifetime. Permit one gameplay connection per account and character; an
+authorized reconnect may replace a stale connection, while character transfer
+requires an administrator. Key/role/ownership changes are durable recovery
+inputs and revoke affected live connections at the next tick.
 
-Derived indexes may accelerate spatial and cross-system queries, but canonical
-records remain the source of truth and indexes must be rebuildable and checked
-for consistency. The Bevy client may create and destroy presentation entities
-freely from stable-ID keyed snapshots and events.
+Authorization is default-deny:
 
-### Stable identity
+- Player: manage its authorized endpoint list and own characters; command only
+  its controlled character; read only owned/perceived state; chat/report.
+- Moderator: player rights plus view minimal account/connection/chat/moderation
+  metadata and mute, kick, or suspend other player-role accounts for at most 24
+  hours; never itself or equal/higher roles; no private/unseen state or mutation.
+- Administrator: moderator rights plus account/key/role management, permanent
+  bans, ownership transfer, canonical inspection, recorded debug mutations,
+  maintenance, shutdown, configuration, migration, backup, and restore.
+- Sensitive administrator commands require a new fully handshaken admin-ALPN
+  connection less than five minutes old; this is freshness, not a second factor.
 
-Use typed 128-bit IDs including `WorldId`, `ActorId`, `ItemId`, `VehicleId`,
-`MissionId`, and `EventId`. The upper 64 bits are the persistent random world
-namespace and the lower 64 bits are a monotonically allocated counter. The
-world namespace is generated with the operating system CSPRNG. The server
-allocator reserves blocks of 4,096 counters by advancing the persisted
-high-water mark in a dedicated SQLite transaction before issuing any ID from a
-block. Unused or rolled-back IDs are skipped permanently.
+Audit every moderation, enrollment, key, and administration attempt through a
+typed allowlist serializer. Record safe IDs, metadata, tick, status, and recovery
+input; never raw secret keys, credentials, tokens, or arbitrary arguments/results.
+Test every command/actor-role/target-role combination, cross-account access,
+duplicate/racing bindings, revoked keys, stale admin connections, and recovery.
 
-Record `IdBlockReserved` and `IdBlockAbandoned` as authoritative recovery inputs
-and replay records. If a crash leaves SQLite's high-water mark ahead of the last
-journaled allocator cursor, recovery records `IdBlockAbandoned` for that entire
-unconfirmed remainder before allocating again. Replay consumes these records
-instead of reserving fresh database ranges so burned IDs and allocator state are
-identical.
+Use explicit version-1 Postcard messages, never Bevy replication. One long-lived
+bidirectional game-control stream carries negotiation, character selection,
+commands/results, chat, and ordinary moderation. A server-opened ordered event
+stream carries lifecycle/critical events. Separate server-opened streams carry
+manifests and snapshots. Sequence-numbered QUIC datagrams carry held input and
+replaceable actor/vehicle deltas; query `max_datagram_size()` before every send,
+cap at 1,200 bytes, and close if datagrams fall below the required 1,024 bytes.
 
-Bevy `Entity` values, memory addresses, array positions, and database row IDs
-are never canonical, durable, or wire identities. Only the client maintains a
-disposable map between stable IDs and Bevy presentation entities. Never reuse a
-stable ID after deletion, rollback, or a crash.
+Clients open one bidirectional control stream per connection and no
+unidirectional streams; framing and resource rules apply to every project ALPN.
+Enforce the architecture document's frame, stream, timeout, heartbeat, ingress,
+connection, memory, and rate limits. Globally schedule control/critical output
+before weighted-fair bulk; cap bulk at 512 KiB/s per client and 1.5 MiB/s server-
+wide. Pure simulation tests bypass transport; end-to-end tests use real loopback
+iroh endpoints plus fault injection.
 
-### Time and scheduling
+## Simulation and world model
 
-Use `SimTick(u64)` and `SimDuration` at 20 Hz; one tick is 50 milliseconds and
-one simulation second is one wall-clock second. Send network state at 10 Hz.
-Rendering is variable-rate and interpolated. Headless tests and replays drive
-the same clock without sleeping.
+One dedicated OS thread exclusively owns `WorldState`; Tokio owns iroh I/O,
+signals, timers, and bounded background work. Never hold world state across
+`.await`. Use the fixed bounded queues and fail-closed overload behavior in the
+architecture document; never drop journal or critical-event batches.
 
-Every tick runs these ordered phases:
+Every tick runs ordered ingress, authorization/validation, action start,
+movement/collision, completion/combat, needs/environment, AI, cleanup/ID
+allocation, journal, interest, and replication phases. Same-tick conflicts order
+by phase, readiness, stable `ActorId`, then command sequence. Parallelize only
+order-invariant work.
 
-1. Network ingress and input collection
-2. Authentication/ownership and command validation
-3. Action start and interruption
-4. Movement, vehicle motion, projectiles, and collision
-5. Action completion and combat resolution
-6. Effects, needs, fields, weather, and environmental processing
-7. AI decisions
-8. Cleanup, stable-ID allocation, and dirty marking
-9. Persistence journal batching
-10. Relevance calculation and replication
+Use typed 128-bit stable IDs: random 64-bit world namespace plus monotonic 64-bit
+counter, reserved transactionally in blocks of 4,096. Never use Bevy entities,
+addresses, indices, or DB row IDs as identity. Journal/replay block reservation
+and abandonment so crash-burned IDs reproduce.
 
-Use a stable priority queue keyed by `(due_tick, event_sequence)` for scheduled
-work. Order same-tick conflicts by phase, actor readiness, stable `ActorId`, and
-command sequence.
+One CDDA submap is a 12x12, one-z-level chunk. Active simulation is 20 Hz in
+merged 11x11 bubbles on the player's z-level and adjacent levels; prefetch 13x13.
+Warm regions run coarse 1 Hz around disconnected characters and live hazards.
+Dormant chunks use scheduled analytical catch-up before activation.
 
-Do not depend on task scheduling, hash iteration, or incidental execution order.
-Order conflicting phases explicitly, and parallelize only computations whose
-result is invariant to execution order.
+Players cannot pause or accelerate time. Administrative maintenance drains and
+persists work, disconnects clients, then freezes time. Explicit planned stops do
+not advance time; crashes/unexpected downtime record and apply deterministic UTC
+catch-up before connections are accepted.
 
-Players cannot pause or accelerate the world. Menus leave the simulation
-running; an actor finishes its current action and guards in place. Crafting,
-reading, construction, healing, sleep, and travel take their real simulation
-durations and continue after disconnect. Threats interrupt them according to
-CDDA rules.
-
-Administrative maintenance pause stops command intake, checkpoints SQLite,
-disconnects clients, and then freezes `SimTick`. Planned maintenance does not
-advance time. Unexpected process downtime does: use the persisted UTC anchor to
-perform deterministic catch-up before accepting clients.
-
-### Region activation
-
-Use 12 by 12 tile, single-z-level CDDA submaps as atomic map chunks.
-
-- **Active:** full 20 Hz simulation in an 11 by 11 submap square centered on
-  each connected player, on the current and adjacent z-levels, and in chunks
-  containing combat, moving vehicles, projectiles, explosions, or immediate
-  hazards.
-- **Warm:** 1 Hz coarse spatial simulation in the same-size bubble around each
-  disconnected character, NPC camp, persistent fire, or live anchor. Hostile
-  contact or a complex hazard promotes affected chunks to Active until resolved.
-- **Dormant:** unloaded state represented by scheduled events and
-  `last_sim_tick`; deterministic catch-up processes needs, rot, plants, weather,
-  power, fields, and elapsed-time systems before activation.
-
-Network prefetch uses a 13 by 13 submap square. Merge overlaps and apply the
-highest tier. Tier changes occur only at tick boundaries.
-
-### Disconnected-character autopilot
-
-On disconnect, clear held movement and steering input at the next tick. Continue
-the current activity; normal danger rules interrupt it only when its activity
-definition permits interruption. Enable survival autopilot when the activity
-completes or is interrupted. It may defend, flee nearby threats, extinguish
-fire, leave dangerous terrain or atmosphere, seek shelter inside the current
-reality bubble, use ordinary food and medicine, use wielded equipment, and sleep
-when safe.
-
-It does not initiate combat, loot, leave the current bubble, begin projects,
-spend unique resources, make dialogue/faction choices, or change equipment
-loadouts. Reconnection returns control at the next tick without moving,
-healing, canceling, or protecting the character.
-
-### Commands and client prediction
+On disconnect, clear held movement/steering next tick and continue the current
+interruptible activity. Survival autopilot may defend, flee nearby danger,
+extinguish fire, leave hazardous terrain/air, seek nearby shelter, use ordinary
+food/medicine/wielded gear, and sleep safely. It cannot initiate combat, loot,
+leave the bubble, start projects, spend unique resources, make dialogue/faction
+choices, or change loadouts. Reconnect restores control next tick without rescue.
 
 Each actor has one active action and at most two queued semantic commands.
-Canceling queued work is free. Active work is cancelable only when its activity
-definition is interruptible; elapsed time and already-paid costs remain.
-Invalid commands return a typed rejection and are removed. Held movement and
-vehicle steering are stateful inputs rather than queued commands.
-
-Predict only the controlled actor's locomotion, vehicle steering, camera, and
-cosmetic effects. Never predict inventory, combat, projectiles, RNG outcomes,
-item use, crafting, dialogue, or world interaction. Interpolate remote actors
-100 milliseconds behind authoritative time. Smooth valid corrections of at
-most one tile over 150 milliseconds; snap larger or collision-invalid
-divergence and emit a diagnostic event.
-
-### Networking
-
-Use exactly `iroh = "=1.0.3"` with its authenticated, encrypted QUIC
-connections. Keep iroh behind a project-owned transport adapter; protocol,
-simulation, persistence, and replay types cannot depend on iroh APIs. The
-network topology is client-to-authoritative-server only. Do not establish
-client-to-client gameplay connections or infer gameplay trust from iroh's
-peer-to-peer transport.
-
-Persist one iroh `SecretKey` per server world and advertise the corresponding
-serialized `EndpointAddr`. Client favorites pin its cryptographic `EndpointId`.
-Persist one iroh secret key per client installation. Use the fixed ALPN
-`cdda-rust/game/1`. Key rotation is an explicit operator action that produces a
-new address to distribute out of band; never accept a silent endpoint identity
-change. Generate endpoint keys with the operating system CSPRNG and store them
-with owner-only file permissions or equivalent platform ACLs.
-
-Map protocol messages to QUIC as follows:
-
-- One long-lived bidirectional control stream carries handshake, authentication,
-  character selection, session lifecycle, chat, administration, semantic
-  commands, and typed command results.
-- One server-opened long-lived unidirectional event stream carries reliable
-  ordered entity lifecycle changes and critical domain events.
-- Each content manifest, initial-state bundle, and chunk snapshot uses a new
-  short-lived reliable unidirectional stream, avoiding per-stream head-of-line
-  blocking while remaining subject to shared connection budgets.
-- QUIC datagrams carry sequence-numbered held movement, vehicle steering, and
-  actor/vehicle state deltas. Each datagram is self-contained and bounded;
-  receivers discard stale sequences. Send oversized state on a reliable
-  snapshot stream instead of application-fragmenting datagrams.
-
-Reliable frames have a 32-bit big-endian byte length followed by a Postcard
-1.1.3 payload. Every message envelope includes protocol version 1 and a message
-kind. All payloads use fixed-width domain numbers, typed stable IDs, bounded
-collections, documented maximum encoded and decoded sizes, and server-side
-authorization. Reject unknown versions and kinds before decoding their bodies.
-
-The first control-stream exchange compares protocol version, pinned CDDA
-baseline, content-manifest hash, ordered enabled-mod list, and server
-`EndpointId`, then performs password or resume-token authentication and
-character selection. Iroh authenticates and encrypts transport endpoints, but
-does not replace account authentication. There is no parallel web control API,
-separate connection-token exchange, or plaintext authentication path. Bind an
-issued application session to the authenticated client `EndpointId`. Await the
-full QUIC handshake and do not use `into_0rtt` or send authentication, session,
-command, or gameplay data in 0-RTT.
-
-Protocol version 1 requires QUIC datagram support and an initial
-`max_datagram_size()` of at least 1,024 bytes. Reject the connection during the
-control handshake if that requirement is not met. Before every send, query the
-current `max_datagram_size()` and cap the payload to the smaller of that value
-and 1,200 bytes. Use non-waiting sends: a full send buffer drops superseded
-real-time state. If datagram support disappears or the current maximum falls
-below 1,024 bytes, close the connection as transport-incompatible. Handle all
-other send errors explicitly, and move state too large for the current path to
-a reliable snapshot stream.
-
-Enforce these fixed resource limits:
-
-- At most 64 established QUIC connections per server: at most 32
-  pre-authentication connections, 16 authenticated gameplay sessions, and 16
-  authenticated non-gameplay control or administration sessions.
-- New-connection token buckets of 60 per minute with burst 20 globally and six
-  per minute with burst three per `EndpointId`. Expire idle rate-limit keys
-  after 30 minutes, cap keyed tables at 4,096 entries, and apply only the global
-  bucket on overflow without allocating another key.
-- Protocol/content negotiation and authentication completed within 15 seconds
-  of QUIC establishment.
-- At most two concurrent Argon2 verifications and a bounded queue of eight that
-  waits at most two seconds before returning a typed busy rejection.
-- Exactly one client-opened bidirectional control stream and zero client-opened
-  unidirectional streams. Close on any additional client-opened stream.
-- Maximum encoded/decoded frame sizes of 64/256 KiB for control, 256 KiB/1 MiB
-  for events, and 8/32 MiB for bulk snapshots. Check declared and decompressed
-  sizes before allocation, and require every frame to make progress within five
-  seconds.
-- At most four concurrent bulk streams and 16 MiB of encoded bulk data in flight
-  per client. Apply a per-client 512 KiB/s bulk token bucket with a 2 MiB burst
-  and a server-wide 1.5 MiB/s bulk bucket with a 3 MiB burst. On the minimum 20
-  Mbit/s server link this reserves more than 7 Mbit/s for control, events, and
-  real-time deltas. Globally drain control and critical-event output across all
-  connections before scheduling bulk with weighted-fair queuing, and assign
-  those streams higher QUIC priority within each connection. Separate streams
-  and connections still share host, path, and relay congestion.
-- A heartbeat every five seconds and disconnect after 15 seconds without
-  inbound traffic.
-- Control ingress at 40 messages per second with burst 80 and datagram ingress
-  at 60 per second with burst 120. Reject reliable excess and drop unreliable
-  excess before either reaches the simulation queue.
-
-Pure simulation tests invoke domain commands without a transport. Protocol
-tests use a deterministic in-memory harness at the project adapter boundary.
-End-to-end network tests use real ephemeral iroh endpoints on loopback and an
-application test shim that injects latency, loss, duplication, reordering, and
-disconnects without replacing iroh in the production path.
-
-Account names match `[a-z0-9_]{3,32}`. Passwords are 12 through 256 bytes and
-are stored as Argon2id PHC strings using 64 MiB, three iterations, four lanes, a
-random 16-byte salt, and a 32-byte output. Public registration is disabled;
-administrators create accounts or one-use invites with the CLI. Limit failed
-authentication to five attempts per account and client `EndpointId` per 15
-minutes and 100 failures globally per 15 minutes.
-Generate salts, invitation tokens, session tokens, and iroh endpoint secret
-keys with the operating system CSPRNG.
-
-Successful login returns an opaque random 256-bit token whose BLAKE3 hash is
-stored. It expires after 24 hours and is revoked by password changes or admin
-action. One-use invitation tokens use the same size, storage, and 24-hour
-expiration policy. Roles are player, moderator, and administrator. Exactly one
-gameplay connection per account and per character is active at a time; only the
-same reconnect session or an administrator may replace or transfer it.
-
-Implement default-deny authorization with this exact capability matrix:
-
-| Role | Allowed capabilities |
-| --- | --- |
-| Player | Change its own password; manage its own sessions and characters; command only its currently controlled character; read only ownership/perception/ordinary-UI state; use chat and submit reports |
-| Moderator | Every player capability for its own character; view account name/ID, character name, connection state, chat, reports, and moderation history; mute, kick, and suspend an account for at most 24 hours |
-| Administrator | Every moderator capability; create/disable accounts and invitations; reset credentials; grant/revoke roles; permanently ban; replace sessions; transfer character ownership/control; inspect canonical/private state; issue recorded debug/world mutations; enter maintenance; shut down; configure, migrate, back up, and restore the world |
-
-Moderators cannot view credentials, session tokens, private inventories, or
-unseen state; transfer or control characters; change accounts or roles;
-permanently ban; mutate gameplay; pause/configure the world; or run backup,
-restore, migration, or shutdown. No role can read passwords or raw session
-tokens because they are not stored. Require password reauthentication within
-five minutes for administrator maintenance, restore, role, credential-reset,
-ownership-transfer, and debug-mutation commands. Journal every moderation and
-administration attempt with actor account, role, target, tick, typed safe
-metadata, status, and any resulting recovery input. Implement a per-command
-allowlist audit serializer; never serialize raw arguments or results. Never log
-passwords, password-reset values, raw invitation/session tokens, endpoint secret
-keys, reauthentication material, or other credentials. Token operations log
-only the persisted record ID, stored hash identifier, expiry, and result status.
-Treat the privileged CLI as a separately audited local administrator surface
-that never grants a network client privileges. Generate authorization tests for
-every command/role pair, cross-account ownership,
-expired reauthentication, and unknown-command default denial.
-
-### Deployment and content handshake
-
-Run one authoritative server runtime and one SQLite database per persistent
-world. Do not shard or federate a world. Dedicated operators expose one iroh
-endpoint. Accounts and roles are local to that server world. Ship native
-headless server binaries for Apple silicon and Intel macOS 13 or newer and for
-x86-64 GNU/Linux with glibc 2.35 or newer.
-
-Construct client and server endpoints with iroh's `endpoint::presets::N0`
-configuration. Prefer direct QUIC, use its default address lookup and hole
-punching, and allow its end-to-end-encrypted N0 relay fallback when a direct path
-cannot be established. There is no project-operated central account service,
-matchmaking service, or public server directory. Custom relay operation is
-outside this completion scope. Players join using an operator-provided
-serialized `EndpointAddr`. Store its `EndpointId` as the favorite's pinned
-identity and treat its direct/relay addresses as refreshable hints; a bare
-hostname or IP without the expected `EndpointId` is not a valid remote server
-identity.
-
-On macOS and Linux, local play launches the standalone Bevy-free server
-executable as a separate child process and connects through iroh's local direct
-path. Never link or embed server crates into the Bevy client process. Closing
-the client only disconnects its character; the local server remains running
-until explicitly stopped. An explicit stop first enters the administrative
-maintenance procedure, so planned downtime freezes world time. A crash, forced
-termination, or other unexpected process downtime uses the persisted-UTC
-deterministic catch-up policy. The initial Windows client connects to remote
-servers only. The host client remains non-authoritative.
-
-The connection handshake compares protocol version, baseline commit,
-content-manifest hash, and ordered enabled-mod list before character selection.
-Reject a mismatch with all differing values in the diagnostic response. Do not
-download or execute content from a server automatically. Third-party mods are
-outside the pinned completion scope; an operator using one installs the exact
-same files manually on server and clients, and those files participate in the
-manifest hash. Multiplayer communication includes server-routed text chat;
-voice chat is out of scope.
-
-### Persistence
-
-Use bundled SQLite through `rusqlite` 0.40.1 with `journal_mode=WAL`,
-`synchronous=FULL`, foreign keys, and one persistence worker. Use transactional,
-numbered, forward-only SQL migrations after an automatic backup; do not support
-downgrades.
-
-Every 100 milliseconds, commit one atomic append-only journal batch containing
-the authoritative recovery inputs—accepted commands plus administrative,
-connection-control, and wall-clock events that affect simulation—and an audit
-copy and BLAKE3 hash of the ordered domain events those inputs produced. Do not
-acknowledge durable outcomes before this commit. Record the batch's first and
-last `SimTick`, including frames with no player commands, so replay regenerates
-AI and environmental work. Write dirty entity and submap snapshots every five
-seconds with the last included journal sequence.
-
-Recover from the latest mutually consistent snapshots by replaying only later
-recovery-input records through the simulation. Regenerate domain events and
-require their ordered hash to equal the stored audit hash. Never apply stored
-output events as a second mutation path. Abort startup with a corruption or
-determinism error on any mismatch. Checkpoint WAL every 60 seconds and at
-graceful shutdown.
-
-Roll compressed replay archives hourly and retain 30 days. After a verified
-snapshot and replay-archive write, daily compaction removes recovery-journal
-rows older than that snapshot; SQLite reuses the freed pages. This preserves
-crash recovery and recent desync diagnosis without unbounded journal growth.
-Compaction never removes a snapshot object referenced by a retained replay.
-
-Encode versioned domain blobs with Postcard 1.1.3 and compress them with
-`zstd` 0.13.3. Never serialize client presentation or framework state. Create
-verified online backups hourly; retain 24 hourly and 30 daily generations.
-Include the database,
-content-manifest hash, baseline commit, schema/protocol versions, and BLAKE3
-checksums. Restore verifies integrity and replays only authoritative
-recovery-input records before opening.
-
-### Determinism and replay
-
-Canonical simulation uses integer or fixed-point arithmetic. Floating-point
-values are presentation-only. Any collection iteration that affects outcomes is
-ordered by stable ID; hash-map iteration order must never affect simulation.
-
-Use exact integer newtypes whenever CDDA defines a canonical unit, including
-ticks and domain-specific distance, mass, volume, energy, and temperature
-types. Represent every remaining fractional simulation value as signed Q32.32
-fixed point in `i64`. Multiplication and division use checked `i128`
-intermediates and round to nearest with ties to even. Check conversions,
-division by zero, and overflow; never wrap, saturate, use platform-default
-rounding, or fall back to floating point. Reject a command-caused numeric error
-before assignment. Treat background-system overflow as a fatal deterministic
-invariant failure: commit no part of that tick and enter maintenance recovery
-from the preceding journal boundary.
-
-Define `CanonicalStateV1` as a BLAKE3 Merkle tree. Encode leaf DTOs with
-versioned Postcard and order them by
-`(domain_type_tag, stable_id_or_chunk_coordinate)`. Include global simulation
-state, content and schema versions, world seed and namespace, `SimTick`, command
-and event sequences, allocator high-water state, every persistent domain object
-and chunk, and scheduled work. Exclude derived indexes, caches, network
-connections, wall-clock timestamps, diagnostics, and client presentation. Hash
-ordered child hashes with explicit tree-level domain tags. Use this exact root
-for replay, persistence verification, and cross-platform conformance; change it
-only through an explicit version migration.
-
-Each world stores a 256-bit seed. Derive named ChaCha8 streams with BLAKE3 from
-the world seed, a domain tag, relevant stable IDs, tick, and event sequence.
-Use separate domains for combat, map generation, weather, loot, and AI so a new
-random draw in one domain cannot perturb another.
-
-The replay format is a versioned Postcard stream compressed with Zstandard.
-Its header contains the baseline commit, content-manifest hash, protocol and
-schema versions, world namespace, seed, initial snapshot hash, and start tick.
-Records contain every authoritative recovery input in journal order: accepted
-commands, administrative and connection-control events, commandless tick spans,
-`IdBlockReserved`, `IdBlockAbandoned`, and
-`UnexpectedDowntimeCatchUp { previous_utc_anchor, observed_utc, elapsed_ticks }`.
-Replay uses recorded elapsed ticks and allocator operations instead of a live
-clock or database. Record periodic BLAKE3 canonical state roots every 100 ticks.
-The same replay, including one continued across a crash and recovery, must
-produce identical roots on Windows, macOS, and Linux.
-
-At each hourly replay roll, persist an immutable canonical initial-snapshot
-object addressed by its BLAKE3 hash before writing the replay header. Retain the
-object for at least as long as every archive that references it and delete it
-only when no replay or backup references it. The replay export tool emits a
-self-contained bundle containing the replay stream, its snapshot object, and
-the matching content manifest; importing verifies all hashes before execution.
-
-### Content compatibility
-
-Vendor the pinned CDDA content with a reproducible importer. Preserve upstream
-JSON without semantic rewrites and implement its parser, inheritance,
-finalization, dependency, replacement, and effect-on-condition behavior in
-Rust. Do not introduce RON or a replacement content language.
-
-Import `data/core`, `data/json`, `data/names`, `data/raw`, and all bundled
-`data/mods` from commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05`.
-Import `TEST_DATA` and `Standard_Combat_Tests` only as test fixtures. Import
-fonts, sound, title, shaders, and tileset assets only with recorded compatible
-licenses. Exclude Android, browser, screenshot, packaging, and XDG artifacts.
-
-The pinned Git commit's tracked `lang/po` directory contains only a placeholder;
-upstream release automation fetches non-English catalogs from mutable Transifex
-state. Ship the pinned English source strings and English UI only. Do not fetch
-translations during import or build. External non-English catalogs and runtime
-language switching are explicitly outside this completion scope.
-
-Generate a manifest for every imported file containing upstream path, commit,
-BLAKE3 hash, license, and destination. Fail the import on unknown provenance.
-
-Content work must include:
-
-- Schema validation with useful source locations and diagnostics
-- Cross-reference validation
-- Deterministic load/finalization order
-- Copy-from/inheritance semantics used by the pinned upstream baseline
-- Mod dependency, replacement, and load-order behavior
-- Stable mapping between string content IDs and runtime definitions
-- Effect-on-condition and other data-driven behavior required by baseline
-  content
-- Provenance and licensing metadata for imported assets and data
-- Tests using all core content and every bundled mod in the pinned scope
-
-Test core alone and test every player-selectable bundled mod in a
-dependency-resolved load set. Do not force mutually exclusive mods into one
-world merely to claim coverage.
-
-Do not silently ignore unsupported fields. Reject them clearly, implement them,
-or track them as explicit parity failures.
-
-### Licensing and attribution
-
-License original Rust source and project documentation under CC BY-SA 3.0 and
-include the complete license text. Preserve upstream attribution and mark
-ported or transformed upstream material with its source path and commit.
-Retain separately licensed dependencies, fonts, sounds, tilesets, and other
-assets under their own compatible licenses and include their notices. Do not
-ship an asset whose license or provenance is unknown or incompatible.
-
-### Supported hardware and performance gates
-
-The minimum x86-64 client target is a four-core CPU, 8 GiB RAM, and a GPU with
-2 GiB VRAM supporting Direct3D 12 on Windows 10+, Metal on macOS 13+, or Vulkan
-1.2 on GNU/Linux with glibc 2.35 or newer and X11 or Wayland. The minimum Apple
-silicon client is a base Apple M1 with 8 GiB unified memory on macOS 13. Every
-required client target must sustain 60 frames per second at 1920 by 1080 in the
-standard tiles view on its minimum hardware.
-
-The 16-player server target is four dedicated CPU cores on x86-64 or four Apple
-silicon performance cores, 8 GiB RAM, NVMe storage, and 20 Mbit/s symmetric
-network capacity. Run the standard release workload natively on
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu`. It has 16 connected clients plus 64 additional
-disconnected characters distributed across representative Active, Warm, and
-Dormant regions. All three server targets must meet every gate:
-
-- Simulation tick time below 35 ms at p95 and 50 ms at p99
-- Server resident memory below 4 GiB
-- Steady-state egress below 256 Kbit/s per connected client on average
-- Playable state delivered within five seconds of reconnect on a 20 Mbit/s link
-- Cold startup and full content validation completed within 60 seconds
-- A 24-hour soak with no crash, desync, database corruption, unbounded growth,
-  or missed tick deadline rate above 0.1 percent
-
-## Fixed baseline and parity accounting
-
-Create and continuously maintain `PORTING_MATRIX.md`. Mechanically generate the
-source-, data-, and test-derived portions and hand-maintain behavioral evidence
-that cannot be generated.
-
-Each subsystem and content category must be classified as one of:
-
-- Not investigated
-- Specified
-- Implementing
-- Implemented but unverified
-- Behaviorally verified
-- Intentionally adapted for multiplayer
-- Out of scope by this prompt
-
-The time model, offline-character policy, simultaneous command resolution, and
-other adaptations explicitly prescribed by this prompt are authorized. When a
-new pinned behavior cannot coexist with those locked rules, implement the
-smallest deterministic behavioral change that preserves CDDA's player-visible
-intent. Record that change in an ADR and the parity matrix; do not wait for a
-new product decision. Every adaptation must document:
-
-- The pinned CDDA behavior
-- Why it fails or produces poor results in persistent real time
-- The new behavior
-- Multiplayer edge cases
-- Tests proving the adaptation
-
-Do not use raw file count, type count, compilation, or content parsing alone as
-evidence of parity. A subsystem is verified only when its important observable
-behavior is tested.
-
-In-scope parity includes all of these pinned-baseline areas:
-
-- World generation, overmaps, maps, terrain, furniture, traps, fields, weather,
-  seasons, map extras, specials, and regional settings
-- Player, NPC, monster, faction, and creature behavior
-- Movement, pathfinding, line of sight, lighting, sound, scent, and perception
-- Anatomy, health, damage, healing, disease, effects, needs, stamina, pain,
-  morale, sleep, temperature, mutations, and bionics
-- Items, charges, pockets, containment, clothing, armor, weapons, ammunition,
-  tools, qualities, ownership, and inventory interaction
-- Melee, ranged combat, projectiles, explosions, fire, environmental hazards,
-  death, and drops
-- Skills, proficiencies, recipes, crafting, disassembly, construction, reading,
-  and interruptible long activities
-- Vehicles, parts, installation, cargo, fuel, power, controls, movement,
-  collision, and damage
-- NPC AI, dialogue, missions, trade, camps, companions, and faction interaction
-- Character creation, scenarios, professions, traits, achievements, memorials,
-  and progression
-- Save/load behavior, world options, configuration, keybindings, accessibility,
-  English text, sound, and supported tiles/content presentation
-- Core CDDA data and every bundled mod in the pinned content scope
-- Data-driven scripting and effects required by included content
-- Debug and administration capabilities necessary to test and operate the port
-
-Mobile, browser, console, Android, and iOS clients and platform services are out
-of scope. `TEST_DATA` and `Standard_Combat_Tests` are test fixtures rather than
-player-selectable mods. Assets with unknown or incompatible licenses are not
-shipped. Non-English translation catalogs and runtime language switching are out
-of scope because they are not reproducibly identified by the pinned Git commit.
-Upstream developer and release tools that are unnecessary to build, validate,
-import, test, or operate the port are replaced by equivalent Rust tooling. These
-are the only standing parity exclusions.
-
-## Persistent multiplayer requirements
-
-The server must behave correctly with 0 through 16 connected players.
-
-At minimum, implement and verify:
-
-- Authentication, authorization, accounts, and durable character ownership
-- Character creation, selection, reconnect, and death handling
-- Server-authoritative validation of every client command
-- No trust in client position, inventory, timing, visibility, RNG, or outcomes
-- Chunk-, visibility-, perception-, and ownership-aware interest management
-- Relevance-filtered initial snapshots and incremental deltas
-- Movement prediction that cannot create canonical state
-- Reconciliation that is understandable rather than visibly teleporting under
-  ordinary latency
-- Concurrent interactions with deterministic conflict resolution
-- Chat and essential social/session feedback
-- Administrative shutdown, maintenance, backup, restore, inspection, and
-  moderation functions
-- Graceful and abrupt disconnect handling without removing or protecting the
-  character
-- Offline character simulation and reconnection
-- World-time progress with zero connected clients
-- Inactive-region catch-up without full simulation of the entire generated
-  world
-- Rate limits, size limits, validation, and safe rejection of malformed or
-  hostile network messages
-- Protocol version negotiation and comprehensible mismatch errors
-- Metrics and structured logs sufficient to diagnose desyncs and persistence
-  failures
-
-Persistent real-time behavior must be designed explicitly for menus, crafting,
-sleep, reading, travel, vehicles, combat, and disconnected actors. Never hide a
-single-player pause assumption inside a gameplay system.
-
-## Required project documentation
-
-Create and maintain:
-
-- `README.md`: supported state, setup, running client/server, and license
-- `IMPLEMENTATION_STATUS.md`: current phase, working features, blockers, latest
-  verification, and immediate next tasks
-- `PORTING_MATRIX.md`: pinned-baseline parity accounting
-- `docs/architecture.md`: actual crate and runtime architecture
-- `docs/protocol.md`: commands, events, deltas, channels, trust boundaries, and
-  compatibility policy
-- `docs/persistence.md`: schema, transaction boundaries, recovery, migrations,
-  backup, and restore
-- `docs/time.md`: clocks, simulation phases, activities, offline progress, and
-  inactive-region behavior
-- `docs/content.md`: upstream baseline, import/loading pipeline, compatibility,
-  validation, and provenance
-- `docs/operations.md`: dedicated-server deployment, configuration, metrics,
-  backup, restore, upgrades, and graceful shutdown
-- `docs/testing.md`: commands, test layers, replay fixtures, network simulation,
-  and platform verification
-- ADRs for consequential decisions and rejected alternatives
-- License, attribution, and third-party notices required by upstream and every
-  reused dependency or asset
-
-Keep documentation synchronized with behavior. Do not describe aspirational
-features as implemented.
-
-## Execution method
-
-### Maintain a playable vertical slice
-
-Build the port through expanding end-to-end slices. Keep the main branch
-buildable and the current slice runnable.
-
-The first architecture slice must run on the macOS development host and must:
-
-1. Start a persistent headless server.
-2. Connect two Bevy clients to the separate server through iroh, including a
-   loopback automated test mode.
-3. Load and replicate one validated world chunk.
-4. Spawn actors with stable IDs.
-5. Move both actors simultaneously through server-authoritative commands.
-6. Disconnect one client while its character remains physically present.
-7. Allow the connected actor or an NPC to affect the disconnected character.
-8. Advance world time with both clients disconnected.
-9. Stop and restart the server.
-10. Restore the same chunk, actors, scheduled state, and world time.
-11. Reconnect to the surviving character.
-12. Replay the recorded command sequence to the same verified state hash.
-
-Do not confuse completion of this slice with completion of the port. Use it to
-validate architecture, then expand the parity matrix subsystem by subsystem.
-
-### Port behavior before breadth
-
-For each subsystem:
-
-1. Study upstream source, data, tests, and observable behavior.
-2. Write a concise behavior specification and identify multiplayer conflicts.
-3. Add characterization or golden tests for every observable behavior boundary.
-4. Implement the smallest complete end-to-end behavior.
-5. Integrate persistence, networking, UI, content, and replay handling rather
-   than postponing those boundaries indefinitely.
-6. Verify edge cases and performance.
-7. Update the parity matrix and documentation.
-8. Conduct a fresh review before declaring the subsystem verified.
-
-Maintain a working thin path through all layers instead of accumulating a broad
-collection of unconnected domain types.
-
-### Track progress durably
-
-Update `IMPLEMENTATION_STATUS.md` before ending any work session. It must state:
-
-- Exact upstream baseline commit
-- Current milestone
-- What changed
-- What is actually runnable
-- Verification commands and results
-- Known defects and risks
-- The next concrete tasks in priority order
-
-Record unfinished work in tracked project documents or issues, not only in chat
-context. On resumption, trust the repository and verification results over a
-possibly stale conversational summary.
-
-### Work autonomously
-
-- Do not reopen the product, architecture, scope, or release choices fixed in
-  this prompt and `ARCHITECTURE_DECISIONS.md`.
-- For routine implementation mechanics beneath the locked interfaces, use the
-  simplest compliant design, record consequential engineering selections in
-  ADRs, and continue without requesting another product decision.
-- If one workstream is blocked, continue other valuable in-scope work.
-- Use bounded subagents for independent research, implementation, testing, and
-  review when the environment permits them. Give each a concrete scope and
-  independently validate its output.
-- Preserve existing user changes and avoid destructive source-control actions.
-- Do not publish, push, open pull requests, deploy public servers, or mutate
-  external services unless explicitly authorized.
-- Breaking changes to the new port's pre-release APIs and schemas are allowed
-  when they improve the architecture. Once persistent worlds are distributed,
-  provide explicit migration tooling rather than silently discarding them.
-
-## Verification requirements
-
-Create fast local checks first, then broaden them as functionality grows.
-
-After the workspace exists, the standard local gate includes all five commands:
+Predict only controlled locomotion/steering, camera, and cosmetics; never combat,
+inventory, projectiles, RNG, crafting, dialogue, or world interactions. Render
+remote actors 100 ms behind; smooth valid <=1-tile corrections over 150 ms and
+snap larger/invalid corrections with diagnostics.
+
+## Persistence, determinism, and replay
+
+Use SQLite WAL, `synchronous=FULL`, foreign keys, one persistence worker, and
+forward-only transactional migrations after backup. Every 100 ms atomically
+journal authoritative inputs/tick spans plus an audit copy/hash of generated
+events before acknowledgment. Snapshot dirty state every 5 s with journal
+sequence; checkpoint WAL every 60 s and shutdown. Recovery replays inputs only,
+regenerates events, and aborts on hash mismatch; never apply stored outputs twice.
+
+Create verified backups hourly, retaining 24 hourly and 30 daily. Include the
+protected server `SecretKey`; restore must derive and match its manifest
+`EndpointId` before replacement or startup. Roll compressed replays hourly and
+retain 30 days. Replay records every recovery input, including
+commands, admin/key/connection changes, commandless ticks, allocator operations,
+and unexpected-downtime catch-up; it never consults a live clock or allocator.
+
+Use exact integer domain units and signed Q32.32 `i64` for remaining fractions.
+Use checked `i128` intermediates, ties-to-even rounding, and no floating-point,
+wrapping, or saturation in canonical state. Derive named ChaCha8 streams with
+BLAKE3 from seed/domain/IDs/tick/sequence.
+
+`CanonicalStateV1` is a versioned Postcard/BLAKE3 Merkle root over ordered
+canonical global, allocator, scheduled, object, and chunk DTOs. Exclude caches,
+indexes, connections, wall clock, diagnostics, and presentation. Hash every 100
+ticks and require identical roots on supported platforms.
+
+## Content, parity, and licensing
+
+Import all compatible `data/core`, `data/json`, `data/names`, `data/raw`, and
+bundled `data/mods` at the pinned commit. `TEST_DATA` and
+`Standard_Combat_Tests` are fixtures. Implement pinned JSON inheritance,
+finalization, dependency, replacement, and effect-on-condition behavior; reject
+or explicitly track every unsupported field. Do not invent a replacement format.
+
+Ship English source strings/UI only: non-English catalogs come from mutable
+Transifex state absent from the pinned commit and are out of scope. Mobile,
+browser, console, Android, iOS, and unnecessary upstream tooling are also out.
+
+Maintain `PORTING_MATRIX.md` with behaviorally verified, adapted, implementing,
+or out-of-scope status for every subsystem and content category. Study upstream
+source/data/tests, specify observable behavior, characterize it, implement a
+complete vertical slice, test multiplayer adaptations, and update the matrix.
+File counts, parsing, or compilation alone never prove parity.
+
+Comply with CDDA's CC BY-SA 3.0 obligations. Preserve source path, commit, hash,
+license, and attribution for imported data/assets; exclude unknown or
+incompatible provenance. Original Rust/docs use CC BY-SA 3.0, while dependencies
+and separately licensed assets retain their own notices.
+
+## Execution and verification
+
+Keep a playable macOS-first slice: start the separate persistent server; connect
+two Bevy clients through iroh; enroll endpoint identities; load one chunk; move
+two stable-ID actors; simulate one creature/combat; disconnect and harm one
+character; advance with zero clients; restart/recover; reconnect; reproduce the
+state root by replay. Then expand subsystem by subsystem until full parity.
+
+Maintain README, implementation status, parity matrix, architecture, protocol,
+identity/authorization, persistence, time, content, operations, testing, ADR,
+license, attribution, and third-party documentation. Before ending a session,
+record what runs, exact verification, defects/risks, and next tasks.
+
+The standard local gate is:
 
 ```text
 cargo fmt --all --check
@@ -922,120 +265,29 @@ cargo doc --workspace --all-features --no-deps
 cargo xtask verify-dependency-boundaries
 ```
 
-Also add and maintain:
+Add unit, integration, characterization, property, replay, iroh identity/key-
+rotation, hostile-network, fuzz, persistence/crash, catch-up, performance, and
+16-client soak tests. CI covers Windows/macOS/Linux clients and native macOS
+Apple/Intel plus x86-64 Linux servers. Required 16-player hardware/performance
+budgets and the 24-hour soak are those in `ARCHITECTURE_DECISIONS.md`.
 
-- Unit tests for domain invariants and content loaders
-- Headless integration tests for complete gameplay interactions
-- Golden/characterization tests against pinned CDDA behavior
-- Property tests for inventories, containment, coordinates, IDs, time, and
-  persistence round trips
-- Deterministic replay tests and canonical state hashes
-- Network tests with latency, jitter, loss, reordering, duplication,
-  disconnects, reconnects, and malformed messages
-- End-to-end iroh tests using real loopback endpoints for handshake, endpoint-ID
-  pinning, authentication, streams, datagrams, reconnect, and clean shutdown
-- Security tests and fuzzing for content, save, and network parsing
-- Persistence tests covering transactions, crashes, partial writes, migrations,
-  backup, and restore
-- World catch-up tests spanning unloaded chunks and zero-player intervals
-- Performance benchmarks for active simulation, content loading, pathfinding,
-  chunk streaming, serialization, and database commits
-- A 16-client soak test with representative active and disconnected characters
-- Platform CI for Linux, Windows, and macOS clients and native headless-server
-  jobs for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-  `x86_64-unknown-linux-gnu`
-- Clean-machine dedicated-server build, run, and deployment tests on all three
-  required server targets
-- Dependency license and vulnerability checks
-
-Never weaken, skip, or delete a failing test merely to obtain a green build.
-Diagnose it as an implementation defect or a faulty assertion and document the
-evidence before changing either side.
-
-## Review discipline
-
-At every milestone:
-
-1. Inspect the full milestone diff and all untracked files.
-2. Have a fresh reviewer or independent subagent examine correctness,
-   regressions, security, unsafe edge cases, missing tests, architecture drift,
-   licensing, and misleading documentation.
-3. Validate each finding against current code.
-4. Fix every confirmed critical or high-severity issue.
-5. Address lower-severity in-scope findings or document a concrete rationale.
-6. Rerun all affected checks.
-7. Repeat independent review when fixes are substantial.
-
-Do not claim a milestone complete with confirmed critical defects, failing
-required checks, corrupted migration paths, known privilege bypasses, or
-unverified persistence behavior.
+At each milestone inspect the complete diff, obtain an independent review,
+validate findings, fix all confirmed critical/high issues, address or justify
+lower findings, and rerun affected checks. Never weaken tests for green CI.
 
 ## Completion gate
 
-The assignment is complete only when all of the following are true:
+Finish only when every in-scope parity row is behaviorally verified or has a
+tested authorized adaptation; all included content is usable through the Bevy
+client; persistent 0-16-player operation, disconnected vulnerability, catch-up,
+iroh identity/key lifecycle, default-deny authorization, hostile input,
+persistence/migrations/recovery/backup/restore, deterministic replay, platform
+builds, performance budgets, and the soak test pass; Bevy exists only in the
+client graph; documentation and licensing are audited; all required checks are
+green; and a final independent review has no critical/high issue, placeholder,
+silent unsupported field, or undocumented manual completion step.
 
-1. The pinned baseline and exact in-scope content set are recorded.
-2. Every in-scope row of `PORTING_MATRIX.md` is behaviorally verified or has an
-   architecture-authorized, tested multiplayer adaptation. Only the fixed
-   exclusions in this prompt may be marked out of scope.
-3. Native clients build and pass required checks on Windows, macOS, and Linux.
-4. Headless servers for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-   `x86_64-unknown-linux-gnu` build, deploy, run, shut down, back up, restore,
-   recover from tested failures, and pass the performance and 24-hour soak gates
-   natively.
-5. Sixteen connected clients and 64 additional disconnected characters pass
-   the specified 24-hour soak and every stated performance budget.
-6. The server remains authoritative under hostile, malformed, late, duplicated,
-   reordered, and conflicting client commands.
-7. Disconnected characters remain physically present and vulnerable, and can
-   be affected, killed, persisted, and reconnected correctly.
-8. World time and scheduled consequences progress correctly with zero connected
-   clients.
-9. Active, inactive, unloaded, and reloaded chunks behave consistently.
-10. Save data, migrations, crash recovery, backup, and restore pass the
-    persistence conformance suite.
-11. Rendering-independent replay reproduces verified outcomes and state hashes.
-12. All in-scope CDDA mechanics and included content are usable through the Bevy
-    client, not merely parsed or represented internally.
-13. Operator, player, contributor, protocol, persistence, content, and testing
-    documentation matches the delivered behavior.
-14. Required licensing, attribution, provenance, and third-party notices are
-    complete and audited.
-15. Formatting, linting, tests, documentation, platform CI, fuzz targets,
-    security checks, benchmarks, and the specified soak test pass at the fixed
-    release gates in this prompt.
-16. A final independent full-project review finds no unresolved critical or
-    high-severity correctness, security, persistence, or licensing issue.
-17. There are no placeholders, stubs, ignored unsupported content fields, or
-    undocumented manual steps being counted as completed features.
-18. Bevy appears only in the client dependency graph. The dependency-boundary
-    check proves that every non-client workspace crate, including the server and
-    all of its transitive dependencies, is free of `bevy` and `bevy_*` packages.
-19. The delivered network transport is iroh 1.0.3 using the prescribed ALPN,
-    endpoint identity, stream/datagram mapping, and direct/relay policy; no
-    second gameplay or authentication transport remains.
-
-If the environment, permissions, hardware, or an external service prevents a
-required completion check, do not claim the port is complete. Report the exact
-blocker, the work already verified, and the remaining command or external action
-needed.
-
-## Communication
-
-Lead progress reports with working outcomes. Keep them concise but precise:
-
-- Current milestone and percent of verified parity rows
-- User-visible or operator-visible capability added
-- Important architectural decision or adaptation
-- Verification performed and result
-- Confirmed risks or blockers
-- Next concrete implementation target
-
-Do not report activity as progress merely because files were created or code
-compiled. Report behavior that now works and evidence that it works.
-
-Begin by reading the authoritative inputs, verifying and recording the pinned
-upstream baseline, creating the Rust workspace and durable status/parity
-documents, and implementing the first architecture slice. Then continue
-expanding verified vertical slices until the completion gate is genuinely
-satisfied.
+If permissions, hardware, or external services block a required check, do not
+claim completion. Record the exact blocker, verified work, and remaining action.
+Lead progress reports with working outcomes, verification, risks, and the next
+concrete target—not file creation or compilation alone.

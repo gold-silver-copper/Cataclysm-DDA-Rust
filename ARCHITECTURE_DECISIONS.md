@@ -334,7 +334,7 @@ crates/
   content/     definitions, loading, validation, and migrations
   protocol/    commands, events, snapshots, and wire types
   persistence/ chunk and entity storage
-  server/      sessions, networking, interest management, and simulation loop
+  server/      connections, networking, interest management, and simulation loop
   client/      Bevy rendering, UI, input, audio, and client prediction
   tools/       validators, importers, benchmarks, and replay inspection
 ```
@@ -392,12 +392,12 @@ semantics. RON and a newly invented content format are not used.
 | Rust toolchain | Rust 1.97.1, pinned by `rust-toolchain.toml`, edition 2024 |
 | Client | Bevy 0.19.0 with explicit 2D, UI, audio, asset, input, accessibility, and platform features |
 | Server | Plain Rust on Tokio 1.53.1; no Bevy crate is permitted in its dependency graph |
-| Networking | `iroh` 1.0.3 authenticated QUIC connections using a fixed game ALPN |
+| Networking | `iroh` 1.0.3 authenticated QUIC connections using fixed project ALPNs |
 | Network encoding | Explicit versioned Serde domain messages encoded with `postcard` 1.1.3 |
 | Persistence | SQLite bundled through `rusqlite` 0.40.1 in WAL mode |
 | Persistence blobs | Versioned `postcard` 1.1.3 records compressed with `zstd` 0.13.3 |
 | Async runtime | Tokio 1.53.1 for iroh I/O, signals, timers, and bounded background work |
-| Authentication | RustCrypto `argon2` 0.5.3 using Argon2id plus opaque random session tokens |
+| Authentication | Iroh-authenticated `EndpointId` allowlists mapped to durable accounts and roles; no passwords or bearer tokens |
 | Deterministic RNG | `rand_chacha` 0.10.0 `ChaCha8Rng` with BLAKE3 1.8.5-derived named streams |
 | Diagnostics | `tracing` 0.1.44, `tracing-subscriber` 0.3.23, and a loopback-only Prometheus-format metrics endpoint |
 
@@ -411,73 +411,97 @@ document's last-updated date and is pinned as `iroh = "=1.0.3"`.
 
 ## Network and authentication policy
 
-All gameplay, session-control, authentication, chat, and remote-administration
+All gameplay, connection-control, authentication, chat, and remote-administration
 traffic uses `iroh` 1.0.3. The server persists one iroh `SecretKey` per world
 and advertises its corresponding `EndpointAddr`, which includes the
 cryptographic `EndpointId` plus current direct and relay addressing hints. A
 client favorite pins that `EndpointId`; an operator shares a changed address
-out of band after intentional key rotation. The fixed ALPN is
-`cdda-rust/game/1`. There is no parallel web login API, separate
-connection-token exchange, or plaintext authentication path.
+out of band after intentional key rotation. The fixed ALPNs are
+`cdda-rust/game/1` for gameplay, `cdda-rust/enroll/1` only to prove possession
+of a preauthorized endpoint key, and `cdda-rust/admin/1` for sensitive remote
+administration. There is no parallel web login API, connection-token exchange,
+or plaintext authentication path.
 
-The client also persists a per-install iroh secret key. Iroh's QUIC connection
-authenticates both endpoint public keys and encrypts all traffic before the
-application sends credentials. Transport identity does not replace account
-authentication: the first bidirectional control stream performs version and
-content negotiation, password or resume-token authentication, character
-selection, and session setup. A session is bound to the authenticated client
-`EndpointId` that created it. The application waits for the full QUIC handshake;
-it does not use 0-RTT for authentication or gameplay traffic.
+Each client installation persists one iroh `SecretKey`; its public
+`EndpointId` is the only client authentication identity. The client stores the
+key using operating-system credential protection when available, otherwise in
+an owner-only file or ACL. Secret keys are never logged, synchronized, or sent
+to the server. The application awaits the full QUIC handshake and authorizes
+the peer returned by `Connection::remote_id()`; it never uses 0-RTT for
+enrollment, administration, commands, or gameplay.
 
-Accounts use canonical ASCII names matching `[a-z0-9_]{3,32}` and passwords of
-12 through 256 bytes. Passwords are stored as Argon2id PHC strings using 64 MiB
-memory, three iterations, four lanes, a random 16-byte salt, and a 32-byte
-output. Public self-registration is disabled; administrators create accounts or
-one-use invitations through the server CLI. Authentication is limited to five
-failed attempts per account and client `EndpointId` per 15 minutes and 100
-failed attempts globally per 15 minutes. Salts, invitation tokens, session
-tokens, and iroh endpoint secret keys come from the operating system CSPRNG.
+An account record contains a durable `AccountId`, display name, role, status,
+owned character IDs, and ordered endpoint bindings with active, pending, and
+revoked states. An enabled account has at least one active `EndpointId`;
+initial-enrollment and recovery-locked accounts have none and cannot play.
+Each `EndpointId` is permanently bound to at most one `AccountId` in a world,
+including pending and revoked bindings. A database uniqueness constraint and
+one transaction for lookup plus mutation reject duplicates and enrollment races;
+a revoked ID cannot be rebound to the same or another account.
+Display names are labels rather than login identifiers. The server binds a
+connection to its authenticated `EndpointId` for its entire lifetime. It rejects
+any identity that is neither active nor the exact unexpired pending identity on
+the enrollment ALPN, and rejects every disabled, banned, or revoked identity,
+immediately after the handshake. There are no passwords, password hashes,
+application session or resume tokens, invitation secrets, OAuth identities,
+application certificates, or separate login/recovery service.
 
-Successful login returns an opaque random 256-bit session token; only its
-BLAKE3 hash is stored. Sessions expire after 24 hours and are revoked on password
-change or administrative action. One-use invitation tokens use the same size,
-storage, and 24-hour expiration policy. Roles are player, moderator, and
-administrator. An account owns multiple characters, but exactly one gameplay
-connection per account and per character is active at a time. A second
-connection is rejected unless it presents the same reconnect session or an
-administrator explicitly replaces or transfers control.
+The audited local administrator CLI creates the initial account and a ten-minute
+pending enrollment for an exact `EndpointId`. An authenticated account may add
+another exact pending ID or revoke any but its last active ID. A pending client
+connects using `cdda-rust/enroll/1`; the server activates it atomically only when
+`Connection::remote_id()` exactly matches the unexpired pending ID, then consumes
+the pending record. The enrollment stream performs no password, shared-secret,
+or bearer-token exchange. If all keys are lost, the local CLI atomically revokes
+the old bindings, recovery-locks the account, and creates an exact pending
+replacement; successful iroh proof activates the replacement and unlocks it.
+Expiry leaves the account recovery-locked until the local CLI creates a new
+pending replacement; it never restores an old binding automatically.
+Pending enrollment creation, expiration, consumption, recovery, revocation,
+role, status, and ownership changes are durable recovery inputs; applicable
+changes disconnect affected live connections at the next tick.
+
+Roles are player, moderator, and administrator. An account may own multiple
+characters, but exactly one gameplay connection per account and per character
+is active. An authorized reconnect may replace a stale connection; only an
+administrator may transfer ownership or live control. No application bearer
+token or transferable connection credential exists.
 
 Authorization is default-deny and uses this fixed capability matrix:
 
 | Role | Allowed capabilities |
 | --- | --- |
-| Player | Change its own password; manage its own sessions and characters; issue gameplay commands only for its currently controlled character; read state permitted by ownership, perception, and ordinary UI rules; use chat and submit reports |
-| Moderator | Every player capability for its own character; view account name/ID, character name, connection state, chat, reports, and moderation history; mute, kick, and suspend an account for at most 24 hours |
-| Administrator | Every moderator capability; create/disable accounts and invitations; reset credentials; grant/revoke roles; permanently ban; replace sessions; transfer character ownership/control; inspect canonical and private state; issue recorded debug/world mutations; enter maintenance; shut down; configure, migrate, back up, and restore the world |
+| Player | Manage its authorized endpoint set and characters; issue gameplay commands only for its currently controlled character; read state permitted by ownership, perception, and ordinary UI rules; use chat and submit reports |
+| Moderator | Every player capability for its own character; view account ID/display name, character name, connection state, chat, reports, and moderation history; mute, kick, and suspend another player-role account for at most 24 hours |
+| Administrator | Every moderator capability; create/disable accounts; enroll/revoke endpoint identities; grant/revoke roles; permanently ban; transfer character ownership/control; inspect canonical and private state; issue recorded debug/world mutations; enter maintenance; shut down; configure, migrate, back up, and restore the world |
 
-Moderators may not view credentials, session tokens, private inventories, or
-unseen world state; transfer/control characters; change accounts or roles;
+Moderators may never target themselves or an equal/higher-role account. They may
+not view private inventories or unseen world state; transfer/control characters;
+change accounts, endpoint sets, or roles;
 permanently ban; mutate gameplay; pause or configure the world; or run backup,
-restore, migration, or shutdown operations. No role can read a password or raw
-session token because neither is stored. Administrator maintenance, restore,
-role, credential-reset, ownership-transfer, and debug-mutation commands require
-password reauthentication within the preceding five minutes. Every moderation
-and administration command records actor account, role, target, tick, typed
-safe metadata, status, and resulting recovery input in the audit journal. Audit
-records use per-command allowlists rather than serializing raw arguments or
-results. They never contain passwords, password-reset values, raw invitation or
-session tokens, endpoint secret keys, reauthentication material, or other
-credentials; token operations record only the persisted record ID, stored hash
-identifier, expiry, and result status. The local privileged CLI is a separately
-audited local administrator surface and never grants a network client
-privileges. Tests enumerate every command/role pair, cross-account ownership
-case,
-expired reauthentication, and default-deny unknown command.
+restore, migration, or shutdown operations. Administrator maintenance, restore,
+role, endpoint-replacement, ownership-transfer, and debug-mutation commands
+require a newly established, fully handshaken `cdda-rust/admin/1` connection
+whose iroh-authenticated identity has held the administrator role for its entire
+lifetime and whose handshake completed within the preceding five minutes. This
+is only a connection-freshness check: it uses the same iroh identity, adds no
+authentication factor, and does not mitigate compromise of that endpoint key.
+
+Every moderation, enrollment, key, and administration attempt records actor
+account, authenticated endpoint, role, target, tick, typed safe metadata, status,
+and resulting recovery input in the audit journal. Audit records use per-command
+allowlists rather than serializing raw arguments or results and never contain
+endpoint secret keys or arbitrary command data. The local privileged CLI is a
+separately audited local administrator surface and never grants a network client
+privileges. Tests enumerate every command, actor-role, and target-role
+combination; cross-account ownership case; duplicate and racing enrollment;
+unknown/revoked endpoint; stale admin connection; key rotation/recovery; and
+default-deny unknown command.
 
 The application maps explicit project messages onto iroh QUIC primitives:
 
-- One long-lived bidirectional control stream carries handshake, authentication,
-  character selection, session lifecycle, chat, administration, semantic
+- One long-lived bidirectional control stream carries negotiation, endpoint
+  authorization, character selection, connection lifecycle, chat, semantic
   commands, and typed command results.
 - One server-opened long-lived unidirectional event stream carries reliable
   ordered entity lifecycle changes and critical domain events.
@@ -506,20 +530,20 @@ snapshot stream.
 
 Network resource limits are protocol requirements, not operator tuning. One
 server accepts at most 64 established QUIC connections, of which at most 32 may
-be pre-authentication, 16 authenticated gameplay sessions, and 16 authenticated
-non-gameplay control or administration sessions. Admission uses a global token
+be pending authorization, 16 authorized gameplay connections, and 16 authorized
+non-gameplay control or administration connections. Admission uses a global token
 bucket of 60 new connections per minute with burst 20 and a per-`EndpointId`
 bucket of six per minute with burst three. Rate-limit key tables expire idle
 entries after 30 minutes and hold at most 4,096 entries; overflow is governed by
 the global buckets without allocating a new key. A connection must complete
-protocol/content negotiation and authentication within 15 seconds of QUIC
-establishment. At most two Argon2 verifications run concurrently; the bounded
-wait queue holds eight requests for no more than two seconds before a typed busy
-rejection.
+protocol/content negotiation and endpoint authorization within 15 seconds of
+QUIC establishment.
 
 A client opens exactly one bidirectional control stream and no unidirectional
-streams; any additional client-opened stream closes the connection as a
-protocol violation. Control frames are limited to 64 KiB encoded and 256 KiB
+streams on each gameplay, enrollment, or administration connection; any
+additional client-opened stream closes the connection as a protocol violation.
+The framing, timeout, memory, and ingress limits apply to all three ALPNs.
+Control frames are limited to 64 KiB encoded and 256 KiB
 decoded, event frames to 256 KiB encoded and 1 MiB decoded, and bulk snapshot
 frames to 8 MiB encoded and 32 MiB decoded. Length and decompression limits are
 checked before allocation. No more than four bulk streams or 16 MiB of encoded
@@ -531,7 +555,7 @@ scheduler drains control and critical events across every connection before
 servicing bulk transfers with weighted-fair queuing; within each connection it
 also assigns those streams higher QUIC priority. Independent streams and
 connections still share host, path, and relay congestion. Each frame must make
-progress within five seconds. Authenticated clients send a heartbeat every five
+progress within five seconds. Authorized clients send a heartbeat every five
 seconds and are disconnected after 15 seconds without inbound traffic. Control
 ingress is limited to 40 messages per second with burst 80 and datagram ingress
 to 60 per second with burst 120; excess traffic is rejected or dropped according
@@ -582,7 +606,7 @@ state is sent at 10 Hz. Rendering is variable-rate and interpolated.
 Each tick runs these ordered phases:
 
 1. Network ingress and input collection
-2. Authentication/ownership and command validation
+2. Endpoint authorization, ownership, and command validation
 3. Action start and interruption
 4. Movement, vehicle motion, projectiles, and collision
 5. Action completion and combat resolution
@@ -677,9 +701,15 @@ Compaction never removes a snapshot object referenced by a retained replay.
 
 The server creates verified online backups hourly, retaining 24 hourly and 30
 daily generations. Each backup includes the database, content-manifest hash,
-baseline commit, schema version, protocol version, and BLAKE3 checksum. Restore
-always verifies integrity and replays only authoritative recovery-input records
-before opening the world.
+baseline commit, schema version, protocol version, and BLAKE3 checksum. It also
+includes a separate protected identity bundle containing the server-world iroh
+`SecretKey`; the bundle uses the same OS credential-store or owner-only file/ACL
+rules as the live key and is never logged. The public backup manifest records
+the expected server `EndpointId` and identity-bundle checksum. Restore verifies
+the bundle, derives the key's `EndpointId`, and refuses replacement or startup
+unless it matches the manifest, then replays only authoritative recovery-input
+records before opening the world. A backup is incomplete if this identity check
+cannot pass.
 
 ## Determinism and replay
 
