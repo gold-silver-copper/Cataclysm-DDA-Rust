@@ -1,0 +1,19 @@
+# Goal Prompt
+
+From the repository root, paste the following entire block into Codex. It is
+short enough to be the `/goal` objective; the referenced files contain the
+detailed binding specification.
+
+```text
+/goal Deliver a complete, production-quality, fully playable persistent multiplayer Rust port of the pinned Cataclysm: Dark Days Ahead baseline in this repository.
+
+Read and obey IMPLEMENTATION_AGENT_PROMPT.md and ARCHITECTURE_DECISIONS.md completely; they are binding parts of this goal and their completion gates are incorporated here. Also read applicable AGENTS.md files, status/parity documents, ADRs, all working-tree changes, and the read-only pinned CDDA checkout. Preserve user work. Resolve in-scope implementation details autonomously, record consequential decisions, and continue across milestones until the release is proven complete. Do not stop at research, planning, scaffolding, compilation, a prototype, a vertical slice, partial content loading, or a list of work for someone else.
+
+Implement the complete Rust workspace, authoritative server, Bevy client, CDDA content pipeline, tools, tests, documentation, packaging, and release. Keep a runnable macOS-first end-to-end path while expanding behavioral parity subsystem by subsystem. Maintain IMPLEMENTATION_STATUS.md and PORTING_MATRIX.md as durable truth. Before each turn ends, record runnable behavior, exact verification, defects, blockers, and next work; on continuation, resume from those files. Continue independent useful work when one task is waiting. Do not publish, push, open PRs, deploy, or mutate external services without explicit permission.
+
+Completion requires a fresh user on a clean supported machine to follow the docs, build or install the release, start the standalone persistent server, bootstrap its iroh identity, enroll without passwords or bearer tokens, create/select a character, and play through the Bevy client without source edits, fixtures, placeholders, undocumented commands, or routine administrator intervention. Zero through sixteen players must be able to generate and explore persistent worlds and use all included pinned CDDA content through complete ordinary gameplay loops: survival, movement/perception, inventory/equipment, combat/death, creatures and NPCs, crafting/construction, vehicles, dialogue, missions/factions, mutations/bionics, weather/time, and world interaction. Every in-scope parity row must be behaviorally verified or have its documented, tested, architecture-authorized multiplayer adaptation.
+
+The world must advance with zero players; disconnected characters remain present, vulnerable, persistent, and reconnectable. Iroh identity/authorization/enrollment/recovery, networking limits, persistence/migrations/crash recovery, server-identity backup/restore, deterministic replay/state hashes, hostile-input handling, and headless tests must pass. Bevy exists only in the client graph. Required Windows/macOS/Linux clients and macOS/Linux servers build and run. All required formatting, linting, tests, docs, platform CI, content validation, fuzz/security checks, performance budgets, and the 16-player 24-hour soak pass. Final independent diff and release review finds no unresolved critical/high defect, unsupported content hidden as success, licensing/provenance problem, placeholder, or undocumented completion step.
+
+Work in verified end-to-end increments and fix regressions before expanding. Never weaken a gate or complete the goal because time, context, or budget is low. If permissions, hardware, or an external service blocks a required check, complete all independent work and record the exact blocker. Mark complete only with reproducible evidence that every criterion here and in both binding documents passes; report blocked only when no meaningful in-scope progress remains without external action.
+```

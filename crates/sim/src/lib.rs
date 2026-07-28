@@ -1,0 +1,24273 @@
+//! Renderer-independent canonical simulation state.
+
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::fmt;
+
+use cdda_protocol::{
+    ActorConnectionUpdateV1, ActorId, ActorSnapshot, BashTargetKindV1, BookStudyActivitySnapshotV1,
+    BookStudyInterruptionReason, BookStudyV1, CRAFT_PRACTICE_ACTION_POINTS,
+    CRAFT_PROFICIENCY_SCALE, CharacterCreationStatsV1, ChunkCoord, ChunkSnapshot, ClientCommand,
+    CommandKind, CommandRejection, CommandSequence, ConstructionActivitySnapshotV1,
+    ConstructionInterruptionReason, ConstructionRecipeV1, ConstructionResultV1,
+    CraftActivitySnapshotV1, CraftConsumedItemV1, CraftItemPrototypeV1, CraftProficiencyV1,
+    CraftRecipeV1, CraftSkillRequirementV1, CreatureCorpsePrototypeV1, CreatureCorpseSnapshotV1,
+    CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
+    DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason,
+    DisassemblyRecipeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
+    FurnitureTileSnapshot, GroundItemSnapshot, HeldInputSequence, HeldMovementUpdateSource,
+    HeldMovementUpdateV1, HorizontalDirection, ItemComponentSnapshotV1, ItemId, ItemSnapshot,
+    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
+    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
+    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
+    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
+    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
+    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL, MAX_LEARNED_RECIPES,
+    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
+    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
+    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
+    MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot, PoweredToolStateV1,
+    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
+    RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
+    WorldEventKind, WorldPosition, WorldSnapshotV1, adjusted_book_study_time_moves,
+};
+use rand_chacha::ChaCha8Rng;
+use rand_core::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
+
+pub const ID_RESERVATION_SIZE: u64 = 4_096;
+pub const DEFAULT_ACTOR_HP: i32 = 100;
+pub const UNARMED_DAMAGE: u16 = 10;
+/// Character generation is not yet modeled; new survivors use CDDA's default
+/// value for each canonical base stat.
+pub const DEFAULT_ACTOR_BASE_STAT: u16 = cdda_protocol::DEFAULT_CHARACTER_CREATION_STAT;
+pub const MAX_ACTOR_INVENTORY_ITEMS: usize = 256;
+pub const MAX_ITEM_TYPE_ID_BYTES: usize = 512;
+pub const CREATURE_ACTION_THRESHOLD: u32 = 2_000;
+const MAX_CREATURE_SOUND_GOAL_ACTIONS: u32 = 786_420;
+pub const ACTOR_ACTION_THRESHOLD: u32 = cdda_protocol::ACTION_POINT_THRESHOLD;
+const DISCONNECTED_AUTOPILOT_THREAT_RADIUS: u64 = 8;
+const CORPSE_REVIVAL_HOUR_TICKS: u64 = SimTick::HZ * 60 * 60;
+pub const DEFAULT_ACTOR_SPEED: u16 = 100;
+/// Pinned samples of CDDA's
+/// `1 - (0.5 - 0.5 * cos(pi * practice))^2` remaining time-malus curve.
+/// Runtime interpolation is integer-only and portable across platforms.
+const PROFICIENCY_MALUS_REMAINING_MILLIONTHS: [u32; 101] = [
+    1_000_000, 1_000_000, 999_999, 999_995, 999_984, 999_962, 999_922, 999_855, 999_753, 999_606,
+    999_401, 999_126, 998_767, 998_309, 997_736, 997_030, 996_175, 995_152, 993_942, 992_525,
+    990_881, 988_991, 986_834, 984_389, 981_635, 978_553, 975_122, 971_323, 967_135, 962_540,
+    957_520, 952_057, 946_136, 939_740, 932_855, 925_468, 917_568, 909_142, 900_183, 890_683,
+    880_636, 870_037, 858_883, 847_175, 834_913, 822_099, 808_740, 794_840, 780_410, 765_459,
+    750_000, 734_048, 717_619, 700_732, 683_406, 665_665, 647_531, 629_032, 610_193, 591_045,
+    571_619, 551_945, 532_059, 511_994, 491_788, 471_478, 451_102, 430_699, 410_309, 389_974,
+    369_734, 349_633, 329_711, 310_011, 290_575, 271_447, 252_667, 234_278, 216_321, 198_836,
+    181_864, 165_444, 149_614, 134_410, 119_868, 106_024, 92_908, 80_554, 68_991, 58_245, 48_345,
+    39_312, 31_170, 23_938, 17_634, 12_274, 7_870, 4_433, 1_972, 493, 0,
+];
+pub const MAX_QUEUED_ACTIONS: usize = 2;
+pub const ACTIVE_BUBBLE_RADIUS_SUBMAPS: i32 = 5;
+pub const DEFAULT_STORED_KCAL: i32 = 55_000;
+pub const NEEDS_INTERVAL_TICKS: u64 = SimTick::HZ * 60 * 5;
+pub const BASE_KCAL_PER_NEEDS_INTERVAL: i32 = 7;
+pub const THIRST_DEATH_THRESHOLD: i32 = 1_200;
+pub const TERRAIN_MEMORY_RADIUS_TILES: u32 = 60;
+// Pinned `LIGHT_RANGE` samples for integer luminance 0..=35 using
+// LIGHT_AMBIENT_LOW=3.5 and open-air transparency 2.3/60. Values at and above
+// 35 reach the current maximum view distance. Runtime canonical behavior uses
+// this audited integer table and never evaluates logarithms.
+const OPEN_AIR_LIGHT_SIGHT_RADIUS: [u8; 36] = [
+    0, 0, 0, 0, 3, 9, 14, 18, 21, 24, 27, 29, 32, 34, 36, 37, 39, 41, 42, 44, 45, 46, 47, 49, 50,
+    51, 52, 53, 54, 55, 56, 56, 57, 58, 59, 60,
+];
+// External fine-detail work is available at ambient light 7 or greater for
+// the pinned default character. The 0..=70 table uses 255 as "unavailable";
+// 70 and brighter reach 60 tiles. Personal light follows the separate pinned
+// active-light bonus below.
+const OPEN_AIR_EXTERNAL_DETAIL_RADIUS: [u8; 71] = [
+    255, 255, 255, 255, 255, 255, 255, 0, 3, 6, 9, 11, 14, 16, 18, 19, 21, 23, 24, 26, 27, 28, 29,
+    31, 32, 33, 34, 35, 36, 37, 37, 38, 39, 40, 41, 41, 42, 43, 44, 44, 45, 46, 46, 47, 47, 48, 49,
+    49, 50, 50, 51, 51, 52, 52, 53, 53, 54, 54, 55, 55, 56, 56, 56, 57, 57, 58, 58, 58, 59, 59, 60,
+];
+pub const SLEEPINESS_TIRED: i32 = 191;
+pub const SLEEPINESS_DEAD_TIRED: i32 = 383;
+pub const SLEEPINESS_EXHAUSTED: i32 = 575;
+pub const SLEEPINESS_MASSIVE: i32 = 1_000;
+pub const SLEEPINESS_MAX: i32 = 1_050;
+pub const RESTED_WAKE_SLEEPINESS: i32 = -20;
+pub const MAX_SLEEP_INTENSITY: u16 = 24;
+
+#[must_use]
+pub const fn powered_light_sight_radius(light_emission: u16) -> u32 {
+    if light_emission >= 35 {
+        TERRAIN_MEMORY_RADIUS_TILES
+    } else {
+        OPEN_AIR_LIGHT_SIGHT_RADIUS[light_emission as usize] as u32
+    }
+}
+
+#[must_use]
+pub const fn powered_light_external_detail_radius(light_emission: u16) -> Option<u32> {
+    if light_emission >= 70 {
+        return Some(TERRAIN_MEMORY_RADIUS_TILES);
+    }
+    let radius = OPEN_AIR_EXTERNAL_DETAIL_RADIUS[light_emission as usize];
+    if radius == u8::MAX {
+        None
+    } else {
+        Some(radius as u32)
+    }
+}
+
+#[must_use]
+pub const fn powered_light_is_personal_detail(light_emission: u16) -> bool {
+    light_emission >= 4
+}
+
+#[must_use]
+pub fn powered_light_effective_emission(
+    base_emission: u16,
+    dims_with_charge: bool,
+    stored_energy_millijoules: u64,
+    capacity_charges: u32,
+) -> u16 {
+    let capacity_energy = u64::from(capacity_charges)
+        .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+        .expect("u32 battery capacity always fits u64 millijoules");
+    if base_emission == 0 || stored_energy_millijoules == 0 || capacity_energy == 0 {
+        return 0;
+    }
+    if !dims_with_charge || u128::from(stored_energy_millijoules) * 5 >= u128::from(capacity_energy)
+    {
+        return base_emission;
+    }
+    let scaled = u128::from(base_emission) * u128::from(stored_energy_millijoules) * 5
+        / u128::from(capacity_energy);
+    u16::try_from(scaled).expect("charge-dimmed emission never exceeds its u16 base")
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservedIdBlock {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl ReservedIdBlock {
+    pub fn new(start: u64, end: u64) -> Result<Self, SimError> {
+        if start == 0 || start > end {
+            return Err(SimError::InvalidReservation);
+        }
+        Ok(Self { start, end })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IdAllocator {
+    world_namespace: u64,
+    high_water: u64,
+    next: u64,
+    reserved_end: u64,
+}
+
+impl IdAllocator {
+    #[must_use]
+    pub const fn new(world_namespace: u64) -> Self {
+        Self {
+            world_namespace,
+            high_water: 0,
+            next: 1,
+            reserved_end: 0,
+        }
+    }
+
+    pub fn install_reserved_block(&mut self, block: ReservedIdBlock) -> Result<(), SimError> {
+        let expected_start = self
+            .high_water
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        if block.start != expected_start || block.end < block.start {
+            return Err(SimError::InvalidReservation);
+        }
+        self.high_water = block.end;
+        self.next = block.start;
+        self.reserved_end = block.end;
+        Ok(())
+    }
+
+    fn allocate_counter(&mut self) -> Result<u64, SimError> {
+        if self.next == 0 || self.next > self.reserved_end {
+            return Err(SimError::IdReservationExhausted);
+        }
+        let counter = self.next;
+        self.next = self.next.checked_add(1).ok_or(SimError::NumericOverflow)?;
+        Ok(counter)
+    }
+
+    #[must_use]
+    pub const fn can_allocate(&self) -> bool {
+        self.next != 0 && self.next <= self.reserved_end
+    }
+
+    pub fn allocate_actor(&mut self) -> Result<ActorId, SimError> {
+        Ok(ActorId::new(self.world_namespace, self.allocate_counter()?))
+    }
+
+    pub fn allocate_item(&mut self) -> Result<ItemId, SimError> {
+        Ok(ItemId::new(self.world_namespace, self.allocate_counter()?))
+    }
+
+    pub fn allocate_creature(&mut self) -> Result<CreatureId, SimError> {
+        Ok(CreatureId::new(
+            self.world_namespace,
+            self.allocate_counter()?,
+        ))
+    }
+
+    #[must_use]
+    pub const fn high_water(&self) -> u64 {
+        self.high_water
+    }
+
+    #[must_use]
+    pub const fn next(&self) -> u64 {
+        self.next
+    }
+
+    #[must_use]
+    pub const fn reserved_end(&self) -> u64 {
+        self.reserved_end
+    }
+
+    #[must_use]
+    pub const fn remaining(&self) -> u64 {
+        if self.next > self.reserved_end {
+            0
+        } else {
+            self.reserved_end - self.next + 1
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Chunk {
+    coord: ChunkCoord,
+    revision: u64,
+    tiles: Vec<TerrainTileSnapshot>,
+    furniture: Vec<Option<FurnitureTileSnapshot>>,
+    fields: Vec<Vec<FieldSnapshotV1>>,
+    map_damage: Vec<u16>,
+}
+
+impl Chunk {
+    #[must_use]
+    pub fn floor(coord: ChunkCoord) -> Self {
+        Self {
+            coord,
+            revision: 0,
+            tiles: vec![
+                TerrainTileSnapshot {
+                    terrain_id: String::from("t_floor"),
+                    move_cost: 2,
+                    transparent: true,
+                    flat: true,
+                    open: String::new(),
+                    open_move_cost: None,
+                    open_transparent: None,
+                    open_flat: None,
+                    close: String::new(),
+                    close_move_cost: None,
+                    close_transparent: None,
+                    close_flat: None,
+                };
+                (SUBMAP_SIZE * SUBMAP_SIZE) as usize
+            ],
+            furniture: vec![None; (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+            fields: vec![Vec::new(); (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+            map_damage: vec![0; (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+        }
+    }
+
+    pub fn filled(coord: ChunkCoord, terrain: TerrainTileSnapshot) -> Result<Self, SimError> {
+        validate_terrain_tile(&terrain)?;
+        Ok(Self {
+            coord,
+            revision: 0,
+            tiles: vec![terrain; (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+            furniture: vec![None; (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+            fields: vec![Vec::new(); (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+            map_damage: vec![0; (SUBMAP_SIZE * SUBMAP_SIZE) as usize],
+        })
+    }
+
+    pub fn from_snapshot(snapshot: &ChunkSnapshot) -> Result<Self, SimError> {
+        if snapshot.tiles.len() != (SUBMAP_SIZE * SUBMAP_SIZE) as usize
+            || snapshot
+                .tiles
+                .iter()
+                .any(|tile| validate_terrain_tile(tile).is_err())
+        {
+            return Err(SimError::InvalidTerrain);
+        }
+        if snapshot.furniture.len() != (SUBMAP_SIZE * SUBMAP_SIZE) as usize
+            || snapshot
+                .furniture
+                .iter()
+                .flatten()
+                .any(|furniture| validate_furniture_tile(furniture).is_err())
+        {
+            return Err(SimError::InvalidFurniture);
+        }
+        if snapshot.fields.len() != (SUBMAP_SIZE * SUBMAP_SIZE) as usize {
+            return Err(SimError::InvalidField);
+        }
+        if snapshot.map_damage.len() != (SUBMAP_SIZE * SUBMAP_SIZE) as usize {
+            return Err(SimError::InvalidTerrain);
+        }
+        for fields in &snapshot.fields {
+            if fields.len() > 16
+                || fields
+                    .windows(2)
+                    .any(|pair| pair[0].field_type_id >= pair[1].field_type_id)
+                || fields.iter().any(|field| {
+                    validate_item_type_id(&field.field_type_id).is_err()
+                        || field.intensity == 0
+                        || field.display_sequence == 0
+                })
+            {
+                return Err(SimError::InvalidField);
+            }
+        }
+        Ok(Self {
+            coord: snapshot.coord,
+            revision: snapshot.revision,
+            tiles: snapshot.tiles.clone(),
+            furniture: snapshot.furniture.clone(),
+            fields: snapshot.fields.clone(),
+            map_damage: snapshot.map_damage.clone(),
+        })
+    }
+
+    pub fn set_terrain(
+        &mut self,
+        local: LocalTileCoord,
+        tile: TerrainTileSnapshot,
+    ) -> Result<(), SimError> {
+        validate_terrain_tile(&tile)?;
+        let index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
+        if self.tiles[index] != tile {
+            self.tiles[index] = tile;
+            self.map_damage[index] = 0;
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        Ok(())
+    }
+
+    fn tile(&self, local: LocalTileCoord) -> Option<&TerrainTileSnapshot> {
+        tile_index(local).and_then(|index| self.tiles.get(index))
+    }
+
+    pub fn set_furniture(
+        &mut self,
+        local: LocalTileCoord,
+        furniture: Option<FurnitureTileSnapshot>,
+    ) -> Result<(), SimError> {
+        if let Some(furniture) = &furniture {
+            validate_furniture_tile(furniture)?;
+        }
+        let index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
+        if self.furniture[index] != furniture {
+            self.furniture[index] = furniture;
+            self.map_damage[index] = 0;
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        Ok(())
+    }
+
+    fn furniture(&self, local: LocalTileCoord) -> Option<&FurnitureTileSnapshot> {
+        tile_index(local)
+            .and_then(|index| self.furniture.get(index))
+            .and_then(Option::as_ref)
+    }
+
+    fn fields(&self, local: LocalTileCoord) -> Option<&[FieldSnapshotV1]> {
+        tile_index(local)
+            .and_then(|index| self.fields.get(index))
+            .map(Vec::as_slice)
+    }
+
+    fn map_damage(&self, local: LocalTileCoord) -> Option<u16> {
+        tile_index(local).and_then(|index| self.map_damage.get(index).copied())
+    }
+
+    fn set_map_damage(&mut self, local: LocalTileCoord, damage: u16) -> Result<(), SimError> {
+        let index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
+        if self.map_damage[index] != damage {
+            self.map_damage[index] = damage;
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        Ok(())
+    }
+
+    fn is_passable(&self, local: LocalTileCoord) -> bool {
+        self.tile(local)
+            .is_some_and(|terrain| terrain.move_cost > 0)
+            && self
+                .furniture(local)
+                .is_none_or(|furniture| furniture.move_cost_mod >= 0)
+    }
+
+    fn is_transparent(&self, local: LocalTileCoord) -> bool {
+        self.tile(local).is_some_and(|terrain| terrain.transparent)
+            && self
+                .furniture(local)
+                .is_none_or(|furniture| furniture.transparent)
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> ChunkSnapshot {
+        ChunkSnapshot {
+            coord: self.coord,
+            revision: self.revision,
+            tiles: self.tiles.clone(),
+            furniture: self.furniture.clone(),
+            fields: self.fields.clone(),
+            map_damage: self.map_damage.clone(),
+        }
+    }
+}
+
+fn validate_furniture_tile(furniture: &FurnitureTileSnapshot) -> Result<(), SimError> {
+    validate_item_type_id(&furniture.furniture_id).map_err(|_| SimError::InvalidFurniture)
+}
+
+fn validate_field_type(field_type: &FieldTypeSnapshotV1) -> Result<(), SimError> {
+    validate_item_type_id(&field_type.field_type_id).map_err(|_| SimError::InvalidField)?;
+    if field_type.intensity_levels.is_empty()
+        || field_type.intensity_levels.len() > 16
+        || field_type.intensity_levels.iter().any(|level| {
+            level.name.is_empty()
+                || level.name.len() > 512
+                || level.name.chars().any(char::is_control)
+                || level.symbol.is_empty()
+                || level.symbol.len() > 16
+                || level.symbol.chars().any(char::is_control)
+                || level.color.is_empty()
+                || level.color.len() > 64
+                || level.color.chars().any(char::is_control)
+        })
+    {
+        return Err(SimError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_terrain_tile(tile: &TerrainTileSnapshot) -> Result<(), SimError> {
+    validate_item_type_id(&tile.terrain_id)?;
+    let invalid_target =
+        |target: &str, move_cost: Option<i32>, transparent: Option<bool>, flat: Option<bool>| {
+            target.len() > MAX_ITEM_TYPE_ID_BYTES
+                || target.chars().any(char::is_control)
+                || match (target.is_empty(), move_cost, transparent, flat) {
+                    (true, None, None, None) => false,
+                    (false, Some(cost), Some(_), Some(_)) => cost < -1,
+                    _ => true,
+                }
+        };
+    if tile.move_cost < -1
+        || invalid_target(
+            &tile.open,
+            tile.open_move_cost,
+            tile.open_transparent,
+            tile.open_flat,
+        )
+        || invalid_target(
+            &tile.close,
+            tile.close_move_cost,
+            tile.close_transparent,
+            tile.close_flat,
+        )
+    {
+        return Err(SimError::InvalidTerrain);
+    }
+    Ok(())
+}
+
+fn horizontal_step_multiplier(dx: i8, dy: i8, dz: i8) -> Option<i64> {
+    if dz != 0 || !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) {
+        return None;
+    }
+    match u8::from(dx != 0) + u8::from(dy != 0) {
+        1 => Some(50),
+        2 => Some(71),
+        _ => None,
+    }
+}
+
+fn tile_index(local: LocalTileCoord) -> Option<usize> {
+    if i32::from(local.x) >= SUBMAP_SIZE || i32::from(local.y) >= SUBMAP_SIZE {
+        return None;
+    }
+    Some(usize::from(local.y) * SUBMAP_SIZE as usize + usize::from(local.x))
+}
+
+fn world_position_for_tile_index(
+    coord: ChunkCoord,
+    index: usize,
+) -> Result<WorldPosition, SimError> {
+    let width = SUBMAP_SIZE as usize;
+    if index >= width * width {
+        return Err(SimError::InvalidLocalCoordinate);
+    }
+    let local_x = i32::try_from(index % width).map_err(|_| SimError::NumericOverflow)?;
+    let local_y = i32::try_from(index / width).map_err(|_| SimError::NumericOverflow)?;
+    let x = coord
+        .x
+        .checked_mul(SUBMAP_SIZE)
+        .and_then(|base| base.checked_add(local_x))
+        .ok_or(SimError::NumericOverflow)?;
+    let y = coord
+        .y
+        .checked_mul(SUBMAP_SIZE)
+        .and_then(|base| base.checked_add(local_y))
+        .ok_or(SimError::NumericOverflow)?;
+    Ok(WorldPosition { x, y, z: coord.z })
+}
+
+/// Q0.64 probability for `1 - exp(-ln(2) / half_life)`. This keeps the
+/// upstream exponential half-life model while avoiding platform libm in the
+/// canonical simulation.
+fn exponential_decay_threshold(half_life_seconds: u64) -> u64 {
+    const LN_2_Q64: u64 = 0xb172_17f7_d1cf_79ab;
+    let x = LN_2_Q64 / half_life_seconds.max(1);
+    let mut term = x;
+    let mut result = x;
+    for divisor in 2_u64..=32 {
+        term = (((u128::from(term) * u128::from(x)) >> 64) as u64) / divisor;
+        if term == 0 {
+            break;
+        }
+        if divisor.is_multiple_of(2) {
+            result = result.saturating_sub(term);
+        } else {
+            result = result.saturating_add(term);
+        }
+    }
+    result
+}
+
+fn is_passable_in_chunks(chunks: &BTreeMap<ChunkCoord, Chunk>, position: WorldPosition) -> bool {
+    let (coord, local) = position.chunk_and_local();
+    chunks
+        .get(&coord)
+        .is_some_and(|chunk| chunk.is_passable(local))
+}
+
+fn tile_distance(left: WorldPosition, right: WorldPosition) -> u64 {
+    left.x.abs_diff(right.x) as u64
+        + left.y.abs_diff(right.y) as u64
+        + left.z.abs_diff(right.z) as u64
+}
+
+fn ranged_distance(left: WorldPosition, right: WorldPosition) -> u32 {
+    left.x
+        .abs_diff(right.x)
+        .max(left.y.abs_diff(right.y))
+        .max(left.z.abs_diff(right.z))
+}
+
+fn horizontal_line_excluding_start(start: WorldPosition, end: WorldPosition) -> Vec<WorldPosition> {
+    if start.z != end.z || start == end {
+        return Vec::new();
+    }
+    let (mut x, mut y) = (start.x, start.y);
+    let dx = (i64::from(end.x) - i64::from(x)).abs();
+    let sx = if x < end.x { 1 } else { -1 };
+    let dy = -(i64::from(end.y) - i64::from(y)).abs();
+    let sy = if y < end.y { 1 } else { -1 };
+    let mut error = dx + dy;
+    let mut line = Vec::new();
+    while x != end.x || y != end.y {
+        let doubled = error * 2;
+        if doubled >= dy {
+            error += dy;
+            x += sx;
+        }
+        if doubled <= dx {
+            error += dx;
+            y += sy;
+        }
+        line.push(WorldPosition { x, y, z: start.z });
+    }
+    line
+}
+
+fn inclusive_rng_u64(rng: &mut ChaCha8Rng, minimum: u64, maximum: u64) -> u64 {
+    minimum + rng.next_u64() % (maximum - minimum + 1)
+}
+
+fn ranged_sound_description(volume: u16) -> &'static str {
+    match volume {
+        0 => "",
+        1..=9 => "plink!",
+        10..=149 => "bang!",
+        150..=174 => "blam!",
+        _ => "kerblam!",
+    }
+}
+
+/// Cross-platform integer approximation of upstream's `normal_roll(30, 5)`.
+/// Twelve independent uniform samples form a fixed Irwin-Hall distribution
+/// with the same mean and standard deviation, avoiding platform `libm` and
+/// standard-library distribution differences in canonical AI.
+fn sound_interest_threshold_q32(rng: &mut ChaCha8Rng) -> i128 {
+    const SCALE: i128 = 1_i128 << 32;
+    30 * SCALE + 5 * standard_normal_sample_q32(rng)
+}
+
+/// Cross-platform unit-standard-deviation Irwin-Hall sample in Q32. Upstream
+/// uses `std::normal_distribution`, whose algorithm is implementation-defined;
+/// canonical multiplayer instead uses the same 12-uniform adaptation already
+/// established for monster hearing.
+fn standard_normal_sample_q32(rng: &mut ChaCha8Rng) -> i128 {
+    let sum = (0..12).fold(0_i128, |total, _| total + i128::from(rng.next_u32()));
+    sum - 6 * i128::from(u32::MAX)
+}
+
+const EUCLIDEAN_DISTANCE_SCALE: u64 = 1 << 30;
+
+fn horizontal_distance_squared(
+    left: WorldPosition,
+    right: WorldPosition,
+) -> Result<u128, SimError> {
+    if left.z != right.z {
+        return Err(SimError::InvalidCreature);
+    }
+    let dx = u128::from(left.x.abs_diff(right.x));
+    let dy = u128::from(left.y.abs_diff(right.y));
+    dx.checked_mul(dx)
+        .and_then(|value| dy.checked_mul(dy).and_then(|dy| value.checked_add(dy)))
+        .ok_or(SimError::NumericOverflow)
+}
+
+fn euclidean_distance_q30(left: WorldPosition, right: WorldPosition) -> Result<u64, SimError> {
+    let squared = horizontal_distance_squared(left, right)?
+        .checked_shl(60)
+        .ok_or(SimError::NumericOverflow)?;
+    u64::try_from(squared.isqrt()).map_err(|_| SimError::NumericOverflow)
+}
+
+fn euclidean_progress_q30(
+    from: WorldPosition,
+    destination: WorldPosition,
+    next: WorldPosition,
+) -> Result<Option<u64>, SimError> {
+    let before_squared = horizontal_distance_squared(from, destination)?;
+    let after_squared = horizontal_distance_squared(next, destination)?;
+    if after_squared >= before_squared {
+        return Ok(None);
+    }
+    let before = euclidean_distance_q30(from, destination)?;
+    let after = euclidean_distance_q30(next, destination)?;
+    Ok(Some(before.saturating_sub(after).max(1)))
+}
+
+fn scaled_creature_movement_action_cost(
+    base_upstream: i64,
+    progress_q30: u64,
+) -> Result<i64, SimError> {
+    let upstream_cost = if progress_q30.saturating_mul(100) < EUCLIDEAN_DISTANCE_SCALE {
+        base_upstream
+            .checked_add(99)
+            .map(|cost| cost / 100)
+            .ok_or(SimError::NumericOverflow)?
+    } else {
+        let scaled = u128::try_from(base_upstream)
+            .map_err(|_| SimError::NumericOverflow)?
+            .checked_mul(u128::from(progress_q30))
+            .ok_or(SimError::NumericOverflow)?;
+        scaled
+            .checked_add(u128::from(EUCLIDEAN_DISTANCE_SCALE - 1))
+            .map(|cost| cost / u128::from(EUCLIDEAN_DISTANCE_SCALE))
+            .and_then(|cost| i64::try_from(cost).ok())
+            .ok_or(SimError::NumericOverflow)?
+    };
+    upstream_cost
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+        .ok_or(SimError::NumericOverflow)
+}
+
+fn squares_closer_steps(from: WorldPosition, to: WorldPosition) -> Vec<(i8, i8)> {
+    let dx = to.x.cmp(&from.x) as i8;
+    let dy = to.y.cmp(&from.y) as i8;
+    let x_distance = from.x.abs_diff(to.x);
+    let y_distance = from.y.abs_diff(to.y);
+    if x_distance > y_distance {
+        let mut steps = vec![(dx, 0), (dx, 1), (dx, -1)];
+        if dy != 0 {
+            steps.push((0, dy));
+        }
+        steps
+    } else if x_distance < y_distance {
+        let mut steps = vec![(0, dy), (1, dy), (-1, dy)];
+        if dx != 0 {
+            steps.push((dx, 0));
+        }
+        steps
+    } else if dx != 0 {
+        vec![(dx, dy), (dx, 0), (0, dy)]
+    } else {
+        Vec::new()
+    }
+}
+
+fn horizontally_adjacent(left: WorldPosition, right: WorldPosition) -> bool {
+    left.z == right.z
+        && left != right
+        && left.x.abs_diff(right.x) <= 1
+        && left.y.abs_diff(right.y) <= 1
+}
+
+/// Maps upstream's continuous ordinary-death overkill damage to the existing
+/// pinned coarse item-condition representation. `None` is the strict
+/// `corpse_damage > 5` pulverization boundary.
+fn corpse_damage_level(remaining_hp: i32, max_hp: i32) -> Result<Option<(u16, bool)>, SimError> {
+    if max_hp <= 0 {
+        return Err(SimError::InvalidCreature);
+    }
+    let overflow = if remaining_hp < 0 {
+        i64::from(remaining_hp)
+            .checked_neg()
+            .ok_or(SimError::NumericOverflow)?
+    } else {
+        0
+    };
+    let max_hp = i64::from(max_hp);
+    if overflow > max_hp.checked_mul(2).ok_or(SimError::NumericOverflow)? {
+        return Ok(None);
+    }
+    let scaled_damage = overflow
+        .checked_mul(2_500)
+        .ok_or(SimError::NumericOverflow)?
+        / max_hp;
+    let upstream_level = if scaled_damage == 0 {
+        0
+    } else {
+        1 + 4 * scaled_damage / 4_000
+    }
+    .clamp(0, 5);
+    let revivable_at_this_damage = upstream_level < 5;
+    let stored_level = u16::try_from(upstream_level.min(i64::from(MAX_ITEM_DAMAGE_LEVEL)))
+        .map_err(|_| SimError::NumericOverflow)?;
+    Ok(Some((stored_level, revivable_at_this_damage)))
+}
+
+fn validate_item_type_id(type_id: &str) -> Result<(), SimError> {
+    if type_id.is_empty()
+        || type_id.len() > MAX_ITEM_TYPE_ID_BYTES
+        || type_id.chars().any(char::is_control)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn validate_creature_corpse_prototype(
+    prototype: &CreatureCorpsePrototypeV1,
+) -> Result<(), SimError> {
+    validate_item_type_id(&prototype.monster_type_id)?;
+    if prototype.max_hp <= 0
+        || prototype.speed == 0
+        || prototype.attack_cost_moves == 0
+        || prototype.melee_dice_sides == 0
+        || (prototype.group_bash && !prototype.bashes)
+        || (prototype.good_hearing && !prototype.hears)
+        || !valid_creature_path_settings(prototype.path_settings)
+        || (prototype.can_see && prototype.vision_day == 0 && prototype.vision_night == 0)
+        || (!prototype.blood_field_type_id.is_empty()
+            && validate_item_type_id(&prototype.blood_field_type_id).is_err())
+    {
+        return Err(SimError::InvalidCreature);
+    }
+    Ok(())
+}
+
+fn valid_creature_path_settings(settings: CreaturePathSettingsV1) -> bool {
+    settings.max_distance <= 400
+}
+
+fn validate_bash_strengths(
+    str_min: i32,
+    str_max: i32,
+    str_min_blocked: i32,
+    str_max_blocked: i32,
+    str_min_supported: i32,
+    str_max_supported: i32,
+) -> bool {
+    str_min >= 0
+        && str_max >= str_min
+        && str_max <= i32::from(u16::MAX)
+        && valid_optional_bash_strengths(str_min_blocked, str_max_blocked)
+        && valid_optional_bash_strengths(str_min_supported, str_max_supported)
+}
+
+fn valid_optional_bash_strengths(minimum: i32, maximum: i32) -> bool {
+    (minimum == -1 && maximum == -1)
+        || (minimum >= 0 && maximum >= minimum && maximum <= i32::from(u16::MAX))
+}
+
+fn validate_bash_field(
+    field: &cdda_protocol::BashFieldEffectV1,
+    field_types: &BTreeMap<String, FieldTypeSnapshotV1>,
+) -> bool {
+    field.intensity > 0
+        && field_types
+            .get(&field.field_type_id)
+            .is_some_and(|field_type| {
+                usize::from(field.intensity) <= field_type.intensity_levels.len()
+            })
+}
+
+fn validate_bash_drops(drops: &[cdda_protocol::BashDropPrototypeV1]) -> bool {
+    let maximum_outputs = drops.iter().try_fold(0_u64, |total, drop| {
+        total.checked_add(if drop.charges_min.is_some() {
+            1
+        } else {
+            u64::from(drop.count_max)
+        })
+    });
+    drops.len() <= 128
+        && maximum_outputs.is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
+        && drops.iter().all(|drop| {
+            drop.probability_percent <= 100
+                && drop.count_min <= drop.count_max
+                && matches!(
+                    (drop.charges_min, drop.charges_max),
+                    (None, None) | (Some(0..), Some(0..))
+                )
+                && drop
+                    .charges_min
+                    .zip(drop.charges_max)
+                    .is_none_or(|(minimum, maximum)| minimum <= maximum)
+                && validate_craft_item_prototype(&drop.prototype).is_ok()
+        })
+}
+
+fn valid_bash_sound(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+fn validate_terrain_bash_type(
+    bash: &TerrainBashTypeV1,
+    field_types: &BTreeMap<String, FieldTypeSnapshotV1>,
+) -> Result<(), SimError> {
+    if validate_item_type_id(&bash.terrain_id).is_err()
+        || !validate_bash_strengths(
+            bash.str_min,
+            bash.str_max,
+            bash.str_min_blocked,
+            bash.str_max_blocked,
+            bash.str_min_supported,
+            bash.str_max_supported,
+        )
+        || bash.bash_multiplier_millionths == 0
+        || validate_terrain_tile(&bash.result).is_err()
+        || !validate_bash_drops(&bash.drops)
+        || bash
+            .hit_field
+            .as_ref()
+            .is_some_and(|field| !validate_bash_field(field, field_types))
+        || bash
+            .destroyed_field
+            .as_ref()
+            .is_some_and(|field| !validate_bash_field(field, field_types))
+        || !valid_bash_sound(&bash.sound)
+        || !valid_bash_sound(&bash.failure_sound)
+        || bash.sound_volume < -1
+        || bash.sound_volume > i32::from(u16::MAX)
+        || bash.failure_sound_volume < -1
+        || bash.failure_sound_volume > i32::from(u16::MAX)
+    {
+        return Err(SimError::InvalidTerrain);
+    }
+    Ok(())
+}
+
+fn validate_furniture_bash_type(
+    bash: &FurnitureBashTypeV1,
+    field_types: &BTreeMap<String, FieldTypeSnapshotV1>,
+) -> Result<(), SimError> {
+    if validate_item_type_id(&bash.furniture_id).is_err()
+        || !validate_bash_strengths(
+            bash.str_min,
+            bash.str_max,
+            bash.str_min_blocked,
+            bash.str_max_blocked,
+            bash.str_min_supported,
+            bash.str_max_supported,
+        )
+        || bash.bash_multiplier_millionths == 0
+        || bash
+            .result
+            .as_ref()
+            .is_some_and(|result| validate_furniture_tile(result).is_err())
+        || !validate_bash_drops(&bash.drops)
+        || bash
+            .hit_field
+            .as_ref()
+            .is_some_and(|field| !validate_bash_field(field, field_types))
+        || bash
+            .destroyed_field
+            .as_ref()
+            .is_some_and(|field| !validate_bash_field(field, field_types))
+        || !valid_bash_sound(&bash.sound)
+        || !valid_bash_sound(&bash.failure_sound)
+        || bash.sound_volume < -1
+        || bash.sound_volume > i32::from(u16::MAX)
+        || bash.failure_sound_volume < -1
+        || bash.failure_sound_volume > i32::from(u16::MAX)
+    {
+        return Err(SimError::InvalidFurniture);
+    }
+    Ok(())
+}
+
+fn validate_item_snapshot(snapshot: &ItemSnapshot) -> Result<(), SimError> {
+    if snapshot.id.counter() == 0
+        || snapshot.damage > MAX_ITEM_DAMAGE_LEVEL
+        || snapshot.melee_damage_milli.len() > 32
+        || snapshot.melee_damage_milli.iter().any(|(kind, damage)| {
+            kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) || *damage < 0
+        })
+        || snapshot.comestible_type.len() > 32
+        || snapshot.comestible_type.chars().any(char::is_control)
+        || (!snapshot.comestible_type.is_empty() && snapshot.charges <= 0)
+        || snapshot.ammunition_type.len() > 64
+        || snapshot.ammunition_type.chars().any(char::is_control)
+        || (!snapshot.ammunition_type.is_empty()
+            && snapshot.charges <= 0
+            && !(snapshot.magazine_capacity > 0 && snapshot.charges == 0))
+        || (snapshot.magazine_capacity > 0
+            && (snapshot.charges < 0
+                || !u32::try_from(snapshot.charges)
+                    .is_ok_and(|charges| charges <= snapshot.magazine_capacity)
+                || snapshot.ammunition_type.is_empty()
+                || snapshot.ranged_weapon.is_some()
+                || snapshot.magazine_well.is_some()))
+        || (snapshot.residual_energy_millijoules != 0
+            && (snapshot.magazine_capacity == 0
+                || !u32::try_from(snapshot.charges)
+                    .is_ok_and(|charges| charges < snapshot.magazine_capacity)
+                || snapshot.residual_energy_millijoules >= MILLIJOULES_PER_BATTERY_CHARGE))
+        || snapshot.magazine_well.as_ref().is_some_and(|_| {
+            snapshot.charges != 0
+                || snapshot.magazine_capacity != 0
+                || !snapshot.ammunition_type.is_empty()
+                || snapshot.ranged_weapon.is_some()
+        })
+        || snapshot
+            .ranged_weapon
+            .as_ref()
+            .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+    {
+        return Err(SimError::InvalidItem);
+    }
+    validate_item_type_id(&snapshot.type_id)?;
+    validate_component_provenance(&snapshot.component_provenance)?;
+    if let Some(well) = &snapshot.magazine_well {
+        validate_magazine_well_snapshot(well)?;
+    }
+    if let Some(powered) = &snapshot.powered_tool
+        && (snapshot.magazine_well.is_none()
+            || snapshot.residual_energy_millijoules != 0
+            || !valid_powered_tool_state(&snapshot.type_id, powered))
+    {
+        return Err(SimError::InvalidItem);
+    }
+    if let Some(corpse) = &snapshot.creature_corpse
+        && (snapshot.type_id != "corpse"
+            || snapshot.charges != 1
+            || !snapshot.melee_damage_milli.is_empty()
+            || snapshot.calories != 0
+            || snapshot.quench != 0
+            || !snapshot.comestible_type.is_empty()
+            || !snapshot.ammunition_type.is_empty()
+            || snapshot.ranged_weapon.is_some()
+            || snapshot.component_provenance.is_some()
+            || snapshot.magazine_capacity != 0
+            || snapshot.magazine_well.is_some()
+            || snapshot.residual_energy_millijoules != 0
+            || snapshot.powered_tool.is_some()
+            || validate_creature_corpse_prototype(&corpse.prototype).is_err()
+            || ((corpse.revivable || corpse.revive_special) && !corpse.prototype.revives))
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn validate_creature_corpse_context(
+    item: &ItemSnapshot,
+    tick: SimTick,
+    field_types: &BTreeMap<String, FieldTypeSnapshotV1>,
+) -> Result<(), SimError> {
+    if let Some(corpse) = &item.creature_corpse
+        && (corpse.death_tick > tick
+            || (!corpse.prototype.blood_field_type_id.is_empty()
+                && !field_types.contains_key(&corpse.prototype.blood_field_type_id)))
+    {
+        return Err(SimError::InvalidSnapshot);
+    }
+    if let Some(installed) = item
+        .magazine_well
+        .as_ref()
+        .and_then(|well| well.installed_magazine.as_deref())
+    {
+        validate_creature_corpse_context(installed, tick, field_types)?;
+    }
+    Ok(())
+}
+
+fn valid_powered_tool_state(type_id: &str, powered: &PoweredToolStateV1) -> bool {
+    validate_item_type_id(&powered.inactive_type_id).is_ok()
+        && validate_item_type_id(&powered.active_type_id).is_ok()
+        && powered.inactive_type_id != powered.active_type_id
+        && powered.activation_charges > 0
+        && powered.power_draw_milliwatts > 0
+        && powered.light_emission > 0
+        && if powered.active {
+            type_id == powered.active_type_id
+        } else {
+            type_id == powered.inactive_type_id
+        }
+}
+
+fn validate_magazine_well_prototype(well: &MagazineWellPrototypeV1) -> Result<(), SimError> {
+    if well.compatible_magazine_type_ids.is_empty()
+        || well.compatible_magazine_type_ids.len() > MAX_MAGAZINE_COMPATIBLE_TYPES
+        || well
+            .compatible_magazine_type_ids
+            .iter()
+            .any(|type_id| validate_item_type_id(type_id).is_err())
+        || well
+            .compatible_magazine_type_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn validate_magazine_well_snapshot(well: &MagazineWellSnapshotV1) -> Result<(), SimError> {
+    validate_magazine_well_prototype(&MagazineWellPrototypeV1 {
+        compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+    })?;
+    if let Some(installed) = &well.installed_magazine
+        && (well
+            .compatible_magazine_type_ids
+            .binary_search(&installed.type_id)
+            .is_err()
+            || installed.magazine_capacity == 0
+            || installed.magazine_well.is_some()
+            || validate_item_snapshot(installed).is_err())
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn item_snapshot_contains_id(item: &ItemSnapshot, item_id: ItemId) -> bool {
+    item.id == item_id
+        || item
+            .magazine_well
+            .as_ref()
+            .and_then(|well| well.installed_magazine.as_deref())
+            .is_some_and(|installed| item_snapshot_contains_id(installed, item_id))
+}
+
+fn register_stable_item_ids(
+    item: &ItemSnapshot,
+    world_namespace: u64,
+    item_ids: &mut BTreeSet<ItemId>,
+    maximum_counter: &mut u64,
+) -> Result<(), SimError> {
+    if item.id.counter() == 0
+        || item.id.world_namespace() != world_namespace
+        || !item_ids.insert(item.id)
+    {
+        return Err(SimError::InvalidSnapshot);
+    }
+    *maximum_counter = (*maximum_counter).max(item.id.counter());
+    if let Some(installed) = item
+        .magazine_well
+        .as_ref()
+        .and_then(|well| well.installed_magazine.as_deref())
+    {
+        register_stable_item_ids(installed, world_namespace, item_ids, maximum_counter)?;
+    }
+    Ok(())
+}
+
+fn validate_component_provenance(
+    provenance: &Option<Vec<ItemComponentSnapshotV1>>,
+) -> Result<(), SimError> {
+    let Some(components) = provenance else {
+        return Ok(());
+    };
+    if components.len() > MAX_ITEM_COMPONENTS {
+        return Err(SimError::InvalidItem);
+    }
+    let mut remaining = MAX_ITEM_COMPONENTS;
+    for component in components {
+        validate_item_component(component, 1, &mut remaining)?;
+    }
+    Ok(())
+}
+
+fn validate_item_component(
+    component: &ItemComponentSnapshotV1,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<(), SimError> {
+    if depth > MAX_ITEM_COMPONENT_DEPTH
+        || *remaining == 0
+        || component.damage > MAX_ITEM_DAMAGE_LEVEL
+        || (component.count_by_charges && component.charges <= 0)
+        || component.melee_damage_milli.len() > 32
+        || component.melee_damage_milli.iter().any(|(kind, damage)| {
+            kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) || *damage < 0
+        })
+        || component.comestible_type.len() > 32
+        || component.comestible_type.chars().any(char::is_control)
+        || (!component.comestible_type.is_empty() && component.charges <= 0)
+        || component.ammunition_type.len() > 64
+        || component.ammunition_type.chars().any(char::is_control)
+        || (!component.ammunition_type.is_empty()
+            && component.charges <= 0
+            && !(component.magazine_capacity > 0 && component.charges == 0))
+        || (component.magazine_capacity > 0
+            && (component.charges < 0
+                || !u32::try_from(component.charges)
+                    .is_ok_and(|charges| charges <= component.magazine_capacity)
+                || component.ammunition_type.is_empty()
+                || component.ranged_weapon.is_some()
+                || component.magazine_well.is_some()))
+        || (component.residual_energy_millijoules != 0
+            && (component.magazine_capacity == 0
+                || !u32::try_from(component.charges)
+                    .is_ok_and(|charges| charges < component.magazine_capacity)
+                || component.residual_energy_millijoules >= MILLIJOULES_PER_BATTERY_CHARGE))
+        || component.magazine_well.as_ref().is_some_and(|_| {
+            component.charges != 0
+                || component.magazine_capacity != 0
+                || !component.ammunition_type.is_empty()
+                || component.ranged_weapon.is_some()
+        })
+        || component
+            .ranged_weapon
+            .as_ref()
+            .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+    {
+        return Err(SimError::InvalidItem);
+    }
+    validate_item_type_id(&component.type_id)?;
+    if let Some(well) = &component.magazine_well {
+        validate_magazine_well_prototype(well)?;
+    }
+    if let Some(powered) = &component.powered_tool
+        && (component.magazine_well.is_none()
+            || component.residual_energy_millijoules != 0
+            || !valid_powered_tool_state(&component.type_id, powered))
+    {
+        return Err(SimError::InvalidItem);
+    }
+    *remaining -= 1;
+    if let Some(children) = &component.component_provenance {
+        if children.len() > MAX_ITEM_COMPONENTS {
+            return Err(SimError::InvalidItem);
+        }
+        for child in children {
+            validate_item_component(child, depth + 1, remaining)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_item_component_root(component: &ItemComponentSnapshotV1) -> Result<(), SimError> {
+    let mut remaining = MAX_ITEM_COMPONENTS;
+    validate_item_component(component, 1, &mut remaining)
+}
+
+fn component_state_matches_prototype(
+    state: &ItemComponentSnapshotV1,
+    prototype: &CraftItemPrototypeV1,
+) -> bool {
+    state.type_id == prototype.type_id
+        && state.charges == prototype.charges
+        && state.melee_damage_milli == prototype.melee_damage_milli
+        && state.calories == prototype.calories
+        && state.quench == prototype.quench
+        && state.comestible_type == prototype.comestible_type
+        && state.ammunition_type == prototype.ammunition_type
+        && state.ranged_weapon == prototype.ranged_weapon
+        && state.magazine_capacity == prototype.magazine_capacity
+        && state.magazine_well == prototype.magazine_well
+        && state.residual_energy_millijoules == prototype.residual_energy_millijoules
+        && state.powered_tool == prototype.powered_tool
+}
+
+fn valid_ranged_weapon(weapon: &RangedWeaponSnapshot) -> bool {
+    !weapon.ammunition_type.is_empty()
+        && weapon.ammunition_type.len() <= 64
+        && !weapon.ammunition_type.chars().any(char::is_control)
+        && weapon.ammunition_capacity > 0
+        && weapon.ammunition_remaining <= weapon.ammunition_capacity
+        && weapon.range > 0
+        && weapon.damage > 0
+}
+
+fn validate_craft_recipe(recipe: &CraftRecipeV1) -> Result<(), SimError> {
+    if recipe.recipe_id.is_empty()
+        || recipe.recipe_id.len() > MAX_CRAFT_RECIPE_ID_BYTES
+        || recipe.recipe_id.chars().any(char::is_control)
+        || recipe.time_moves == 0
+        || recipe.output_instances == 0
+        || recipe.output_instances > MAX_CRAFT_OUTPUT_INSTANCES
+        || recipe.byproducts.len() > MAX_CRAFT_BYPRODUCT_TYPES
+        || recipe.byproducts.iter().any(|byproduct| {
+            byproduct.output_instances == 0
+                || byproduct.output_instances > MAX_CRAFT_OUTPUT_INSTANCES
+                || validate_craft_item_prototype(&byproduct.output).is_err()
+        })
+        || !recipe
+            .byproducts
+            .windows(2)
+            .all(|pair| pair[0].output.type_id < pair[1].output.type_id)
+        || recipe
+            .total_output_instances()
+            .is_none_or(|total| total > MAX_CRAFT_OUTPUT_INSTANCES)
+        || recipe.components.is_empty()
+        || recipe.components.len() > MAX_CRAFT_COMPONENT_GROUPS
+        || recipe.components.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_COMPONENT_ALTERNATIVES
+                || group.iter().any(|component| {
+                    component.count == 0 || validate_item_type_id(&component.type_id).is_err()
+                })
+        })
+        || recipe.tools.len() > MAX_CRAFT_SUPPORT_GROUPS
+        || recipe.tools.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_SUPPORT_ALTERNATIVES
+                || group.iter().any(|tool| {
+                    tool.amount == 0
+                        || (!tool.consumes_charges
+                            && usize::from(tool.amount) > MAX_ACTOR_INVENTORY_ITEMS)
+                        || validate_item_type_id(&tool.type_id).is_err()
+                })
+        })
+        || recipe.qualities.len() > MAX_CRAFT_SUPPORT_GROUPS
+        || recipe.qualities.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_SUPPORT_ALTERNATIVES
+                || group.iter().any(|quality| {
+                    quality.amount == 0
+                        || usize::from(quality.amount) > MAX_ACTOR_INVENTORY_ITEMS
+                        || validate_item_type_id(&quality.quality_id).is_err()
+                        || quality.providers.is_empty()
+                        || quality.providers.len() > MAX_CRAFT_QUALITY_PROVIDERS
+                        || quality
+                            .providers
+                            .iter()
+                            .any(|provider| validate_item_type_id(&provider.type_id).is_err())
+                        || !quality
+                            .providers
+                            .windows(2)
+                            .all(|pair| pair[0].type_id < pair[1].type_id)
+                })
+        })
+        || recipe.proficiencies.len() > MAX_CRAFT_PROFICIENCIES
+        || recipe
+            .proficiencies
+            .iter()
+            .any(|proficiency| !valid_craft_proficiency(proficiency))
+        || !recipe
+            .proficiencies
+            .windows(2)
+            .all(|pair| pair[0].proficiency_id < pair[1].proficiency_id)
+        || recipe
+            .primary_skill
+            .as_ref()
+            .is_some_and(|requirement| !valid_skill_requirement(requirement))
+        || !valid_skill_requirements(&recipe.required_skills)
+        || !valid_skill_requirements(&recipe.autolearn_skills)
+        || (!recipe.autolearn && recipe.book_requirements.is_empty() && !recipe.can_be_learned)
+        || (!recipe.autolearn && !recipe.autolearn_skills.is_empty())
+        || recipe.book_requirements.len() > MAX_CRAFT_BOOK_REQUIREMENTS
+        || recipe.book_requirements.iter().any(|requirement| {
+            validate_item_type_id(&requirement.book_type_id).is_err()
+                || requirement.required_skill_level > MAX_SKILL_LEVEL
+        })
+        || !recipe
+            .book_requirements
+            .windows(2)
+            .all(|pair| pair[0].book_type_id < pair[1].book_type_id)
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    if recipe
+        .time_moves
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+        .is_none()
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    let mut charge_modes = BTreeMap::new();
+    for component in recipe.components.iter().flatten() {
+        if charge_modes
+            .insert(component.type_id.as_str(), component.count_by_charges)
+            .is_some_and(|mode| mode != component.count_by_charges)
+        {
+            return Err(SimError::InvalidCraft);
+        }
+    }
+    validate_craft_item_prototype(&recipe.output)
+}
+
+fn valid_skill_id(skill_id: &str) -> bool {
+    !skill_id.is_empty()
+        && skill_id.len() <= MAX_SKILL_ID_BYTES
+        && !skill_id.chars().any(char::is_control)
+}
+
+fn valid_proficiency_id(proficiency_id: &str) -> bool {
+    !proficiency_id.is_empty()
+        && proficiency_id.len() <= MAX_PROFICIENCY_ID_BYTES
+        && !proficiency_id.chars().any(char::is_control)
+}
+
+fn valid_craft_proficiency(proficiency: &CraftProficiencyV1) -> bool {
+    valid_proficiency_id(&proficiency.proficiency_id)
+        && if proficiency.required {
+            proficiency.time_multiplier_millionths == 0 && proficiency.skill_penalty_millionths == 0
+        } else {
+            (CRAFT_PROFICIENCY_SCALE..=MAX_CRAFT_PROFICIENCY_MULTIPLIER)
+                .contains(&proficiency.time_multiplier_millionths)
+        }
+        && proficiency.skill_penalty_millionths.unsigned_abs() <= MAX_CRAFT_PROFICIENCY_MULTIPLIER
+        && proficiency.learning_time_multiplier_millionths <= MAX_CRAFT_PROFICIENCY_MULTIPLIER
+        && proficiency.time_to_learn_action_points > 0
+        && proficiency.time_to_learn_action_points <= MAX_PROFICIENCY_PRACTICE_ACTION_POINTS
+        && proficiency
+            .max_experience_action_points
+            .is_none_or(|maximum| maximum > 0 && maximum <= MAX_PROFICIENCY_PRACTICE_ACTION_POINTS)
+        && proficiency.required_proficiencies.len() <= MAX_CRAFT_PROFICIENCIES
+        && proficiency
+            .required_proficiencies
+            .iter()
+            .all(|id| valid_proficiency_id(id))
+        && proficiency
+            .required_proficiencies
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+}
+
+fn valid_skill_requirement(requirement: &CraftSkillRequirementV1) -> bool {
+    valid_skill_id(&requirement.skill_id) && requirement.level <= MAX_SKILL_LEVEL
+}
+
+fn valid_skill_requirements(requirements: &[CraftSkillRequirementV1]) -> bool {
+    requirements.len() <= MAX_SKILLS
+        && requirements.iter().all(valid_skill_requirement)
+        && requirements
+            .windows(2)
+            .all(|pair| pair[0].skill_id < pair[1].skill_id)
+}
+
+fn skill_experience_threshold(level: u8) -> u64 {
+    let next = u64::from(level) + 1;
+    10_000 * next * next
+}
+
+fn book_study_experience_range(
+    source_time_minutes: u32,
+    intelligence: u16,
+    original_level: u8,
+) -> Result<(u32, u32), SimError> {
+    let intelligence = u32::from(effective_base_stat(intelligence));
+    let base_minimum = (source_time_minutes / 10 + intelligence / 4).max(1);
+    let base_maximum = (source_time_minutes / 5 + intelligence / 2)
+        .saturating_sub(u32::from(original_level))
+        .clamp(2, 10)
+        .max(base_minimum);
+    let level_factor = u32::from(original_level) + 1;
+    Ok((
+        base_minimum
+            .checked_mul(level_factor)
+            .ok_or(SimError::NumericOverflow)?,
+        base_maximum
+            .checked_mul(level_factor)
+            .ok_or(SimError::NumericOverflow)?,
+    ))
+}
+
+fn valid_skill_levels(skills: &[SkillLevelSnapshot], current_tick: SimTick) -> bool {
+    skills.len() <= MAX_SKILLS
+        && skills
+            .windows(2)
+            .all(|pair| pair[0].skill_id < pair[1].skill_id)
+        && skills.iter().all(|skill| {
+            valid_skill_id(&skill.skill_id)
+                && skill.practical_level <= MAX_SKILL_LEVEL
+                && skill.theoretical_level <= MAX_SKILL_LEVEL
+                && skill.theoretical_level >= skill.practical_level
+                && (skill.practical_level == MAX_SKILL_LEVEL
+                    || u64::from(skill.practical_experience)
+                        < skill_experience_threshold(skill.practical_level))
+                && (skill.theoretical_level == MAX_SKILL_LEVEL
+                    || u64::from(skill.theoretical_experience)
+                        < skill_experience_threshold(skill.theoretical_level))
+                && (skill.theoretical_level != skill.practical_level
+                    || skill.theoretical_experience >= skill.practical_experience)
+                && skill.last_practiced <= current_tick
+        })
+}
+
+fn valid_proficiency_levels(proficiencies: &[ProficiencyLevelSnapshot]) -> bool {
+    proficiencies.len() <= MAX_PROFICIENCIES
+        && proficiencies
+            .windows(2)
+            .all(|pair| pair[0].proficiency_id < pair[1].proficiency_id)
+        && proficiencies.iter().all(|proficiency| {
+            valid_proficiency_id(&proficiency.proficiency_id)
+                && proficiency.practiced_action_points <= MAX_PROFICIENCY_PRACTICE_ACTION_POINTS
+                && proficiency.practice_remainder_millionths < CRAFT_PROFICIENCY_SCALE
+                && (proficiency.learned
+                    || proficiency.practiced_action_points > 0
+                    || proficiency.practice_remainder_millionths > 0)
+        })
+}
+
+fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimError> {
+    validate_item_type_id(&item.type_id)?;
+    if item.melee_damage_milli.len() > 32
+        || item.melee_damage_milli.iter().any(|(kind, damage)| {
+            kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) || *damage < 0
+        })
+        || item.comestible_type.len() > 32
+        || item.comestible_type.chars().any(char::is_control)
+        || (!item.comestible_type.is_empty() && item.charges <= 0)
+        || item.ammunition_type.len() > 64
+        || item.ammunition_type.chars().any(char::is_control)
+        || (!item.ammunition_type.is_empty()
+            && item.charges <= 0
+            && !(item.magazine_capacity > 0 && item.charges == 0))
+        || (item.magazine_capacity > 0
+            && (item.charges < 0
+                || !u32::try_from(item.charges)
+                    .is_ok_and(|charges| charges <= item.magazine_capacity)
+                || item.ammunition_type.is_empty()
+                || item.ranged_weapon.is_some()
+                || item.magazine_well.is_some()))
+        || (item.residual_energy_millijoules != 0
+            && (item.magazine_capacity == 0
+                || !u32::try_from(item.charges)
+                    .is_ok_and(|charges| charges < item.magazine_capacity)
+                || item.residual_energy_millijoules >= MILLIJOULES_PER_BATTERY_CHARGE))
+        || item.magazine_well.as_ref().is_some_and(|_| {
+            item.charges != 0
+                || item.magazine_capacity != 0
+                || !item.ammunition_type.is_empty()
+                || item.ranged_weapon.is_some()
+        })
+        || item
+            .ranged_weapon
+            .as_ref()
+            .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    if let Some(well) = &item.magazine_well {
+        validate_magazine_well_prototype(well).map_err(|_| SimError::InvalidCraft)?;
+    }
+    if let Some(powered) = &item.powered_tool
+        && (item.magazine_well.is_none()
+            || item.residual_energy_millijoules != 0
+            || !valid_powered_tool_state(&item.type_id, powered))
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    Ok(())
+}
+
+fn validate_craft_activity(
+    activity: &CraftActivitySnapshotV1,
+    actor_id: ActorId,
+) -> Result<(), SimError> {
+    validate_craft_recipe(&activity.recipe)?;
+    let maximum = activity
+        .recipe
+        .time_moves
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+        .ok_or(SimError::NumericOverflow)?;
+    let completed = maximum
+        .checked_sub(activity.remaining_action_points)
+        .ok_or(SimError::InvalidCraft)?;
+    let maximum_practice_ticks = completed / CRAFT_PRACTICE_ACTION_POINTS;
+    let maximum_proficiency_buckets =
+        craft_proficiency_bucket(maximum, activity.remaining_action_points)
+            .ok_or(SimError::InvalidCraft)?;
+    let mut ids = BTreeSet::new();
+    if activity.remaining_action_points == 0
+        || activity.remaining_action_points > maximum
+        || activity.selected_tool_alternatives.len() != activity.recipe.tools.len()
+        || activity
+            .selected_tool_alternatives
+            .iter()
+            .zip(&activity.recipe.tools)
+            .any(|(selected, group)| usize::from(*selected) >= group.len())
+        || if activity.recipe.primary_skill.is_some() {
+            activity.practice_ticks_awarded != maximum_practice_ticks
+        } else {
+            activity.practice_ticks_awarded != 0
+        }
+        || activity.proficiency_progress_millionths >= CRAFT_PROFICIENCY_SCALE
+        || if activity.recipe.proficiencies.is_empty() {
+            activity.proficiency_buckets_awarded != 0
+                || activity.proficiency_progress_millionths != 0
+        } else {
+            activity.proficiency_buckets_awarded != maximum_proficiency_buckets
+        }
+        || activity.consumed_items.is_empty()
+        || activity.consumed_items.len() > MAX_ACTOR_INVENTORY_ITEMS
+        || activity.consumed_items.iter().any(|consumed| {
+            consumed.item.id.world_namespace() != actor_id.world_namespace()
+                || !ids.insert(consumed.item.id)
+                || validate_item_snapshot(&consumed.item).is_err()
+                || consumed.split_from.is_some_and(|item_id| {
+                    item_id.world_namespace() != actor_id.world_namespace()
+                        || item_id == consumed.item.id
+                })
+        })
+        || craft_output_component_provenance(&activity.recipe, &activity.consumed_items).is_err()
+        || activity.reserved_output_items.len()
+            != activity
+                .recipe
+                .total_output_instances()
+                .map_or(usize::MAX, usize::from)
+        || activity.reserved_output_items.iter().any(|item_id| {
+            item_id.world_namespace() != actor_id.world_namespace()
+                || item_id.counter() == 0
+                || !ids.insert(*item_id)
+        })
+        || !activity
+            .reserved_output_items
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || activity.previously_wielded.is_some_and(|item_id| {
+            !activity
+                .consumed_items
+                .iter()
+                .any(|item| item.item.id == item_id && item.split_from.is_none())
+        })
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    Ok(())
+}
+
+fn validate_construction_recipe(recipe: &ConstructionRecipeV1) -> Result<(), SimError> {
+    if validate_item_type_id(&recipe.construction_id).is_err()
+        || recipe.name.is_empty()
+        || recipe.name.len() > 512
+        || recipe.name.chars().any(char::is_control)
+        || recipe.time_moves == 0
+        || recipe
+            .time_moves
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+            .is_none()
+        || !valid_skill_requirements(&recipe.required_skills)
+        || recipe.components.is_empty()
+        || recipe.components.len() > MAX_CRAFT_COMPONENT_GROUPS
+        || recipe.components.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_COMPONENT_ALTERNATIVES
+                || group.iter().any(|component| {
+                    component.count == 0 || validate_item_type_id(&component.type_id).is_err()
+                })
+        })
+        || recipe.qualities.len() > MAX_CRAFT_SUPPORT_GROUPS
+        || recipe.qualities.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_SUPPORT_ALTERNATIVES
+                || group.iter().any(|quality| {
+                    quality.amount == 0
+                        || usize::from(quality.amount) > MAX_ACTOR_INVENTORY_ITEMS
+                        || validate_item_type_id(&quality.quality_id).is_err()
+                        || quality.providers.is_empty()
+                        || quality.providers.len() > MAX_CRAFT_QUALITY_PROVIDERS
+                        || quality
+                            .providers
+                            .iter()
+                            .any(|provider| validate_item_type_id(&provider.type_id).is_err())
+                        || !quality
+                            .providers
+                            .windows(2)
+                            .all(|pair| pair[0].type_id < pair[1].type_id)
+                })
+        })
+        || recipe.pre_terrain.len() > 64
+        || recipe
+            .pre_terrain
+            .iter()
+            .any(|id| validate_item_type_id(id).is_err())
+        || !recipe.pre_terrain.windows(2).all(|pair| pair[0] < pair[1])
+        || match &recipe.result {
+            ConstructionResultV1::Terrain(tile) => validate_terrain_tile(tile).is_err(),
+            ConstructionResultV1::Furniture(furniture) => {
+                validate_furniture_tile(furniture).is_err()
+            }
+        }
+    {
+        return Err(SimError::InvalidConstruction);
+    }
+    let mut charge_modes = BTreeMap::new();
+    for component in recipe.components.iter().flatten() {
+        if charge_modes
+            .insert(component.type_id.as_str(), component.count_by_charges)
+            .is_some_and(|mode| mode != component.count_by_charges)
+        {
+            return Err(SimError::InvalidConstruction);
+        }
+    }
+    Ok(())
+}
+
+fn validate_construction_activity(
+    activity: &ConstructionActivitySnapshotV1,
+    actor_id: ActorId,
+) -> Result<(), SimError> {
+    let maximum = activity
+        .recipe
+        .time_moves
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+        .ok_or(SimError::InvalidConstruction)?;
+    let mut ids = BTreeSet::new();
+    if validate_construction_recipe(&activity.recipe).is_err()
+        || activity.remaining_action_points == 0
+        || activity.remaining_action_points > maximum
+        || activity.consumed_items.is_empty()
+        || activity.consumed_items.len() > MAX_ACTOR_INVENTORY_ITEMS
+        || activity.consumed_items.iter().any(|consumed| {
+            consumed.item.id.counter() == 0
+                || consumed.item.id.world_namespace() != actor_id.world_namespace()
+                || !ids.insert(consumed.item.id)
+                || validate_item_snapshot(&consumed.item).is_err()
+                || consumed.split_from.is_some_and(|item_id| {
+                    item_id.counter() == 0
+                        || item_id.world_namespace() != actor_id.world_namespace()
+                        || item_id == consumed.item.id
+                })
+        })
+        || activity.previously_wielded.is_some_and(|item_id| {
+            !activity
+                .consumed_items
+                .iter()
+                .any(|consumed| consumed.item.id == item_id && consumed.split_from.is_none())
+        })
+    {
+        return Err(SimError::InvalidConstruction);
+    }
+    Ok(())
+}
+
+fn validate_book_study(study: &BookStudyV1) -> Result<(), SimError> {
+    if validate_item_type_id(&study.book_type_id).is_err()
+        || !valid_skill_id(&study.skill_id)
+        || study.required_skill_level >= study.maximum_skill_level
+        || study.maximum_skill_level > MAX_SKILL_LEVEL
+        || study.intelligence_requirement > MAX_ACTOR_BASE_STAT
+        || study.time_moves == 0
+        || study.time_moves > MAX_BOOK_STUDY_MOVES
+        || adjusted_book_study_time_moves(study.time_moves, study.intelligence_requirement, 1)
+            .is_none_or(|moves| moves > MAX_BOOK_STUDY_MOVES)
+        || study.source_time_minutes == 0
+        || u64::from(study.source_time_minutes)
+            .checked_mul(60 * 100)
+            .is_none_or(|moves| moves > MAX_BOOK_STUDY_MOVES)
+        || adjusted_book_study_time_moves(study.time_moves, study.intelligence_requirement, 1)
+            .and_then(|moves| {
+                moves.checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+            })
+            .is_none()
+    {
+        return Err(SimError::InvalidBookStudy);
+    }
+    Ok(())
+}
+
+fn validate_book_study_activity(
+    activity: &BookStudyActivitySnapshotV1,
+    actor_id: ActorId,
+    intelligence: u16,
+) -> Result<(), SimError> {
+    validate_book_study(&activity.study)?;
+    let maximum = adjusted_book_study_time_moves(
+        activity.study.time_moves,
+        activity.study.intelligence_requirement,
+        effective_base_stat(intelligence),
+    )
+    .ok_or(SimError::InvalidBookStudy)?
+    .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+    .ok_or(SimError::NumericOverflow)?;
+    if activity.book_item_id.counter() == 0
+        || activity.book_item_id.world_namespace() != actor_id.world_namespace()
+        || activity.rng_sequence.0 == 0
+        || activity.remaining_action_points == 0
+        || activity.remaining_action_points > maximum
+    {
+        return Err(SimError::InvalidBookStudy);
+    }
+    Ok(())
+}
+
+fn validate_disassembly_recipe(recipe: &DisassemblyRecipeV1) -> Result<(), SimError> {
+    if recipe.recipe_id.is_empty()
+        || recipe.recipe_id.len() > MAX_CRAFT_RECIPE_ID_BYTES
+        || recipe.recipe_id.chars().any(char::is_control)
+        || validate_item_type_id(&recipe.target_type_id).is_err()
+        || recipe.time_moves == 0
+        || recipe
+            .time_moves
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+            .is_none()
+        || recipe.difficulty > MAX_SKILL_LEVEL
+        || recipe
+            .primary_skill_id
+            .as_ref()
+            .is_some_and(|skill_id| !valid_skill_id(skill_id))
+        || !valid_skill_requirements(&recipe.learn_requirements)
+        || !valid_skill_requirements(&recipe.autolearn_requirements)
+        || (!recipe.autolearn && !recipe.autolearn_requirements.is_empty())
+        || (recipe.requires_empty_charges && recipe.unload_charges_as.is_some())
+        || recipe.unload_charges_as.as_ref().is_some_and(|ammunition| {
+            validate_craft_item_prototype(ammunition).is_err()
+                || ammunition.charges <= 0
+                || ammunition.ammunition_type.is_empty()
+                || ammunition.ranged_weapon.is_some()
+        })
+        || recipe.components.len() > MAX_DISASSEMBLY_COMPONENT_TYPES
+        || recipe.components.iter().any(|component| {
+            component.output_instances == 0
+                || component.output_instances > MAX_CRAFT_OUTPUT_INSTANCES
+                || (component.count_by_charges && component.output_instances != 1)
+                || validate_craft_item_prototype(&component.output).is_err()
+                || component.output_state.as_ref().is_some_and(|state| {
+                    !state.recoverable
+                        || state.count_by_charges != component.count_by_charges
+                        || validate_item_component_root(state).is_err()
+                        || !component_state_matches_prototype(state, &component.output)
+                })
+        })
+        || recipe
+            .total_component_instances()
+            .is_none_or(|total| total > MAX_CRAFT_OUTPUT_INSTANCES)
+        || recipe.tools.len() > MAX_CRAFT_SUPPORT_GROUPS
+        || recipe.tools.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_SUPPORT_ALTERNATIVES
+                || group.iter().any(|tool| {
+                    tool.amount == 0
+                        || tool.consumes_charges
+                        || usize::from(tool.amount) > MAX_ACTOR_INVENTORY_ITEMS
+                        || validate_item_type_id(&tool.type_id).is_err()
+                })
+        })
+        || recipe.qualities.len() > MAX_CRAFT_SUPPORT_GROUPS
+        || recipe.qualities.iter().any(|group| {
+            group.is_empty()
+                || group.len() > MAX_CRAFT_SUPPORT_ALTERNATIVES
+                || group.iter().any(|quality| {
+                    quality.amount == 0
+                        || usize::from(quality.amount) > MAX_ACTOR_INVENTORY_ITEMS
+                        || validate_item_type_id(&quality.quality_id).is_err()
+                        || quality.providers.is_empty()
+                        || quality.providers.len() > MAX_CRAFT_QUALITY_PROVIDERS
+                        || quality
+                            .providers
+                            .iter()
+                            .any(|provider| validate_item_type_id(&provider.type_id).is_err())
+                        || !quality
+                            .providers
+                            .windows(2)
+                            .all(|pair| pair[0].type_id < pair[1].type_id)
+                })
+        })
+    {
+        return Err(SimError::InvalidDisassembly);
+    }
+    Ok(())
+}
+
+fn validate_disassembly_activity(
+    activity: &DisassemblyActivitySnapshotV1,
+    actor_id: ActorId,
+) -> Result<(), SimError> {
+    validate_disassembly_recipe(&activity.recipe)?;
+    let maximum = activity
+        .recipe
+        .time_moves
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+        .ok_or(SimError::NumericOverflow)?;
+    let mut ids = BTreeSet::new();
+    if activity.target_item.id.counter() == 0
+        || activity.target_item.id.world_namespace() != actor_id.world_namespace()
+        || activity.target_item.type_id != activity.recipe.target_type_id
+        || activity.target_item.damage > MAX_ITEM_DAMAGE_LEVEL
+        || activity
+            .target_item
+            .magazine_well
+            .as_ref()
+            .is_some_and(|well| well.installed_magazine.is_some())
+        || !match (
+            &activity.target_item.ranged_weapon,
+            &activity.recipe.unload_charges_as,
+        ) {
+            (None, None) => {
+                !activity.recipe.requires_empty_charges || activity.target_item.charges == 0
+            }
+            (Some(weapon), Some(ammunition)) => {
+                !activity.recipe.requires_empty_charges
+                    && weapon.ammunition_remaining == 0
+                    && weapon.ammunition_type == ammunition.ammunition_type
+            }
+            (None, Some(_)) => {
+                !activity.recipe.requires_empty_charges && activity.target_item.charges == 0
+            }
+            _ => false,
+        }
+        || validate_item_snapshot(&activity.target_item).is_err()
+        || activity.selected_tool_alternatives.len() != activity.recipe.tools.len()
+        || activity
+            .selected_tool_alternatives
+            .iter()
+            .zip(&activity.recipe.tools)
+            .any(|(selected, group)| usize::from(*selected) >= group.len())
+        || activity.remaining_action_points == 0
+        || activity.remaining_action_points > maximum
+        || activity.rng_sequence.0 == 0
+        || activity.reserved_component_items.len()
+            != activity
+                .recipe
+                .total_component_instances()
+                .map_or(usize::MAX, usize::from)
+        || !activity
+            .reserved_component_items
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || activity.reserved_component_items.iter().any(|item_id| {
+            item_id.counter() == 0
+                || item_id.world_namespace() != actor_id.world_namespace()
+                || *item_id == activity.target_item.id
+                || !ids.insert(*item_id)
+        })
+    {
+        return Err(SimError::InvalidDisassembly);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Actor {
+    id: ActorId,
+    position: WorldPosition,
+    hp: i32,
+    base_strength: u16,
+    base_dexterity: u16,
+    base_intelligence: u16,
+    base_perception: u16,
+    connected: bool,
+    last_command_sequence: CommandSequence,
+    last_held_input_sequence: HeldInputSequence,
+    held_movement: Option<HorizontalDirection>,
+    inventory: BTreeMap<ItemId, ItemInstance>,
+    wielded: Option<ItemId>,
+    stored_kcal: i32,
+    thirst: i32,
+    sleepiness: i32,
+    sleeping: bool,
+    sleep_intervals: u16,
+    speed: u16,
+    action_points: i64,
+    queued_actions: VecDeque<QueuedActionSnapshot>,
+    craft_activity: Option<CraftActivitySnapshotV1>,
+    read_activity: Option<BookStudyActivitySnapshotV1>,
+    disassembly_activity: Option<DisassemblyActivitySnapshotV1>,
+    construction_activity: Option<ConstructionActivitySnapshotV1>,
+    learned_recipes: BTreeSet<String>,
+    skills: BTreeMap<String, SkillLevelSnapshot>,
+    proficiencies: BTreeMap<String, ProficiencyLevelSnapshot>,
+    map_memory: BTreeMap<ChunkCoord, Vec<Option<MemorizedTileSnapshot>>>,
+}
+
+impl Actor {
+    fn snapshot(&self) -> ActorSnapshot {
+        ActorSnapshot {
+            id: self.id,
+            position: self.position,
+            hp: self.hp,
+            base_strength: self.base_strength,
+            base_dexterity: self.base_dexterity,
+            base_intelligence: self.base_intelligence,
+            base_perception: self.base_perception,
+            connected: self.connected,
+            last_command_sequence: self.last_command_sequence,
+            last_held_input_sequence: self.last_held_input_sequence,
+            held_movement: self.held_movement,
+            inventory: self
+                .inventory
+                .values()
+                .map(ItemInstance::snapshot)
+                .collect(),
+            wielded: self.wielded,
+            stored_kcal: self.stored_kcal,
+            thirst: self.thirst,
+            sleepiness: self.sleepiness,
+            sleeping: self.sleeping,
+            sleep_intervals: self.sleep_intervals,
+            speed: self.speed,
+            action_points: self.action_points,
+            queued_actions: self.queued_actions.iter().cloned().collect(),
+            craft_activity: self.craft_activity.clone(),
+            read_activity: self.read_activity.clone(),
+            disassembly_activity: self.disassembly_activity.clone(),
+            construction_activity: self.construction_activity.clone(),
+            learned_recipes: self.learned_recipes.iter().cloned().collect(),
+            skills: self.skills.values().cloned().collect(),
+            proficiencies: self.proficiencies.values().cloned().collect(),
+            map_memory: self
+                .map_memory
+                .iter()
+                .map(|(coord, tiles)| MemorizedChunkSnapshot {
+                    coord: *coord,
+                    tiles: tiles.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn valid_actor_schedule(snapshot: &ActorSnapshot, current_tick: SimTick) -> bool {
+    if [
+        snapshot.base_strength,
+        snapshot.base_dexterity,
+        snapshot.base_intelligence,
+        snapshot.base_perception,
+    ]
+    .into_iter()
+    .any(|stat| stat == 0 || stat > MAX_ACTOR_BASE_STAT)
+        || snapshot.speed == 0
+        || u32::from(snapshot.speed) > ACTOR_ACTION_THRESHOLD
+        || snapshot.action_points > i64::from(ACTOR_ACTION_THRESHOLD)
+        || snapshot.action_points < cdda_protocol::MIN_ACTION_POINTS
+        || snapshot.sleepiness < -1_000
+        || snapshot.sleepiness > SLEEPINESS_MAX
+        || (!snapshot.sleeping && snapshot.sleep_intervals != 0)
+        || snapshot.sleep_intervals > MAX_SLEEP_INTENSITY
+        || snapshot.queued_actions.len() > MAX_QUEUED_ACTIONS
+        || snapshot.craft_activity.as_ref().is_some_and(|activity| {
+            validate_craft_activity(activity, snapshot.id).is_err()
+                || (snapshot.sleeping && !activity.interrupted)
+                || !snapshot.queued_actions.is_empty()
+        })
+        || snapshot.read_activity.as_ref().is_some_and(|activity| {
+            validate_book_study_activity(activity, snapshot.id, snapshot.base_intelligence).is_err()
+                || (snapshot.sleeping && !activity.interrupted)
+                || (!activity.interrupted && !snapshot.queued_actions.is_empty())
+                || (!activity.interrupted
+                    && !snapshot.inventory.iter().any(|item| {
+                        item.id == activity.book_item_id
+                            && item.type_id == activity.study.book_type_id
+                    }))
+        })
+        || snapshot
+            .disassembly_activity
+            .as_ref()
+            .is_some_and(|activity| {
+                validate_disassembly_activity(activity, snapshot.id).is_err()
+                    || (snapshot.sleeping && !activity.interrupted)
+                    || !snapshot.queued_actions.is_empty() && !activity.interrupted
+                    || snapshot
+                        .inventory
+                        .iter()
+                        .any(|item| item.id == activity.target_item.id)
+            })
+        || snapshot
+            .construction_activity
+            .as_ref()
+            .is_some_and(|activity| {
+                validate_construction_activity(activity, snapshot.id).is_err()
+                    || (snapshot.sleeping && !activity.interrupted)
+                    || (!snapshot.queued_actions.is_empty() && !activity.interrupted)
+            })
+        || usize::from(snapshot.craft_activity.is_some())
+            + usize::from(snapshot.read_activity.is_some())
+            + usize::from(snapshot.disassembly_activity.is_some())
+            + usize::from(snapshot.construction_activity.is_some())
+            > 1
+        || snapshot.learned_recipes.len() > MAX_LEARNED_RECIPES
+        || snapshot.learned_recipes.iter().any(|recipe_id| {
+            recipe_id.is_empty()
+                || recipe_id.len() > MAX_CRAFT_RECIPE_ID_BYTES
+                || recipe_id.chars().any(char::is_control)
+        })
+        || !snapshot
+            .learned_recipes
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || snapshot
+            .held_movement
+            .is_some_and(|direction| !direction.is_valid())
+        || !valid_map_memory(&snapshot.map_memory)
+        || !valid_skill_levels(&snapshot.skills, current_tick)
+        || !valid_proficiency_levels(&snapshot.proficiencies)
+    {
+        return false;
+    }
+    let mut previous = CommandSequence(0);
+    for action in &snapshot.queued_actions {
+        if action.sequence <= previous || action.sequence > snapshot.last_command_sequence {
+            return false;
+        }
+        previous = action.sequence;
+    }
+    true
+}
+
+fn valid_map_memory(memory: &[MemorizedChunkSnapshot]) -> bool {
+    let mut previous = None;
+    memory.iter().all(|chunk| {
+        let ordered = previous.is_none_or(|coord| coord < chunk.coord);
+        previous = Some(chunk.coord);
+        ordered
+            && chunk.tiles.len() == (SUBMAP_SIZE * SUBMAP_SIZE) as usize
+            && chunk.tiles.iter().any(Option::is_some)
+            && chunk.tiles.iter().flatten().all(|tile| {
+                validate_terrain_tile(&tile.terrain).is_ok()
+                    && tile
+                        .furniture
+                        .as_ref()
+                        .is_none_or(|furniture| validate_furniture_tile(furniture).is_ok())
+            })
+    })
+}
+
+enum ScheduledActorAction {
+    Queued(QueuedActionSnapshot),
+    Held(HorizontalDirection),
+    CraftCompleted,
+    ReadCompleted,
+    DisassemblyCompleted,
+    ConstructionCompleted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveLightSource {
+    position: WorldPosition,
+    sight_radius: u32,
+    external_detail_radius: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct PlannedCraftConsumption {
+    item_id: ItemId,
+    count: u32,
+    count_by_charges: bool,
+}
+
+fn map_memory_from_snapshot(
+    memory: Vec<MemorizedChunkSnapshot>,
+) -> BTreeMap<ChunkCoord, Vec<Option<MemorizedTileSnapshot>>> {
+    memory
+        .into_iter()
+        .map(|chunk| (chunk.coord, chunk.tiles))
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatureSpawn {
+    pub type_id: String,
+    pub position: WorldPosition,
+    pub hp: i32,
+    pub speed: u16,
+    pub attack_cost_moves: u16,
+    pub aggression: i16,
+    pub melee_skill: u16,
+    pub dodge: u16,
+    pub size: CreatureSizeV1,
+    pub melee_dice: u16,
+    pub melee_dice_sides: u16,
+    pub can_see: bool,
+    pub vision_day: u16,
+    pub vision_night: u16,
+    pub stumbles: bool,
+    pub bashes: bool,
+    pub group_bash: bool,
+    pub hears: bool,
+    pub good_hearing: bool,
+    pub clumsy_attacks: bool,
+    pub immobile: bool,
+    pub pacifist: bool,
+    pub can_open_doors: bool,
+    pub path_settings: CreaturePathSettingsV1,
+    /// Empty means the creature has no ordinary-death blood field.
+    pub blood_field_type_id: String,
+    /// `None` leaves no modeled ordinary corpse.
+    pub corpse: Option<CreatureCorpsePrototypeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Creature {
+    id: CreatureId,
+    type_id: String,
+    position: WorldPosition,
+    hp: i32,
+    max_hp: i32,
+    speed: u16,
+    attack_cost_moves: u16,
+    aggression: i16,
+    melee_skill: u16,
+    dodge: u16,
+    size: CreatureSizeV1,
+    melee_dice: u16,
+    melee_dice_sides: u16,
+    can_see: bool,
+    vision_day: u16,
+    vision_night: u16,
+    stumbles: bool,
+    bashes: bool,
+    group_bash: bool,
+    hears: bool,
+    good_hearing: bool,
+    clumsy_attacks: bool,
+    immobile: bool,
+    pacifist: bool,
+    can_open_doors: bool,
+    path_settings: CreaturePathSettingsV1,
+    goal: Option<WorldPosition>,
+    sound_goal: Option<CreatureSoundGoalV1>,
+    action_points: i64,
+    downed_until_tick: Option<SimTick>,
+    blood_field_type_id: String,
+    corpse: Option<CreatureCorpsePrototypeV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CreatureStepAction {
+    Move,
+    OpenTerrain,
+    Bash,
+}
+
+#[derive(Clone)]
+enum CreatureBashTarget {
+    Terrain(TerrainBashTypeV1),
+    Furniture(FurnitureBashTypeV1),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StructuralBashSource {
+    Actor(ActorId),
+    Creature(CreatureId),
+}
+
+impl CreatureBashTarget {
+    fn target_kind(&self) -> BashTargetKindV1 {
+        match self {
+            Self::Terrain(_) => BashTargetKindV1::Terrain,
+            Self::Furniture(_) => BashTargetKindV1::Furniture,
+        }
+    }
+
+    fn target_type_id(&self) -> &str {
+        match self {
+            Self::Terrain(bash) => &bash.terrain_id,
+            Self::Furniture(bash) => &bash.furniture_id,
+        }
+    }
+
+    fn strength_bounds(&self, blocked: bool) -> (i32, i32) {
+        match self {
+            Self::Terrain(bash) => {
+                if blocked && bash.str_min_blocked >= 0 {
+                    (bash.str_min_blocked, bash.str_max_blocked)
+                } else {
+                    (bash.str_min, bash.str_max)
+                }
+            }
+            Self::Furniture(bash) => {
+                if blocked && bash.str_min_blocked >= 0 {
+                    (bash.str_min_blocked, bash.str_max_blocked)
+                } else {
+                    (bash.str_min, bash.str_max)
+                }
+            }
+        }
+    }
+
+    fn bash_multiplier_millionths(&self) -> u32 {
+        match self {
+            Self::Terrain(bash) => bash.bash_multiplier_millionths,
+            Self::Furniture(bash) => bash.bash_multiplier_millionths,
+        }
+    }
+
+    fn drops(&self) -> &[cdda_protocol::BashDropPrototypeV1] {
+        match self {
+            Self::Terrain(bash) => &bash.drops,
+            Self::Furniture(bash) => &bash.drops,
+        }
+    }
+
+    fn hit_field(&self) -> Option<&cdda_protocol::BashFieldEffectV1> {
+        match self {
+            Self::Terrain(bash) => bash.hit_field.as_ref(),
+            Self::Furniture(bash) => bash.hit_field.as_ref(),
+        }
+    }
+
+    fn destroyed_field(&self) -> Option<&cdda_protocol::BashFieldEffectV1> {
+        match self {
+            Self::Terrain(bash) => bash.destroyed_field.as_ref(),
+            Self::Furniture(bash) => bash.destroyed_field.as_ref(),
+        }
+    }
+
+    fn sound(&self, success: bool) -> (&str, i32) {
+        let (minimum, maximum) = self.strength_bounds(false);
+        match (self, success) {
+            (Self::Terrain(bash), true) => (
+                &bash.sound,
+                if bash.sound_volume == -1 {
+                    (minimum * 3 / 2).min(maximum)
+                } else {
+                    bash.sound_volume
+                },
+            ),
+            (Self::Furniture(bash), true) => (
+                &bash.sound,
+                if bash.sound_volume == -1 {
+                    (minimum * 3 / 2).min(maximum)
+                } else {
+                    bash.sound_volume
+                },
+            ),
+            (Self::Terrain(bash), false) => (
+                &bash.failure_sound,
+                if bash.failure_sound_volume == -1 {
+                    12
+                } else {
+                    bash.failure_sound_volume
+                },
+            ),
+            (Self::Furniture(bash), false) => (
+                &bash.failure_sound,
+                if bash.failure_sound_volume == -1 {
+                    12
+                } else {
+                    bash.failure_sound_volume
+                },
+            ),
+        }
+    }
+}
+
+impl Creature {
+    fn snapshot(&self) -> CreatureSnapshot {
+        CreatureSnapshot {
+            id: self.id,
+            type_id: self.type_id.clone(),
+            position: self.position,
+            hp: self.hp,
+            max_hp: self.max_hp,
+            speed: self.speed,
+            attack_cost_moves: self.attack_cost_moves,
+            aggression: self.aggression,
+            melee_skill: self.melee_skill,
+            dodge: self.dodge,
+            size: self.size,
+            melee_dice: self.melee_dice,
+            melee_dice_sides: self.melee_dice_sides,
+            can_see: self.can_see,
+            vision_day: self.vision_day,
+            vision_night: self.vision_night,
+            stumbles: self.stumbles,
+            bashes: self.bashes,
+            group_bash: self.group_bash,
+            hears: self.hears,
+            good_hearing: self.good_hearing,
+            clumsy_attacks: self.clumsy_attacks,
+            immobile: self.immobile,
+            pacifist: self.pacifist,
+            can_open_doors: self.can_open_doors,
+            path_settings: self.path_settings,
+            goal: self.goal,
+            sound_goal: self.sound_goal,
+            action_points: self.action_points,
+            downed_until_tick: self.downed_until_tick,
+            blood_field_type_id: self.blood_field_type_id.clone(),
+            corpse: self.corpse.clone(),
+        }
+    }
+
+    fn from_snapshot(snapshot: &CreatureSnapshot) -> Result<Self, SimError> {
+        validate_creature_snapshot(snapshot)?;
+        Ok(Self {
+            id: snapshot.id,
+            type_id: snapshot.type_id.clone(),
+            position: snapshot.position,
+            hp: snapshot.hp,
+            max_hp: snapshot.max_hp,
+            speed: snapshot.speed,
+            attack_cost_moves: snapshot.attack_cost_moves,
+            aggression: snapshot.aggression,
+            melee_skill: snapshot.melee_skill,
+            dodge: snapshot.dodge,
+            size: snapshot.size,
+            melee_dice: snapshot.melee_dice,
+            melee_dice_sides: snapshot.melee_dice_sides,
+            can_see: snapshot.can_see,
+            vision_day: snapshot.vision_day,
+            vision_night: snapshot.vision_night,
+            stumbles: snapshot.stumbles,
+            bashes: snapshot.bashes,
+            group_bash: snapshot.group_bash,
+            hears: snapshot.hears,
+            good_hearing: snapshot.good_hearing,
+            clumsy_attacks: snapshot.clumsy_attacks,
+            immobile: snapshot.immobile,
+            pacifist: snapshot.pacifist,
+            can_open_doors: snapshot.can_open_doors,
+            path_settings: snapshot.path_settings,
+            goal: snapshot.goal,
+            sound_goal: snapshot.sound_goal,
+            action_points: snapshot.action_points,
+            downed_until_tick: snapshot.downed_until_tick,
+            blood_field_type_id: snapshot.blood_field_type_id.clone(),
+            corpse: snapshot.corpse.clone(),
+        })
+    }
+}
+
+fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimError> {
+    validate_item_type_id(&snapshot.type_id)?;
+    if snapshot.id.counter() == 0
+        || snapshot.max_hp <= 0
+        || snapshot.hp <= 0
+        || snapshot.hp > snapshot.max_hp
+        || snapshot.speed == 0
+        || snapshot.attack_cost_moves == 0
+        || snapshot.melee_dice_sides == 0
+        || (snapshot.group_bash && !snapshot.bashes)
+        || (snapshot.good_hearing && !snapshot.hears)
+        || !valid_creature_path_settings(snapshot.path_settings)
+        || (snapshot.can_see && snapshot.vision_day == 0 && snapshot.vision_night == 0)
+        || snapshot
+            .goal
+            .is_some_and(|goal| goal.z != snapshot.position.z || goal == snapshot.position)
+        || snapshot.sound_goal.is_some_and(|goal| {
+            !snapshot.hears
+                || goal.position.z != snapshot.position.z
+                || goal.position == snapshot.position
+                || goal.remaining_actions == 0
+                || goal.remaining_actions > MAX_CREATURE_SOUND_GOAL_ACTIONS
+        })
+        || snapshot.action_points >= i64::from(CREATURE_ACTION_THRESHOLD)
+        || snapshot.action_points < cdda_protocol::MIN_ACTION_POINTS
+        || (!snapshot.blood_field_type_id.is_empty()
+            && validate_item_type_id(&snapshot.blood_field_type_id).is_err())
+        || snapshot.corpse.as_ref().is_some_and(|corpse| {
+            validate_creature_corpse_prototype(corpse).is_err()
+                || corpse.monster_type_id != snapshot.type_id
+                || corpse.max_hp != snapshot.max_hp
+                || corpse.attack_cost_moves != snapshot.attack_cost_moves
+                || corpse.aggression != snapshot.aggression
+                || corpse.melee_skill != snapshot.melee_skill
+                || corpse.dodge != snapshot.dodge
+                || corpse.size != snapshot.size
+                || corpse.melee_dice != snapshot.melee_dice
+                || corpse.melee_dice_sides != snapshot.melee_dice_sides
+                || corpse.can_see != snapshot.can_see
+                || corpse.vision_day != snapshot.vision_day
+                || corpse.vision_night != snapshot.vision_night
+                || corpse.stumbles != snapshot.stumbles
+                || corpse.bashes != snapshot.bashes
+                || corpse.group_bash != snapshot.group_bash
+                || corpse.hears != snapshot.hears
+                || corpse.good_hearing != snapshot.good_hearing
+                || corpse.clumsy_attacks != snapshot.clumsy_attacks
+                || corpse.immobile != snapshot.immobile
+                || corpse.pacifist != snapshot.pacifist
+                || corpse.can_open_doors != snapshot.can_open_doors
+                || corpse.path_settings != snapshot.path_settings
+                || corpse.blood_field_type_id != snapshot.blood_field_type_id
+        })
+    {
+        return Err(SimError::InvalidCreature);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ItemInstance {
+    id: ItemId,
+    type_id: String,
+    charges: i32,
+    damage: u16,
+    melee_damage_milli: BTreeMap<String, i32>,
+    calories: i32,
+    quench: i32,
+    comestible_type: String,
+    ammunition_type: String,
+    ranged_weapon: Option<RangedWeaponSnapshot>,
+    component_provenance: Option<Vec<ItemComponentSnapshotV1>>,
+    magazine_capacity: u32,
+    magazine_well: Option<MagazineWellSnapshotV1>,
+    residual_energy_millijoules: u32,
+    powered_tool: Option<PoweredToolStateV1>,
+    creature_corpse: Option<CreatureCorpseSnapshotV1>,
+}
+
+impl ItemInstance {
+    fn available_tool_charges(&self) -> i32 {
+        self.magazine_well.as_ref().map_or(self.charges, |well| {
+            well.installed_magazine
+                .as_deref()
+                .map_or(0, |magazine| magazine.charges)
+        })
+    }
+
+    fn debit_tool_charges(&mut self, charges: i32) -> Result<i32, SimError> {
+        if charges < 0 {
+            return Err(SimError::InvalidItem);
+        }
+        let stored = self
+            .magazine_well
+            .as_mut()
+            .and_then(|well| well.installed_magazine.as_deref_mut())
+            .map_or(&mut self.charges, |magazine| &mut magazine.charges);
+        *stored = stored
+            .checked_sub(charges)
+            .filter(|remaining| *remaining >= 0)
+            .ok_or(SimError::InvalidItem)?;
+        Ok(*stored)
+    }
+
+    fn available_power_energy_millijoules(&self) -> Result<u64, SimError> {
+        let Some(magazine) = self
+            .magazine_well
+            .as_ref()
+            .and_then(|well| well.installed_magazine.as_deref())
+        else {
+            return Ok(0);
+        };
+        let charges = u64::try_from(magazine.charges).map_err(|_| SimError::InvalidItem)?;
+        charges
+            .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+            .and_then(|energy| energy.checked_add(u64::from(magazine.residual_energy_millijoules)))
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn effective_powered_light_emission(&self) -> Result<u16, SimError> {
+        let Some(powered) = self.powered_tool.as_ref().filter(|powered| powered.active) else {
+            return Ok(0);
+        };
+        let Some(magazine) = self
+            .magazine_well
+            .as_ref()
+            .and_then(|well| well.installed_magazine.as_deref())
+        else {
+            return Ok(0);
+        };
+        Ok(powered_light_effective_emission(
+            powered.light_emission,
+            powered.dims_with_charge,
+            self.available_power_energy_millijoules()?,
+            magazine.magazine_capacity,
+        ))
+    }
+
+    fn consume_activation_power(&mut self, charges: u16) -> Result<bool, SimError> {
+        let Some(magazine) = self
+            .magazine_well
+            .as_mut()
+            .and_then(|well| well.installed_magazine.as_deref_mut())
+        else {
+            return Ok(false);
+        };
+        let charges = i32::from(charges);
+        if magazine.charges < charges {
+            return Ok(false);
+        }
+        magazine.charges = magazine
+            .charges
+            .checked_sub(charges)
+            .ok_or(SimError::NumericOverflow)?;
+        Ok(true)
+    }
+
+    fn consume_continuous_power(&mut self, millijoules: u32) -> Result<bool, SimError> {
+        let Some(magazine) = self
+            .magazine_well
+            .as_mut()
+            .and_then(|well| well.installed_magazine.as_deref_mut())
+        else {
+            return Ok(false);
+        };
+        let available = u64::try_from(magazine.charges)
+            .map_err(|_| SimError::InvalidItem)?
+            .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+            .and_then(|energy| energy.checked_add(u64::from(magazine.residual_energy_millijoules)))
+            .ok_or(SimError::NumericOverflow)?;
+        if available < u64::from(millijoules) {
+            return Ok(false);
+        }
+        let mut residual = u64::from(magazine.residual_energy_millijoules);
+        while residual < u64::from(millijoules) {
+            magazine.charges = magazine
+                .charges
+                .checked_sub(1)
+                .ok_or(SimError::NumericOverflow)?;
+            residual = residual
+                .checked_add(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        residual = residual
+            .checked_sub(u64::from(millijoules))
+            .ok_or(SimError::NumericOverflow)?;
+        magazine.residual_energy_millijoules =
+            u32::try_from(residual).map_err(|_| SimError::NumericOverflow)?;
+        Ok(true)
+    }
+
+    fn set_powered_active(&mut self, active: bool) -> Result<(), SimError> {
+        let powered = self.powered_tool.as_mut().ok_or(SimError::InvalidItem)?;
+        powered.active = active;
+        self.type_id.clone_from(if active {
+            &powered.active_type_id
+        } else {
+            &powered.inactive_type_id
+        });
+        Ok(())
+    }
+
+    fn snapshot(&self) -> ItemSnapshot {
+        ItemSnapshot {
+            id: self.id,
+            type_id: self.type_id.clone(),
+            charges: self.charges,
+            damage: self.damage,
+            melee_damage_milli: self.melee_damage_milli.clone(),
+            calories: self.calories,
+            quench: self.quench,
+            comestible_type: self.comestible_type.clone(),
+            ammunition_type: self.ammunition_type.clone(),
+            ranged_weapon: self.ranged_weapon.clone(),
+            component_provenance: self.component_provenance.clone(),
+            magazine_capacity: self.magazine_capacity,
+            magazine_well: self.magazine_well.clone(),
+            residual_energy_millijoules: self.residual_energy_millijoules,
+            powered_tool: self.powered_tool.clone(),
+            creature_corpse: self.creature_corpse.clone(),
+        }
+    }
+
+    fn from_snapshot(snapshot: &ItemSnapshot) -> Result<Self, SimError> {
+        validate_item_snapshot(snapshot)?;
+        Ok(Self {
+            id: snapshot.id,
+            type_id: snapshot.type_id.clone(),
+            charges: snapshot.charges,
+            damage: snapshot.damage,
+            melee_damage_milli: snapshot.melee_damage_milli.clone(),
+            calories: snapshot.calories,
+            quench: snapshot.quench,
+            comestible_type: snapshot.comestible_type.clone(),
+            ammunition_type: snapshot.ammunition_type.clone(),
+            ranged_weapon: snapshot.ranged_weapon.clone(),
+            component_provenance: snapshot.component_provenance.clone(),
+            magazine_capacity: snapshot.magazine_capacity,
+            magazine_well: snapshot.magazine_well.clone(),
+            residual_energy_millijoules: snapshot.residual_energy_millijoules,
+            powered_tool: snapshot.powered_tool.clone(),
+            creature_corpse: snapshot.creature_corpse.clone(),
+        })
+    }
+}
+
+fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> ItemInstance {
+    ItemInstance {
+        id,
+        type_id: prototype.type_id.clone(),
+        charges: prototype.charges,
+        damage: 0,
+        melee_damage_milli: prototype.melee_damage_milli.clone(),
+        calories: prototype.calories,
+        quench: prototype.quench,
+        comestible_type: prototype.comestible_type.clone(),
+        ammunition_type: prototype.ammunition_type.clone(),
+        ranged_weapon: prototype.ranged_weapon.clone(),
+        component_provenance: None,
+        magazine_capacity: prototype.magazine_capacity,
+        magazine_well: prototype
+            .magazine_well
+            .as_ref()
+            .map(|well| MagazineWellSnapshotV1 {
+                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                installed_magazine: None,
+            }),
+        residual_energy_millijoules: prototype.residual_energy_millijoules,
+        powered_tool: prototype.powered_tool.clone(),
+        creature_corpse: None,
+    }
+}
+
+fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemInstance {
+    ItemInstance {
+        id,
+        type_id: component.type_id.clone(),
+        charges: component.charges,
+        damage: component.damage,
+        melee_damage_milli: component.melee_damage_milli.clone(),
+        calories: component.calories,
+        quench: component.quench,
+        comestible_type: component.comestible_type.clone(),
+        ammunition_type: component.ammunition_type.clone(),
+        ranged_weapon: component.ranged_weapon.clone(),
+        component_provenance: component.component_provenance.clone(),
+        magazine_capacity: component.magazine_capacity,
+        magazine_well: component
+            .magazine_well
+            .as_ref()
+            .map(|well| MagazineWellSnapshotV1 {
+                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                installed_magazine: None,
+            }),
+        residual_energy_millijoules: component.residual_energy_millijoules,
+        powered_tool: component.powered_tool.clone(),
+        creature_corpse: None,
+    }
+}
+
+fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftItemPrototypeV1 {
+    CraftItemPrototypeV1 {
+        type_id: component.type_id.clone(),
+        charges: component.charges,
+        melee_damage_milli: component.melee_damage_milli.clone(),
+        calories: component.calories,
+        quench: component.quench,
+        comestible_type: component.comestible_type.clone(),
+        ammunition_type: component.ammunition_type.clone(),
+        ranged_weapon: component.ranged_weapon.clone(),
+        magazine_capacity: component.magazine_capacity,
+        magazine_well: component.magazine_well.clone(),
+        residual_energy_millijoules: component.residual_energy_millijoules,
+        powered_tool: component.powered_tool.clone(),
+    }
+}
+
+fn component_from_consumed(
+    consumed: &CraftConsumedItemV1,
+    count_by_charges: bool,
+    recoverable: bool,
+) -> ItemComponentSnapshotV1 {
+    ItemComponentSnapshotV1 {
+        type_id: consumed.item.type_id.clone(),
+        charges: consumed.item.charges,
+        damage: consumed.item.damage,
+        melee_damage_milli: consumed.item.melee_damage_milli.clone(),
+        calories: consumed.item.calories,
+        quench: consumed.item.quench,
+        comestible_type: consumed.item.comestible_type.clone(),
+        ammunition_type: consumed.item.ammunition_type.clone(),
+        ranged_weapon: consumed.item.ranged_weapon.clone(),
+        count_by_charges,
+        recoverable,
+        component_provenance: consumed.item.component_provenance.clone(),
+        magazine_capacity: consumed.item.magazine_capacity,
+        magazine_well: consumed
+            .item
+            .magazine_well
+            .as_ref()
+            .map(|well| MagazineWellPrototypeV1 {
+                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+            }),
+        residual_energy_millijoules: consumed.item.residual_energy_millijoules,
+        powered_tool: consumed.item.powered_tool.clone(),
+    }
+}
+
+fn craft_output_component_provenance(
+    recipe: &CraftRecipeV1,
+    consumed_items: &[CraftConsumedItemV1],
+) -> Result<Option<Vec<Vec<ItemComponentSnapshotV1>>>, SimError> {
+    if consumed_items
+        .iter()
+        .any(|consumed| consumed.item.creature_corpse.is_some())
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    if !recipe.retain_components {
+        return Ok(None);
+    }
+    if consumed_items.iter().any(|consumed| {
+        consumed
+            .item
+            .magazine_well
+            .as_ref()
+            .is_some_and(|well| well.installed_magazine.is_some())
+    }) {
+        return Err(SimError::InvalidCraft);
+    }
+    let output_count = usize::from(recipe.output_instances);
+    if output_count == 0 {
+        return Err(SimError::InvalidCraft);
+    }
+    let mut consumed = consumed_items.iter().collect::<Vec<_>>();
+    consumed.sort_by_key(|item| item.item.id);
+    let mut grouped = BTreeMap::<String, Vec<ItemComponentSnapshotV1>>::new();
+    for item in consumed {
+        let mut metadata = recipe
+            .components
+            .iter()
+            .flatten()
+            .filter(|component| component.type_id == item.item.type_id);
+        let Some(first) = metadata.next() else {
+            return Err(SimError::InvalidCraft);
+        };
+        let count_by_charges = first.count_by_charges;
+        let mut recoverable = first.recoverable;
+        for component in metadata {
+            if component.count_by_charges != count_by_charges {
+                return Err(SimError::InvalidCraft);
+            }
+            recoverable &= component.recoverable;
+        }
+        grouped
+            .entry(item.item.type_id.clone())
+            .or_default()
+            .push(component_from_consumed(item, count_by_charges, recoverable));
+    }
+    let mut outputs = vec![Vec::new(); output_count];
+    for mut group in grouped.into_values() {
+        let count_by_charges = group
+            .first()
+            .map(|component| component.count_by_charges)
+            .ok_or(SimError::InvalidCraft)?;
+        if group
+            .iter()
+            .any(|component| component.count_by_charges != count_by_charges)
+        {
+            return Err(SimError::InvalidCraft);
+        }
+        if count_by_charges {
+            let mut combined = group.remove(0);
+            for component in group {
+                combined.charges = combined
+                    .charges
+                    .checked_add(component.charges)
+                    .ok_or(SimError::NumericOverflow)?;
+                combined.recoverable &= component.recoverable;
+            }
+            let divisor = i32::try_from(output_count).map_err(|_| SimError::NumericOverflow)?;
+            if combined.charges <= 0 || combined.charges % divisor != 0 {
+                // Pinned item_components::split returns no stored components
+                // when a charge stack cannot divide evenly across results.
+                return Ok(None);
+            }
+            combined.charges /= divisor;
+            for output in &mut outputs {
+                output.push(combined.clone());
+            }
+        } else {
+            if group.len() % output_count != 0 {
+                return Ok(None);
+            }
+            for (index, component) in group.into_iter().enumerate() {
+                outputs[index % output_count].push(component);
+            }
+        }
+    }
+    if outputs.iter().any(|components| {
+        let provenance = Some(components.clone());
+        validate_component_provenance(&provenance).is_err()
+    }) {
+        return Err(SimError::InvalidCraft);
+    }
+    Ok(Some(outputs))
+}
+
+fn roll_dice(rng: &mut ChaCha8Rng, count: u32, sides: u32) -> Result<u32, SimError> {
+    if sides == 0 {
+        return Err(SimError::InvalidDisassembly);
+    }
+    (0..count).try_fold(0_u32, |total, _| {
+        total
+            .checked_add(1 + rng.next_u32() % sides)
+            .ok_or(SimError::NumericOverflow)
+    })
+}
+
+fn same_item_definition(item: &ItemInstance, snapshot: &ItemSnapshot) -> bool {
+    item.type_id == snapshot.type_id
+        && item.damage == snapshot.damage
+        && item.melee_damage_milli == snapshot.melee_damage_milli
+        && item.calories == snapshot.calories
+        && item.quench == snapshot.quench
+        && item.comestible_type == snapshot.comestible_type
+        && item.ammunition_type == snapshot.ammunition_type
+        && item.ranged_weapon == snapshot.ranged_weapon
+        && item.magazine_capacity == snapshot.magazine_capacity
+        && item.magazine_well == snapshot.magazine_well
+        && item.residual_energy_millijoules == snapshot.residual_energy_millijoules
+        && item.powered_tool == snapshot.powered_tool
+}
+
+fn actor_skill_level(actor: &Actor, skill_id: &str, theoretical: bool) -> u8 {
+    actor.skills.get(skill_id).map_or(0, |skill| {
+        if theoretical {
+            skill.theoretical_level
+        } else {
+            skill.practical_level
+        }
+    })
+}
+
+fn effective_base_stat(stat: u16) -> u16 {
+    stat.min(MAX_CHARACTER_CREATION_STAT)
+}
+
+fn pinned_melee_attack_speed_moves(
+    attack_time_moves: u16,
+    dexterity: u16,
+    melee_skill: u8,
+) -> Result<u32, SimError> {
+    let base_move_cost = u32::from(attack_time_moves) / 2;
+    let skill_factor = 15_u32
+        .checked_sub(u32::from(melee_skill))
+        .ok_or(SimError::NumericOverflow)?;
+    let skill_cost = base_move_cost
+        .checked_mul(skill_factor)
+        .ok_or(SimError::NumericOverflow)?
+        / 15;
+    let before_dexterity = base_move_cost
+        .checked_add(skill_cost)
+        .ok_or(SimError::NumericOverflow)?;
+    Ok(before_dexterity
+        .saturating_sub(u32::from(effective_base_stat(dexterity)) / 2)
+        .max(25))
+}
+
+fn pinned_unarmed_melee_accuracy_quarters(dexterity: u16, melee_skill: u8) -> i64 {
+    // Character::get_hit_base is DEX/4. The null item is not itself a melee
+    // item, so item::melee_skill is the null skill; general melee contributes
+    // /2 and the null item's default `m_to_hit` is -2.
+    i64::from(effective_base_stat(dexterity)) + i64::from(melee_skill) * 2 - 8
+}
+
+fn pinned_bash_weapon_melee_accuracy_twelfths(
+    dexterity: u16,
+    bashing_skill: u8,
+    melee_skill: u8,
+    melee_to_hit: i16,
+    bash_damage: u16,
+) -> i64 {
+    // Character::get_hit_weapon uses the dominant damage skill only when that
+    // damage exceeds MELEE_STAT (5), then adds general melee/2 and item to-hit.
+    let dominant_skill = if bash_damage > 5 {
+        i64::from(bashing_skill) * 4
+    } else {
+        0
+    };
+    i64::from(effective_base_stat(dexterity)) * 3
+        + i64::from(melee_skill) * 6
+        + i64::from(melee_to_hit) * 12
+        + dominant_skill
+}
+
+const fn creature_size_melee_penalty(size: CreatureSizeV1) -> i64 {
+    match size {
+        CreatureSizeV1::Tiny => 30,
+        CreatureSizeV1::Small => 15,
+        CreatureSizeV1::Medium => 0,
+        CreatureSizeV1::Large => -10,
+        CreatureSizeV1::Huge => -20,
+    }
+}
+
+const IMMOBILE_MELEE_HIT_BONUS: i64 = 40;
+
+fn pinned_melee_hit_roll(
+    accuracy_numerator: i64,
+    accuracy_denominator: u8,
+    rng: &mut ChaCha8Rng,
+) -> Result<i64, SimError> {
+    if accuracy_denominator == 0 {
+        return Err(SimError::NumericOverflow);
+    }
+    const SCALE: i128 = 1_i128 << 32;
+    let mean_q32 = i128::from(accuracy_numerator)
+        .checked_mul(5 * SCALE)
+        .ok_or(SimError::NumericOverflow)?
+        / i128::from(accuracy_denominator);
+    let roll_q32 = standard_normal_sample_q32(rng)
+        .checked_mul(25)
+        .and_then(|deviation| mean_q32.checked_add(deviation))
+        .ok_or(SimError::NumericOverflow)?;
+    i64::try_from(roll_q32 / SCALE).map_err(|_| SimError::NumericOverflow)
+}
+
+fn meets_skill_requirements(
+    actor: &Actor,
+    requirements: impl IntoIterator<Item = CraftSkillRequirementV1>,
+    theoretical: bool,
+) -> bool {
+    requirements.into_iter().all(|requirement| {
+        actor_skill_level(actor, &requirement.skill_id, theoretical) >= requirement.level
+    })
+}
+
+fn actor_knows_recipe(actor: &Actor, recipe: &CraftRecipeV1) -> bool {
+    (recipe.can_be_learned && actor.learned_recipes.contains(&recipe.recipe_id))
+        || (recipe.autolearn
+            && meets_skill_requirements(actor, recipe.autolearn_skills.clone(), true))
+        || recipe.book_requirements.iter().any(|requirement| {
+            let carries_book = actor
+                .inventory
+                .values()
+                .any(|item| item.type_id == requirement.book_type_id);
+            let primary_skill_level = recipe.primary_skill.as_ref().map_or(0, |primary| {
+                actor_skill_level(actor, &primary.skill_id, true)
+            });
+            carries_book && primary_skill_level >= requirement.required_skill_level
+        })
+}
+
+fn actor_has_recipe_skills(actor: &Actor, recipe: &CraftRecipeV1) -> bool {
+    let requirements = recipe
+        .primary_skill
+        .iter()
+        .cloned()
+        .chain(recipe.required_skills.iter().cloned())
+        .collect::<Vec<_>>();
+    meets_skill_requirements(actor, requirements.clone(), false)
+        || meets_skill_requirements(actor, requirements, true)
+}
+
+fn actor_has_proficiency(actor: &Actor, proficiency_id: &str) -> bool {
+    actor
+        .proficiencies
+        .get(proficiency_id)
+        .is_some_and(|proficiency| proficiency.learned)
+}
+
+fn actor_has_required_proficiencies(actor: &Actor, recipe: &CraftRecipeV1) -> bool {
+    recipe.proficiencies.iter().all(|proficiency| {
+        !proficiency.required || actor_has_proficiency(actor, &proficiency.proficiency_id)
+    })
+}
+
+fn proficiency_remaining_malus_millionths(
+    practiced_action_points: u64,
+    time_to_learn_action_points: u64,
+) -> u32 {
+    if practiced_action_points >= time_to_learn_action_points {
+        return 0;
+    }
+    let basis_points = (u128::from(practiced_action_points) * 10_000
+        / u128::from(time_to_learn_action_points)) as usize;
+    let index = basis_points / 100;
+    let remainder = basis_points % 100;
+    let left = u64::from(PROFICIENCY_MALUS_REMAINING_MILLIONTHS[index]);
+    let right = u64::from(PROFICIENCY_MALUS_REMAINING_MILLIONTHS[index + 1]);
+    u32::try_from((left * (100 - remainder) as u64 + right * remainder as u64) / 100)
+        .expect("interpolated proficiency curve remains in scale")
+}
+
+fn craft_proficiency_time_malus_millionths(
+    actor_proficiencies: &BTreeMap<String, ProficiencyLevelSnapshot>,
+    recipe: &CraftRecipeV1,
+) -> Result<u64, SimError> {
+    let scale = u128::from(CRAFT_PROFICIENCY_SCALE);
+    let mut total = scale;
+    for proficiency in &recipe.proficiencies {
+        if proficiency.required
+            || actor_proficiencies
+                .get(&proficiency.proficiency_id)
+                .is_some_and(|state| state.learned)
+        {
+            continue;
+        }
+        let practiced = actor_proficiencies
+            .get(&proficiency.proficiency_id)
+            .map_or(0, |state| state.practiced_action_points);
+        let remaining = u128::from(proficiency_remaining_malus_millionths(
+            practiced,
+            proficiency.time_to_learn_action_points,
+        ));
+        let added = u128::from(
+            proficiency
+                .time_multiplier_millionths
+                .checked_sub(CRAFT_PROFICIENCY_SCALE)
+                .ok_or(SimError::InvalidCraft)?,
+        )
+        .checked_mul(remaining)
+        .ok_or(SimError::NumericOverflow)?
+            / scale;
+        let factor = scale.checked_add(added).ok_or(SimError::NumericOverflow)?;
+        total = total.checked_mul(factor).ok_or(SimError::NumericOverflow)? / scale;
+        if total > u128::from(u64::MAX) {
+            return Err(SimError::NumericOverflow);
+        }
+    }
+    u64::try_from(total).map_err(|_| SimError::NumericOverflow)
+}
+
+fn craft_progress_for_tick(
+    speed: u16,
+    malus_millionths: u64,
+    prior_remainder_millionths: u32,
+) -> Result<(u64, u32), SimError> {
+    if malus_millionths < u64::from(CRAFT_PROFICIENCY_SCALE) {
+        return Err(SimError::InvalidCraft);
+    }
+    let scale = u128::from(CRAFT_PROFICIENCY_SCALE);
+    let progress_millionths = u128::from(speed)
+        .checked_mul(scale)
+        .and_then(|value| value.checked_mul(scale))
+        .ok_or(SimError::NumericOverflow)?
+        / u128::from(malus_millionths);
+    let accumulated = progress_millionths
+        .checked_add(u128::from(prior_remainder_millionths))
+        .ok_or(SimError::NumericOverflow)?;
+    Ok((
+        u64::try_from(accumulated / scale).map_err(|_| SimError::NumericOverflow)?,
+        u32::try_from(accumulated % scale).map_err(|_| SimError::NumericOverflow)?,
+    ))
+}
+
+fn craft_proficiency_bucket(total_action_points: u64, remaining_action_points: u64) -> Option<u8> {
+    let completed = total_action_points.checked_sub(remaining_action_points)?;
+    if total_action_points == 0 {
+        return None;
+    }
+    u8::try_from(u128::from(completed) * 20 / u128::from(total_action_points)).ok()
+}
+
+struct CraftToolSelection {
+    alternatives: Vec<u16>,
+    protected_items: BTreeSet<ItemId>,
+}
+
+struct CraftToolChargeDebit {
+    item_id: ItemId,
+    charges: u32,
+    remaining_charges: i32,
+}
+
+fn tool_start_charge(total: u16) -> u32 {
+    let total = u32::from(total);
+    total / 20 + total % 20
+}
+
+fn tool_resume_charge(total: u16) -> u32 {
+    (u32::from(total) / 20).max(1)
+}
+
+fn available_tool_charges(inventory: &BTreeMap<ItemId, ItemInstance>, type_id: &str) -> u64 {
+    inventory
+        .values()
+        .filter(|item| item.type_id == type_id)
+        .map(|item| u64::try_from(item.available_tool_charges()).unwrap_or(0))
+        .sum()
+}
+
+fn select_craft_tools(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+) -> Option<CraftToolSelection> {
+    select_craft_tools_for_charge(inventory, recipe, tool_start_charge)
+}
+
+fn select_craft_tools_for_charge(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+    charge_required: fn(u16) -> u32,
+) -> Option<CraftToolSelection> {
+    let mut alternatives = Vec::with_capacity(recipe.tools.len());
+    let mut required_presence = BTreeMap::<String, u32>::new();
+    let mut required_charges = BTreeMap::<String, u64>::new();
+    for group in &recipe.tools {
+        let (index, selected) = group.iter().enumerate().find(|(_, tool)| {
+            if tool.consumes_charges {
+                let already = required_charges.get(&tool.type_id).copied().unwrap_or(0);
+                available_tool_charges(inventory, &tool.type_id)
+                    >= already + u64::from(charge_required(tool.amount))
+            } else {
+                let already = required_presence.get(&tool.type_id).copied().unwrap_or(0);
+                let available = inventory
+                    .values()
+                    .filter(|item| item.type_id == tool.type_id)
+                    .count();
+                u64::try_from(available).ok().is_some_and(|available| {
+                    available >= u64::from(already) + u64::from(tool.amount)
+                })
+            }
+        })?;
+        alternatives.push(u16::try_from(index).ok()?);
+        if selected.consumes_charges {
+            *required_charges
+                .entry(selected.type_id.clone())
+                .or_default() += u64::from(charge_required(selected.amount));
+        } else {
+            *required_presence
+                .entry(selected.type_id.clone())
+                .or_default() += u32::from(selected.amount);
+        }
+    }
+    let mut protected_items = BTreeSet::new();
+    for (type_id, amount) in required_presence {
+        protected_items.extend(
+            inventory
+                .values()
+                .filter(|item| item.type_id == type_id)
+                .take(usize::try_from(amount).ok()?)
+                .map(|item| item.id),
+        );
+    }
+    for (type_id, amount) in required_charges {
+        let mut remaining = amount;
+        for item in inventory
+            .values()
+            .filter(|item| item.type_id == type_id && item.available_tool_charges() > 0)
+        {
+            protected_items.insert(item.id);
+            remaining =
+                remaining.saturating_sub(u64::try_from(item.available_tool_charges()).ok()?);
+            if remaining == 0 {
+                break;
+            }
+        }
+        if remaining != 0 {
+            return None;
+        }
+    }
+    Some(CraftToolSelection {
+        alternatives,
+        protected_items,
+    })
+}
+
+fn select_disassembly_tools(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &DisassemblyRecipeV1,
+    excluded_item: Option<ItemId>,
+) -> Option<CraftToolSelection> {
+    let mut alternatives = Vec::with_capacity(recipe.tools.len());
+    let mut required_presence = BTreeMap::<String, u32>::new();
+    for group in &recipe.tools {
+        let (index, selected) = group.iter().enumerate().find(|(_, tool)| {
+            if tool.consumes_charges {
+                return false;
+            }
+            let already = required_presence.get(&tool.type_id).copied().unwrap_or(0);
+            let available = inventory
+                .values()
+                .filter(|item| item.type_id == tool.type_id && Some(item.id) != excluded_item)
+                .count();
+            u64::try_from(available)
+                .ok()
+                .is_some_and(|available| available >= u64::from(already + u32::from(tool.amount)))
+        })?;
+        alternatives.push(u16::try_from(index).ok()?);
+        *required_presence
+            .entry(selected.type_id.clone())
+            .or_default() += u32::from(selected.amount);
+    }
+    let mut protected_items = BTreeSet::new();
+    for (type_id, amount) in required_presence {
+        protected_items.extend(
+            inventory
+                .values()
+                .filter(|item| item.type_id == type_id && Some(item.id) != excluded_item)
+                .take(usize::try_from(amount).ok()?)
+                .map(|item| item.id),
+        );
+    }
+    Some(CraftToolSelection {
+        alternatives,
+        protected_items,
+    })
+}
+
+fn craft_tool_bucket(total_action_points: u64, remaining_action_points: u64) -> Option<u8> {
+    let completed = total_action_points.checked_sub(remaining_action_points)?;
+    if total_action_points == 0 {
+        return None;
+    }
+    let scaled = u128::from(completed) * 20 / u128::from(total_action_points);
+    u8::try_from(1 + scaled.min(19)).ok()
+}
+
+fn tool_charge_cumulative(total: u16, bucket: u8) -> u32 {
+    if bucket == 0 {
+        return 0;
+    }
+    let total = u32::from(total);
+    (total % 20 + u32::from(bucket) * (total / 20)).min(total)
+}
+
+fn debit_selected_craft_tools(
+    inventory: &mut BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+    selected_alternatives: &[u16],
+    old_bucket: u8,
+    new_bucket: u8,
+) -> Result<Option<Vec<CraftToolChargeDebit>>, SimError> {
+    if selected_alternatives.len() != recipe.tools.len()
+        || old_bucket > new_bucket
+        || new_bucket > 20
+    {
+        return Err(SimError::InvalidCraft);
+    }
+    let mut charge_debits = BTreeMap::<String, u64>::new();
+    let mut presence = BTreeMap::<String, u32>::new();
+    for (group, selected) in recipe.tools.iter().zip(selected_alternatives) {
+        let requirement = group
+            .get(usize::from(*selected))
+            .ok_or(SimError::InvalidCraft)?;
+        if requirement.consumes_charges {
+            let old = tool_charge_cumulative(requirement.amount, old_bucket);
+            let new = tool_charge_cumulative(requirement.amount, new_bucket);
+            *charge_debits
+                .entry(requirement.type_id.clone())
+                .or_default() += u64::from(new.checked_sub(old).ok_or(SimError::InvalidCraft)?);
+        } else if new_bucket > old_bucket {
+            *presence.entry(requirement.type_id.clone()).or_default() +=
+                u32::from(requirement.amount);
+        }
+    }
+    for (type_id, amount) in &presence {
+        let available = inventory
+            .values()
+            .filter(|item| item.type_id == *type_id)
+            .count();
+        if u64::try_from(available).map_err(|_| SimError::NumericOverflow)? < u64::from(*amount) {
+            return Ok(None);
+        }
+    }
+    for (type_id, amount) in &charge_debits {
+        if available_tool_charges(inventory, type_id) < *amount {
+            return Ok(None);
+        }
+    }
+    let mut debits = Vec::new();
+    for (type_id, mut remaining) in charge_debits {
+        if remaining == 0 {
+            continue;
+        }
+        for item in inventory
+            .values_mut()
+            .filter(|item| item.type_id == type_id && item.available_tool_charges() > 0)
+        {
+            let available =
+                u64::try_from(item.available_tool_charges()).map_err(|_| SimError::InvalidItem)?;
+            let take = available.min(remaining);
+            let take_i32 = i32::try_from(take).map_err(|_| SimError::NumericOverflow)?;
+            let remaining_charges = item.debit_tool_charges(take_i32)?;
+            debits.push(CraftToolChargeDebit {
+                item_id: item.id,
+                charges: u32::try_from(take).map_err(|_| SimError::NumericOverflow)?,
+                remaining_charges,
+            });
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+        }
+        if remaining != 0 {
+            return Err(SimError::InvalidCraft);
+        }
+    }
+    Ok(Some(debits))
+}
+
+fn selected_noncharge_tools_present(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+    selected_alternatives: &[u16],
+) -> bool {
+    if selected_alternatives.len() != recipe.tools.len() {
+        return false;
+    }
+    let mut required = BTreeMap::<&str, u32>::new();
+    for (group, selected) in recipe.tools.iter().zip(selected_alternatives) {
+        let Some(requirement) = group.get(usize::from(*selected)) else {
+            return false;
+        };
+        if !requirement.consumes_charges {
+            *required.entry(&requirement.type_id).or_default() += u32::from(requirement.amount);
+        }
+    }
+    required.into_iter().all(|(type_id, amount)| {
+        inventory
+            .values()
+            .filter(|item| item.type_id == type_id)
+            .count()
+            >= usize::try_from(amount).unwrap_or(usize::MAX)
+    })
+}
+
+fn select_craft_quality_items(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+) -> Option<BTreeSet<ItemId>> {
+    select_quality_items(inventory, &recipe.qualities, None)
+}
+
+fn select_disassembly_quality_items(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &DisassemblyRecipeV1,
+    excluded_item: Option<ItemId>,
+) -> Option<BTreeSet<ItemId>> {
+    select_quality_items(inventory, &recipe.qualities, excluded_item)
+}
+
+fn select_construction_quality_items(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &ConstructionRecipeV1,
+) -> Option<BTreeSet<ItemId>> {
+    select_quality_items(inventory, &recipe.qualities, None)
+}
+
+fn select_quality_items(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    qualities: &[Vec<cdda_protocol::CraftQualityRequirementV1>],
+    excluded_item: Option<ItemId>,
+) -> Option<BTreeSet<ItemId>> {
+    let mut selected = BTreeSet::new();
+    for group in qualities {
+        let choice = group.iter().find_map(|quality| {
+            let ids = inventory
+                .values()
+                .filter(|item| {
+                    Some(item.id) != excluded_item
+                        && quality
+                            .providers
+                            .binary_search_by(|provider| provider.type_id.cmp(&item.type_id))
+                            .ok()
+                            .and_then(|index| quality.providers.get(index))
+                            .is_some_and(|provider| {
+                                provider.minimum_charges == 0
+                                    || item.available_tool_charges()
+                                        >= i32::from(provider.minimum_charges)
+                            })
+                })
+                .take(usize::from(quality.amount))
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            (ids.len() == usize::from(quality.amount)).then_some(ids)
+        })?;
+        selected.extend(choice);
+    }
+    Some(selected)
+}
+
+fn plan_craft_consumption(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+) -> Result<Option<Vec<PlannedCraftConsumption>>, SimError> {
+    let Some(tool_selection) = select_craft_tools(inventory, recipe) else {
+        return Ok(None);
+    };
+    let mut protected = tool_selection.protected_items;
+    let Some(quality_items) = select_craft_quality_items(inventory, recipe) else {
+        return Ok(None);
+    };
+    protected.extend(quality_items);
+    plan_craft_components(inventory, recipe, &protected)
+}
+
+fn plan_craft_components(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+    protected: &BTreeSet<ItemId>,
+) -> Result<Option<Vec<PlannedCraftConsumption>>, SimError> {
+    plan_component_groups(inventory, &recipe.components, protected)
+}
+
+fn plan_construction_components(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &ConstructionRecipeV1,
+    protected: &BTreeSet<ItemId>,
+) -> Result<Option<Vec<PlannedCraftConsumption>>, SimError> {
+    plan_component_groups(inventory, &recipe.components, protected)
+}
+
+fn all_possible_construction_support_items(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &ConstructionRecipeV1,
+) -> BTreeSet<ItemId> {
+    let quality_types = recipe
+        .qualities
+        .iter()
+        .flatten()
+        .flat_map(|quality| {
+            quality
+                .providers
+                .iter()
+                .map(|provider| provider.type_id.as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    inventory
+        .values()
+        .filter(|item| quality_types.contains(item.type_id.as_str()))
+        .map(|item| item.id)
+        .collect()
+}
+
+fn plan_component_groups(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    components: &[Vec<cdda_protocol::CraftComponentRequirementV1>],
+    protected: &BTreeSet<ItemId>,
+) -> Result<Option<Vec<PlannedCraftConsumption>>, SimError> {
+    let mut planned = BTreeMap::<ItemId, PlannedCraftConsumption>::new();
+    for group in components {
+        let mut selected = None;
+        for alternative in group {
+            let mut available = 0_u64;
+            for item in inventory.values().filter(|item| {
+                item.type_id == alternative.type_id
+                    && item.creature_corpse.is_none()
+                    && !protected.contains(&item.id)
+                    && item
+                        .magazine_well
+                        .as_ref()
+                        .is_none_or(|well| well.installed_magazine.is_none())
+            }) {
+                let units = if alternative.count_by_charges {
+                    u64::try_from(item.charges).unwrap_or(0)
+                } else {
+                    1
+                };
+                let already = planned
+                    .get(&item.id)
+                    .map_or(0, |planned| u64::from(planned.count));
+                available = available
+                    .checked_add(units.saturating_sub(already))
+                    .ok_or(SimError::NumericOverflow)?;
+            }
+            if available >= u64::from(alternative.count) {
+                selected = Some(alternative);
+                break;
+            }
+        }
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let mut remaining = selected.count;
+        for item in inventory.values().filter(|item| {
+            item.type_id == selected.type_id
+                && !protected.contains(&item.id)
+                && item
+                    .magazine_well
+                    .as_ref()
+                    .is_none_or(|well| well.installed_magazine.is_none())
+        }) {
+            if remaining == 0 {
+                break;
+            }
+            let units = if selected.count_by_charges {
+                u32::try_from(item.charges).unwrap_or(0)
+            } else {
+                1
+            };
+            let already = planned.get(&item.id).map_or(0, |entry| entry.count);
+            let take = units.saturating_sub(already).min(remaining);
+            if take == 0 {
+                continue;
+            }
+            let entry = planned.entry(item.id).or_insert(PlannedCraftConsumption {
+                item_id: item.id,
+                count: 0,
+                count_by_charges: selected.count_by_charges,
+            });
+            if entry.count_by_charges != selected.count_by_charges {
+                return Err(SimError::InvalidCraft);
+            }
+            entry.count = entry
+                .count
+                .checked_add(take)
+                .ok_or(SimError::NumericOverflow)?;
+            remaining -= take;
+        }
+        if remaining != 0 {
+            return Err(SimError::InvalidCraft);
+        }
+    }
+    Ok(Some(planned.into_values().collect()))
+}
+
+fn all_possible_craft_support_items(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    recipe: &CraftRecipeV1,
+) -> BTreeSet<ItemId> {
+    let tool_types = recipe
+        .tools
+        .iter()
+        .flatten()
+        .map(|tool| tool.type_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let quality_types = recipe
+        .qualities
+        .iter()
+        .flatten()
+        .flat_map(|quality| {
+            quality
+                .providers
+                .iter()
+                .map(|provider| provider.type_id.as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    inventory
+        .values()
+        .filter(|item| {
+            tool_types.contains(item.type_id.as_str())
+                || quality_types.contains(item.type_id.as_str())
+        })
+        .map(|item| item.id)
+        .collect()
+}
+
+fn craft_reservations_match(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    activity: &CraftActivitySnapshotV1,
+) -> Result<bool, SimError> {
+    if inventory
+        .len()
+        .checked_add(activity.reserved_output_items.len())
+        .is_none_or(|count| count > MAX_ACTOR_INVENTORY_ITEMS)
+    {
+        return Ok(false);
+    }
+    let mut restored = inventory.clone();
+    let mut consumed_by_source = BTreeMap::new();
+    for consumed in &activity.consumed_items {
+        let source_id = consumed.split_from.unwrap_or(consumed.item.id);
+        if consumed_by_source.insert(source_id, consumed).is_some() {
+            return Ok(false);
+        }
+        if let Some(parent_id) = consumed.split_from {
+            let Some(parent) = restored.get_mut(&parent_id) else {
+                return Ok(false);
+            };
+            if consumed.item.charges <= 0 || !same_item_definition(parent, &consumed.item) {
+                return Ok(false);
+            }
+            let Some(restored_charges) = parent.charges.checked_add(consumed.item.charges) else {
+                return Ok(false);
+            };
+            parent.charges = restored_charges;
+        } else {
+            let item = ItemInstance::from_snapshot(&consumed.item)?;
+            if restored.insert(consumed.item.id, item).is_some() {
+                return Ok(false);
+            }
+        }
+    }
+    if restored.len() > MAX_ACTOR_INVENTORY_ITEMS {
+        return Ok(false);
+    }
+    // Recovery validates the immutable ingredient reservation, not whether the
+    // actor can resume right now. A missing/depleted support is a valid reason
+    // for an interrupted craft. Official recipes reject all component/support
+    // type overlap, and this conservative set keeps forged overlap fail-closed.
+    let protected = all_possible_craft_support_items(&restored, &activity.recipe);
+    let Some(planned) = plan_craft_components(&restored, &activity.recipe, &protected)? else {
+        return Ok(false);
+    };
+    if planned.len() != consumed_by_source.len() {
+        return Ok(false);
+    }
+    for planned in planned {
+        let Some(consumed) = consumed_by_source.get(&planned.item_id) else {
+            return Ok(false);
+        };
+        if planned.count_by_charges {
+            if u32::try_from(consumed.item.charges).ok() != Some(planned.count) {
+                return Ok(false);
+            }
+        } else if consumed.split_from.is_some() || planned.count != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn construction_reservations_match(
+    inventory: &BTreeMap<ItemId, ItemInstance>,
+    activity: &ConstructionActivitySnapshotV1,
+) -> Result<bool, SimError> {
+    let mut restored = inventory.clone();
+    let mut consumed_by_source = BTreeMap::new();
+    for consumed in &activity.consumed_items {
+        let source_id = consumed.split_from.unwrap_or(consumed.item.id);
+        if consumed_by_source.insert(source_id, consumed).is_some() {
+            return Ok(false);
+        }
+        if let Some(parent_id) = consumed.split_from {
+            let Some(parent) = restored.get_mut(&parent_id) else {
+                return Ok(false);
+            };
+            if consumed.item.charges <= 0 || !same_item_definition(parent, &consumed.item) {
+                return Ok(false);
+            }
+            let Some(restored_charges) = parent.charges.checked_add(consumed.item.charges) else {
+                return Ok(false);
+            };
+            parent.charges = restored_charges;
+        } else {
+            let item = ItemInstance::from_snapshot(&consumed.item)?;
+            if restored.insert(consumed.item.id, item).is_some() {
+                return Ok(false);
+            }
+        }
+    }
+    if restored.len() > MAX_ACTOR_INVENTORY_ITEMS {
+        return Ok(false);
+    }
+    let protected = all_possible_construction_support_items(&restored, &activity.recipe);
+    let Some(planned) = plan_construction_components(&restored, &activity.recipe, &protected)?
+    else {
+        return Ok(false);
+    };
+    if planned.len() != consumed_by_source.len() {
+        return Ok(false);
+    }
+    for planned in planned {
+        let Some(consumed) = consumed_by_source.get(&planned.item_id) else {
+            return Ok(false);
+        };
+        if planned.count_by_charges {
+            if u32::try_from(consumed.item.charges).ok() != Some(planned.count) {
+                return Ok(false);
+            }
+        } else if consumed.split_from.is_some() || planned.count != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn craft_reserved_inventory_slots(activity: &CraftActivitySnapshotV1) -> usize {
+    activity
+        .consumed_items
+        .iter()
+        .filter(|consumed| consumed.split_from.is_none())
+        .count()
+        .max(activity.reserved_output_items.len())
+}
+
+fn construction_reserved_inventory_slots(activity: &ConstructionActivitySnapshotV1) -> usize {
+    activity
+        .consumed_items
+        .iter()
+        .filter(|consumed| consumed.split_from.is_none())
+        .count()
+}
+
+fn is_craft_split_parent(activity: &CraftActivitySnapshotV1, item_id: ItemId) -> bool {
+    activity
+        .consumed_items
+        .iter()
+        .any(|consumed| consumed.split_from == Some(item_id))
+}
+
+fn command_mutates_craft_split_parent(
+    activity: &CraftActivitySnapshotV1,
+    wielded: Option<ItemId>,
+    command: &CommandKind,
+) -> bool {
+    match command {
+        CommandKind::Drop { item_id }
+        | CommandKind::Consume { item_id }
+        | CommandKind::Activate { item_id } => is_craft_split_parent(activity, *item_id),
+        CommandKind::Reload { ammunition_item } => {
+            is_craft_split_parent(activity, *ammunition_item)
+                || wielded.is_some_and(|item_id| is_craft_split_parent(activity, item_id))
+        }
+        CommandKind::ShootActor { .. } | CommandKind::ShootCreature { .. } => {
+            wielded.is_some_and(|item_id| is_craft_split_parent(activity, item_id))
+        }
+        _ => false,
+    }
+}
+
+fn command_mutates_construction_split_parent(
+    activity: &ConstructionActivitySnapshotV1,
+    wielded: Option<ItemId>,
+    command: &CommandKind,
+) -> bool {
+    let is_split_parent = |item_id| {
+        activity
+            .consumed_items
+            .iter()
+            .any(|consumed| consumed.split_from == Some(item_id))
+    };
+    match command {
+        CommandKind::Drop { item_id }
+        | CommandKind::Consume { item_id }
+        | CommandKind::Activate { item_id } => is_split_parent(*item_id),
+        CommandKind::Reload { ammunition_item } => {
+            is_split_parent(*ammunition_item) || wielded.is_some_and(is_split_parent)
+        }
+        CommandKind::ShootActor { .. } | CommandKind::ShootCreature { .. } => {
+            wielded.is_some_and(is_split_parent)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemSpawn {
+    pub position: WorldPosition,
+    pub type_id: String,
+    pub charges: i32,
+    pub melee_damage_milli: BTreeMap<String, i32>,
+    pub calories: i32,
+    pub quench: i32,
+    pub comestible_type: String,
+    pub ammunition_type: String,
+    pub ranged_weapon: Option<RangedWeaponSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct GroundItem {
+    item: ItemInstance,
+    position: WorldPosition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CorpseLocation {
+    Ground(WorldPosition),
+    Inventory(ActorId, WorldPosition),
+}
+
+impl GroundItem {
+    fn snapshot(&self) -> GroundItemSnapshot {
+        GroundItemSnapshot {
+            item: self.item.snapshot(),
+            position: self.position,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TickOutcome {
+    pub tick: SimTick,
+    pub events: Vec<WorldEvent>,
+    pub canonical_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActorSpawn {
+    pub actor: ActorSnapshot,
+    pub created_tick: SimTick,
+}
+
+pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
+    let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV14");
+    hasher.update(&encoded);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldState {
+    world_namespace: u64,
+    world_seed: [u8; 32],
+    tick: SimTick,
+    allocator: IdAllocator,
+    next_event_counter: u64,
+    next_field_sequence: u64,
+    field_types: BTreeMap<String, FieldTypeSnapshotV1>,
+    terrain_bash_types: BTreeMap<String, TerrainBashTypeV1>,
+    furniture_bash_ids: BTreeSet<String>,
+    furniture_bash_types: BTreeMap<String, FurnitureBashTypeV1>,
+    smash_item_types: BTreeMap<String, SmashItemTypeV1>,
+    worldgen_default_terrain: Option<TerrainTileSnapshot>,
+    actors: BTreeMap<ActorId, Actor>,
+    creatures: BTreeMap<CreatureId, Creature>,
+    ground_items: BTreeMap<ItemId, GroundItem>,
+    chunks: BTreeMap<ChunkCoord, Chunk>,
+    #[serde(skip)]
+    memory_chunk_revisions: BTreeMap<ChunkCoord, u64>,
+    #[serde(skip)]
+    memory_sight_radius: u16,
+}
+
+impl WorldState {
+    #[must_use]
+    pub fn new(world_namespace: u64, world_seed: [u8; 32]) -> Self {
+        Self {
+            world_namespace,
+            world_seed,
+            tick: SimTick(0),
+            allocator: IdAllocator::new(world_namespace),
+            next_event_counter: 1,
+            next_field_sequence: 1,
+            field_types: BTreeMap::new(),
+            terrain_bash_types: BTreeMap::new(),
+            furniture_bash_ids: BTreeSet::new(),
+            furniture_bash_types: BTreeMap::new(),
+            smash_item_types: BTreeMap::new(),
+            worldgen_default_terrain: None,
+            actors: BTreeMap::new(),
+            creatures: BTreeMap::new(),
+            ground_items: BTreeMap::new(),
+            chunks: BTreeMap::new(),
+            memory_chunk_revisions: BTreeMap::new(),
+            memory_sight_radius: NaturalLightSnapshot::at_tick(SimTick(0)).sight_radius,
+        }
+    }
+
+    pub fn install_reserved_block(&mut self, block: ReservedIdBlock) -> Result<(), SimError> {
+        self.allocator.install_reserved_block(block)
+    }
+
+    /// Burns any externally reserved counters through `high_water`. This is
+    /// used during recovery before installing a fresh server-owned block; IDs
+    /// are never reused even when a prior reservation produced no simulation
+    /// object.
+    pub fn advance_allocator_high_water(&mut self, high_water: u64) -> Result<(), SimError> {
+        if high_water < self.allocator.high_water() {
+            return Err(SimError::InvalidReservation);
+        }
+        let next = high_water.checked_add(1).ok_or(SimError::NumericOverflow)?;
+        self.allocator.high_water = high_water;
+        self.allocator.next = next;
+        self.allocator.reserved_end = high_water;
+        Ok(())
+    }
+
+    pub fn insert_chunk(&mut self, chunk: Chunk) -> Option<Chunk> {
+        self.chunks.insert(chunk.coord, chunk)
+    }
+
+    pub fn register_field_type(&mut self, definition: FieldTypeSnapshotV1) -> Result<(), SimError> {
+        validate_field_type(&definition)?;
+        if self.tick != SimTick(0) {
+            return Err(SimError::InvalidField);
+        }
+        match self.field_types.get(&definition.field_type_id) {
+            Some(existing) if existing == &definition => Ok(()),
+            Some(_) => Err(SimError::InvalidField),
+            None => {
+                self.field_types
+                    .insert(definition.field_type_id.clone(), definition);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn register_terrain_bash_type(
+        &mut self,
+        definition: TerrainBashTypeV1,
+    ) -> Result<(), SimError> {
+        validate_terrain_bash_type(&definition, &self.field_types)?;
+        if self.tick != SimTick(0) {
+            return Err(SimError::InvalidTerrain);
+        }
+        match self.terrain_bash_types.get(&definition.terrain_id) {
+            Some(existing) if existing == &definition => Ok(()),
+            Some(_) => Err(SimError::InvalidTerrain),
+            None => {
+                self.terrain_bash_types
+                    .insert(definition.terrain_id.clone(), definition);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn register_furniture_bash_type(
+        &mut self,
+        definition: FurnitureBashTypeV1,
+    ) -> Result<(), SimError> {
+        validate_furniture_bash_type(&definition, &self.field_types)?;
+        if self.tick != SimTick(0) {
+            return Err(SimError::InvalidFurniture);
+        }
+        let furniture_id = definition.furniture_id.clone();
+        match self.furniture_bash_types.get(&furniture_id) {
+            Some(existing) if existing == &definition => Ok(()),
+            Some(_) => Err(SimError::InvalidFurniture),
+            None => {
+                self.furniture_bash_types
+                    .insert(furniture_id.clone(), definition);
+                Ok(())
+            }
+        }?;
+        self.furniture_bash_ids.insert(furniture_id);
+        Ok(())
+    }
+
+    /// Records that pinned content defines a bash body even when its behavior
+    /// is not yet safe to admit into the runtime simulation. Such furniture
+    /// remains an opaque structural layer and cannot expose terrain beneath it.
+    pub fn register_furniture_bash_presence(
+        &mut self,
+        furniture_id: String,
+    ) -> Result<(), SimError> {
+        validate_item_type_id(&furniture_id).map_err(|_| SimError::InvalidFurniture)?;
+        if self.tick != SimTick(0) {
+            return Err(SimError::InvalidFurniture);
+        }
+        self.furniture_bash_ids.insert(furniture_id);
+        Ok(())
+    }
+
+    pub fn register_smash_item_type(
+        &mut self,
+        definition: SmashItemTypeV1,
+    ) -> Result<(), SimError> {
+        if validate_item_type_id(&definition.item_type_id).is_err()
+            || definition.bash_damage == 0
+            || definition.attack_time_moves == 0
+            || self.tick != SimTick(0)
+        {
+            return Err(SimError::InvalidItem);
+        }
+        match self.smash_item_types.get(&definition.item_type_id) {
+            Some(existing) if existing == &definition => Ok(()),
+            Some(_) => Err(SimError::InvalidItem),
+            None => {
+                self.smash_item_types
+                    .insert(definition.item_type_id.clone(), definition);
+                Ok(())
+            }
+        }
+    }
+
+    /// Adds intensity using upstream field semantics: an existing type keeps
+    /// its age and display order, while a new type receives a stable order.
+    pub fn add_field(
+        &mut self,
+        position: WorldPosition,
+        field_type_id: &str,
+        intensity: u8,
+    ) -> Result<u8, SimError> {
+        if intensity == 0 {
+            return Err(SimError::InvalidField);
+        }
+        let maximum = self
+            .field_types
+            .get(field_type_id)
+            .ok_or(SimError::InvalidField)?
+            .intensity_levels
+            .len();
+        let maximum = u8::try_from(maximum).map_err(|_| SimError::InvalidField)?;
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self.chunks.get_mut(&coord).ok_or(SimError::InvalidField)?;
+        let tile_index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
+        let entries = chunk
+            .fields
+            .get_mut(tile_index)
+            .ok_or(SimError::InvalidLocalCoordinate)?;
+        match entries.binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id)) {
+            Ok(index) => {
+                let field = &mut entries[index];
+                let next = field.intensity.saturating_add(intensity).min(maximum);
+                if next != field.intensity {
+                    field.intensity = next;
+                    chunk.revision = chunk
+                        .revision
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
+                }
+                Ok(field.intensity)
+            }
+            Err(index) => {
+                let display_sequence = self.next_field_sequence;
+                self.next_field_sequence = self
+                    .next_field_sequence
+                    .checked_add(1)
+                    .ok_or(SimError::NumericOverflow)?;
+                let intensity = intensity.min(maximum);
+                entries.insert(
+                    index,
+                    FieldSnapshotV1 {
+                        field_type_id: field_type_id.to_owned(),
+                        intensity,
+                        age_seconds: 0,
+                        display_sequence,
+                    },
+                );
+                chunk.revision = chunk
+                    .revision
+                    .checked_add(1)
+                    .ok_or(SimError::NumericOverflow)?;
+                Ok(intensity)
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn fields_at(&self, position: WorldPosition) -> Option<&[FieldSnapshotV1]> {
+        let (coord, local) = position.chunk_and_local();
+        self.chunks.get(&coord)?.fields(local)
+    }
+
+    pub fn configure_flat_worldgen(
+        &mut self,
+        terrain: TerrainTileSnapshot,
+    ) -> Result<(), SimError> {
+        validate_terrain_tile(&terrain)?;
+        if self.tick != SimTick(0) || !self.chunks.is_empty() || terrain.move_cost <= 0 {
+            return Err(SimError::InvalidTerrain);
+        }
+        self.worldgen_default_terrain = Some(terrain);
+        Ok(())
+    }
+
+    pub fn spawn_ground_item(&mut self, spawn: ItemSpawn) -> Result<ItemId, SimError> {
+        self.spawn_ground_item_with_magazine_storage(spawn, 0, None)
+    }
+
+    pub fn spawn_ground_item_with_magazine_storage(
+        &mut self,
+        spawn: ItemSpawn,
+        magazine_capacity: u32,
+        magazine_well: Option<MagazineWellPrototypeV1>,
+    ) -> Result<ItemId, SimError> {
+        self.spawn_ground_item_with_powered_storage(
+            spawn,
+            magazine_capacity,
+            magazine_well,
+            0,
+            None,
+        )
+    }
+
+    pub fn spawn_ground_item_with_powered_storage(
+        &mut self,
+        spawn: ItemSpawn,
+        magazine_capacity: u32,
+        magazine_well: Option<MagazineWellPrototypeV1>,
+        residual_energy_millijoules: u32,
+        powered_tool: Option<PoweredToolStateV1>,
+    ) -> Result<ItemId, SimError> {
+        validate_item_type_id(&spawn.type_id)?;
+        if spawn.comestible_type.len() > 32
+            || spawn.comestible_type.chars().any(char::is_control)
+            || (!spawn.comestible_type.is_empty() && spawn.charges <= 0)
+            || spawn.ammunition_type.len() > 64
+            || spawn.ammunition_type.chars().any(char::is_control)
+            || (!spawn.ammunition_type.is_empty()
+                && spawn.charges <= 0
+                && !(magazine_capacity > 0 && spawn.charges == 0))
+            || (magazine_capacity > 0
+                && (spawn.charges < 0
+                    || !u32::try_from(spawn.charges)
+                        .is_ok_and(|charges| charges <= magazine_capacity)
+                    || spawn.ammunition_type.is_empty()
+                    || spawn.ranged_weapon.is_some()
+                    || magazine_well.is_some()))
+            || (residual_energy_millijoules != 0
+                && (magazine_capacity == 0
+                    || !u32::try_from(spawn.charges)
+                        .is_ok_and(|charges| charges < magazine_capacity)
+                    || residual_energy_millijoules >= MILLIJOULES_PER_BATTERY_CHARGE))
+            || magazine_well.as_ref().is_some_and(|_| {
+                spawn.charges != 0
+                    || magazine_capacity != 0
+                    || !spawn.ammunition_type.is_empty()
+                    || spawn.ranged_weapon.is_some()
+            })
+            || spawn
+                .ranged_weapon
+                .as_ref()
+                .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+        {
+            return Err(SimError::InvalidItem);
+        }
+        if let Some(well) = &magazine_well {
+            validate_magazine_well_prototype(well)?;
+        }
+        if let Some(powered) = &powered_tool
+            && (magazine_well.is_none()
+                || residual_energy_millijoules != 0
+                || !valid_powered_tool_state(&spawn.type_id, powered))
+        {
+            return Err(SimError::InvalidItem);
+        }
+        if !self.is_passable(spawn.position) {
+            return Err(SimError::SpawnBlocked);
+        }
+        let id = self.allocator.allocate_item()?;
+        self.ground_items.insert(
+            id,
+            GroundItem {
+                item: ItemInstance {
+                    id,
+                    type_id: spawn.type_id,
+                    charges: spawn.charges,
+                    damage: 0,
+                    melee_damage_milli: spawn.melee_damage_milli,
+                    calories: spawn.calories,
+                    quench: spawn.quench,
+                    comestible_type: spawn.comestible_type,
+                    ammunition_type: spawn.ammunition_type,
+                    ranged_weapon: spawn.ranged_weapon,
+                    component_provenance: None,
+                    magazine_capacity,
+                    magazine_well: magazine_well.map(|well| MagazineWellSnapshotV1 {
+                        compatible_magazine_type_ids: well.compatible_magazine_type_ids,
+                        installed_magazine: None,
+                    }),
+                    residual_energy_millijoules,
+                    powered_tool,
+                    creature_corpse: None,
+                },
+                position: spawn.position,
+            },
+        );
+        Ok(id)
+    }
+
+    #[must_use]
+    pub fn ground_item_snapshot(&self, item_id: ItemId) -> Option<GroundItemSnapshot> {
+        self.ground_items.get(&item_id).map(GroundItem::snapshot)
+    }
+
+    pub fn spawn_creature(&mut self, spawn: CreatureSpawn) -> Result<CreatureId, SimError> {
+        let speed = spawn.speed;
+        let attack_cost_moves = spawn.attack_cost_moves;
+        let aggression = spawn.aggression;
+        let melee_skill = spawn.melee_skill;
+        let dodge = spawn.dodge;
+        let size = spawn.size;
+        let melee_dice = spawn.melee_dice;
+        let melee_dice_sides = spawn.melee_dice_sides;
+        validate_item_type_id(&spawn.type_id)?;
+        if !spawn.blood_field_type_id.is_empty()
+            && !self.field_types.contains_key(&spawn.blood_field_type_id)
+        {
+            return Err(SimError::InvalidCreature);
+        }
+        if let Some(corpse) = &spawn.corpse
+            && (validate_creature_corpse_prototype(corpse).is_err()
+                || corpse.monster_type_id != spawn.type_id
+                || corpse.max_hp != spawn.hp
+                || corpse.speed != speed
+                || corpse.attack_cost_moves != attack_cost_moves
+                || corpse.aggression != aggression
+                || corpse.melee_skill != melee_skill
+                || corpse.dodge != dodge
+                || corpse.size != size
+                || corpse.melee_dice != melee_dice
+                || corpse.melee_dice_sides != melee_dice_sides
+                || corpse.can_see != spawn.can_see
+                || corpse.vision_day != spawn.vision_day
+                || corpse.vision_night != spawn.vision_night
+                || corpse.stumbles != spawn.stumbles
+                || corpse.bashes != spawn.bashes
+                || corpse.group_bash != spawn.group_bash
+                || corpse.hears != spawn.hears
+                || corpse.good_hearing != spawn.good_hearing
+                || corpse.clumsy_attacks != spawn.clumsy_attacks
+                || corpse.immobile != spawn.immobile
+                || corpse.pacifist != spawn.pacifist
+                || corpse.can_open_doors != spawn.can_open_doors
+                || corpse.path_settings != spawn.path_settings
+                || corpse.blood_field_type_id != spawn.blood_field_type_id)
+        {
+            return Err(SimError::InvalidCreature);
+        }
+        if spawn.hp <= 0
+            || speed == 0
+            || attack_cost_moves == 0
+            || melee_dice_sides == 0
+            || (spawn.group_bash && !spawn.bashes)
+            || (spawn.good_hearing && !spawn.hears)
+            || !valid_creature_path_settings(spawn.path_settings)
+            || (spawn.can_see && spawn.vision_day == 0 && spawn.vision_night == 0)
+        {
+            return Err(SimError::InvalidCreature);
+        }
+        if !self.is_passable(spawn.position)
+            || self.actor_at(spawn.position).is_some()
+            || self.creature_at(spawn.position).is_some()
+        {
+            return Err(SimError::SpawnBlocked);
+        }
+        let id = self.allocator.allocate_creature()?;
+        self.creatures.insert(
+            id,
+            Creature {
+                id,
+                type_id: spawn.type_id,
+                position: spawn.position,
+                hp: spawn.hp,
+                max_hp: spawn.hp,
+                speed,
+                attack_cost_moves,
+                aggression,
+                melee_skill,
+                dodge,
+                size,
+                melee_dice,
+                melee_dice_sides,
+                can_see: spawn.can_see,
+                vision_day: spawn.vision_day,
+                vision_night: spawn.vision_night,
+                stumbles: spawn.stumbles,
+                bashes: spawn.bashes,
+                group_bash: spawn.group_bash,
+                hears: spawn.hears,
+                good_hearing: spawn.good_hearing,
+                clumsy_attacks: spawn.clumsy_attacks,
+                immobile: spawn.immobile,
+                pacifist: spawn.pacifist,
+                can_open_doors: spawn.can_open_doors,
+                path_settings: spawn.path_settings,
+                goal: None,
+                sound_goal: None,
+                action_points: 0,
+                downed_until_tick: None,
+                blood_field_type_id: spawn.blood_field_type_id,
+                corpse: spawn.corpse,
+            },
+        );
+        Ok(id)
+    }
+
+    #[must_use]
+    pub fn creature_snapshot(&self, creature_id: CreatureId) -> Option<CreatureSnapshot> {
+        self.creatures.get(&creature_id).map(Creature::snapshot)
+    }
+
+    pub fn spawn_actor(
+        &mut self,
+        position: WorldPosition,
+        connected: bool,
+    ) -> Result<ActorId, SimError> {
+        self.spawn_actor_with_base_stats(position, connected, CharacterCreationStatsV1::default())
+    }
+
+    pub fn spawn_actor_with_base_stats(
+        &mut self,
+        position: WorldPosition,
+        connected: bool,
+        base_stats: CharacterCreationStatsV1,
+    ) -> Result<ActorId, SimError> {
+        if !base_stats.is_valid() {
+            return Err(SimError::InvalidCharacterCreation);
+        }
+        if !self.is_passable(position)
+            || self.actor_at(position).is_some()
+            || self.creature_at(position).is_some()
+        {
+            return Err(SimError::SpawnBlocked);
+        }
+        let id = self.allocator.allocate_actor()?;
+        self.actors.insert(
+            id,
+            Actor {
+                id,
+                position,
+                hp: DEFAULT_ACTOR_HP,
+                base_strength: base_stats.strength,
+                base_dexterity: base_stats.dexterity,
+                base_intelligence: base_stats.intelligence,
+                base_perception: base_stats.perception,
+                connected,
+                last_command_sequence: CommandSequence(0),
+                last_held_input_sequence: HeldInputSequence(0),
+                held_movement: None,
+                inventory: BTreeMap::new(),
+                wielded: None,
+                stored_kcal: DEFAULT_STORED_KCAL,
+                thirst: 0,
+                sleepiness: 0,
+                sleeping: false,
+                sleep_intervals: 0,
+                speed: DEFAULT_ACTOR_SPEED,
+                action_points: i64::from(ACTOR_ACTION_THRESHOLD),
+                queued_actions: VecDeque::new(),
+                craft_activity: None,
+                read_activity: None,
+                disassembly_activity: None,
+                construction_activity: None,
+                learned_recipes: BTreeSet::new(),
+                skills: BTreeMap::new(),
+                proficiencies: BTreeMap::new(),
+                map_memory: BTreeMap::new(),
+            },
+        );
+        self.refresh_actor_memory(id)?;
+        Ok(id)
+    }
+
+    pub fn spawn_actor_first_available(&mut self, connected: bool) -> Result<ActorId, SimError> {
+        self.spawn_actor_first_available_with_stats(connected, CharacterCreationStatsV1::default())
+    }
+
+    pub fn spawn_actor_first_available_with_stats(
+        &mut self,
+        connected: bool,
+        base_stats: CharacterCreationStatsV1,
+    ) -> Result<ActorId, SimError> {
+        if !base_stats.is_valid() {
+            return Err(SimError::InvalidCharacterCreation);
+        }
+        let mut chunk_coords: Vec<_> = self.chunks.keys().copied().collect();
+        chunk_coords.sort_by_key(|coord| (*coord != (ChunkCoord { x: 0, y: 0, z: 0 }), *coord));
+        for chunk in chunk_coords {
+            let origin_x = chunk
+                .x
+                .checked_mul(SUBMAP_SIZE)
+                .ok_or(SimError::NumericOverflow)?;
+            let origin_y = chunk
+                .y
+                .checked_mul(SUBMAP_SIZE)
+                .ok_or(SimError::NumericOverflow)?;
+            for y in 0..SUBMAP_SIZE {
+                for x in 0..SUBMAP_SIZE {
+                    let position = WorldPosition {
+                        x: origin_x.checked_add(x).ok_or(SimError::NumericOverflow)?,
+                        y: origin_y.checked_add(y).ok_or(SimError::NumericOverflow)?,
+                        z: chunk.z,
+                    };
+                    if self.is_passable(position)
+                        && self.actor_at(position).is_none()
+                        && self.creature_at(position).is_none()
+                    {
+                        return self.spawn_actor_with_base_stats(position, connected, base_stats);
+                    }
+                }
+            }
+        }
+        Err(SimError::NoSpawnLocation)
+    }
+
+    /// Removes a provisional actor without rewinding the allocator. Stable IDs
+    /// stay burned when a higher-level creation transaction rolls back.
+    pub fn despawn_actor(&mut self, actor_id: ActorId) -> Result<(), SimError> {
+        self.actors
+            .remove(&actor_id)
+            .map(|_actor| ())
+            .ok_or(SimError::UnknownActor)
+    }
+
+    /// Restores an actor at the deterministic point recorded by character
+    /// enrollment. The allocator must be positioned exactly where it was when
+    /// the actor was originally created; gaps would hide missing journaled
+    /// state and are therefore rejected.
+    pub fn restore_actor(&mut self, actor: ActorSnapshot) -> Result<(), SimError> {
+        let mut expected_counter = actor.id.counter();
+        if actor.id.world_namespace() != self.world_namespace
+            || actor.id.counter() == 0
+            || self.actors.contains_key(&actor.id)
+            || actor.id.counter() != self.allocator.next()
+            || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
+            || !valid_actor_schedule(&actor, self.tick)
+            || actor.craft_activity.is_some()
+            || actor.read_activity.is_some()
+            || actor.disassembly_activity.is_some()
+            || actor.construction_activity.is_some()
+            || (actor.hp > 0
+                && (!self.is_passable(actor.position)
+                    || self.actor_at(actor.position).is_some()
+                    || self.creature_at(actor.position).is_some()))
+        {
+            return Err(SimError::InvalidActorRestore);
+        }
+        let mut restored_item_ids = BTreeSet::new();
+        let mut maximum_restored_counter = actor.id.counter();
+        for item in &actor.inventory {
+            validate_item_snapshot(item).map_err(|_| SimError::InvalidActorRestore)?;
+            register_stable_item_ids(
+                item,
+                self.world_namespace,
+                &mut restored_item_ids,
+                &mut maximum_restored_counter,
+            )
+            .map_err(|_| SimError::InvalidActorRestore)?;
+        }
+        for item_id in &restored_item_ids {
+            expected_counter = expected_counter
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+            if item_id.counter() != expected_counter || self.item_id_exists(*item_id) {
+                return Err(SimError::InvalidActorRestore);
+            }
+        }
+        if maximum_restored_counter != expected_counter {
+            return Err(SimError::InvalidActorRestore);
+        }
+        let mut restored_inventory = BTreeMap::new();
+        for item in &actor.inventory {
+            if restored_inventory
+                .insert(item.id, ItemInstance::from_snapshot(item)?)
+                .is_some()
+            {
+                return Err(SimError::InvalidActorRestore);
+            }
+        }
+        if expected_counter > self.allocator.reserved_end() {
+            return Err(SimError::InvalidActorRestore);
+        }
+        if actor
+            .wielded
+            .is_some_and(|item_id| !restored_inventory.contains_key(&item_id))
+        {
+            return Err(SimError::InvalidActorRestore);
+        }
+        let restored_skills = actor
+            .skills
+            .iter()
+            .cloned()
+            .map(|skill| (skill.skill_id.clone(), skill))
+            .collect::<BTreeMap<_, _>>();
+        let restored_proficiencies = actor
+            .proficiencies
+            .iter()
+            .cloned()
+            .map(|proficiency| (proficiency.proficiency_id.clone(), proficiency))
+            .collect::<BTreeMap<_, _>>();
+        let allocated = self.allocator.allocate_actor()?;
+        if allocated != actor.id {
+            return Err(SimError::InvalidActorRestore);
+        }
+        for expected in &restored_item_ids {
+            if self.allocator.allocate_item()? != *expected {
+                return Err(SimError::InvalidActorRestore);
+            }
+        }
+        self.actors.insert(
+            actor.id,
+            Actor {
+                id: actor.id,
+                position: actor.position,
+                hp: actor.hp,
+                base_strength: actor.base_strength,
+                base_dexterity: actor.base_dexterity,
+                base_intelligence: actor.base_intelligence,
+                base_perception: actor.base_perception,
+                connected: actor.connected,
+                last_command_sequence: actor.last_command_sequence,
+                last_held_input_sequence: actor.last_held_input_sequence,
+                held_movement: actor.held_movement,
+                inventory: restored_inventory,
+                wielded: actor.wielded,
+                stored_kcal: actor.stored_kcal,
+                thirst: actor.thirst,
+                sleepiness: actor.sleepiness,
+                sleeping: actor.sleeping,
+                sleep_intervals: actor.sleep_intervals,
+                speed: actor.speed,
+                action_points: actor.action_points,
+                queued_actions: actor.queued_actions.into(),
+                craft_activity: actor.craft_activity,
+                read_activity: actor.read_activity,
+                disassembly_activity: actor.disassembly_activity,
+                construction_activity: actor.construction_activity,
+                learned_recipes: actor.learned_recipes.into_iter().collect(),
+                skills: restored_skills,
+                proficiencies: restored_proficiencies,
+                map_memory: map_memory_from_snapshot(actor.map_memory),
+            },
+        );
+        Ok(())
+    }
+
+    /// Network connections do not survive process recovery. This deliberately
+    /// changes no event or command counters because it is recovery metadata,
+    /// not an in-world action.
+    pub fn disconnect_all_for_recovery(&mut self) -> Vec<ActorConnectionUpdateV1> {
+        let mut updates = Vec::new();
+        for actor in self.actors.values_mut() {
+            if actor.connected || actor.held_movement.is_some() {
+                updates.push(ActorConnectionUpdateV1 {
+                    actor_id: actor.id,
+                    connected: false,
+                });
+            }
+            actor.connected = false;
+            actor.held_movement = None;
+        }
+        updates
+    }
+
+    pub fn set_connected(&mut self, actor_id: ActorId, connected: bool) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        actor.connected = connected;
+        if !connected {
+            actor.held_movement = None;
+        }
+        Ok(())
+    }
+
+    pub fn advance_tick(&mut self, commands: Vec<ClientCommand>) -> Result<TickOutcome, SimError> {
+        self.advance_tick_with_inputs(commands, Vec::new())
+    }
+
+    pub fn advance_tick_with_inputs(
+        &mut self,
+        commands: Vec<ClientCommand>,
+        held_movement: Vec<HeldMovementUpdateV1>,
+    ) -> Result<TickOutcome, SimError> {
+        self.advance_tick_with_recovery_inputs(commands, held_movement, Vec::new())
+    }
+
+    pub fn advance_tick_with_recovery_inputs(
+        &mut self,
+        mut commands: Vec<ClientCommand>,
+        mut held_movement: Vec<HeldMovementUpdateV1>,
+        connection_updates: Vec<ActorConnectionUpdateV1>,
+    ) -> Result<TickOutcome, SimError> {
+        commands.sort_by_key(|command| (command.actor_id, command.sequence));
+        held_movement.sort_by_key(|input| (input.actor_id, input.sequence, input.source));
+        for update in connection_updates {
+            self.set_connected(update.actor_id, update.connected)?;
+        }
+        self.tick = self.tick.next();
+        let mut events = Vec::with_capacity(commands.len());
+        for input in held_movement {
+            self.apply_held_movement_update(input)?;
+        }
+        for command in commands {
+            self.admit_command(command, &mut events)?;
+        }
+        let actor_sound_start = events.len();
+        self.advance_actor_actions(&mut events)?;
+        self.advance_powered_tools(&mut events)?;
+        self.advance_fields(&mut events)?;
+        self.advance_creature_corpses(&mut events)?;
+        self.advance_needs(&mut events)?;
+        self.advance_disconnected_autopilot(&mut events)?;
+        self.advance_creature_hearing(&events[actor_sound_start..])?;
+        let creature_sound_start = events.len();
+        self.advance_creatures(&mut events)?;
+        self.advance_creature_hearing(&events[creature_sound_start..])?;
+        self.refresh_terrain_memory(&events)?;
+        let canonical_hash = self.canonical_hash()?;
+        Ok(TickOutcome {
+            tick: self.tick,
+            events,
+            canonical_hash,
+        })
+    }
+
+    fn apply_held_movement_update(&mut self, input: HeldMovementUpdateV1) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&input.actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        match input.source {
+            HeldMovementUpdateSource::Client => {
+                if input
+                    .direction
+                    .is_some_and(|direction| !direction.is_valid())
+                {
+                    return Err(SimError::InvalidHeldMovement);
+                }
+                if input.sequence <= actor.last_held_input_sequence {
+                    return Ok(());
+                }
+                actor.last_held_input_sequence = input.sequence;
+                actor.held_movement = (actor.hp > 0
+                    && actor.craft_activity.is_none()
+                    && actor.read_activity.is_none()
+                    && actor.disassembly_activity.is_none()
+                    && actor.construction_activity.is_none())
+                .then_some(input.direction)
+                .flatten();
+            }
+            HeldMovementUpdateSource::LeaseExpired | HeldMovementUpdateSource::Disconnected => {
+                if input.direction.is_some() {
+                    return Err(SimError::InvalidHeldMovement);
+                }
+                if input.sequence == actor.last_held_input_sequence {
+                    actor.held_movement = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_command(
+        &mut self,
+        command: ClientCommand,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some(actor) = self.actors.get(&command.actor_id) else {
+            events.push(self.make_event(WorldEventKind::CommandRejected {
+                actor_id: command.actor_id,
+                sequence: command.sequence,
+                reason: CommandRejection::UnknownActor,
+            })?);
+            return Ok(());
+        };
+        if command.sequence <= actor.last_command_sequence {
+            events.push(self.make_event(WorldEventKind::CommandRejected {
+                actor_id: command.actor_id,
+                sequence: command.sequence,
+                reason: CommandRejection::StaleSequence,
+            })?);
+            return Ok(());
+        }
+        let actor_alive = actor.hp > 0;
+        if let Some(actor) = self.actors.get_mut(&command.actor_id) {
+            actor.last_command_sequence = command.sequence;
+        }
+        if !actor_alive {
+            events.push(self.make_event(WorldEventKind::CommandRejected {
+                actor_id: command.actor_id,
+                sequence: command.sequence,
+                reason: CommandRejection::ActorDead,
+            })?);
+            return Ok(());
+        }
+
+        let actor_sleeping = self
+            .actors
+            .get(&command.actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .sleeping;
+        if actor_sleeping && !matches!(&command.kind, CommandKind::Wake) {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::ActorSleeping,
+            )?);
+            return Ok(());
+        }
+        if !actor_sleeping && matches!(&command.kind, CommandKind::Wake) {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::ActorAwake,
+            )?);
+            return Ok(());
+        }
+
+        let actor = self
+            .actors
+            .get(&command.actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if let Some(activity) = actor.craft_activity.as_ref() {
+            let allowed = if activity.interrupted {
+                !matches!(
+                    &command.kind,
+                    CommandKind::Craft { .. }
+                        | CommandKind::ReadBook { .. }
+                        | CommandKind::ResumeRead
+                        | CommandKind::CancelRead
+                        | CommandKind::Disassemble { .. }
+                        | CommandKind::ResumeDisassembly
+                        | CommandKind::CancelDisassembly
+                        | CommandKind::Construct { .. }
+                        | CommandKind::ResumeConstruction
+                        | CommandKind::CancelConstruction
+                ) && !command_mutates_craft_split_parent(activity, actor.wielded, &command.kind)
+            } else {
+                matches!(&command.kind, CommandKind::CancelCraft | CommandKind::Wake)
+            };
+            if !allowed {
+                let reason = if matches!(&command.kind, CommandKind::ResumeCraft) {
+                    CommandRejection::CraftNotInterrupted
+                } else {
+                    CommandRejection::ActorBusy
+                };
+                events.push(self.rejection(command.actor_id, command.sequence, reason)?);
+                return Ok(());
+            }
+        } else if matches!(
+            &command.kind,
+            CommandKind::ResumeCraft | CommandKind::CancelCraft
+        ) {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::NoCraftInProgress,
+            )?);
+            return Ok(());
+        }
+
+        let actor = self
+            .actors
+            .get(&command.actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if let Some(activity) = actor.read_activity.as_ref() {
+            let allowed = if activity.interrupted {
+                !matches!(
+                    &command.kind,
+                    CommandKind::Craft { .. }
+                        | CommandKind::ReadBook { .. }
+                        | CommandKind::Disassemble { .. }
+                        | CommandKind::ResumeDisassembly
+                        | CommandKind::CancelDisassembly
+                        | CommandKind::Construct { .. }
+                        | CommandKind::ResumeConstruction
+                        | CommandKind::CancelConstruction
+                )
+            } else {
+                matches!(&command.kind, CommandKind::CancelRead | CommandKind::Wake)
+            };
+            if !allowed {
+                let reason = if matches!(&command.kind, CommandKind::ResumeRead) {
+                    CommandRejection::ReadNotInterrupted
+                } else {
+                    CommandRejection::ActorBusy
+                };
+                events.push(self.rejection(command.actor_id, command.sequence, reason)?);
+                return Ok(());
+            }
+        } else if matches!(
+            &command.kind,
+            CommandKind::ResumeRead | CommandKind::CancelRead
+        ) {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::NoReadInProgress,
+            )?);
+            return Ok(());
+        }
+
+        let actor = self
+            .actors
+            .get(&command.actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if let Some(activity) = actor.disassembly_activity.as_ref() {
+            let allowed = if activity.interrupted {
+                !matches!(
+                    &command.kind,
+                    CommandKind::Craft { .. }
+                        | CommandKind::ReadBook { .. }
+                        | CommandKind::Disassemble { .. }
+                        | CommandKind::ResumeCraft
+                        | CommandKind::CancelCraft
+                        | CommandKind::ResumeRead
+                        | CommandKind::CancelRead
+                        | CommandKind::Construct { .. }
+                        | CommandKind::ResumeConstruction
+                        | CommandKind::CancelConstruction
+                )
+            } else {
+                matches!(
+                    &command.kind,
+                    CommandKind::CancelDisassembly | CommandKind::Wake
+                )
+            };
+            if !allowed {
+                let reason = if matches!(&command.kind, CommandKind::ResumeDisassembly) {
+                    CommandRejection::DisassemblyNotInterrupted
+                } else {
+                    CommandRejection::ActorBusy
+                };
+                events.push(self.rejection(command.actor_id, command.sequence, reason)?);
+                return Ok(());
+            }
+        } else if matches!(
+            &command.kind,
+            CommandKind::ResumeDisassembly | CommandKind::CancelDisassembly
+        ) {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::NoDisassemblyInProgress,
+            )?);
+            return Ok(());
+        }
+
+        let actor = self
+            .actors
+            .get(&command.actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if let Some(activity) = actor.construction_activity.as_ref() {
+            let allowed = if activity.interrupted {
+                !matches!(
+                    &command.kind,
+                    CommandKind::Craft { .. }
+                        | CommandKind::ResumeCraft
+                        | CommandKind::CancelCraft
+                        | CommandKind::ReadBook { .. }
+                        | CommandKind::ResumeRead
+                        | CommandKind::CancelRead
+                        | CommandKind::Disassemble { .. }
+                        | CommandKind::ResumeDisassembly
+                        | CommandKind::CancelDisassembly
+                        | CommandKind::Construct { .. }
+                ) && !command_mutates_construction_split_parent(
+                    activity,
+                    actor.wielded,
+                    &command.kind,
+                )
+            } else {
+                matches!(
+                    &command.kind,
+                    CommandKind::CancelConstruction | CommandKind::Wake
+                )
+            };
+            if !allowed {
+                let reason = if matches!(&command.kind, CommandKind::ResumeConstruction) {
+                    CommandRejection::ConstructionNotInterrupted
+                } else {
+                    CommandRejection::ActorBusy
+                };
+                events.push(self.rejection(command.actor_id, command.sequence, reason)?);
+                return Ok(());
+            }
+        } else if matches!(
+            &command.kind,
+            CommandKind::ResumeConstruction | CommandKind::CancelConstruction
+        ) {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::NoConstructionInProgress,
+            )?);
+            return Ok(());
+        }
+
+        let actor = self
+            .actors
+            .get_mut(&command.actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if actor.queued_actions.len() >= MAX_QUEUED_ACTIONS {
+            events.push(self.rejection(
+                command.actor_id,
+                command.sequence,
+                CommandRejection::ActionQueueFull,
+            )?);
+            return Ok(());
+        }
+        actor.queued_actions.push_back(QueuedActionSnapshot {
+            sequence: command.sequence,
+            kind: command.kind,
+        });
+        Ok(())
+    }
+
+    fn advance_actor_actions(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        let actor_ids: Vec<_> = self.actors.keys().copied().collect();
+        for actor_id in actor_ids {
+            let detail_light = self.actor_has_detail_light(actor_id)?;
+            let construction_target_valid = if let Some(activity) = self
+                .actors
+                .get(&actor_id)
+                .and_then(|actor| actor.construction_activity.as_ref())
+            {
+                self.construction_target_is_valid(actor_id, activity.target, &activity.recipe)?
+            } else {
+                true
+            };
+            let construction_qualities_available = self
+                .actors
+                .get(&actor_id)
+                .and_then(|actor| {
+                    actor.construction_activity.as_ref().map(|activity| {
+                        select_construction_quality_items(&actor.inventory, &activity.recipe)
+                            .is_some()
+                    })
+                })
+                .unwrap_or(true);
+            let (
+                action,
+                practice,
+                proficiency_practice,
+                tool_debits,
+                tool_interruption,
+                read_interruption,
+                disassembly_interruption,
+                construction_interruption,
+            ) = {
+                let actor = self
+                    .actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?;
+                if actor.hp <= 0 {
+                    actor.queued_actions.clear();
+                    actor.held_movement = None;
+                    (None, None, None, Vec::new(), None, None, None, None)
+                } else if actor.sleeping {
+                    (
+                        actor
+                            .queued_actions
+                            .front()
+                            .is_some_and(|action| matches!(action.kind, CommandKind::Wake))
+                            .then(|| actor.queued_actions.pop_front())
+                            .flatten()
+                            .map(ScheduledActorAction::Queued),
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                } else if actor
+                    .craft_activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.interrupted)
+                {
+                    let immediate_control = actor.queued_actions.front().is_some_and(|action| {
+                        matches!(
+                            action.kind,
+                            CommandKind::ResumeCraft | CommandKind::CancelCraft
+                        )
+                    });
+                    let action = if immediate_control {
+                        actor.queued_actions.pop_front()
+                    } else {
+                        let accrued = actor
+                            .action_points
+                            .checked_add(i64::from(actor.speed))
+                            .ok_or(SimError::NumericOverflow)?;
+                        actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
+                        (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
+                            .then(|| actor.queued_actions.pop_front())
+                            .flatten()
+                    };
+                    (
+                        action.map(ScheduledActorAction::Queued),
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                } else if actor
+                    .read_activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.interrupted)
+                {
+                    let immediate_control = actor.queued_actions.front().is_some_and(|action| {
+                        matches!(
+                            action.kind,
+                            CommandKind::ResumeRead | CommandKind::CancelRead
+                        )
+                    });
+                    let action = if immediate_control {
+                        actor.queued_actions.pop_front()
+                    } else {
+                        let accrued = actor
+                            .action_points
+                            .checked_add(i64::from(actor.speed))
+                            .ok_or(SimError::NumericOverflow)?;
+                        actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
+                        (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
+                            .then(|| actor.queued_actions.pop_front())
+                            .flatten()
+                    };
+                    (
+                        action.map(ScheduledActorAction::Queued),
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                } else if actor
+                    .disassembly_activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.interrupted)
+                {
+                    let immediate_control = actor.queued_actions.front().is_some_and(|action| {
+                        matches!(
+                            action.kind,
+                            CommandKind::ResumeDisassembly | CommandKind::CancelDisassembly
+                        )
+                    });
+                    let action = if immediate_control {
+                        actor.queued_actions.pop_front()
+                    } else {
+                        let accrued = actor
+                            .action_points
+                            .checked_add(i64::from(actor.speed))
+                            .ok_or(SimError::NumericOverflow)?;
+                        actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
+                        (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
+                            .then(|| actor.queued_actions.pop_front())
+                            .flatten()
+                    };
+                    (
+                        action.map(ScheduledActorAction::Queued),
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                } else if actor
+                    .construction_activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.interrupted)
+                {
+                    let immediate_control = actor.queued_actions.front().is_some_and(|action| {
+                        matches!(
+                            action.kind,
+                            CommandKind::ResumeConstruction | CommandKind::CancelConstruction
+                        )
+                    });
+                    let action = if immediate_control {
+                        actor.queued_actions.pop_front()
+                    } else {
+                        let accrued = actor
+                            .action_points
+                            .checked_add(i64::from(actor.speed))
+                            .ok_or(SimError::NumericOverflow)?;
+                        actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
+                        (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
+                            .then(|| actor.queued_actions.pop_front())
+                            .flatten()
+                    };
+                    (
+                        action.map(ScheduledActorAction::Queued),
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                } else if let Some(activity) = &mut actor.read_activity {
+                    if let Some(action) = actor.queued_actions.pop_front() {
+                        (
+                            Some(ScheduledActorAction::Queued(action)),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    } else if !detail_light {
+                        activity.interrupted = true;
+                        (
+                            None,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            Some((activity.book_item_id, BookStudyInterruptionReason::Darkness)),
+                            None,
+                            None,
+                        )
+                    } else {
+                        activity.remaining_action_points = activity
+                            .remaining_action_points
+                            .saturating_sub(u64::from(actor.speed));
+                        (
+                            (activity.remaining_action_points == 0)
+                                .then_some(ScheduledActorAction::ReadCompleted),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                } else if let Some(activity) = &mut actor.disassembly_activity {
+                    if let Some(action) = actor.queued_actions.pop_front() {
+                        (
+                            Some(ScheduledActorAction::Queued(action)),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    } else if !detail_light {
+                        activity.interrupted = true;
+                        (
+                            None,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            Some((
+                                activity.target_item.id,
+                                DisassemblyInterruptionReason::Darkness,
+                            )),
+                            None,
+                        )
+                    } else {
+                        activity.remaining_action_points = activity
+                            .remaining_action_points
+                            .saturating_sub(u64::from(actor.speed));
+                        (
+                            (activity.remaining_action_points == 0)
+                                .then_some(ScheduledActorAction::DisassemblyCompleted),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                } else if let Some(activity) = &mut actor.construction_activity {
+                    if let Some(action) = actor.queued_actions.pop_front() {
+                        (
+                            Some(ScheduledActorAction::Queued(action)),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    } else if !detail_light {
+                        activity.interrupted = true;
+                        (
+                            None,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            Some((
+                                activity.recipe.construction_id.clone(),
+                                activity.target,
+                                ConstructionInterruptionReason::Darkness,
+                            )),
+                        )
+                    } else if !construction_target_valid {
+                        activity.interrupted = true;
+                        (
+                            None,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            Some((
+                                activity.recipe.construction_id.clone(),
+                                activity.target,
+                                ConstructionInterruptionReason::TargetChanged,
+                            )),
+                        )
+                    } else if !construction_qualities_available {
+                        activity.interrupted = true;
+                        (
+                            None,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            Some((
+                                activity.recipe.construction_id.clone(),
+                                activity.target,
+                                ConstructionInterruptionReason::MissingQualities,
+                            )),
+                        )
+                    } else {
+                        activity.remaining_action_points = activity
+                            .remaining_action_points
+                            .saturating_sub(u64::from(actor.speed));
+                        (
+                            (activity.remaining_action_points == 0)
+                                .then_some(ScheduledActorAction::ConstructionCompleted),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                } else if let Some(activity) = &mut actor.craft_activity {
+                    if let Some(action) = actor.queued_actions.pop_front() {
+                        (
+                            Some(ScheduledActorAction::Queued(action)),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    } else {
+                        let (progress, progress_remainder_millionths) =
+                            if activity.recipe.proficiencies.is_empty() {
+                                (u64::from(actor.speed), 0)
+                            } else {
+                                let malus = craft_proficiency_time_malus_millionths(
+                                    &actor.proficiencies,
+                                    &activity.recipe,
+                                )?;
+                                craft_progress_for_tick(
+                                    actor.speed,
+                                    malus,
+                                    activity.proficiency_progress_millionths,
+                                )?
+                            };
+                        let proposed_remaining =
+                            activity.remaining_action_points.saturating_sub(progress);
+                        let total_action_points = activity
+                            .recipe
+                            .time_moves
+                            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+                            .ok_or(SimError::NumericOverflow)?;
+                        let old_bucket = craft_tool_bucket(
+                            total_action_points,
+                            activity.remaining_action_points,
+                        )
+                        .ok_or(SimError::InvalidCraft)?;
+                        let new_bucket = craft_tool_bucket(total_action_points, proposed_remaining)
+                            .ok_or(SimError::InvalidCraft)?;
+                        let debit = debit_selected_craft_tools(
+                            &mut actor.inventory,
+                            &activity.recipe,
+                            &activity.selected_tool_alternatives,
+                            old_bucket,
+                            new_bucket,
+                        )?;
+                        if let Some(tool_debits) = debit {
+                            activity.remaining_action_points = proposed_remaining;
+                            activity.proficiency_progress_millionths =
+                                progress_remainder_millionths;
+                            let completed = total_action_points
+                                .checked_sub(activity.remaining_action_points)
+                                .ok_or(SimError::InvalidCraft)?;
+                            let practice_target = completed / CRAFT_PRACTICE_ACTION_POINTS;
+                            let practice =
+                                if let Some(skill) = activity.recipe.primary_skill.clone() {
+                                    let practice_delta = practice_target
+                                        .checked_sub(activity.practice_ticks_awarded)
+                                        .ok_or(SimError::InvalidCraft)?;
+                                    activity.practice_ticks_awarded = practice_target;
+                                    (practice_delta > 0).then_some((skill, practice_delta))
+                                } else {
+                                    None
+                                };
+                            let proficiency_target = if activity.recipe.proficiencies.is_empty() {
+                                0
+                            } else {
+                                craft_proficiency_bucket(
+                                    total_action_points,
+                                    activity.remaining_action_points,
+                                )
+                                .ok_or(SimError::InvalidCraft)?
+                            };
+                            let proficiency_delta = proficiency_target
+                                .checked_sub(activity.proficiency_buckets_awarded)
+                                .ok_or(SimError::InvalidCraft)?;
+                            activity.proficiency_buckets_awarded = proficiency_target;
+                            let proficiency_practice = (proficiency_delta > 0)
+                                .then(|| (activity.recipe.clone(), proficiency_delta));
+                            (
+                                (activity.remaining_action_points == 0)
+                                    .then_some(ScheduledActorAction::CraftCompleted),
+                                practice,
+                                proficiency_practice,
+                                tool_debits,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                        } else {
+                            activity.interrupted = true;
+                            (
+                                None,
+                                None,
+                                None,
+                                Vec::new(),
+                                Some(activity.recipe.recipe_id.clone()),
+                                None,
+                                None,
+                                None,
+                            )
+                        }
+                    }
+                } else {
+                    let accrued = actor
+                        .action_points
+                        .checked_add(i64::from(actor.speed))
+                        .ok_or(SimError::NumericOverflow)?;
+                    actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
+                    let action = if actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD) {
+                        actor
+                            .queued_actions
+                            .pop_front()
+                            .map(ScheduledActorAction::Queued)
+                            .or_else(|| actor.held_movement.map(ScheduledActorAction::Held))
+                    } else {
+                        None
+                    };
+                    (action, None, None, Vec::new(), None, None, None, None)
+                }
+            };
+            for debit in tool_debits {
+                events.push(self.make_event(WorldEventKind::CraftToolChargesConsumed {
+                    actor_id,
+                    item_id: debit.item_id,
+                    charges: debit.charges,
+                    remaining_charges: debit.remaining_charges,
+                })?);
+            }
+            if let Some(recipe_id) = tool_interruption {
+                events.push(self.make_event(WorldEventKind::CraftInterrupted {
+                    actor_id,
+                    recipe_id,
+                })?);
+            }
+            if let Some((book_item_id, reason)) = read_interruption {
+                events.push(self.make_event(WorldEventKind::BookStudyInterrupted {
+                    actor_id,
+                    book_item_id,
+                    reason,
+                })?);
+            }
+            if let Some((item_id, reason)) = disassembly_interruption {
+                events.push(self.make_event(WorldEventKind::DisassemblyInterrupted {
+                    actor_id,
+                    target_item_id: item_id,
+                    reason,
+                })?);
+            }
+            if let Some((construction_id, target, reason)) = construction_interruption {
+                events.push(self.make_event(WorldEventKind::ConstructionInterrupted {
+                    actor_id,
+                    construction_id,
+                    target,
+                    reason,
+                })?);
+            }
+            if let Some((skill, practice_ticks)) = practice {
+                self.award_craft_practice(actor_id, &skill, practice_ticks, events)?;
+            }
+            if let Some((recipe, proficiency_buckets)) = proficiency_practice {
+                self.award_craft_proficiency_practice(
+                    actor_id,
+                    &recipe,
+                    proficiency_buckets,
+                    events,
+                )?;
+            }
+            if let Some(action) = action {
+                if matches!(&action, ScheduledActorAction::CraftCompleted) {
+                    self.complete_craft(actor_id, events)?;
+                    continue;
+                }
+                if matches!(&action, ScheduledActorAction::ReadCompleted) {
+                    self.complete_book_study(actor_id, events)?;
+                    continue;
+                }
+                if matches!(&action, ScheduledActorAction::DisassemblyCompleted) {
+                    self.complete_disassembly(actor_id, events)?;
+                    continue;
+                }
+                if matches!(&action, ScheduledActorAction::ConstructionCompleted) {
+                    self.complete_construction(actor_id, events)?;
+                    continue;
+                }
+                let cost = match &action {
+                    ScheduledActorAction::Queued(action) => self.action_cost(actor_id, action)?,
+                    ScheduledActorAction::Held(direction) => {
+                        self.movement_action_cost(actor_id, direction.dx, direction.dy, 0)?
+                    }
+                    ScheduledActorAction::CraftCompleted => 0,
+                    ScheduledActorAction::ReadCompleted => 0,
+                    ScheduledActorAction::DisassemblyCompleted => 0,
+                    ScheduledActorAction::ConstructionCompleted => 0,
+                };
+                let actor = self
+                    .actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?;
+                actor.action_points = actor
+                    .action_points
+                    .checked_sub(cost)
+                    .ok_or(SimError::NumericOverflow)?;
+                match action {
+                    ScheduledActorAction::Queued(action) => {
+                        self.execute_action(actor_id, action, events)?;
+                    }
+                    ScheduledActorAction::Held(direction) => {
+                        self.apply_held_move(actor_id, direction, events)?;
+                    }
+                    ScheduledActorAction::CraftCompleted => {}
+                    ScheduledActorAction::ReadCompleted => {}
+                    ScheduledActorAction::DisassemblyCompleted => {}
+                    ScheduledActorAction::ConstructionCompleted => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn award_craft_practice(
+        &mut self,
+        actor_id: ActorId,
+        requirement: &CraftSkillRequirementV1,
+        practice_ticks: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let skill_cap = requirement.level.saturating_mul(5) / 4;
+        let mut gained_levels = Vec::new();
+        {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let skill = actor
+                .skills
+                .entry(requirement.skill_id.clone())
+                .or_insert_with(|| SkillLevelSnapshot {
+                    skill_id: requirement.skill_id.clone(),
+                    practical_level: 0,
+                    practical_experience: 0,
+                    theoretical_level: 0,
+                    theoretical_experience: 0,
+                    last_practiced: self.tick,
+                });
+            for _ in 0..practice_ticks {
+                skill.last_practiced = self.tick;
+                if skill.practical_level > skill_cap || skill.practical_level >= MAX_SKILL_LEVEL {
+                    continue;
+                }
+                skill.practical_experience = skill
+                    .practical_experience
+                    .checked_add(100)
+                    .ok_or(SimError::NumericOverflow)?;
+                if u64::from(skill.practical_experience)
+                    >= skill_experience_threshold(skill.practical_level)
+                {
+                    // Pinned crafting practice does not allow one training call
+                    // to cross more than one level and resets overflow XP.
+                    skill.practical_experience = 0;
+                    skill.practical_level = skill
+                        .practical_level
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
+                    if skill.practical_level > skill.theoretical_level {
+                        skill.theoretical_level = skill.practical_level;
+                        skill.theoretical_experience = 0;
+                    }
+                    gained_levels.push((skill.practical_level, skill.theoretical_level));
+                } else if skill.practical_level == skill.theoretical_level
+                    && skill.practical_experience > skill.theoretical_experience
+                {
+                    // SkillLevel::on_exercise_change keeps knowledge caught up
+                    // when both levels are equal.
+                    skill.theoretical_experience = skill.practical_experience;
+                }
+            }
+        }
+        for (practical_level, theoretical_level) in gained_levels {
+            events.push(self.make_event(WorldEventKind::SkillLevelGained {
+                actor_id,
+                skill_id: requirement.skill_id.clone(),
+                practical_level,
+                theoretical_level,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn award_disassembly_practice(
+        &mut self,
+        actor_id: ActorId,
+        skill_id: &str,
+        difficulty: u8,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        // Pinned `complete_disassemble` calls `practice(skill, difficulty * 2,
+        // difficulty)`. This is the focus-100, training-enabled, trait-free
+        // path, with canonical actor INT/PER evaluated as exact rationals.
+        let base_experience = u64::from(difficulty)
+            .checked_mul(2)
+            .and_then(|amount| amount.checked_mul(100))
+            .ok_or(SimError::NumericOverflow)?;
+        let (old_practical, old_theoretical, practical_level, theoretical_level) = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let intelligence = u64::from(effective_base_stat(actor.base_intelligence));
+            let perception = u64::from(effective_base_stat(actor.base_perception));
+            let catchup_numerator = 24_u64
+                .checked_add(
+                    intelligence
+                        .checked_mul(2)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .and_then(|value| value.checked_add(perception))
+                .ok_or(SimError::NumericOverflow)?;
+            let knowledge_numerator = 40_u64
+                .checked_add(intelligence)
+                .ok_or(SimError::NumericOverflow)?;
+            let skill =
+                actor
+                    .skills
+                    .entry(skill_id.to_owned())
+                    .or_insert_with(|| SkillLevelSnapshot {
+                        skill_id: skill_id.to_owned(),
+                        practical_level: 0,
+                        practical_experience: 0,
+                        theoretical_level: 0,
+                        theoretical_experience: 0,
+                        last_practiced: self.tick,
+                    });
+            let old_practical = skill.practical_level;
+            let old_theoretical = skill.theoretical_level;
+            if skill.practical_level >= MAX_SKILL_LEVEL {
+                return Ok(());
+            }
+            skill.last_practiced = self.tick;
+            if skill.practical_level <= difficulty && base_experience > 0 {
+                let practical_level = u64::from(skill.practical_level.max(1));
+                let theoretical_level = u64::from(skill.theoretical_level.max(1));
+                let practical_experience = u64::from(skill.practical_experience);
+                let theoretical_experience = u64::from(skill.theoretical_experience);
+                let (practical_gain, mut theoretical_gain) =
+                    if skill.theoretical_level > skill.practical_level {
+                        (
+                            base_experience
+                                .checked_mul(catchup_numerator)
+                                .and_then(|gain| gain.checked_mul(theoretical_level))
+                                .ok_or(SimError::NumericOverflow)?
+                                / practical_level
+                                    .checked_mul(24)
+                                    .ok_or(SimError::NumericOverflow)?,
+                            base_experience
+                                .checked_mul(knowledge_numerator)
+                                .ok_or(SimError::NumericOverflow)?
+                                / 40,
+                        )
+                    } else if skill.theoretical_level == skill.practical_level
+                        && theoretical_experience > practical_experience
+                    {
+                        let practical_denominator = theoretical_experience
+                            .checked_mul(24)
+                            .ok_or(SimError::NumericOverflow)?;
+                        let practical_multiplier_numerator = catchup_numerator
+                            .checked_mul(theoretical_experience)
+                            .and_then(|value| {
+                                practical_experience
+                                    .checked_mul(24)
+                                    .and_then(|exercise| value.checked_sub(exercise))
+                            })
+                            .ok_or(SimError::NumericOverflow)?
+                            .max(practical_denominator);
+                        let theoretical_denominator = theoretical_experience
+                            .checked_mul(40)
+                            .ok_or(SimError::NumericOverflow)?;
+                        let theoretical_multiplier_numerator = knowledge_numerator
+                            .checked_mul(theoretical_experience)
+                            .and_then(|value| {
+                                practical_experience
+                                    .checked_mul(4)
+                                    .and_then(|exercise| value.checked_sub(exercise))
+                            })
+                            .ok_or(SimError::NumericOverflow)?
+                            .max(theoretical_denominator);
+                        (
+                            base_experience
+                                .checked_mul(practical_multiplier_numerator)
+                                .ok_or(SimError::NumericOverflow)?
+                                / practical_denominator,
+                            base_experience
+                                .checked_mul(theoretical_multiplier_numerator)
+                                .ok_or(SimError::NumericOverflow)?
+                                / theoretical_denominator,
+                        )
+                    } else {
+                        (base_experience, base_experience)
+                    };
+                theoretical_gain = if skill.theoretical_level >= MAX_SKILL_LEVEL {
+                    0
+                } else {
+                    theoretical_gain.min(
+                        practical_gain
+                            .checked_mul(9)
+                            .ok_or(SimError::NumericOverflow)?
+                            / 10,
+                    )
+                };
+                skill.practical_experience = u32::try_from(
+                    practical_experience
+                        .checked_add(practical_gain)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .map_err(|_| SimError::NumericOverflow)?;
+                skill.theoretical_experience = u32::try_from(
+                    theoretical_experience
+                        .checked_add(theoretical_gain)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .map_err(|_| SimError::NumericOverflow)?;
+
+                if u64::from(skill.practical_experience)
+                    >= skill_experience_threshold(skill.practical_level)
+                {
+                    skill.practical_experience = 0;
+                    skill.practical_level = skill
+                        .practical_level
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
+                    if skill.practical_level > skill.theoretical_level {
+                        skill.theoretical_level = skill.practical_level;
+                        skill.theoretical_experience = 0;
+                    }
+                }
+                if skill.practical_level == skill.theoretical_level
+                    && skill.practical_experience > skill.theoretical_experience
+                {
+                    skill.theoretical_experience = skill.practical_experience;
+                }
+                if skill.theoretical_level < MAX_SKILL_LEVEL
+                    && u64::from(skill.theoretical_experience)
+                        >= skill_experience_threshold(skill.theoretical_level)
+                {
+                    skill.theoretical_experience = 0;
+                    skill.theoretical_level = skill
+                        .theoretical_level
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
+                }
+            }
+            (
+                old_practical,
+                old_theoretical,
+                skill.practical_level,
+                skill.theoretical_level,
+            )
+        };
+        if practical_level != old_practical || theoretical_level != old_theoretical {
+            events.push(self.make_event(WorldEventKind::SkillLevelGained {
+                actor_id,
+                skill_id: skill_id.to_owned(),
+                practical_level,
+                theoretical_level,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn award_craft_proficiency_practice(
+        &mut self,
+        actor_id: ActorId,
+        recipe: &CraftRecipeV1,
+        proficiency_buckets: u8,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if proficiency_buckets == 0 || recipe.proficiencies.is_empty() {
+            return Ok(());
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let malus = craft_proficiency_time_malus_millionths(&actor.proficiencies, recipe)?;
+        let malused_moves = u128::from(recipe.time_moves)
+            .checked_mul(u128::from(malus))
+            .ok_or(SimError::NumericOverflow)?
+            / u128::from(CRAFT_PROFICIENCY_SCALE);
+        // Pinned craft_proficiency_gain converts each 5% slice to whole seconds.
+        let practice_action_points = (malused_moves / 2_000)
+            .checked_mul(2_000)
+            .and_then(|value| value.checked_mul(u128::from(proficiency_buckets)))
+            .ok_or(SimError::NumericOverflow)?;
+        let subjects = recipe
+            .proficiencies
+            .iter()
+            .filter(|proficiency| {
+                if proficiency.required
+                    || !proficiency.can_learn
+                    || proficiency.learning_time_multiplier_millionths == 0
+                    || actor_has_proficiency(actor, &proficiency.proficiency_id)
+                    || !proficiency
+                        .required_proficiencies
+                        .iter()
+                        .all(|required| actor_has_proficiency(actor, required))
+                {
+                    return false;
+                }
+                actor
+                    .proficiencies
+                    .get(&proficiency.proficiency_id)
+                    .zip(proficiency.max_experience_action_points)
+                    .is_none_or(|(state, maximum)| state.practiced_action_points <= maximum)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if subjects.is_empty() || practice_action_points == 0 {
+            return Ok(());
+        }
+        let per_subject = practice_action_points
+            / u128::try_from(subjects.len()).map_err(|_| SimError::NumericOverflow)?;
+        let mut learned = Vec::new();
+        {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            for proficiency in subjects {
+                let awarded_millionths = per_subject
+                    .checked_mul(u128::from(proficiency.learning_time_multiplier_millionths))
+                    .and_then(|value| value.checked_mul(u128::from(CRAFT_PROFICIENCY_SCALE)))
+                    .ok_or(SimError::NumericOverflow)?
+                    / u128::from(proficiency.time_multiplier_millionths);
+                let state = actor
+                    .proficiencies
+                    .entry(proficiency.proficiency_id.clone())
+                    .or_insert_with(|| ProficiencyLevelSnapshot {
+                        proficiency_id: proficiency.proficiency_id.clone(),
+                        practiced_action_points: 0,
+                        practice_remainder_millionths: 0,
+                        learned: false,
+                    });
+                let accumulated = awarded_millionths
+                    .checked_add(u128::from(state.practice_remainder_millionths))
+                    .ok_or(SimError::NumericOverflow)?;
+                let whole = u64::try_from(accumulated / u128::from(CRAFT_PROFICIENCY_SCALE))
+                    .map_err(|_| SimError::NumericOverflow)?;
+                state.practice_remainder_millionths =
+                    u32::try_from(accumulated % u128::from(CRAFT_PROFICIENCY_SCALE))
+                        .map_err(|_| SimError::NumericOverflow)?;
+                state.practiced_action_points = state
+                    .practiced_action_points
+                    .checked_add(whole)
+                    .ok_or(SimError::NumericOverflow)?;
+                if state.practiced_action_points >= proficiency.time_to_learn_action_points {
+                    state.practiced_action_points = proficiency.time_to_learn_action_points;
+                    state.practice_remainder_millionths = 0;
+                    state.learned = true;
+                    learned.push(proficiency.proficiency_id);
+                }
+            }
+        }
+        for proficiency_id in learned {
+            events.push(self.make_event(WorldEventKind::ProficiencyLearned {
+                actor_id,
+                proficiency_id,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn action_cost(
+        &mut self,
+        actor_id: ActorId,
+        action: &QueuedActionSnapshot,
+    ) -> Result<i64, SimError> {
+        match &action.kind {
+            CommandKind::Move { dx, dy, dz } => self.movement_action_cost(actor_id, *dx, *dy, *dz),
+            CommandKind::Smash { .. } => self.actor_smash_action_cost(actor_id),
+            CommandKind::Attack { .. } | CommandKind::AttackCreature { .. } => {
+                self.actor_melee_action_cost(actor_id)
+            }
+            CommandKind::Wake
+            | CommandKind::Activate { .. }
+            | CommandKind::Craft { .. }
+            | CommandKind::ResumeCraft
+            | CommandKind::CancelCraft
+            | CommandKind::ReadBook { .. }
+            | CommandKind::ResumeRead
+            | CommandKind::CancelRead
+            | CommandKind::Construct { .. }
+            | CommandKind::ResumeConstruction
+            | CommandKind::CancelConstruction => Ok(0),
+            _ => Ok(i64::from(ACTOR_ACTION_THRESHOLD)),
+        }
+    }
+
+    fn movement_action_cost(
+        &mut self,
+        actor_id: ActorId,
+        dx: i8,
+        dy: i8,
+        dz: i8,
+    ) -> Result<i64, SimError> {
+        let Some(axis_multiplier) = horizontal_step_multiplier(dx, dy, dz) else {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        };
+        let from = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(to) = from.checked_offset(dx, dy, dz) else {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        };
+        self.ensure_active_bubble_generated(to)?;
+        if self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        }
+        let Some(from_cost) = self.tile_movement_cost(from) else {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        };
+        let Some(to_cost) = self.tile_movement_cost(to) else {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        };
+        from_cost
+            .checked_add(to_cost)
+            .and_then(|cost| cost.checked_mul(axis_multiplier))
+            .map(|cost| cost / 2)
+            .and_then(|cost| cost.checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE))
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn apply_held_move(
+        &mut self,
+        actor_id: ActorId,
+        direction: HorizontalDirection,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let from = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(to) = from.checked_offset(direction.dx, direction.dy, 0) else {
+            return Ok(());
+        };
+        self.ensure_active_bubble_generated(to)?;
+        if !self.is_passable(to) || self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+            return Ok(());
+        }
+        self.actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position = to;
+        events.push(self.make_event(WorldEventKind::ActorMoved { actor_id, from, to })?);
+        Ok(())
+    }
+
+    fn execute_action(
+        &mut self,
+        actor_id: ActorId,
+        action: QueuedActionSnapshot,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let sequence = action.sequence;
+
+        match action.kind {
+            CommandKind::Move { dx, dy, dz } => {
+                self.apply_move(actor_id, sequence, dx, dy, dz, events)
+            }
+            CommandKind::Attack { target } => self.apply_attack(actor_id, sequence, target, events),
+            CommandKind::AttackCreature { target } => {
+                self.apply_attack_creature(actor_id, sequence, target, events)
+            }
+            CommandKind::ShootActor { target } => {
+                self.apply_ranged_attack(actor_id, sequence, RangedTarget::Actor(target), events)
+            }
+            CommandKind::ShootCreature { target } => {
+                self.apply_ranged_attack(actor_id, sequence, RangedTarget::Creature(target), events)
+            }
+            CommandKind::Reload { ammunition_item } => {
+                self.apply_reload(actor_id, sequence, ammunition_item, events)
+            }
+            CommandKind::Wield { item_id } => {
+                self.apply_wield(actor_id, sequence, Some(item_id), events)
+            }
+            CommandKind::Unwield => self.apply_wield(actor_id, sequence, None, events),
+            CommandKind::PickUp { item_id } => {
+                self.apply_pickup(actor_id, sequence, item_id, events)
+            }
+            CommandKind::Drop { item_id } => self.apply_drop(actor_id, sequence, item_id, events),
+            CommandKind::Consume { item_id } => {
+                self.apply_consume(actor_id, sequence, item_id, events)
+            }
+            CommandKind::Activate { item_id } => {
+                self.apply_activate(actor_id, sequence, item_id, events)
+            }
+            CommandKind::Craft { recipe_id, recipe } => {
+                self.start_craft(actor_id, sequence, recipe_id, recipe, events)
+            }
+            CommandKind::ResumeCraft => self.resume_craft(actor_id, sequence, events),
+            CommandKind::CancelCraft => self.cancel_craft(actor_id, events),
+            CommandKind::ReadBook {
+                item_id,
+                book_type_id,
+                study,
+            } => self.start_book_study(actor_id, sequence, item_id, book_type_id, study, events),
+            CommandKind::ResumeRead => self.resume_book_study(actor_id, sequence, events),
+            CommandKind::CancelRead => self.cancel_book_study(actor_id, events),
+            CommandKind::Disassemble {
+                item_id,
+                item_type_id,
+                recipe,
+            } => self.start_disassembly(actor_id, sequence, item_id, item_type_id, recipe, events),
+            CommandKind::ResumeDisassembly => self.resume_disassembly(actor_id, sequence, events),
+            CommandKind::CancelDisassembly => self.cancel_disassembly(actor_id, events),
+            CommandKind::Construct {
+                target,
+                construction_id,
+                construction,
+            } => self.start_construction(
+                actor_id,
+                sequence,
+                target,
+                construction_id,
+                construction,
+                events,
+            ),
+            CommandKind::ResumeConstruction => self.resume_construction(actor_id, sequence, events),
+            CommandKind::CancelConstruction => self.cancel_construction(actor_id, events),
+            CommandKind::Open { dx, dy } => {
+                self.apply_terrain_interaction(actor_id, sequence, dx, dy, true, events)
+            }
+            CommandKind::Close { dx, dy } => {
+                self.apply_terrain_interaction(actor_id, sequence, dx, dy, false, events)
+            }
+            CommandKind::Smash { dx, dy } => {
+                self.apply_actor_bash(actor_id, sequence, dx, dy, events)
+            }
+            CommandKind::Sleep => self.apply_sleep(actor_id, sequence, events),
+            CommandKind::Wake => self.wake_actor(actor_id, WakeReason::Voluntary, events),
+            CommandKind::Wait => Ok(()),
+        }
+    }
+
+    fn apply_sleep(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if actor.sleeping {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ActorSleeping)?);
+            return Ok(());
+        }
+        if actor.sleepiness < SLEEPINESS_TIRED {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::NotTired)?);
+            return Ok(());
+        }
+        self.put_actor_to_sleep(actor_id, SleepReason::Voluntary, events)
+    }
+
+    fn put_actor_to_sleep(
+        &mut self,
+        actor_id: ActorId,
+        reason: SleepReason,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        actor.sleeping = true;
+        actor.sleep_intervals = 0;
+        actor.action_points = 0;
+        let canceled = actor
+            .queued_actions
+            .drain(..)
+            .map(|action| action.sequence)
+            .collect::<Vec<_>>();
+        events.push(self.make_event(WorldEventKind::ActorFellAsleep { actor_id, reason })?);
+        for sequence in canceled {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ActorSleeping)?);
+        }
+        Ok(())
+    }
+
+    fn wake_actor(
+        &mut self,
+        actor_id: ActorId,
+        reason: WakeReason,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if !actor.sleeping {
+            return Ok(());
+        }
+        actor.sleeping = false;
+        actor.sleep_intervals = 0;
+        actor.action_points = 0;
+        let canceled = actor
+            .queued_actions
+            .drain(..)
+            .map(|action| action.sequence)
+            .collect::<Vec<_>>();
+        events.push(self.make_event(WorldEventKind::ActorWokeUp { actor_id, reason })?);
+        for sequence in canceled {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ActorAwake)?);
+        }
+        Ok(())
+    }
+
+    fn apply_move(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        dx: i8,
+        dy: i8,
+        dz: i8,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if horizontal_step_multiplier(dx, dy, dz).is_none() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InvalidMovement)?);
+            return Ok(());
+        }
+        let from = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(to) = from.checked_offset(dx, dy, dz) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InvalidMovement)?);
+            return Ok(());
+        };
+        self.ensure_active_bubble_generated(to)?;
+        if !self.is_passable(to) || self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.position = to;
+        }
+        events.push(self.make_event(WorldEventKind::ActorMoved { actor_id, from, to })?);
+        Ok(())
+    }
+
+    fn apply_attack(
+        &mut self,
+        source: ActorId,
+        sequence: CommandSequence,
+        target: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let source_position = self
+            .actors
+            .get(&source)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(target_actor) = self.actors.get(&target) else {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        };
+        if target_actor.hp <= 0 {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        }
+        let target_position = target_actor.position;
+        if !horizontally_adjacent(source_position, target_position) {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetOutOfRange)?);
+            return Ok(());
+        }
+        let damage = self.melee_damage(source)?;
+        let (remaining_hp, was_sleeping) = {
+            let target_actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+            target_actor.hp = target_actor
+                .hp
+                .checked_sub(i32::from(damage))
+                .ok_or(SimError::NumericOverflow)?;
+            let was_sleeping = target_actor.sleeping;
+            if target_actor.hp <= 0 {
+                target_actor.sleeping = false;
+                target_actor.sleep_intervals = 0;
+                target_actor.queued_actions.clear();
+            }
+            (target_actor.hp, was_sleeping)
+        };
+        events.push(self.make_event(WorldEventKind::DamageApplied {
+            source,
+            target,
+            amount: damage,
+            remaining_hp,
+        })?);
+        self.interrupt_craft(target, events)?;
+        self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+        self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+        self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
+        if was_sleeping && remaining_hp > 0 {
+            self.wake_actor(target, WakeReason::Damage, events)?;
+        }
+        if remaining_hp <= 0 {
+            events.push(self.make_event(WorldEventKind::ActorDied {
+                actor_id: target,
+                killer: source,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn apply_ranged_attack(
+        &mut self,
+        source: ActorId,
+        sequence: CommandSequence,
+        target: RangedTarget,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let source_actor = self.actors.get(&source).ok_or(SimError::UnknownActor)?;
+        let source_position = source_actor.position;
+        let Some(weapon_id) = source_actor.wielded else {
+            events.push(self.rejection(source, sequence, CommandRejection::WeaponNotRanged)?);
+            return Ok(());
+        };
+        let Some(weapon) = source_actor.inventory.get(&weapon_id) else {
+            return Err(SimError::UnknownItem);
+        };
+        let Some(ranged_weapon) = weapon.ranged_weapon.clone() else {
+            events.push(self.rejection(source, sequence, CommandRejection::WeaponNotRanged)?);
+            return Ok(());
+        };
+        if ranged_weapon.ammunition_remaining == 0 {
+            events.push(self.rejection(source, sequence, CommandRejection::WeaponEmpty)?);
+            return Ok(());
+        }
+        let target_position = match target {
+            RangedTarget::Actor(target_id) => self
+                .actors
+                .get(&target_id)
+                .filter(|actor| actor.hp > 0 && target_id != source)
+                .map(|actor| actor.position),
+            RangedTarget::Creature(target_id) => self
+                .creatures
+                .get(&target_id)
+                .filter(|creature| creature.hp > 0)
+                .map(|creature| creature.position),
+        };
+        let Some(target_position) = target_position else {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        };
+        let distance = ranged_distance(source_position, target_position);
+        if distance == 0 || distance > u32::from(ranged_weapon.range) {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetOutOfRange)?);
+            return Ok(());
+        }
+        if !self.actor_can_see_position(source, target_position)? {
+            events.push(self.rejection(source, sequence, CommandRejection::NoClearShot)?);
+            return Ok(());
+        }
+
+        let remaining_ammunition = ranged_weapon.ammunition_remaining - 1;
+        let target_id = match target {
+            RangedTarget::Actor(id) => id.as_u128(),
+            RangedTarget::Creature(id) => id.as_u128(),
+        };
+        let mut rng = self.named_rng(
+            b"actor-ranged-hit",
+            &[source.as_u128(), weapon_id.as_u128(), target_id],
+            self.next_event_counter,
+        );
+        let miss_per_thousand = u64::from(ranged_weapon.dispersion)
+            .checked_mul(u64::from(distance))
+            .ok_or(SimError::NumericOverflow)?
+            .checked_div(u64::from(ranged_weapon.range))
+            .ok_or(SimError::NumericOverflow)?
+            .min(900);
+        let hit = u64::from(rng.next_u32() % 1_000) >= miss_per_thousand;
+        if hit && let RangedTarget::Creature(target_id) = target {
+            let creature = self
+                .creatures
+                .get(&target_id)
+                .ok_or(SimError::UnknownCreature)?;
+            let remaining_hp = creature
+                .hp
+                .checked_sub(i32::from(ranged_weapon.damage))
+                .ok_or(SimError::NumericOverflow)?;
+            if remaining_hp <= 0
+                && creature.corpse.is_some()
+                && corpse_damage_level(remaining_hp, creature.max_hp)?.is_some()
+                && !self.allocator.can_allocate()
+            {
+                events.push(self.rejection(
+                    source,
+                    sequence,
+                    CommandRejection::StableIdsUnavailable,
+                )?);
+                return Ok(());
+            }
+        }
+        self.actors
+            .get_mut(&source)
+            .and_then(|actor| actor.inventory.get_mut(&weapon_id))
+            .and_then(|item| item.ranged_weapon.as_mut())
+            .ok_or(SimError::UnknownItem)?
+            .ammunition_remaining = remaining_ammunition;
+        events.push(self.make_event(WorldEventKind::RangedAttackResolved {
+            source,
+            weapon: weapon_id,
+            origin: source_position,
+            target,
+            hit,
+            remaining_ammunition,
+            sound: ranged_sound_description(ranged_weapon.sound_volume).to_owned(),
+            sound_volume: ranged_weapon.sound_volume,
+        })?);
+        if !hit {
+            return Ok(());
+        }
+
+        match target {
+            RangedTarget::Actor(target_id) => {
+                let (remaining_hp, was_sleeping) = {
+                    let actor = self
+                        .actors
+                        .get_mut(&target_id)
+                        .ok_or(SimError::UnknownActor)?;
+                    actor.hp = actor
+                        .hp
+                        .checked_sub(i32::from(ranged_weapon.damage))
+                        .ok_or(SimError::NumericOverflow)?;
+                    let was_sleeping = actor.sleeping;
+                    if actor.hp <= 0 {
+                        actor.sleeping = false;
+                        actor.sleep_intervals = 0;
+                        actor.queued_actions.clear();
+                    }
+                    (actor.hp, was_sleeping)
+                };
+                events.push(self.make_event(WorldEventKind::DamageApplied {
+                    source,
+                    target: target_id,
+                    amount: ranged_weapon.damage,
+                    remaining_hp,
+                })?);
+                self.interrupt_craft(target_id, events)?;
+                self.interrupt_book_study(target_id, BookStudyInterruptionReason::Damage, events)?;
+                self.interrupt_disassembly(
+                    target_id,
+                    DisassemblyInterruptionReason::Damage,
+                    events,
+                )?;
+                self.interrupt_construction(
+                    target_id,
+                    ConstructionInterruptionReason::Damage,
+                    events,
+                )?;
+                if was_sleeping && remaining_hp > 0 {
+                    self.wake_actor(target_id, WakeReason::Damage, events)?;
+                }
+                if remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::ActorDied {
+                        actor_id: target_id,
+                        killer: source,
+                    })?);
+                }
+            }
+            RangedTarget::Creature(target_id) => {
+                let creature = self
+                    .creatures
+                    .get_mut(&target_id)
+                    .ok_or(SimError::UnknownCreature)?;
+                creature.hp = creature
+                    .hp
+                    .checked_sub(i32::from(ranged_weapon.damage))
+                    .ok_or(SimError::NumericOverflow)?;
+                let remaining_hp = creature.hp;
+                events.push(self.make_event(WorldEventKind::CreatureDamaged {
+                    source,
+                    target: target_id,
+                    amount: ranged_weapon.damage,
+                    remaining_hp,
+                })?);
+                if remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::CreatureDied {
+                        creature_id: target_id,
+                        killer: source,
+                    })?);
+                    self.finish_creature_death(target_id, remaining_hp, events)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_reload(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        ammunition_item: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(weapon_id) = actor.wielded else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::WeaponNotRanged)?);
+            return Ok(());
+        };
+        let Some(weapon) = actor.inventory.get(&weapon_id) else {
+            return Err(SimError::UnknownItem);
+        };
+        if weapon.ranged_weapon.is_none() && weapon.magazine_well.is_some() {
+            return self.apply_magazine_reload(
+                actor_id,
+                sequence,
+                weapon_id,
+                ammunition_item,
+                events,
+            );
+        }
+        let Some(ranged_weapon) = weapon.ranged_weapon.as_ref() else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::WeaponNotRanged)?);
+            return Ok(());
+        };
+        if ranged_weapon.ammunition_remaining == ranged_weapon.ammunition_capacity {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::WeaponFull)?);
+            return Ok(());
+        }
+        let Some(ammunition) = actor.inventory.get(&ammunition_item) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if ammunition_item == weapon_id
+            || ammunition.ammunition_type != ranged_weapon.ammunition_type
+            || ammunition.charges <= 0
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        }
+        let capacity = ranged_weapon.ammunition_capacity - ranged_weapon.ammunition_remaining;
+        let loaded = u16::try_from(i32::from(capacity).min(ammunition.charges))
+            .map_err(|_| SimError::NumericOverflow)?;
+
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let mut ammunition = actor
+            .inventory
+            .remove(&ammunition_item)
+            .ok_or(SimError::UnknownItem)?;
+        let weapon = actor
+            .inventory
+            .get_mut(&weapon_id)
+            .and_then(|weapon| weapon.ranged_weapon.as_mut())
+            .ok_or(SimError::UnknownItem)?;
+        weapon.ammunition_remaining = weapon
+            .ammunition_remaining
+            .checked_add(loaded)
+            .ok_or(SimError::NumericOverflow)?;
+        ammunition.charges = ammunition
+            .charges
+            .checked_sub(i32::from(loaded))
+            .ok_or(SimError::NumericOverflow)?;
+        let ammunition_remaining = weapon.ammunition_remaining;
+        let source_charges_remaining = ammunition.charges;
+        if ammunition.charges > 0 {
+            actor.inventory.insert(ammunition_item, ammunition);
+        }
+        events.push(self.make_event(WorldEventKind::WeaponReloaded {
+            actor_id,
+            weapon: weapon_id,
+            ammunition_item,
+            loaded,
+            ammunition_remaining,
+            source_charges_remaining,
+        })?);
+        Ok(())
+    }
+
+    fn apply_magazine_reload(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        tool_id: ItemId,
+        magazine_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let well = actor
+            .inventory
+            .get(&tool_id)
+            .and_then(|tool| tool.magazine_well.as_ref())
+            .ok_or(SimError::UnknownItem)?;
+        if actor
+            .inventory
+            .get(&tool_id)
+            .and_then(|tool| tool.powered_tool.as_ref())
+            .is_some_and(|powered| powered.active)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::PoweredToolActive)?);
+            return Ok(());
+        }
+        let Some(magazine) = actor.inventory.get(&magazine_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if magazine_id == tool_id
+            || well
+                .compatible_magazine_type_ids
+                .binary_search(&magazine.type_id)
+                .is_err()
+            || magazine.magazine_capacity == 0
+            || magazine.magazine_well.is_some()
+            || magazine.ranged_weapon.is_some()
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        }
+
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let magazine = actor
+            .inventory
+            .remove(&magazine_id)
+            .ok_or(SimError::UnknownItem)?;
+        let charges = magazine.charges;
+        let ejected = actor
+            .inventory
+            .get_mut(&tool_id)
+            .and_then(|tool| tool.magazine_well.as_mut())
+            .ok_or(SimError::UnknownItem)?
+            .installed_magazine
+            .replace(Box::new(magazine.snapshot()));
+        let ejected_magazine = if let Some(ejected) = ejected {
+            let ejected = ItemInstance::from_snapshot(&ejected)?;
+            let ejected_id = ejected.id;
+            if actor.inventory.insert(ejected_id, ejected).is_some() {
+                return Err(SimError::InvalidItem);
+            }
+            Some(ejected_id)
+        } else {
+            None
+        };
+        events.push(self.make_event(WorldEventKind::MagazineReloaded {
+            actor_id,
+            tool: tool_id,
+            magazine: magazine_id,
+            ejected_magazine,
+            charges,
+        })?);
+        Ok(())
+    }
+
+    fn has_clear_shot(&self, origin: WorldPosition, target: WorldPosition) -> bool {
+        if origin.z != target.z {
+            return false;
+        }
+        let (mut x, mut y) = (origin.x, origin.y);
+        let dx = (i64::from(target.x) - i64::from(x)).abs();
+        let sx = if x < target.x { 1 } else { -1 };
+        let dy = -(i64::from(target.y) - i64::from(y)).abs();
+        let sy = if y < target.y { 1 } else { -1 };
+        let mut error = dx + dy;
+        loop {
+            if x == target.x && y == target.y {
+                return true;
+            }
+            let doubled = error * 2;
+            if doubled >= dy {
+                error += dy;
+                x += sx;
+            }
+            if doubled <= dx {
+                error += dx;
+                y += sy;
+            }
+            if x == target.x && y == target.y {
+                return true;
+            }
+            let (chunk, local) = (WorldPosition { x, y, z: origin.z }).chunk_and_local();
+            if !self
+                .chunks
+                .get(&chunk)
+                .is_some_and(|chunk| chunk.is_transparent(local))
+            {
+                return false;
+            }
+        }
+    }
+
+    fn active_light_sources(&self) -> Vec<ActiveLightSource> {
+        let mut sources = BTreeMap::<WorldPosition, (u32, Option<u32>)>::new();
+        let mut add_source = |position: WorldPosition, item: &ItemInstance| {
+            let light_emission = item.effective_powered_light_emission().unwrap_or(0);
+            if light_emission == 0 {
+                return;
+            }
+            let sight_radius = powered_light_sight_radius(light_emission);
+            let external_detail_radius = powered_light_external_detail_radius(light_emission);
+            if sight_radius == 0 && external_detail_radius.is_none() {
+                return;
+            }
+            let entry = sources.entry(position).or_insert((0, None));
+            entry.0 = entry.0.max(sight_radius);
+            entry.1 = match (entry.1, external_detail_radius) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left @ Some(_), None) => left,
+                (None, right) => right,
+            };
+        };
+        for actor in self.actors.values() {
+            for item in actor.inventory.values() {
+                add_source(actor.position, item);
+            }
+        }
+        for ground in self.ground_items.values() {
+            add_source(ground.position, &ground.item);
+        }
+        sources
+            .into_iter()
+            .map(
+                |(position, (sight_radius, external_detail_radius))| ActiveLightSource {
+                    position,
+                    sight_radius,
+                    external_detail_radius,
+                },
+            )
+            .collect()
+    }
+
+    fn position_has_detail_light(&self, position: WorldPosition) -> Result<bool, SimError> {
+        if NaturalLightSnapshot::at_tick(self.tick).phase == SkyPhase::Day {
+            return Ok(true);
+        }
+        Ok(self.active_light_sources().into_iter().any(|source| {
+            source.external_detail_radius.is_some_and(|radius| {
+                ranged_distance(source.position, position) <= radius
+                    && self.has_clear_shot(source.position, position)
+            })
+        }))
+    }
+
+    fn actor_has_detail_light(&self, actor_id: ActorId) -> Result<bool, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if actor.inventory.values().any(|item| {
+            item.effective_powered_light_emission()
+                .is_ok_and(powered_light_is_personal_detail)
+        }) {
+            return Ok(true);
+        }
+        let position = actor.position;
+        self.position_has_detail_light(position)
+    }
+
+    fn actor_can_see_position(
+        &self,
+        actor_id: ActorId,
+        target: WorldPosition,
+    ) -> Result<bool, SimError> {
+        let sources = self.active_light_sources();
+        self.actor_can_see_position_with_sources(actor_id, target, &sources)
+    }
+
+    fn actor_can_see_position_with_sources(
+        &self,
+        actor_id: ActorId,
+        target: WorldPosition,
+        sources: &[ActiveLightSource],
+    ) -> Result<bool, SimError> {
+        let origin = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let distance = ranged_distance(origin, target);
+        if origin.z != target.z
+            || distance > TERRAIN_MEMORY_RADIUS_TILES
+            || !self.has_clear_shot(origin, target)
+        {
+            return Ok(false);
+        }
+        let natural_radius = u32::from(NaturalLightSnapshot::at_tick(self.tick).sight_radius);
+        if distance <= natural_radius {
+            return Ok(true);
+        }
+        Ok(sources.iter().copied().any(|source| {
+            ranged_distance(source.position, target) <= source.sight_radius
+                && self.has_clear_shot(source.position, target)
+        }))
+    }
+
+    fn refresh_terrain_memory(&mut self, events: &[WorldEvent]) -> Result<(), SimError> {
+        let current_revisions = self
+            .chunks
+            .iter()
+            .map(|(coord, chunk)| (*coord, chunk.revision))
+            .collect::<BTreeMap<_, _>>();
+        let sight_radius = NaturalLightSnapshot::at_tick(self.tick).sight_radius;
+        let global_dynamic_light_changed = events.iter().any(|event| match event.kind {
+            WorldEventKind::PoweredToolChanged { .. }
+            | WorldEventKind::ItemPickedUp { .. }
+            | WorldEventKind::ItemDropped { .. } => true,
+            WorldEventKind::ActorMoved { actor_id, .. } => {
+                self.actors.get(&actor_id).is_some_and(|actor| {
+                    actor.inventory.values().any(|item| {
+                        item.powered_tool
+                            .as_ref()
+                            .is_some_and(|powered| powered.active)
+                    })
+                })
+            }
+            _ => false,
+        });
+        let refresh_every_awake_actor = current_revisions != self.memory_chunk_revisions
+            || sight_radius != self.memory_sight_radius
+            || global_dynamic_light_changed;
+        let mut actor_ids = BTreeSet::new();
+        if refresh_every_awake_actor {
+            actor_ids.extend(
+                self.actors
+                    .values()
+                    .filter(|actor| actor.hp > 0 && !actor.sleeping)
+                    .map(|actor| actor.id),
+            );
+        } else {
+            for event in events {
+                match event.kind {
+                    WorldEventKind::ActorMoved { actor_id, .. }
+                    | WorldEventKind::ActorWokeUp { actor_id, .. } => {
+                        actor_ids.insert(actor_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for actor_id in actor_ids {
+            if self
+                .actors
+                .get(&actor_id)
+                .is_some_and(|actor| actor.hp > 0 && !actor.sleeping)
+            {
+                self.refresh_actor_memory(actor_id)?;
+            }
+        }
+        self.memory_chunk_revisions = current_revisions;
+        self.memory_sight_radius = sight_radius;
+        Ok(())
+    }
+
+    fn refresh_actor_memory(&mut self, actor_id: ActorId) -> Result<(), SimError> {
+        let origin = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let light_sources = self.active_light_sources();
+        let radius = if light_sources.is_empty() {
+            i32::from(NaturalLightSnapshot::at_tick(self.tick).sight_radius)
+        } else {
+            i32::try_from(TERRAIN_MEMORY_RADIUS_TILES).map_err(|_| SimError::NumericOverflow)?
+        };
+        if u32::try_from(radius).map_err(|_| SimError::NumericOverflow)?
+            > TERRAIN_MEMORY_RADIUS_TILES
+        {
+            return Err(SimError::NumericOverflow);
+        }
+        let mut perceived = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let Some(x) = origin.x.checked_add(dx) else {
+                    continue;
+                };
+                let Some(y) = origin.y.checked_add(dy) else {
+                    continue;
+                };
+                let position = WorldPosition { x, y, z: origin.z };
+                if !self.actor_can_see_position_with_sources(actor_id, position, &light_sources)? {
+                    continue;
+                }
+                let (coord, local) = position.chunk_and_local();
+                if let Some(tile) = self.chunks.get(&coord).and_then(|chunk| {
+                    chunk
+                        .tile(local)
+                        .cloned()
+                        .map(|terrain| MemorizedTileSnapshot {
+                            terrain,
+                            furniture: chunk.furniture(local).cloned(),
+                        })
+                }) {
+                    let index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
+                    perceived.push((coord, index, tile));
+                }
+            }
+        }
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        for (coord, index, tile) in perceived {
+            let chunk = actor
+                .map_memory
+                .entry(coord)
+                .or_insert_with(|| vec![None; (SUBMAP_SIZE * SUBMAP_SIZE) as usize]);
+            chunk[index] = Some(tile);
+        }
+        Ok(())
+    }
+
+    fn projected_open_terrain(
+        &self,
+        position: WorldPosition,
+    ) -> Option<(String, String, TerrainTileSnapshot)> {
+        let (coord, local) = position.chunk_and_local();
+        let tile = self.chunks.get(&coord)?.tile(local)?;
+        let (Some(move_cost), Some(transparent), Some(flat)) =
+            (tile.open_move_cost, tile.open_transparent, tile.open_flat)
+        else {
+            return None;
+        };
+        if tile.open.is_empty() {
+            return None;
+        }
+        let from = tile.terrain_id.clone();
+        let to = tile.open.clone();
+        Some((
+            from.clone(),
+            to.clone(),
+            TerrainTileSnapshot {
+                terrain_id: to,
+                move_cost,
+                transparent,
+                flat,
+                open: String::new(),
+                open_move_cost: None,
+                open_transparent: None,
+                open_flat: None,
+                close: from,
+                close_move_cost: Some(tile.move_cost),
+                close_transparent: Some(tile.transparent),
+                close_flat: Some(tile.flat),
+            },
+        ))
+    }
+
+    fn perform_creature_open_terrain(
+        &mut self,
+        creature_id: CreatureId,
+        position: WorldPosition,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let (from, to, transformed) = self
+            .projected_open_terrain(position)
+            .ok_or(SimError::InvalidTerrain)?;
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self
+            .chunks
+            .get_mut(&coord)
+            .ok_or(SimError::InvalidTerrain)?;
+        chunk.set_terrain(local, transformed)?;
+        chunk.set_map_damage(local, 0)?;
+        events.push(self.make_event(WorldEventKind::CreatureOpenedTerrain {
+            creature_id,
+            position,
+            from,
+            to,
+            sound: String::from("swish"),
+            volume: 6,
+        })?);
+        Ok(())
+    }
+
+    fn apply_terrain_interaction(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        dx: i8,
+        dy: i8,
+        opening: bool,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if i16::from(dx).abs() + i16::from(dy).abs() != 1 {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidTerrainInteraction,
+            )?);
+            return Ok(());
+        }
+        let actor_position = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(position) = actor_position.checked_offset(dx, dy, 0) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidTerrainInteraction,
+            )?);
+            return Ok(());
+        };
+        if !opening && (self.actor_at(position).is_some() || self.creature_at(position).is_some()) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        let (chunk_coord, local) = position.chunk_and_local();
+        let tile = self
+            .chunks
+            .get(&chunk_coord)
+            .and_then(|chunk| chunk.tile(local))
+            .cloned();
+        let Some(tile) = tile else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidTerrainInteraction,
+            )?);
+            return Ok(());
+        };
+        let (target, target_cost, target_transparent, target_flat) = if opening {
+            (
+                &tile.open,
+                tile.open_move_cost,
+                tile.open_transparent,
+                tile.open_flat,
+            )
+        } else {
+            (
+                &tile.close,
+                tile.close_move_cost,
+                tile.close_transparent,
+                tile.close_flat,
+            )
+        };
+        let (Some(target_cost), Some(target_transparent), Some(target_flat)) =
+            (target_cost, target_transparent, target_flat)
+        else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidTerrainInteraction,
+            )?);
+            return Ok(());
+        };
+        let from = tile.terrain_id.clone();
+        let to = target.clone();
+        let transformed = if opening {
+            TerrainTileSnapshot {
+                terrain_id: to.clone(),
+                move_cost: target_cost,
+                transparent: target_transparent,
+                flat: target_flat,
+                open: String::new(),
+                open_move_cost: None,
+                open_transparent: None,
+                open_flat: None,
+                close: from.clone(),
+                close_move_cost: Some(tile.move_cost),
+                close_transparent: Some(tile.transparent),
+                close_flat: Some(tile.flat),
+            }
+        } else {
+            TerrainTileSnapshot {
+                terrain_id: to.clone(),
+                move_cost: target_cost,
+                transparent: target_transparent,
+                flat: target_flat,
+                open: from.clone(),
+                open_move_cost: Some(tile.move_cost),
+                open_transparent: Some(tile.transparent),
+                open_flat: Some(tile.flat),
+                close: String::new(),
+                close_move_cost: None,
+                close_transparent: None,
+                close_flat: None,
+            }
+        };
+        self.chunks
+            .get_mut(&chunk_coord)
+            .ok_or(SimError::InvalidTerrain)?
+            .set_terrain(local, transformed)?;
+        self.chunks
+            .get_mut(&chunk_coord)
+            .ok_or(SimError::InvalidTerrain)?
+            .set_map_damage(local, 0)?;
+        events.push(self.make_event(WorldEventKind::TerrainChanged {
+            actor_id,
+            position,
+            from,
+            to,
+        })?);
+        Ok(())
+    }
+
+    fn melee_damage(&self, actor_id: ActorId) -> Result<u16, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(item) = actor
+            .wielded
+            .and_then(|item_id| actor.inventory.get(&item_id))
+        else {
+            return Ok(UNARMED_DAMAGE);
+        };
+        let milli = item
+            .melee_damage_milli
+            .values()
+            .try_fold(0_i64, |total, damage| {
+                total
+                    .checked_add(i64::from(*damage))
+                    .ok_or(SimError::NumericOverflow)
+            })?;
+        let rounded = milli.checked_add(500).ok_or(SimError::NumericOverflow)? / 1_000;
+        u16::try_from(rounded.max(1)).map_err(|_| SimError::NumericOverflow)
+    }
+
+    fn actor_bash_strength(&self, actor_id: ActorId) -> Result<Option<u64>, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(weapon) = actor
+            .wielded
+            .and_then(|item_id| actor.inventory.get(&item_id))
+        else {
+            return Ok(None);
+        };
+        let Some(profile) = self.smash_item_types.get(&weapon.type_id) else {
+            return Ok(None);
+        };
+        if weapon.damage > 1
+            || weapon.ranged_weapon.is_some()
+            || weapon.magazine_capacity != 0
+            || weapon.magazine_well.is_some()
+            || weapon.residual_energy_millijoules != 0
+            || weapon.powered_tool.is_some()
+            || !weapon.ammunition_type.is_empty()
+            || weapon
+                .melee_damage_milli
+                .iter()
+                .any(|(damage_type, damage)| damage_type != "bash" && *damage > 0)
+        {
+            // Each structural profile has independent per-damage-type
+            // susceptibility. Until all of those multipliers are canonical,
+            // mixed cutting/piercing tools must not be approximated.
+            return Ok(None);
+        }
+        let expected_bash_milli = i32::from(profile.bash_damage)
+            .checked_mul(1_000)
+            .ok_or(SimError::NumericOverflow)?;
+        if weapon.melee_damage_milli.get("bash") != Some(&expected_bash_milli) {
+            return Ok(None);
+        }
+        u64::from(effective_base_stat(actor.base_strength))
+            .checked_add(u64::from(profile.bash_damage))
+            .map(Some)
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn actor_smash_action_cost(&self, actor_id: ActorId) -> Result<i64, SimError> {
+        if self.actor_bash_strength(actor_id)?.is_none() {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let profile = actor
+            .wielded
+            .and_then(|item_id| actor.inventory.get(&item_id))
+            .and_then(|weapon| self.smash_item_types.get(&weapon.type_id))
+            .ok_or(SimError::InvalidItem)?;
+        i64::from(profile.attack_time_moves)
+            .checked_mul(4)
+            .map(|moves| moves / 5)
+            .and_then(|moves| moves.checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE))
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn actor_melee_action_cost(&self, actor_id: ActorId) -> Result<i64, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let attack_time_moves = match actor.wielded {
+            None => 65,
+            Some(item_id) => {
+                if self.actor_bash_strength(actor_id)?.is_none() {
+                    return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+                }
+                let weapon = actor.inventory.get(&item_id).ok_or(SimError::UnknownItem)?;
+                self.smash_item_types
+                    .get(&weapon.type_id)
+                    .ok_or(SimError::InvalidItem)?
+                    .attack_time_moves
+            }
+        };
+        let melee_skill = actor_skill_level(actor, "melee", false);
+        i64::from(pinned_melee_attack_speed_moves(
+            attack_time_moves,
+            actor.base_dexterity,
+            melee_skill,
+        )?)
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+        .ok_or(SimError::NumericOverflow)
+    }
+
+    fn apply_actor_bash(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        dx: i8,
+        dy: i8,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if horizontal_step_multiplier(dx, dy, 0).is_none() {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidBashInteraction,
+            )?);
+            return Ok(());
+        }
+        let origin = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(target) = origin.checked_offset(dx, dy, 0) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidBashInteraction,
+            )?);
+            return Ok(());
+        };
+        self.ensure_active_bubble_generated(target)?;
+        if self.creature_bash_at(target).is_none() {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidBashInteraction,
+            )?);
+            return Ok(());
+        }
+        let Some(strength) = self.actor_bash_strength(actor_id)? else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InvalidBashTool)?);
+            return Ok(());
+        };
+        self.perform_structural_bash(
+            StructuralBashSource::Actor(actor_id),
+            target,
+            strength,
+            sequence.0,
+            events,
+        )
+    }
+
+    fn ensure_active_bubble_generated(&mut self, position: WorldPosition) -> Result<(), SimError> {
+        let (center, _local) = position.chunk_and_local();
+        if center.z != 0 {
+            return Ok(());
+        }
+        let Some(terrain) = self.worldgen_default_terrain.clone() else {
+            return Ok(());
+        };
+        for y_offset in -ACTIVE_BUBBLE_RADIUS_SUBMAPS..=ACTIVE_BUBBLE_RADIUS_SUBMAPS {
+            for x_offset in -ACTIVE_BUBBLE_RADIUS_SUBMAPS..=ACTIVE_BUBBLE_RADIUS_SUBMAPS {
+                let (Some(x), Some(y)) = (
+                    center.x.checked_add(x_offset),
+                    center.y.checked_add(y_offset),
+                ) else {
+                    continue;
+                };
+                let coord = ChunkCoord { x, y, z: center.z };
+                if let std::collections::btree_map::Entry::Vacant(entry) = self.chunks.entry(coord)
+                {
+                    entry.insert(Chunk::filled(coord, terrain.clone())?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_attack_creature(
+        &mut self,
+        source: ActorId,
+        sequence: CommandSequence,
+        target: CreatureId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let source_position = self
+            .actors
+            .get(&source)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(creature) = self.creatures.get(&target) else {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        };
+        if creature.hp <= 0 {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        }
+        if !horizontally_adjacent(source_position, creature.position) {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetOutOfRange)?);
+            return Ok(());
+        }
+        if self
+            .actor_creature_hit_spread(source, target, sequence.0)?
+            .is_some_and(|spread| spread < 0)
+        {
+            events.push(self.make_event(WorldEventKind::ActorMissedCreature { source, target })?);
+            return Ok(());
+        }
+        let damage = self.melee_damage(source)?;
+        if self.creature_death_needs_corpse_id(target, damage)? && !self.allocator.can_allocate() {
+            events.push(self.rejection(
+                source,
+                sequence,
+                CommandRejection::StableIdsUnavailable,
+            )?);
+            return Ok(());
+        }
+        self.apply_melee_damage_to_creature(source, target, damage, events)
+    }
+
+    /// Exact currently admitted player-hit subset. `None` preserves the
+    /// documented temporary guaranteed-hit boundary for weapons outside the
+    /// strict ordinary bash catalog.
+    fn actor_creature_hit_spread(
+        &self,
+        source: ActorId,
+        target: CreatureId,
+        rng_sequence: u64,
+    ) -> Result<Option<i64>, SimError> {
+        let actor = self.actors.get(&source).ok_or(SimError::UnknownActor)?;
+        let creature = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?;
+        let melee_skill = actor_skill_level(actor, "melee", false);
+        let (accuracy_numerator, accuracy_denominator) = match actor.wielded {
+            None => (
+                pinned_unarmed_melee_accuracy_quarters(actor.base_dexterity, melee_skill),
+                4,
+            ),
+            Some(item_id) => {
+                if self.actor_bash_strength(source)?.is_none() {
+                    return Ok(None);
+                }
+                let weapon = actor.inventory.get(&item_id).ok_or(SimError::UnknownItem)?;
+                let profile = self
+                    .smash_item_types
+                    .get(&weapon.type_id)
+                    .ok_or(SimError::InvalidItem)?;
+                (
+                    pinned_bash_weapon_melee_accuracy_twelfths(
+                        actor.base_dexterity,
+                        actor_skill_level(actor, "bashing", false),
+                        melee_skill,
+                        profile.melee_to_hit,
+                        profile.bash_damage,
+                    ),
+                    12,
+                )
+            }
+        };
+        let mut rng = self.named_session_rng(
+            b"actor-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            rng_sequence,
+        );
+        let hit_roll = pinned_melee_hit_roll(accuracy_numerator, accuracy_denominator, &mut rng)?;
+        let dodge_roll = i64::from(creature.dodge)
+            .checked_mul(5)
+            .ok_or(SimError::NumericOverflow)?;
+        let spread = hit_roll
+            .checked_sub(dodge_roll)
+            .and_then(|spread| spread.checked_sub(creature_size_melee_penalty(creature.size)))
+            .ok_or(SimError::NumericOverflow)?;
+        spread
+            .checked_add(if creature.immobile {
+                IMMOBILE_MELEE_HIT_BONUS
+            } else {
+                0
+            })
+            .map(Some)
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn apply_melee_damage_to_creature(
+        &mut self,
+        source: ActorId,
+        target: CreatureId,
+        damage: u16,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let remaining_hp = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .hp
+            .checked_sub(i32::from(damage))
+            .ok_or(SimError::NumericOverflow)?;
+        self.creatures
+            .get_mut(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .hp = remaining_hp;
+        events.push(self.make_event(WorldEventKind::CreatureDamaged {
+            source,
+            target,
+            amount: damage,
+            remaining_hp,
+        })?);
+        if remaining_hp <= 0 {
+            events.push(self.make_event(WorldEventKind::CreatureDied {
+                creature_id: target,
+                killer: source,
+            })?);
+            self.finish_creature_death(target, remaining_hp, events)?;
+        }
+        Ok(())
+    }
+
+    fn creature_death_needs_corpse_id(
+        &self,
+        target: CreatureId,
+        damage: u16,
+    ) -> Result<bool, SimError> {
+        let creature = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?;
+        let remaining_hp = creature
+            .hp
+            .checked_sub(i32::from(damage))
+            .ok_or(SimError::NumericOverflow)?;
+        Ok(remaining_hp <= 0
+            && creature.corpse.is_some()
+            && corpse_damage_level(remaining_hp, creature.max_hp)?.is_some())
+    }
+
+    fn finish_creature_death(
+        &mut self,
+        creature_id: CreatureId,
+        remaining_hp: i32,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        self.splatter_creature_blood(creature_id, events)?;
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        let position = creature.position;
+        let max_hp = creature.max_hp;
+        let Some(prototype) = creature.corpse.clone() else {
+            self.creatures.remove(&creature_id);
+            return Ok(());
+        };
+        let Some((damage, revivable_at_this_damage)) = corpse_damage_level(remaining_hp, max_hp)?
+        else {
+            // Upstream pulverizes overkilled bodies. Gib scattering is a later
+            // fail-closed processor rather than an invented ordinary corpse.
+            self.creatures.remove(&creature_id);
+            return Ok(());
+        };
+        let corpse_item_id = self.allocator.allocate_item()?;
+        let mut rng = self.named_rng(
+            b"creature-corpse",
+            &[creature_id.as_u128(), corpse_item_id.as_u128()],
+            self.next_event_counter,
+        );
+        let revive_special = prototype.revives && rng.next_u32().is_multiple_of(20);
+        self.ground_items.insert(
+            corpse_item_id,
+            GroundItem {
+                item: ItemInstance {
+                    id: corpse_item_id,
+                    type_id: String::from("corpse"),
+                    charges: 1,
+                    damage,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                    component_provenance: None,
+                    magazine_capacity: 0,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                    creature_corpse: Some(CreatureCorpseSnapshotV1 {
+                        revivable: prototype.revives && revivable_at_this_damage,
+                        prototype,
+                        death_tick: self.tick,
+                        revive_special,
+                    }),
+                },
+                position,
+            },
+        );
+        events.push(self.make_event(WorldEventKind::CreatureCorpseCreated {
+            creature_id,
+            corpse_item_id,
+            position,
+        })?);
+        self.creatures.remove(&creature_id);
+        Ok(())
+    }
+
+    fn splatter_creature_blood(
+        &mut self,
+        creature_id: CreatureId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        let position = creature.position;
+        let field_type_id = creature.blood_field_type_id.clone();
+        if field_type_id.is_empty() {
+            return Ok(());
+        }
+        let intensity = self.add_field(position, &field_type_id, 1)?;
+        events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+            position,
+            field_type_id,
+            intensity,
+        })?);
+        Ok(())
+    }
+
+    fn advance_disconnected_autopilot(
+        &mut self,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        const STEPS: [(i8, i8); 8] = [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let actor_ids = self.actors.keys().copied().collect::<Vec<_>>();
+        for actor_id in actor_ids {
+            let Some(actor) = self.actors.get(&actor_id) else {
+                continue;
+            };
+            let activities_allow_autopilot = actor
+                .craft_activity
+                .as_ref()
+                .is_none_or(|activity| activity.interrupted)
+                && actor
+                    .read_activity
+                    .as_ref()
+                    .is_none_or(|activity| activity.interrupted)
+                && actor
+                    .disassembly_activity
+                    .as_ref()
+                    .is_none_or(|activity| activity.interrupted)
+                && actor
+                    .construction_activity
+                    .as_ref()
+                    .is_none_or(|activity| activity.interrupted);
+            if actor.connected
+                || actor.hp <= 0
+                || actor.sleeping
+                || actor.action_points != i64::from(ACTOR_ACTION_THRESHOLD)
+                || actor.held_movement.is_some()
+                || !actor.queued_actions.is_empty()
+                || !activities_allow_autopilot
+            {
+                continue;
+            }
+            let from = actor.position;
+            let mut threats = Vec::new();
+            for creature in self.creatures.values() {
+                if creature.hp <= 0
+                    || creature.aggression <= 0
+                    || creature.position.z != from.z
+                    || tile_distance(from, creature.position) > DISCONNECTED_AUTOPILOT_THREAT_RADIUS
+                    || !self.actor_can_see_position(actor_id, creature.position)?
+                {
+                    continue;
+                }
+                threats.push((creature.id, creature.position));
+            }
+            if threats.is_empty() {
+                if self.advance_disconnected_emergency_consumption(actor_id, events)? {
+                    continue;
+                }
+                self.advance_disconnected_safe_sleep(actor_id, events)?;
+                continue;
+            }
+            let current_distance = threats
+                .iter()
+                .map(|(_id, position)| tile_distance(from, *position))
+                .min()
+                .ok_or(SimError::InvalidCreature)?;
+            let mut best = None;
+            for (dx, dy) in STEPS {
+                let Some(to) = from.checked_offset(dx, dy, 0) else {
+                    continue;
+                };
+                if !self.is_passable(to)
+                    || self.actor_at(to).is_some()
+                    || self.creature_at(to).is_some()
+                {
+                    continue;
+                }
+                let distance = threats
+                    .iter()
+                    .map(|(_id, position)| tile_distance(to, *position))
+                    .min()
+                    .ok_or(SimError::InvalidCreature)?;
+                if distance <= current_distance
+                    || best.is_some_and(|(best_distance, _to, _cost)| distance <= best_distance)
+                {
+                    continue;
+                }
+                let Some(cost) = self.loaded_movement_action_cost(from, to, dx, dy)? else {
+                    continue;
+                };
+                best = Some((distance, to, cost));
+            }
+            if let Some((_distance, to, cost)) = best {
+                let actor = self
+                    .actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?;
+                actor.action_points = actor
+                    .action_points
+                    .checked_sub(cost)
+                    .ok_or(SimError::NumericOverflow)?;
+                actor.position = to;
+                events.push(self.make_event(WorldEventKind::ActorMoved { actor_id, from, to })?);
+                continue;
+            }
+            let Some(target) = threats
+                .iter()
+                .find(|(_id, position)| horizontally_adjacent(from, *position))
+                .map(|(id, _position)| *id)
+            else {
+                continue;
+            };
+            let damage = self.melee_damage(actor_id)?;
+            let missed = self
+                .actor_creature_hit_spread(actor_id, target, self.tick.0)?
+                .is_some_and(|spread| spread < 0);
+            if !missed
+                && self.creature_death_needs_corpse_id(target, damage)?
+                && !self.allocator.can_allocate()
+            {
+                continue;
+            }
+            let action_cost = self.actor_melee_action_cost(actor_id)?;
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            actor.action_points = actor
+                .action_points
+                .checked_sub(action_cost)
+                .ok_or(SimError::NumericOverflow)?;
+            if missed {
+                events.push(self.make_event(WorldEventKind::ActorMissedCreature {
+                    source: actor_id,
+                    target,
+                })?);
+            } else {
+                self.apply_melee_damage_to_creature(actor_id, target, damage, events)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn advance_disconnected_emergency_consumption(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let ordinary = |item: &&ItemInstance| {
+            item.charges > 0
+                && matches!(item.comestible_type.as_str(), "FOOD" | "DRINK")
+                && actor.wielded != Some(item.id)
+        };
+        let item_id = (actor.thirst >= THIRST_DEATH_THRESHOLD)
+            .then(|| {
+                actor
+                    .inventory
+                    .values()
+                    .filter(ordinary)
+                    .find(|item| item.quench > 0)
+                    .map(|item| item.id)
+            })
+            .flatten()
+            .or_else(|| {
+                (actor.stored_kcal <= 0)
+                    .then(|| {
+                        actor
+                            .inventory
+                            .values()
+                            .filter(ordinary)
+                            .find(|item| item.calories > 0)
+                            .map(|item| item.id)
+                    })
+                    .flatten()
+            });
+        let Some(item_id) = item_id else {
+            return Ok(false);
+        };
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        actor.action_points = actor
+            .action_points
+            .checked_sub(i64::from(ACTOR_ACTION_THRESHOLD))
+            .ok_or(SimError::NumericOverflow)?;
+        self.consume_owned_item(actor_id, item_id, events)?;
+        Ok(true)
+    }
+
+    fn advance_disconnected_safe_sleep(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if actor.stored_kcal <= 0
+            || actor.thirst >= THIRST_DEATH_THRESHOLD
+            || actor.sleepiness < SLEEPINESS_TIRED
+        {
+            return Ok(());
+        }
+        let (chunk, local) = actor.position.chunk_and_local();
+        if self
+            .chunks
+            .get(&chunk)
+            .and_then(|chunk| chunk.furniture(local))
+            .is_none_or(|furniture| furniture.comfort <= 0)
+        {
+            return Ok(());
+        }
+        self.put_actor_to_sleep(actor_id, SleepReason::Autopilot, events)
+    }
+
+    fn loaded_movement_action_cost(
+        &self,
+        from: WorldPosition,
+        to: WorldPosition,
+        dx: i8,
+        dy: i8,
+    ) -> Result<Option<i64>, SimError> {
+        let Some(axis_multiplier) = horizontal_step_multiplier(dx, dy, 0) else {
+            return Ok(None);
+        };
+        let Some(from_cost) = self.tile_movement_cost(from) else {
+            return Ok(None);
+        };
+        let Some(to_cost) = self.tile_movement_cost(to) else {
+            return Ok(None);
+        };
+        from_cost
+            .checked_add(to_cost)
+            .and_then(|cost| cost.checked_mul(axis_multiplier))
+            .map(|cost| cost / 2)
+            .and_then(|cost| cost.checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE))
+            .map(Some)
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn terrain_bash_at(&self, position: WorldPosition) -> Option<&TerrainBashTypeV1> {
+        let (coord, local) = position.chunk_and_local();
+        let terrain_id = &self.chunks.get(&coord)?.tile(local)?.terrain_id;
+        self.terrain_bash_types.get(terrain_id)
+    }
+
+    fn creature_bash_at(&self, position: WorldPosition) -> Option<CreatureBashTarget> {
+        let (coord, local) = position.chunk_and_local();
+        if let Some(furniture_id) = self
+            .chunks
+            .get(&coord)
+            .and_then(|chunk| chunk.furniture(local))
+            .map(|furniture| furniture.furniture_id.as_str())
+        {
+            if let Some(bash) = self.furniture_bash_types.get(furniture_id) {
+                return Some(CreatureBashTarget::Furniture(bash.clone()));
+            }
+            if self.furniture_bash_ids.contains(furniture_id) {
+                return None;
+            }
+        }
+        self.terrain_bash_at(position)
+            .cloned()
+            .map(CreatureBashTarget::Terrain)
+    }
+
+    fn bash_target_is_blocked(&self, position: WorldPosition) -> bool {
+        const CARDINAL: [(i8, i8); 4] = [(0, -1), (-1, 0), (0, 1), (1, 0)];
+        CARDINAL.into_iter().any(|(dx, dy)| {
+            position.checked_offset(dx, dy, 0).is_some_and(|adjacent| {
+                let (coord, local) = adjacent.chunk_and_local();
+                self.chunks
+                    .get(&coord)
+                    .and_then(|chunk| chunk.furniture(local))
+                    .is_some_and(|furniture| furniture.blocks_door)
+            })
+        })
+    }
+
+    fn creature_base_bash_strength(&self, creature_id: CreatureId) -> Result<u64, SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        u64::from(creature.melee_dice)
+            .checked_mul(u64::from(creature.melee_dice_sides))
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn bash_damage(
+        bash: &CreatureBashTarget,
+        strength: u64,
+        blocked: bool,
+    ) -> Result<u16, SimError> {
+        let (minimum, _maximum) = bash.strength_bounds(blocked);
+        let scaled = strength
+            .checked_mul(u64::from(bash.bash_multiplier_millionths()))
+            .ok_or(SimError::NumericOverflow)?
+            / 1_000_000;
+        let damage =
+            scaled.saturating_sub(u64::try_from(minimum).map_err(|_| SimError::InvalidTerrain)?);
+        u16::try_from(damage.min(u64::from(u16::MAX))).map_err(|_| SimError::NumericOverflow)
+    }
+
+    fn bash_hp(bash: &CreatureBashTarget, blocked: bool) -> Result<u16, SimError> {
+        let (_minimum, hp) = bash.strength_bounds(blocked);
+        u16::try_from(hp).map_err(|_| SimError::InvalidTerrain)
+    }
+
+    fn creature_bash_rating(
+        &self,
+        creature_id: CreatureId,
+        target: WorldPosition,
+    ) -> Result<Option<u8>, SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        if !creature.bashes {
+            return Ok(None);
+        }
+        let estimate = self
+            .creature_base_bash_strength(creature_id)?
+            .checked_mul(if creature.group_bash { 2 } else { 1 })
+            .ok_or(SimError::NumericOverflow)?;
+        self.creature_bash_rating_for_strength(target, estimate)
+    }
+
+    fn creature_route_bash_rating(
+        &self,
+        creature_id: CreatureId,
+        target: WorldPosition,
+    ) -> Result<Option<u8>, SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        if !creature.bashes {
+            return Ok(None);
+        }
+        let strength = self.creature_base_bash_strength(creature_id)?;
+        self.creature_bash_rating_for_strength(target, strength)
+    }
+
+    fn creature_bash_rating_for_strength(
+        &self,
+        target: WorldPosition,
+        strength: u64,
+    ) -> Result<Option<u8>, SimError> {
+        let Some(bash) = self.creature_bash_at(target) else {
+            return Ok(None);
+        };
+        // Upstream route and immediate-candidate estimates call
+        // `bash_rating_internal` without supported/blocked context. The
+        // actual bash still selects those contextual bounds.
+        let damage = Self::bash_damage(&bash, strength, false)?;
+        if damage == 0 {
+            return Ok(Some(0));
+        }
+        let hp = Self::bash_hp(&bash, false)?;
+        let rating = if damage > hp {
+            10
+        } else {
+            (10 * u32::from(damage) / u32::from(hp)).max(1)
+        };
+        Ok(Some(
+            u8::try_from(rating).map_err(|_| SimError::NumericOverflow)?,
+        ))
+    }
+
+    fn creature_group_bash_strength(
+        &self,
+        creature_id: CreatureId,
+        target: WorldPosition,
+    ) -> Result<u64, SimError> {
+        let basher = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        if !basher.group_bash {
+            return self.creature_base_bash_strength(creature_id);
+        }
+        let behind_x = basher.position.x.cmp(&target.x) as i32;
+        let behind_y = basher.position.y.cmp(&target.y) as i32;
+        let perpendicular = (-behind_y, behind_x);
+        let mut zone = BTreeSet::new();
+        for depth in 1_i32..=5 {
+            let center = WorldPosition {
+                x: target
+                    .x
+                    .checked_add(
+                        behind_x
+                            .checked_mul(depth)
+                            .ok_or(SimError::NumericOverflow)?,
+                    )
+                    .ok_or(SimError::NumericOverflow)?,
+                y: target
+                    .y
+                    .checked_add(
+                        behind_y
+                            .checked_mul(depth)
+                            .ok_or(SimError::NumericOverflow)?,
+                    )
+                    .ok_or(SimError::NumericOverflow)?,
+                z: target.z,
+            };
+            for offset in -1_i32..=1 {
+                zone.insert(WorldPosition {
+                    x: center
+                        .x
+                        .checked_add(
+                            perpendicular
+                                .0
+                                .checked_mul(offset)
+                                .ok_or(SimError::NumericOverflow)?,
+                        )
+                        .ok_or(SimError::NumericOverflow)?,
+                    y: center
+                        .y
+                        .checked_add(
+                            perpendicular
+                                .1
+                                .checked_mul(offset)
+                                .ok_or(SimError::NumericOverflow)?,
+                        )
+                        .ok_or(SimError::NumericOverflow)?,
+                    z: target.z,
+                });
+            }
+        }
+        let mut total = 0_u64;
+        for candidate in zone {
+            let path = horizontal_line_excluding_start(target, candidate);
+            if path.is_empty() {
+                continue;
+            }
+            let mut helper = None;
+            let mut connected = true;
+            for position in path {
+                let Some(creature) = self
+                    .creature_at(position)
+                    .and_then(|id| self.creatures.get(&id))
+                    .filter(|creature| creature.hp > 0 && creature.group_bash)
+                else {
+                    connected = false;
+                    break;
+                };
+                helper = Some(creature);
+            }
+            let Some(helper) = helper.filter(|_| connected) else {
+                continue;
+            };
+            let distance = u64::from(ranged_distance(candidate, target)).max(1);
+            let contribution = u64::from(helper.melee_dice)
+                .checked_mul(u64::from(helper.melee_dice_sides))
+                .ok_or(SimError::NumericOverflow)?
+                / distance;
+            total = total
+                .checked_add(contribution)
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        Ok(total)
+    }
+
+    fn bash_drop_position(
+        &self,
+        target: WorldPosition,
+        bash: &CreatureBashTarget,
+    ) -> Option<WorldPosition> {
+        let (coord, local) = target.chunk_and_local();
+        let chunk = self.chunks.get(&coord)?;
+        let target_terrain_is_passable = match bash {
+            CreatureBashTarget::Terrain(bash) => bash.result.move_cost > 0,
+            CreatureBashTarget::Furniture(_) => chunk.tile(local)?.move_cost > 0,
+        };
+        let target_furniture_is_passable = match bash {
+            CreatureBashTarget::Terrain(_) => chunk
+                .furniture(local)
+                .is_none_or(|furniture| furniture.move_cost_mod >= 0),
+            CreatureBashTarget::Furniture(bash) => bash
+                .result
+                .as_ref()
+                .is_none_or(|furniture| furniture.move_cost_mod >= 0),
+        };
+        if target_terrain_is_passable && target_furniture_is_passable {
+            return Some(target);
+        }
+        const ADJACENT: [(i8, i8); 8] = [
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        ];
+        ADJACENT.into_iter().find_map(|(dx, dy)| {
+            target
+                .checked_offset(dx, dy, 0)
+                .filter(|position| self.is_passable(*position))
+        })
+    }
+
+    fn perform_creature_bash(
+        &mut self,
+        creature_id: CreatureId,
+        target: WorldPosition,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let strength = self.creature_group_bash_strength(creature_id, target)?;
+        self.perform_structural_bash(
+            StructuralBashSource::Creature(creature_id),
+            target,
+            strength,
+            turn_sequence,
+            events,
+        )
+    }
+
+    fn perform_structural_bash(
+        &mut self,
+        source: StructuralBashSource,
+        target: WorldPosition,
+        strength: u64,
+        rng_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let bash = self
+            .creature_bash_at(target)
+            .ok_or(SimError::InvalidTerrain)?;
+        let blocked = self.bash_target_is_blocked(target);
+        let damage = Self::bash_damage(&bash, strength, blocked)?;
+        let hp = Self::bash_hp(&bash, blocked)?;
+        let (coord, local) = target.chunk_and_local();
+        let previous = self
+            .chunks
+            .get(&coord)
+            .and_then(|chunk| chunk.map_damage(local))
+            .ok_or(SimError::InvalidTerrain)?;
+        let total = previous.saturating_add(damage);
+        let (rng_domain, stable_id) = match source {
+            StructuralBashSource::Actor(actor_id) => {
+                (b"actor-structural-bash".as_slice(), actor_id.as_u128())
+            }
+            StructuralBashSource::Creature(creature_id) => (
+                b"creature-structural-bash".as_slice(),
+                creature_id.as_u128(),
+            ),
+        };
+        let mut rng = self.named_rng(rng_domain, &[stable_id], rng_sequence);
+        let mut planned = Vec::new();
+        if total >= hp {
+            for drop in bash.drops() {
+                if rng.next_u64() % 100 >= u64::from(drop.probability_percent) {
+                    continue;
+                }
+                if let Some((minimum, maximum)) = drop.charges_min.zip(drop.charges_max) {
+                    let charges = i32::try_from(inclusive_rng_u64(
+                        &mut rng,
+                        u64::try_from(minimum).map_err(|_| SimError::InvalidItem)?,
+                        u64::try_from(maximum).map_err(|_| SimError::InvalidItem)?,
+                    ))
+                    .map_err(|_| SimError::NumericOverflow)?;
+                    if charges > 0 {
+                        let mut prototype = drop.prototype.clone();
+                        prototype.charges = charges;
+                        planned.push(prototype);
+                    }
+                } else {
+                    let count = inclusive_rng_u64(
+                        &mut rng,
+                        u64::from(drop.count_min),
+                        u64::from(drop.count_max),
+                    );
+                    planned.extend(std::iter::repeat_n(
+                        drop.prototype.clone(),
+                        usize::try_from(count).map_err(|_| SimError::NumericOverflow)?,
+                    ));
+                }
+            }
+        }
+        let drop_position = self.bash_drop_position(target, &bash);
+        let can_materialize = planned.is_empty()
+            || (drop_position.is_some()
+                && self.allocator.remaining()
+                    >= u64::try_from(planned.len()).map_err(|_| SimError::NumericOverflow)?);
+        let success = total >= hp && can_materialize;
+        let accumulated_damage = if success {
+            0
+        } else {
+            total.min(hp.saturating_sub(1))
+        };
+        if success {
+            match &bash {
+                CreatureBashTarget::Terrain(bash) => self
+                    .chunks
+                    .get_mut(&coord)
+                    .ok_or(SimError::InvalidTerrain)?
+                    .set_terrain(local, bash.result.clone())?,
+                CreatureBashTarget::Furniture(bash) => self
+                    .chunks
+                    .get_mut(&coord)
+                    .ok_or(SimError::InvalidFurniture)?
+                    .set_furniture(local, bash.result.clone())?,
+            }
+            self.chunks
+                .get_mut(&coord)
+                .ok_or(SimError::InvalidTerrain)?
+                .set_map_damage(local, 0)?;
+            for prototype in planned {
+                let drop_position = drop_position.ok_or(SimError::InvalidTerrain)?;
+                let item_id = self.allocator.allocate_item()?;
+                self.ground_items.insert(
+                    item_id,
+                    GroundItem {
+                        item: item_from_craft_prototype(item_id, &prototype),
+                        position: drop_position,
+                    },
+                );
+            }
+        } else {
+            self.chunks
+                .get_mut(&coord)
+                .ok_or(SimError::InvalidTerrain)?
+                .set_map_damage(local, accumulated_damage)?;
+        }
+        if let Some(field) = bash.hit_field() {
+            let intensity = self.add_field(target, &field.field_type_id, field.intensity)?;
+            events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+                position: target,
+                field_type_id: field.field_type_id.clone(),
+                intensity,
+            })?);
+        }
+        if success && let Some(field) = bash.destroyed_field() {
+            let intensity = self.add_field(target, &field.field_type_id, field.intensity)?;
+            events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+                position: target,
+                field_type_id: field.field_type_id.clone(),
+                intensity,
+            })?);
+        }
+        let (sound, raw_volume) = bash.sound(success);
+        let volume = u16::try_from(raw_volume).map_err(|_| SimError::InvalidTerrain)?;
+        let kind = match source {
+            StructuralBashSource::Actor(actor_id) => WorldEventKind::ActorBashed {
+                actor_id,
+                target,
+                target_kind: bash.target_kind(),
+                target_type_id: bash.target_type_id().to_owned(),
+                success,
+                damage,
+                accumulated_damage,
+                sound: sound.to_owned(),
+                volume,
+            },
+            StructuralBashSource::Creature(creature_id) => WorldEventKind::CreatureBashed {
+                creature_id,
+                target,
+                target_kind: bash.target_kind(),
+                target_type_id: bash.target_type_id().to_owned(),
+                success,
+                damage,
+                accumulated_damage,
+                sound: sound.to_owned(),
+                volume,
+            },
+        };
+        events.push(self.make_event(kind)?);
+        Ok(())
+    }
+
+    fn advance_creature_hearing(&mut self, events: &[WorldEvent]) -> Result<(), SimError> {
+        for event in events {
+            let stimulus = match &event.kind {
+                WorldEventKind::RangedAttackResolved {
+                    origin,
+                    sound_volume,
+                    ..
+                } if *sound_volume > 0 => Some((*origin, *sound_volume, false)),
+                WorldEventKind::CreatureBashed { target, volume, .. } if *volume > 0 => {
+                    Some((*target, *volume, false))
+                }
+                WorldEventKind::ActorBashed { target, volume, .. } if *volume > 0 => {
+                    Some((*target, *volume, false))
+                }
+                WorldEventKind::CreatureOpenedTerrain {
+                    position, volume, ..
+                } if *volume > 0 => Some((*position, *volume, false)),
+                _ => None,
+            };
+            let Some((source, volume, provocative)) = stimulus else {
+                continue;
+            };
+            let creature_ids = self.creatures.keys().copied().collect::<Vec<_>>();
+            for creature_id in creature_ids {
+                self.creature_hear_sound(
+                    creature_id,
+                    source,
+                    volume,
+                    provocative,
+                    event.id.as_u128(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn creature_hear_sound(
+        &mut self,
+        creature_id: CreatureId,
+        source: WorldPosition,
+        volume: u16,
+        provocative: bool,
+        event_id: u128,
+    ) -> Result<(), SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        if !creature.hears || creature.position.z != source.z {
+            return Ok(());
+        }
+        let distance = ranged_distance(creature.position, source);
+        if u32::from(volume)
+            .checked_mul(2)
+            .ok_or(SimError::NumericOverflow)?
+            <= distance
+        {
+            return Ok(());
+        }
+        let perceived = if creature.good_hearing {
+            i64::from(volume)
+                .checked_mul(2)
+                .and_then(|volume| volume.checked_sub(i64::from(distance)))
+        } else {
+            i64::from(volume).checked_sub(i64::from(distance))
+        }
+        .ok_or(SimError::NumericOverflow)?;
+        if perceived <= 0 {
+            return Ok(());
+        }
+        let good_hearing = creature.good_hearing;
+        let current_goal = creature.sound_goal;
+        let mut rng = self.named_rng(b"creature-hearing", &[creature_id.as_u128(), event_id], 0);
+        const Q32: i128 = 1_i128 << 32;
+        if !provocative
+            && i128::from(perceived)
+                .checked_mul(Q32)
+                .ok_or(SimError::NumericOverflow)?
+                < sound_interest_threshold_q32(&mut rng)
+        {
+            return Ok(());
+        }
+        if current_goal.is_some() && rng.next_u32().is_multiple_of(2) {
+            return Ok(());
+        }
+        let max_error = match perceived {
+            ..=1 => 10_i8,
+            2..=4 => 5,
+            5..=9 => 3,
+            10..=19 => 1,
+            _ => 0,
+        };
+        let random_offset = |rng: &mut ChaCha8Rng| -> i8 {
+            if max_error == 0 {
+                0
+            } else {
+                let width =
+                    u32::from(u8::try_from(max_error).expect("positive sound error")) * 2 + 1;
+                i8::try_from(rng.next_u32() % width).expect("sound error fits i8") - max_error
+            }
+        };
+        let target = WorldPosition {
+            x: source.x.saturating_add(i32::from(random_offset(&mut rng))),
+            y: source.y.saturating_add(i32::from(random_offset(&mut rng))),
+            z: source.z,
+        };
+        let remaining_actions = u32::try_from(perceived)
+            .map_err(|_| SimError::NumericOverflow)?
+            .checked_mul(if good_hearing { 6 } else { 1 })
+            .ok_or(SimError::NumericOverflow)?;
+        if current_goal.is_some_and(|goal| remaining_actions < goal.remaining_actions)
+            || target
+                == self
+                    .creatures
+                    .get(&creature_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .position
+        {
+            return Ok(());
+        }
+        self.creatures
+            .get_mut(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .sound_goal = Some(CreatureSoundGoalV1 {
+            position: target,
+            remaining_actions,
+        });
+        Ok(())
+    }
+
+    fn advance_creatures(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        let creature_ids: Vec<_> = self.creatures.keys().copied().collect();
+        for creature_id in creature_ids {
+            let Some(creature) = self.creatures.get_mut(&creature_id) else {
+                continue;
+            };
+            if creature.hp <= 0 || creature.aggression <= 0 {
+                continue;
+            }
+            if let Some(until) = creature.downed_until_tick {
+                if self.tick < until {
+                    continue;
+                }
+                creature.downed_until_tick = None;
+            }
+            creature.action_points = creature
+                .action_points
+                .checked_add(i64::from(creature.speed))
+                .ok_or(SimError::NumericOverflow)?;
+            let mut turn_sequence = 0_u64;
+            while self.creatures.get(&creature_id).is_some_and(|creature| {
+                creature.action_points >= i64::from(CREATURE_ACTION_THRESHOLD)
+                    && creature
+                        .downed_until_tick
+                        .is_none_or(|until| self.tick >= until)
+            }) {
+                let action_cost = self.take_creature_turn(creature_id, turn_sequence, events)?;
+                turn_sequence = turn_sequence
+                    .checked_add(1)
+                    .ok_or(SimError::NumericOverflow)?;
+                let creature = self
+                    .creatures
+                    .get_mut(&creature_id)
+                    .ok_or(SimError::UnknownCreature)?;
+                creature.action_points = creature
+                    .action_points
+                    .checked_sub(action_cost)
+                    .ok_or(SimError::NumericOverflow)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn take_creature_turn(
+        &mut self,
+        creature_id: CreatureId,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<i64, SimError> {
+        if let Some(sound_goal) = self
+            .creatures
+            .get_mut(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .sound_goal
+            .as_mut()
+        {
+            sound_goal.remaining_actions = sound_goal.remaining_actions.saturating_sub(1);
+            if sound_goal.remaining_actions == 0 {
+                self.creatures
+                    .get_mut(&creature_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .sound_goal = None;
+            }
+        }
+        let creature_position = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .position;
+        let candidates = self
+            .actors
+            .values()
+            .filter(|actor| actor.hp > 0 && actor.position.z == creature_position.z)
+            .map(|actor| (actor.id, actor.position))
+            .collect::<Vec<_>>();
+        let light_sources = self.active_light_sources();
+        let mut target = None;
+        for (actor_id, actor_position) in candidates {
+            if !self.creature_can_see_position(creature_id, actor_position, &light_sources)? {
+                continue;
+            }
+            let key = (tile_distance(creature_position, actor_position), actor_id);
+            if target
+                .as_ref()
+                .is_none_or(|(best_key, _id, _position)| key < *best_key)
+            {
+                target = Some((key, actor_id, actor_position));
+            }
+        }
+        let visible_target = target.map(|(_key, actor_id, position)| (actor_id, position));
+        if let Some((_target_id, target_position)) = visible_target {
+            self.creatures
+                .get_mut(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .goal = Some(target_position);
+        }
+        if self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .immobile
+        {
+            // Pinned `monster::move` performs planning and special attacks,
+            // then `IMMOBILE` clears all remaining moves before ordinary
+            // adjacent attacks, opening, bashing, or movement. Special attacks
+            // are not yet part of this admitted runtime.
+            return Ok(self
+                .creatures
+                .get(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .action_points);
+        }
+        let (destination, following_sound) =
+            if let Some((_target_id, target_position)) = visible_target {
+                (target_position, false)
+            } else if let Some(goal) = self
+                .creatures
+                .get(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .goal
+            {
+                (goal, false)
+            } else if let Some(goal) = self
+                .creatures
+                .get(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .sound_goal
+            {
+                (goal.position, true)
+            } else {
+                return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+            };
+        if destination == creature_position {
+            let creature = self
+                .creatures
+                .get_mut(&creature_id)
+                .ok_or(SimError::UnknownCreature)?;
+            if following_sound {
+                creature.sound_goal = None;
+            } else {
+                creature.goal = None;
+            }
+            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+        }
+        if let Some((target_id, target_position)) = visible_target
+            && horizontally_adjacent(creature_position, target_position)
+            && !self
+                .creatures
+                .get(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .pacifist
+        {
+            let attack_cost = i64::from(
+                self.creatures
+                    .get(&creature_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .attack_cost_moves,
+            )
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+            .ok_or(SimError::NumericOverflow)?;
+            self.creature_attack(creature_id, target_id, turn_sequence, events)?;
+            return Ok(attack_cost);
+        }
+        let stumbles = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .stumbles;
+        let can_open_doors = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .can_open_doors;
+        let route_step = self.creature_route_step(creature_id, creature_position, destination)?;
+        let movement_destination = route_step.unwrap_or(destination);
+        let mut rng = self.named_rng(b"creature-stumble", &[creature_id.as_u128()], turn_sequence);
+        let mut switch_weight = 0_u64;
+        let mut selected: Option<(WorldPosition, CreatureStepAction, bool)> = None;
+        for (step_x, step_y) in squares_closer_steps(creature_position, movement_destination) {
+            let Some(to) = creature_position.checked_offset(step_x, step_y, 0) else {
+                continue;
+            };
+            if self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+                continue;
+            }
+            let (action, bad_choice) = if self.is_passable(to) {
+                (CreatureStepAction::Move, false)
+            } else if can_open_doors && self.projected_open_terrain(to).is_some() {
+                // Pinned `monster::move` remembers an openable direct option
+                // without adding it to stumble weight, then still allows a
+                // later passable alternative to replace it.
+                selected = Some((to, CreatureStepAction::OpenTerrain, true));
+                continue;
+            } else {
+                let Some(rating) = self.creature_bash_rating(creature_id, to)? else {
+                    continue;
+                };
+                if rating == 0 {
+                    continue;
+                }
+                (CreatureStepAction::Bash, rating < 5)
+            };
+            let Some(progress) =
+                euclidean_progress_q30(creature_position, movement_destination, to)?
+            else {
+                continue;
+            };
+            switch_weight = switch_weight
+                .checked_add(progress.checked_mul(2).ok_or(SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+            let may_switch = stumbles || selected.is_some_and(|selected| selected.2);
+            if selected.is_none() || (may_switch && rng.next_u64() % switch_weight < progress) {
+                selected = Some((to, action, bad_choice));
+                if !stumbles && !bad_choice {
+                    break;
+                }
+            }
+        }
+        if let Some((to, action, _bad_choice)) = selected {
+            match action {
+                CreatureStepAction::OpenTerrain => {
+                    self.perform_creature_open_terrain(creature_id, to, events)?;
+                    return Ok(0);
+                }
+                CreatureStepAction::Bash => {
+                    self.perform_creature_bash(creature_id, to, turn_sequence, events)?;
+                    let speed = self
+                        .creatures
+                        .get(&creature_id)
+                        .ok_or(SimError::UnknownCreature)?
+                        .speed;
+                    return i64::from(speed)
+                        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+                        .ok_or(SimError::NumericOverflow);
+                }
+                CreatureStepAction::Move => {}
+            }
+            let action_cost = self
+                .creature_movement_action_cost(creature_position, to, movement_destination)?
+                .ok_or(SimError::InvalidCreature)?;
+            let creature = self
+                .creatures
+                .get_mut(&creature_id)
+                .ok_or(SimError::UnknownCreature)?;
+            creature.position = to;
+            if to == destination {
+                if following_sound {
+                    creature.sound_goal = None;
+                } else {
+                    creature.goal = None;
+                }
+            }
+            events.push(self.make_event(WorldEventKind::CreatureMoved {
+                creature_id,
+                from: creature_position,
+                to,
+            })?);
+            return Ok(action_cost);
+        }
+        Ok(i64::from(CREATURE_ACTION_THRESHOLD))
+    }
+
+    fn creature_route_step(
+        &self,
+        creature_id: CreatureId,
+        from: WorldPosition,
+        target: WorldPosition,
+    ) -> Result<Option<WorldPosition>, SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        let settings = creature.path_settings;
+        if settings.max_distance == 0
+            || from.z != target.z
+            || ranged_distance(from, target) > u32::from(settings.max_distance)
+        {
+            return Ok(None);
+        }
+
+        let max_path_cost = u32::from(settings.max_distance)
+            .checked_mul(5)
+            .ok_or(SimError::NumericOverflow)?;
+        let minimum_x = i64::from(from.x.min(target.x)) - 16;
+        let maximum_x = i64::from(from.x.max(target.x)) + 16;
+        let minimum_y = i64::from(from.y.min(target.y)) - 16;
+        let maximum_y = i64::from(from.y.max(target.y)) + 16;
+        let mut open = BinaryHeap::new();
+        let mut costs = BTreeMap::from([(from, 0_u32)]);
+        let mut parents = BTreeMap::new();
+        let mut closed = BTreeSet::new();
+        open.push(Reverse((0_u32, from)));
+
+        const NEIGHBORS: [(i8, i8); 8] = [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+            (1, 1),
+        ];
+        while let Some(Reverse((_score, current))) = open.pop() {
+            if !closed.insert(current) {
+                continue;
+            }
+            let current_cost = *costs.get(&current).ok_or(SimError::InvalidCreature)?;
+            if current_cost > max_path_cost {
+                return Ok(None);
+            }
+            if current == target {
+                let mut step = target;
+                while let Some(parent) = parents.get(&step).copied() {
+                    if parent == from {
+                        return Ok(Some(step));
+                    }
+                    step = parent;
+                }
+                return Ok(None);
+            }
+            for (dx, dy) in NEIGHBORS {
+                let Some(next) = current.checked_offset(dx, dy, 0) else {
+                    continue;
+                };
+                if i64::from(next.x) < minimum_x
+                    || i64::from(next.x) >= maximum_x
+                    || i64::from(next.y) < minimum_y
+                    || i64::from(next.y) >= maximum_y
+                {
+                    continue;
+                }
+                let Some(tile_cost) = self.creature_route_tile_cost(creature_id, creature, next)?
+                else {
+                    continue;
+                };
+                let diagonal_penalty = u32::from(dx != 0 && dy != 0);
+                let next_cost = current_cost
+                    .checked_add(tile_cost)
+                    .and_then(|cost| cost.checked_add(diagonal_penalty))
+                    .ok_or(SimError::NumericOverflow)?;
+                if next_cost > max_path_cost
+                    || costs
+                        .get(&next)
+                        .is_some_and(|existing| *existing <= next_cost)
+                {
+                    continue;
+                }
+                costs.insert(next, next_cost);
+                parents.insert(next, current);
+                let estimate = ranged_distance(next, target)
+                    .checked_mul(2)
+                    .and_then(|distance| distance.checked_add(next_cost))
+                    .ok_or(SimError::NumericOverflow)?;
+                open.push(Reverse((estimate, next)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn creature_route_tile_cost(
+        &self,
+        creature_id: CreatureId,
+        creature: &Creature,
+        position: WorldPosition,
+    ) -> Result<Option<u32>, SimError> {
+        let settings = creature.path_settings;
+        let base = if let Some(cost) = self.tile_movement_cost(position) {
+            u32::try_from(cost).map_err(|_| SimError::NumericOverflow)?
+        } else if settings.allow_open_doors
+            && self
+                .projected_open_terrain(position)
+                .is_some_and(|(_, _, opened)| {
+                    opened.move_cost > 0
+                        && self
+                            .chunks
+                            .get(&position.chunk_and_local().0)
+                            .and_then(|chunk| chunk.furniture(position.chunk_and_local().1))
+                            .is_none_or(|furniture| furniture.move_cost_mod >= 0)
+                })
+        {
+            4
+        } else if let Some(rating) = self.creature_route_bash_rating(creature_id, position)? {
+            match rating {
+                2.. => 20_u32
+                    .checked_div(u32::from(rating))
+                    .and_then(|cost| cost.checked_add(12))
+                    .ok_or(SimError::NumericOverflow)?,
+                1 => 500,
+                0 => return Ok(None),
+            }
+        } else {
+            return Ok(None);
+        };
+        let dangerous_penalty = if settings.avoid_dangerous_fields
+            && self.fields_at(position).is_some_and(|fields| {
+                fields.iter().any(|field| {
+                    self.field_types
+                        .get(&field.field_type_id)
+                        .and_then(|field_type| {
+                            field_type
+                                .intensity_levels
+                                .get(usize::from(field.intensity - 1))
+                        })
+                        .is_some_and(|level| level.dangerous)
+                })
+            }) {
+            500
+        } else {
+            0
+        };
+        base.checked_add(dangerous_penalty)
+            .map(Some)
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn creature_movement_action_cost(
+        &self,
+        from: WorldPosition,
+        to: WorldPosition,
+        destination: WorldPosition,
+    ) -> Result<Option<i64>, SimError> {
+        let Some(from_cost) = self.tile_movement_cost(from) else {
+            return Ok(None);
+        };
+        let Some(to_cost) = self.tile_movement_cost(to) else {
+            return Ok(None);
+        };
+        let Some(progress) = euclidean_progress_q30(from, destination, to)? else {
+            return Ok(None);
+        };
+        let base_upstream = from_cost
+            .checked_add(to_cost)
+            .and_then(|cost| cost.checked_mul(25))
+            .ok_or(SimError::NumericOverflow)?;
+        scaled_creature_movement_action_cost(base_upstream, progress).map(Some)
+    }
+
+    fn creature_can_see_position(
+        &self,
+        creature_id: CreatureId,
+        target: WorldPosition,
+        light_sources: &[ActiveLightSource],
+    ) -> Result<bool, SimError> {
+        const DARKEST_NATURAL_RADIUS: i64 = 2;
+        let natural_radius_span = i64::from(TERRAIN_MEMORY_RADIUS_TILES) - 2;
+
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        if !creature.can_see || creature.position.z != target.z {
+            return Ok(false);
+        }
+        let distance = ranged_distance(creature.position, target);
+        let maximum_range = u32::from(creature.vision_day.max(creature.vision_night));
+        if distance > maximum_range || !self.has_clear_shot(creature.position, target) {
+            return Ok(false);
+        }
+        let artificially_lit = light_sources.iter().copied().any(|source| {
+            ranged_distance(source.position, target) <= source.sight_radius
+                && self.has_clear_shot(source.position, target)
+        });
+        if artificially_lit {
+            return Ok(true);
+        }
+        let natural_radius = i64::from(NaturalLightSnapshot::at_tick(self.tick).sight_radius);
+        let progress = natural_radius
+            .saturating_sub(DARKEST_NATURAL_RADIUS)
+            .min(natural_radius_span);
+        let night = i64::from(creature.vision_night);
+        let day = i64::from(creature.vision_day);
+        let range = night + (day - night) * progress / natural_radius_span;
+        Ok(u32::try_from(range).map_err(|_| SimError::NumericOverflow)? >= distance)
+    }
+
+    fn creature_attack(
+        &mut self,
+        source: CreatureId,
+        target: ActorId,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if let Some((spread, stumbled)) =
+            self.sleeping_target_creature_attack_roll(source, target, turn_sequence)?
+            && spread < 0
+        {
+            if stumbled {
+                let until = self
+                    .tick
+                    .0
+                    .checked_add(2 * SimTick::HZ)
+                    .map(SimTick)
+                    .ok_or(SimError::NumericOverflow)?;
+                self.creatures
+                    .get_mut(&source)
+                    .ok_or(SimError::UnknownCreature)?
+                    .downed_until_tick = Some(until);
+            }
+            events.push(self.make_event(WorldEventKind::CreatureMissedActor {
+                source,
+                target,
+                stumbled,
+            })?);
+            return Ok(());
+        }
+        let creature = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?;
+        let mut rng = self.named_rng(
+            b"creature-melee",
+            &[source.as_u128(), target.as_u128()],
+            self.next_event_counter,
+        );
+        let mut damage = 0_u32;
+        for _ in 0..creature.melee_dice {
+            damage = damage
+                .checked_add(1 + rng.next_u32() % u32::from(creature.melee_dice_sides))
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        let damage = u16::try_from(damage).map_err(|_| SimError::NumericOverflow)?;
+        if damage == 0 {
+            return Ok(());
+        }
+        let (remaining_hp, was_sleeping) = {
+            let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+            actor.hp = actor
+                .hp
+                .checked_sub(i32::from(damage))
+                .ok_or(SimError::NumericOverflow)?;
+            let was_sleeping = actor.sleeping;
+            if actor.hp <= 0 {
+                actor.sleeping = false;
+                actor.sleep_intervals = 0;
+                actor.queued_actions.clear();
+            }
+            (actor.hp, was_sleeping)
+        };
+        events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
+            source,
+            target,
+            amount: damage,
+            remaining_hp,
+        })?);
+        self.interrupt_craft(target, events)?;
+        self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+        self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+        self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
+        if was_sleeping && remaining_hp > 0 {
+            self.wake_actor(target, WakeReason::Damage, events)?;
+        }
+        if remaining_hp <= 0 {
+            events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
+                actor_id: target,
+                killer: source,
+            })?);
+        }
+        Ok(())
+    }
+
+    /// Exact currently admitted monster-hit subset. Sleeping actors cannot
+    /// attempt to dodge in pinned CDDA, so their dodge roll is exactly zero.
+    /// Awake targets retain the documented temporary guaranteed-hit boundary
+    /// until canonical dodge attempts, stamina, encumbrance, and limb state
+    /// exist.
+    fn sleeping_target_creature_attack_roll(
+        &self,
+        source: CreatureId,
+        target: ActorId,
+        turn_sequence: u64,
+    ) -> Result<Option<(i64, bool)>, SimError> {
+        let creature = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?;
+        let actor = self.actors.get(&target).ok_or(SimError::UnknownActor)?;
+        if creature.melee_dice == 0 || !actor.sleeping {
+            return Ok(None);
+        }
+        let mut rng = self.named_rng(
+            b"creature-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let spread = pinned_melee_hit_roll(i64::from(creature.melee_skill), 1, &mut rng)?;
+        let stumbled = spread < 0 && creature.clumsy_attacks && rng.next_u32().is_multiple_of(4);
+        Ok(Some((spread, stumbled)))
+    }
+
+    fn apply_wield(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: Option<ItemId>,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if item_id.is_some_and(|item_id| !actor.inventory.contains_key(&item_id)) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        }
+        actor.wielded = item_id;
+        events.push(self.make_event(WorldEventKind::ItemWielded { actor_id, item_id })?);
+        Ok(())
+    }
+
+    fn apply_pickup(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let position = actor.position;
+        let reserved_slots = actor
+            .craft_activity
+            .as_ref()
+            .map_or(0, craft_reserved_inventory_slots)
+            + usize::from(actor.disassembly_activity.is_some())
+            + actor
+                .construction_activity
+                .as_ref()
+                .map_or(0, construction_reserved_inventory_slots);
+        if actor
+            .inventory
+            .len()
+            .checked_add(reserved_slots)
+            .is_none_or(|count| count >= MAX_ACTOR_INVENTORY_ITEMS)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InventoryFull)?);
+            return Ok(());
+        }
+        let Some(ground) = self.ground_items.get(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemMissing)?);
+            return Ok(());
+        };
+        if ground.position != position {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotHere)?);
+            return Ok(());
+        }
+        let ground = self
+            .ground_items
+            .remove(&item_id)
+            .ok_or(SimError::UnknownItem)?;
+        self.actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .inventory
+            .insert(item_id, ground.item);
+        events.push(self.make_event(WorldEventKind::ItemPickedUp {
+            actor_id,
+            item_id,
+            position,
+        })?);
+        Ok(())
+    }
+
+    fn apply_drop(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let position = actor.position;
+        let Some(item) = actor.inventory.remove(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if actor.wielded == Some(item_id) {
+            actor.wielded = None;
+        }
+        self.ground_items
+            .insert(item_id, GroundItem { item, position });
+        events.push(self.make_event(WorldEventKind::ItemDropped {
+            actor_id,
+            item_id,
+            position,
+        })?);
+        Ok(())
+    }
+
+    fn apply_consume(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(item) = actor.inventory.get(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if item.comestible_type.is_empty() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotConsumable)?);
+            return Ok(());
+        }
+        self.consume_owned_item(actor_id, item_id, events)
+    }
+
+    fn consume_owned_item(
+        &mut self,
+        actor_id: ActorId,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let item = actor
+            .inventory
+            .get_mut(&item_id)
+            .ok_or(SimError::UnknownItem)?;
+        actor.stored_kcal = actor
+            .stored_kcal
+            .checked_add(item.calories)
+            .ok_or(SimError::NumericOverflow)?;
+        actor.thirst = actor
+            .thirst
+            .checked_sub(item.quench)
+            .ok_or(SimError::NumericOverflow)?
+            .max(0);
+        let remaining_charges = item.charges.saturating_sub(1);
+        item.charges = remaining_charges;
+        let stored_kcal = actor.stored_kcal;
+        let thirst = actor.thirst;
+        if remaining_charges == 0 {
+            actor.inventory.remove(&item_id);
+            if actor.wielded == Some(item_id) {
+                actor.wielded = None;
+            }
+        }
+        events.push(self.make_event(WorldEventKind::ItemConsumed {
+            actor_id,
+            item_id,
+            remaining_charges,
+            stored_kcal,
+            thirst,
+        })?);
+        Ok(())
+    }
+
+    fn apply_activate(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(item) = actor.inventory.get(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        let Some(powered) = item.powered_tool.clone() else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::ItemNotActivatable,
+            )?);
+            return Ok(());
+        };
+        let activating = !powered.active;
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let item = actor
+            .inventory
+            .get_mut(&item_id)
+            .ok_or(SimError::UnknownItem)?;
+        if activating && !item.consume_activation_power(powered.activation_charges)? {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemHasNoPower)?);
+            return Ok(());
+        }
+        item.set_powered_active(activating)?;
+        let available_energy_millijoules = item.available_power_energy_millijoules()?;
+        events.push(self.make_event(WorldEventKind::PoweredToolChanged {
+            actor_id: Some(actor_id),
+            item_id,
+            active: activating,
+            reason: if activating {
+                PoweredToolTransitionReason::Activated
+            } else {
+                PoweredToolTransitionReason::Deactivated
+            },
+            available_energy_millijoules,
+        })?);
+        Ok(())
+    }
+
+    fn advance_powered_tools(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        if !self.tick.0.is_multiple_of(SimTick::HZ) {
+            return Ok(());
+        }
+        let mut depleted = Vec::new();
+        for (actor_id, actor) in &mut self.actors {
+            for item in actor.inventory.values_mut() {
+                let Some(powered) = item.powered_tool.clone().filter(|powered| powered.active)
+                else {
+                    continue;
+                };
+                if !item.consume_continuous_power(powered.power_draw_milliwatts)? {
+                    item.set_powered_active(false)?;
+                    depleted.push((Some(*actor_id), item.id));
+                }
+            }
+        }
+        for ground in self.ground_items.values_mut() {
+            let Some(powered) = ground
+                .item
+                .powered_tool
+                .clone()
+                .filter(|powered| powered.active)
+            else {
+                continue;
+            };
+            if !ground
+                .item
+                .consume_continuous_power(powered.power_draw_milliwatts)?
+            {
+                ground.item.set_powered_active(false)?;
+                depleted.push((None, ground.item.id));
+            }
+        }
+        for (actor_id, item_id) in depleted {
+            let available_energy_millijoules = actor_id.map_or_else(
+                || {
+                    self.ground_items
+                        .get(&item_id)
+                        .ok_or(SimError::UnknownItem)?
+                        .item
+                        .available_power_energy_millijoules()
+                },
+                |actor_id| {
+                    self.actors
+                        .get(&actor_id)
+                        .and_then(|actor| actor.inventory.get(&item_id))
+                        .ok_or(SimError::UnknownItem)?
+                        .available_power_energy_millijoules()
+                },
+            )?;
+            events.push(self.make_event(WorldEventKind::PoweredToolChanged {
+                actor_id,
+                item_id,
+                active: false,
+                reason: PoweredToolTransitionReason::EnergyDepleted,
+                available_energy_millijoules,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn start_craft(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        recipe_id: String,
+        recipe: Option<Box<CraftRecipeV1>>,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some(recipe) = recipe.map(|recipe| *recipe) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::RecipeUnavailable)?);
+            return Ok(());
+        };
+        if recipe.recipe_id != recipe_id || validate_craft_recipe(&recipe).is_err() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::RecipeUnavailable)?);
+            return Ok(());
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if !actor_knows_recipe(actor, &recipe) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::RecipeNotKnown)?);
+            return Ok(());
+        }
+        if !actor_has_recipe_skills(actor, &recipe) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InsufficientSkills,
+            )?);
+            return Ok(());
+        }
+        if !actor_has_required_proficiencies(actor, &recipe) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::MissingProficiencies,
+            )?);
+            return Ok(());
+        }
+        if craft_proficiency_time_malus_millionths(&actor.proficiencies, &recipe).is_err() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::RecipeUnavailable)?);
+            return Ok(());
+        }
+        let Some(tool_selection) = select_craft_tools(&actor.inventory, &recipe) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingTools)?);
+            return Ok(());
+        };
+        if select_craft_quality_items(&actor.inventory, &recipe).is_none() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
+            return Ok(());
+        }
+        let Some(plan) = plan_craft_consumption(&actor.inventory, &recipe)? else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingComponents)?);
+            return Ok(());
+        };
+        let total_output_instances = recipe
+            .total_output_instances()
+            .ok_or(SimError::InvalidCraft)?;
+        let fully_consumed = plan.iter().try_fold(0_usize, |count, planned| {
+            let item = actor
+                .inventory
+                .get(&planned.item_id)
+                .ok_or(SimError::InvalidCraft)?;
+            Ok::<_, SimError>(
+                count
+                    + usize::from(
+                        !planned.count_by_charges
+                            || u32::try_from(item.charges).ok() == Some(planned.count),
+                    ),
+            )
+        })?;
+        let final_inventory_len = actor
+            .inventory
+            .len()
+            .checked_sub(fully_consumed)
+            .and_then(|count| count.checked_add(usize::from(total_output_instances)))
+            .ok_or(SimError::NumericOverflow)?;
+        if final_inventory_len > MAX_ACTOR_INVENTORY_ITEMS {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InventoryFull)?);
+            return Ok(());
+        }
+        let partial_count = plan
+            .iter()
+            .filter(|planned| {
+                planned.count_by_charges
+                    && self
+                        .actors
+                        .get(&actor_id)
+                        .and_then(|actor| actor.inventory.get(&planned.item_id))
+                        .and_then(|item| u32::try_from(item.charges).ok())
+                        .is_some_and(|charges| planned.count < charges)
+            })
+            .count();
+        let ids_needed = u64::try_from(partial_count)
+            .ok()
+            .and_then(|count| count.checked_add(u64::from(total_output_instances)))
+            .ok_or(SimError::NumericOverflow)?;
+        if self.allocator.remaining() < ids_needed {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::StableIdsUnavailable,
+            )?);
+            return Ok(());
+        }
+
+        let mut preview_allocator = self.allocator.clone();
+        let mut preview_consumed = Vec::with_capacity(plan.len());
+        for planned in &plan {
+            let item = actor
+                .inventory
+                .get(&planned.item_id)
+                .ok_or(SimError::InvalidCraft)?;
+            let mut snapshot = item.snapshot();
+            let available_charges = u32::try_from(item.charges).ok();
+            let split_from = if planned.count_by_charges
+                && available_charges.is_some_and(|charges| planned.count < charges)
+            {
+                snapshot.id = preview_allocator.allocate_item()?;
+                snapshot.charges =
+                    i32::try_from(planned.count).map_err(|_| SimError::NumericOverflow)?;
+                Some(planned.item_id)
+            } else {
+                None
+            };
+            preview_consumed.push(CraftConsumedItemV1 {
+                item: snapshot,
+                split_from,
+            });
+        }
+        if craft_output_component_provenance(&recipe, &preview_consumed).is_err() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::RecipeUnavailable)?);
+            return Ok(());
+        }
+
+        let mut split_ids = BTreeMap::new();
+        for planned in &plan {
+            let charges = self
+                .actors
+                .get(&actor_id)
+                .and_then(|actor| actor.inventory.get(&planned.item_id))
+                .and_then(|item| u32::try_from(item.charges).ok());
+            if planned.count_by_charges && charges.is_some_and(|charges| planned.count < charges) {
+                split_ids.insert(planned.item_id, self.allocator.allocate_item()?);
+            }
+        }
+        let mut reserved_output_items = Vec::with_capacity(usize::from(total_output_instances));
+        for _ in 0..total_output_instances {
+            reserved_output_items.push(self.allocator.allocate_item()?);
+        }
+
+        let total_action_points = recipe
+            .time_moves
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+            .ok_or(SimError::NumericOverflow)?;
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if actor.craft_activity.is_some()
+            || actor.read_activity.is_some()
+            || actor.disassembly_activity.is_some()
+            || actor.construction_activity.is_some()
+        {
+            return Err(SimError::InvalidCraft);
+        }
+        let tool_debits = debit_selected_craft_tools(
+            &mut actor.inventory,
+            &recipe,
+            &tool_selection.alternatives,
+            0,
+            1,
+        )?
+        .ok_or(SimError::InvalidCraft)?;
+        let mut consumed_items = Vec::with_capacity(plan.len());
+        let mut previously_wielded = None;
+        for planned in plan {
+            if let Some(split_id) = split_ids.get(&planned.item_id).copied() {
+                let item = actor
+                    .inventory
+                    .get_mut(&planned.item_id)
+                    .ok_or(SimError::UnknownItem)?;
+                let consumed_charges =
+                    i32::try_from(planned.count).map_err(|_| SimError::NumericOverflow)?;
+                item.charges = item
+                    .charges
+                    .checked_sub(consumed_charges)
+                    .ok_or(SimError::NumericOverflow)?;
+                let mut consumed = item.snapshot();
+                consumed.id = split_id;
+                consumed.charges = consumed_charges;
+                consumed_items.push(CraftConsumedItemV1 {
+                    item: consumed,
+                    split_from: Some(planned.item_id),
+                });
+            } else {
+                let item = actor
+                    .inventory
+                    .remove(&planned.item_id)
+                    .ok_or(SimError::UnknownItem)?;
+                if actor.wielded == Some(planned.item_id) {
+                    previously_wielded = Some(planned.item_id);
+                    actor.wielded = None;
+                }
+                consumed_items.push(CraftConsumedItemV1 {
+                    item: item.snapshot(),
+                    split_from: None,
+                });
+            }
+        }
+        actor.action_points = 0;
+        actor.held_movement = None;
+        actor.queued_actions.clear();
+        actor.craft_activity = Some(CraftActivitySnapshotV1 {
+            recipe,
+            selected_tool_alternatives: tool_selection.alternatives,
+            remaining_action_points: total_action_points,
+            consumed_items,
+            reserved_output_items,
+            previously_wielded,
+            practice_ticks_awarded: 0,
+            proficiency_progress_millionths: 0,
+            proficiency_buckets_awarded: 0,
+            interrupted: false,
+        });
+        for debit in tool_debits {
+            events.push(self.make_event(WorldEventKind::CraftToolChargesConsumed {
+                actor_id,
+                item_id: debit.item_id,
+                charges: debit.charges,
+                remaining_charges: debit.remaining_charges,
+            })?);
+        }
+        events.push(self.make_event(WorldEventKind::CraftStarted {
+            actor_id,
+            recipe_id,
+            total_action_points,
+        })?);
+        Ok(())
+    }
+
+    fn resume_craft(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let (tool_selection, qualities_available) = {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .craft_activity
+                .as_ref()
+                .ok_or(SimError::InvalidCraft)?;
+            let selection = select_craft_tools_for_charge(
+                &actor.inventory,
+                &activity.recipe,
+                tool_resume_charge,
+            );
+            (
+                selection,
+                select_craft_quality_items(&actor.inventory, &activity.recipe).is_some(),
+            )
+        };
+        let Some(tool_selection) = tool_selection else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingTools)?);
+            return Ok(());
+        };
+        if !qualities_available {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
+            return Ok(());
+        }
+        let recipe_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .craft_activity
+                .as_mut()
+                .ok_or(SimError::InvalidCraft)?;
+            activity.selected_tool_alternatives = tool_selection.alternatives;
+            activity.interrupted = false;
+            actor.action_points = 0;
+            activity.recipe.recipe_id.clone()
+        };
+        events.push(self.make_event(WorldEventKind::CraftResumed {
+            actor_id,
+            recipe_id,
+        })?);
+        Ok(())
+    }
+
+    fn cancel_craft(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let reservations_are_valid = {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .craft_activity
+                .as_ref()
+                .ok_or(SimError::InvalidCraft)?;
+            craft_reservations_match(&actor.inventory, activity)?
+        };
+        if !reservations_are_valid {
+            return Err(SimError::InvalidCraft);
+        }
+        let recipe_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let activity = actor.craft_activity.take().ok_or(SimError::InvalidCraft)?;
+            let recipe_id = activity.recipe.recipe_id.clone();
+            for consumed in activity.consumed_items {
+                if let Some(split_from) = consumed.split_from {
+                    let parent = actor
+                        .inventory
+                        .get_mut(&split_from)
+                        .ok_or(SimError::InvalidCraft)?;
+                    if parent.type_id != consumed.item.type_id {
+                        return Err(SimError::InvalidCraft);
+                    }
+                    parent.charges = parent
+                        .charges
+                        .checked_add(consumed.item.charges)
+                        .ok_or(SimError::NumericOverflow)?;
+                } else if actor
+                    .inventory
+                    .insert(
+                        consumed.item.id,
+                        ItemInstance::from_snapshot(&consumed.item)?,
+                    )
+                    .is_some()
+                {
+                    return Err(SimError::InvalidCraft);
+                }
+            }
+            if activity
+                .previously_wielded
+                .is_some_and(|item_id| actor.inventory.contains_key(&item_id))
+            {
+                actor.wielded = activity.previously_wielded;
+            }
+            actor.action_points = 0;
+            recipe_id
+        };
+        events.push(self.make_event(WorldEventKind::CraftCanceled {
+            actor_id,
+            recipe_id,
+        })?);
+        Ok(())
+    }
+
+    fn complete_craft(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let output_is_valid = {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .craft_activity
+                .as_ref()
+                .ok_or(SimError::InvalidCraft)?;
+            selected_noncharge_tools_present(
+                &actor.inventory,
+                &activity.recipe,
+                &activity.selected_tool_alternatives,
+            ) && select_craft_quality_items(&actor.inventory, &activity.recipe).is_some()
+                && actor
+                    .inventory
+                    .len()
+                    .checked_add(activity.reserved_output_items.len())
+                    .is_some_and(|count| count <= MAX_ACTOR_INVENTORY_ITEMS)
+                && activity
+                    .reserved_output_items
+                    .iter()
+                    .all(|item_id| !actor.inventory.contains_key(item_id))
+        };
+        if !output_is_valid {
+            return Err(SimError::InvalidCraft);
+        }
+        let (recipe_id, output_items) = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let activity = actor.craft_activity.take().ok_or(SimError::InvalidCraft)?;
+            let output_provenance =
+                craft_output_component_provenance(&activity.recipe, &activity.consumed_items)?;
+            let recipe_id = activity.recipe.recipe_id.clone();
+            let mut prototypes = Vec::with_capacity(activity.reserved_output_items.len());
+            prototypes.extend(std::iter::repeat_n(
+                &activity.recipe.output,
+                usize::from(activity.recipe.output_instances),
+            ));
+            for byproduct in &activity.recipe.byproducts {
+                prototypes.extend(std::iter::repeat_n(
+                    &byproduct.output,
+                    usize::from(byproduct.output_instances),
+                ));
+            }
+            if prototypes.len() != activity.reserved_output_items.len() {
+                return Err(SimError::InvalidCraft);
+            }
+            for (index, (item_id, prototype)) in activity
+                .reserved_output_items
+                .iter()
+                .zip(prototypes)
+                .enumerate()
+            {
+                let mut item = item_from_craft_prototype(*item_id, prototype);
+                if index < usize::from(activity.recipe.output_instances) {
+                    item.component_provenance = output_provenance
+                        .as_ref()
+                        .map(|outputs| outputs[index].clone());
+                }
+                if actor.inventory.insert(*item_id, item).is_some() {
+                    return Err(SimError::InvalidCraft);
+                }
+            }
+            actor.action_points = 0;
+            (recipe_id, activity.reserved_output_items)
+        };
+        events.push(self.make_event(WorldEventKind::CraftCompleted {
+            actor_id,
+            recipe_id,
+            output_items,
+        })?);
+        Ok(())
+    }
+
+    fn interrupt_craft(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let recipe_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let Some(activity) = actor.craft_activity.as_mut() else {
+                return Ok(());
+            };
+            if activity.interrupted {
+                return Ok(());
+            }
+            activity.interrupted = true;
+            activity.recipe.recipe_id.clone()
+        };
+        events.push(self.make_event(WorldEventKind::CraftInterrupted {
+            actor_id,
+            recipe_id,
+        })?);
+        Ok(())
+    }
+
+    fn construction_target_is_valid(
+        &self,
+        actor_id: ActorId,
+        target: WorldPosition,
+        recipe: &ConstructionRecipeV1,
+    ) -> Result<bool, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if !horizontally_adjacent(actor.position, target) {
+            return Ok(false);
+        }
+        let (coord, local) = target.chunk_and_local();
+        let Some(chunk) = self.chunks.get(&coord) else {
+            return Ok(false);
+        };
+        let Some(terrain) = chunk.tile(local) else {
+            return Ok(false);
+        };
+        let furniture = chunk.furniture(local);
+        if recipe.requires_empty
+            && (!terrain.flat
+                || furniture.is_some()
+                || self.actor_at(target).is_some()
+                || self.creature_at(target).is_some()
+                || self
+                    .ground_items
+                    .values()
+                    .any(|ground| ground.position == target))
+        {
+            return Ok(false);
+        }
+        if !recipe.pre_terrain.is_empty()
+            && recipe
+                .pre_terrain
+                .binary_search_by(|id| id.as_str().cmp(&terrain.terrain_id))
+                .is_err()
+            && furniture.is_none_or(|furniture| {
+                recipe
+                    .pre_terrain
+                    .binary_search_by(|id| id.as_str().cmp(&furniture.furniture_id))
+                    .is_err()
+            })
+        {
+            return Ok(false);
+        }
+        if matches!(recipe.result, ConstructionResultV1::Furniture(_)) && furniture.is_some() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn start_construction(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        target: WorldPosition,
+        construction_id: String,
+        construction: Option<Box<ConstructionRecipeV1>>,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some(recipe) = construction.map(|recipe| *recipe) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::ConstructionUnavailable,
+            )?);
+            return Ok(());
+        };
+        if recipe.construction_id != construction_id
+            || validate_construction_recipe(&recipe).is_err()
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::ConstructionUnavailable,
+            )?);
+            return Ok(());
+        }
+        let actor_position = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        if !horizontally_adjacent(actor_position, target) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidConstructionTarget,
+            )?);
+            return Ok(());
+        }
+        self.ensure_active_bubble_generated(target)?;
+        if !self.construction_target_is_valid(actor_id, target, &recipe)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidConstructionTarget,
+            )?);
+            return Ok(());
+        }
+        if !self.actor_has_detail_light(actor_id)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::TooDarkToConstruct,
+            )?);
+            return Ok(());
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if !meets_skill_requirements(actor, recipe.required_skills.clone(), false) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InsufficientSkills,
+            )?);
+            return Ok(());
+        }
+        let Some(quality_items) = select_construction_quality_items(&actor.inventory, &recipe)
+        else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
+            return Ok(());
+        };
+        let Some(plan) = plan_construction_components(&actor.inventory, &recipe, &quality_items)?
+        else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingComponents)?);
+            return Ok(());
+        };
+        let partial_count = plan
+            .iter()
+            .filter(|planned| {
+                planned.count_by_charges
+                    && actor
+                        .inventory
+                        .get(&planned.item_id)
+                        .and_then(|item| u32::try_from(item.charges).ok())
+                        .is_some_and(|charges| planned.count < charges)
+            })
+            .count();
+        if self.allocator.remaining() < u64::try_from(partial_count).unwrap_or(u64::MAX) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::StableIdsUnavailable,
+            )?);
+            return Ok(());
+        }
+        let mut split_ids = BTreeMap::new();
+        for planned in &plan {
+            let charges = self
+                .actors
+                .get(&actor_id)
+                .and_then(|actor| actor.inventory.get(&planned.item_id))
+                .and_then(|item| u32::try_from(item.charges).ok());
+            if planned.count_by_charges && charges.is_some_and(|charges| planned.count < charges) {
+                split_ids.insert(planned.item_id, self.allocator.allocate_item()?);
+            }
+        }
+        let total_action_points = recipe
+            .time_moves
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+            .ok_or(SimError::NumericOverflow)?;
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if actor.craft_activity.is_some()
+            || actor.read_activity.is_some()
+            || actor.disassembly_activity.is_some()
+            || actor.construction_activity.is_some()
+        {
+            return Err(SimError::InvalidConstruction);
+        }
+        let mut consumed_items = Vec::with_capacity(plan.len());
+        let mut previously_wielded = None;
+        for planned in plan {
+            if let Some(split_id) = split_ids.get(&planned.item_id).copied() {
+                let item = actor
+                    .inventory
+                    .get_mut(&planned.item_id)
+                    .ok_or(SimError::UnknownItem)?;
+                let consumed_charges =
+                    i32::try_from(planned.count).map_err(|_| SimError::NumericOverflow)?;
+                item.charges = item
+                    .charges
+                    .checked_sub(consumed_charges)
+                    .ok_or(SimError::NumericOverflow)?;
+                let mut consumed = item.snapshot();
+                consumed.id = split_id;
+                consumed.charges = consumed_charges;
+                consumed_items.push(CraftConsumedItemV1 {
+                    item: consumed,
+                    split_from: Some(planned.item_id),
+                });
+            } else {
+                let item = actor
+                    .inventory
+                    .remove(&planned.item_id)
+                    .ok_or(SimError::UnknownItem)?;
+                if actor.wielded == Some(planned.item_id) {
+                    previously_wielded = Some(planned.item_id);
+                    actor.wielded = None;
+                }
+                consumed_items.push(CraftConsumedItemV1 {
+                    item: item.snapshot(),
+                    split_from: None,
+                });
+            }
+        }
+        actor.action_points = 0;
+        actor.held_movement = None;
+        actor.queued_actions.clear();
+        actor.construction_activity = Some(ConstructionActivitySnapshotV1 {
+            recipe,
+            target,
+            remaining_action_points: total_action_points,
+            consumed_items,
+            previously_wielded,
+            interrupted: false,
+        });
+        events.push(self.make_event(WorldEventKind::ConstructionStarted {
+            actor_id,
+            construction_id,
+            target,
+            total_action_points,
+        })?);
+        Ok(())
+    }
+
+    fn resume_construction(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let (recipe, target) = {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .construction_activity
+                .as_ref()
+                .ok_or(SimError::InvalidConstruction)?;
+            (activity.recipe.clone(), activity.target)
+        };
+        if !self.construction_target_is_valid(actor_id, target, &recipe)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidConstructionTarget,
+            )?);
+            return Ok(());
+        }
+        if !self.actor_has_detail_light(actor_id)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::TooDarkToConstruct,
+            )?);
+            return Ok(());
+        }
+        if self.actors.get(&actor_id).is_none_or(|actor| {
+            select_construction_quality_items(&actor.inventory, &recipe).is_none()
+        }) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
+            return Ok(());
+        }
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let activity = actor
+            .construction_activity
+            .as_mut()
+            .ok_or(SimError::InvalidConstruction)?;
+        activity.interrupted = false;
+        actor.action_points = 0;
+        events.push(self.make_event(WorldEventKind::ConstructionResumed {
+            actor_id,
+            construction_id: recipe.construction_id,
+            target,
+        })?);
+        Ok(())
+    }
+
+    fn cancel_construction(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let reservations_are_valid = {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .construction_activity
+                .as_ref()
+                .ok_or(SimError::InvalidConstruction)?;
+            construction_reservations_match(&actor.inventory, activity)?
+        };
+        if !reservations_are_valid {
+            return Err(SimError::InvalidConstruction);
+        }
+        let (construction_id, target) = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .construction_activity
+                .take()
+                .ok_or(SimError::InvalidConstruction)?;
+            for consumed in activity.consumed_items {
+                if let Some(split_from) = consumed.split_from {
+                    let parent = actor
+                        .inventory
+                        .get_mut(&split_from)
+                        .ok_or(SimError::InvalidConstruction)?;
+                    if parent.type_id != consumed.item.type_id {
+                        return Err(SimError::InvalidConstruction);
+                    }
+                    parent.charges = parent
+                        .charges
+                        .checked_add(consumed.item.charges)
+                        .ok_or(SimError::NumericOverflow)?;
+                } else if actor
+                    .inventory
+                    .insert(
+                        consumed.item.id,
+                        ItemInstance::from_snapshot(&consumed.item)?,
+                    )
+                    .is_some()
+                {
+                    return Err(SimError::InvalidConstruction);
+                }
+            }
+            if activity
+                .previously_wielded
+                .is_some_and(|item_id| actor.inventory.contains_key(&item_id))
+            {
+                actor.wielded = activity.previously_wielded;
+            }
+            actor.action_points = 0;
+            (activity.recipe.construction_id, activity.target)
+        };
+        events.push(self.make_event(WorldEventKind::ConstructionCanceled {
+            actor_id,
+            construction_id,
+            target,
+        })?);
+        Ok(())
+    }
+
+    fn complete_construction(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let activity = self
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.construction_activity.clone())
+            .ok_or(SimError::InvalidConstruction)?;
+        let qualities_available = self.actors.get(&actor_id).is_some_and(|actor| {
+            select_construction_quality_items(&actor.inventory, &activity.recipe).is_some()
+        });
+        if !qualities_available {
+            self.interrupt_construction(
+                actor_id,
+                ConstructionInterruptionReason::MissingQualities,
+                events,
+            )?;
+            return Ok(());
+        }
+        if !self.construction_target_is_valid(actor_id, activity.target, &activity.recipe)? {
+            self.interrupt_construction(
+                actor_id,
+                ConstructionInterruptionReason::TargetChanged,
+                events,
+            )?;
+            return Ok(());
+        }
+        let (coord, local) = activity.target.chunk_and_local();
+        let chunk = self
+            .chunks
+            .get_mut(&coord)
+            .ok_or(SimError::InvalidConstruction)?;
+        match &activity.recipe.result {
+            ConstructionResultV1::Terrain(terrain) => {
+                chunk.set_terrain(local, terrain.clone())?;
+            }
+            ConstructionResultV1::Furniture(furniture) => {
+                chunk.set_furniture(local, Some(furniture.clone()))?;
+            }
+        }
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let current = actor
+            .construction_activity
+            .take()
+            .ok_or(SimError::InvalidConstruction)?;
+        if current != activity {
+            return Err(SimError::InvalidConstruction);
+        }
+        actor.action_points = 0;
+        events.push(self.make_event(WorldEventKind::ConstructionCompleted {
+            actor_id,
+            construction_id: activity.recipe.construction_id,
+            target: activity.target,
+        })?);
+        Ok(())
+    }
+
+    fn interrupt_construction(
+        &mut self,
+        actor_id: ActorId,
+        reason: ConstructionInterruptionReason,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let (construction_id, target) = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let Some(activity) = actor.construction_activity.as_mut() else {
+                return Ok(());
+            };
+            if activity.interrupted {
+                return Ok(());
+            }
+            activity.interrupted = true;
+            (activity.recipe.construction_id.clone(), activity.target)
+        };
+        events.push(self.make_event(WorldEventKind::ConstructionInterrupted {
+            actor_id,
+            construction_id,
+            target,
+            reason,
+        })?);
+        Ok(())
+    }
+
+    fn start_disassembly(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        item_type_id: String,
+        recipe: Option<Box<DisassemblyRecipeV1>>,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some(mut recipe) = recipe.map(|recipe| *recipe) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        };
+        if recipe.target_type_id != item_type_id || validate_disassembly_recipe(&recipe).is_err() {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(target) = actor.inventory.get(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if target.type_id != item_type_id {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        }
+        if target.creature_corpse.is_some() {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        }
+        if recipe.requires_empty_charges && (target.ranged_weapon.is_some() || target.charges != 0)
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        }
+        let unload_charges = match (&target.ranged_weapon, &recipe.unload_charges_as) {
+            (None, None) => 0_i32,
+            (Some(weapon), Some(ammunition))
+                if weapon.ammunition_type == ammunition.ammunition_type =>
+            {
+                i32::from(weapon.ammunition_remaining)
+            }
+            (None, Some(_)) if target.charges >= 0 => target.charges,
+            _ => {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::DisassemblyUnavailable,
+                )?);
+                return Ok(());
+            }
+        };
+        if target.damage > MAX_ITEM_DAMAGE_LEVEL {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemDamaged)?);
+            return Ok(());
+        }
+        if let Some(provenance) = &target.component_provenance {
+            recipe.components = provenance
+                .iter()
+                .filter(|component| component.recoverable)
+                .cloned()
+                .map(|output_state| cdda_protocol::DisassemblyComponentV1 {
+                    output_instances: 1,
+                    count_by_charges: output_state.count_by_charges,
+                    output: craft_prototype_from_component(&output_state),
+                    output_state: Some(output_state),
+                })
+                .collect();
+            if validate_disassembly_recipe(&recipe).is_err() {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::DisassemblyUnavailable,
+                )?);
+                return Ok(());
+            }
+        }
+        if !self.actor_has_detail_light(actor_id)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::TooDarkToDisassemble,
+            )?);
+            return Ok(());
+        }
+        let Some(tool_selection) =
+            select_disassembly_tools(&actor.inventory, &recipe, Some(item_id))
+        else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingTools)?);
+            return Ok(());
+        };
+        if select_disassembly_quality_items(&actor.inventory, &recipe, Some(item_id)).is_none() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
+            return Ok(());
+        }
+        let total_instances = recipe
+            .total_component_instances()
+            .ok_or(SimError::InvalidDisassembly)?;
+        let ids_needed = u64::from(total_instances)
+            .checked_add(u64::from(unload_charges > 0))
+            .ok_or(SimError::NumericOverflow)?;
+        if self.allocator.remaining() < ids_needed {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::StableIdsUnavailable,
+            )?);
+            return Ok(());
+        }
+        let total_action_points = recipe
+            .time_moves
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+            .ok_or(SimError::NumericOverflow)?;
+        let unloaded_item_id = (unload_charges > 0)
+            .then(|| self.allocator.allocate_item())
+            .transpose()?;
+        let mut reserved_component_items = Vec::with_capacity(usize::from(total_instances));
+        for _ in 0..total_instances {
+            reserved_component_items.push(self.allocator.allocate_item()?);
+        }
+        let recipe_id = recipe.recipe_id.clone();
+        let position = actor.position;
+        let (unloaded, detached_magazine) = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            if actor.craft_activity.is_some()
+                || actor.read_activity.is_some()
+                || actor.disassembly_activity.is_some()
+                || actor.construction_activity.is_some()
+            {
+                return Err(SimError::InvalidDisassembly);
+            }
+            let mut target = actor
+                .inventory
+                .remove(&item_id)
+                .ok_or(SimError::UnknownItem)?;
+            let detached_magazine = target
+                .magazine_well
+                .as_mut()
+                .and_then(|well| well.installed_magazine.take())
+                .map(|magazine| ItemInstance::from_snapshot(&magazine))
+                .transpose()?;
+            let unloaded = unloaded_item_id.map(|unloaded_item_id| {
+                let prototype = recipe
+                    .unload_charges_as
+                    .as_ref()
+                    .expect("an allocated unload item has a normalized prototype");
+                let mut ammunition = item_from_craft_prototype(unloaded_item_id, prototype);
+                ammunition.charges = unload_charges;
+                if let Some(weapon) = target.ranged_weapon.as_mut() {
+                    weapon.ammunition_remaining = 0;
+                } else {
+                    target.charges = 0;
+                }
+                (unloaded_item_id, ammunition)
+            });
+            let previously_wielded = actor.wielded == Some(item_id);
+            if previously_wielded {
+                actor.wielded = None;
+            }
+            actor.action_points = 0;
+            actor.held_movement = None;
+            actor.queued_actions.clear();
+            actor.disassembly_activity = Some(DisassemblyActivitySnapshotV1 {
+                recipe,
+                target_item: target.snapshot(),
+                selected_tool_alternatives: tool_selection.alternatives,
+                remaining_action_points: total_action_points,
+                reserved_component_items,
+                previously_wielded,
+                rng_sequence: sequence,
+                interrupted: false,
+            });
+            (unloaded, detached_magazine)
+        };
+        if let Some((unloaded_item_id, ammunition)) = unloaded {
+            if self
+                .ground_items
+                .insert(
+                    unloaded_item_id,
+                    GroundItem {
+                        item: ammunition,
+                        position,
+                    },
+                )
+                .is_some()
+            {
+                return Err(SimError::InvalidDisassembly);
+            }
+            events.push(self.make_event(WorldEventKind::ItemDropped {
+                actor_id,
+                item_id: unloaded_item_id,
+                position,
+            })?);
+        }
+        if let Some(magazine) = detached_magazine {
+            let magazine_id = magazine.id;
+            if self
+                .ground_items
+                .insert(
+                    magazine_id,
+                    GroundItem {
+                        item: magazine,
+                        position,
+                    },
+                )
+                .is_some()
+            {
+                return Err(SimError::InvalidDisassembly);
+            }
+            events.push(self.make_event(WorldEventKind::ItemDropped {
+                actor_id,
+                item_id: magazine_id,
+                position,
+            })?);
+        }
+        events.push(self.make_event(WorldEventKind::DisassemblyStarted {
+            actor_id,
+            target_item_id: item_id,
+            recipe_id,
+            total_action_points,
+        })?);
+        Ok(())
+    }
+
+    fn resume_disassembly(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let (target_item_id, tool_selection, qualities_available) = {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .disassembly_activity
+                .as_ref()
+                .ok_or(SimError::InvalidDisassembly)?;
+            (
+                activity.target_item.id,
+                select_disassembly_tools(&actor.inventory, &activity.recipe, None),
+                select_disassembly_quality_items(&actor.inventory, &activity.recipe, None)
+                    .is_some(),
+            )
+        };
+        let Some(tool_selection) = tool_selection else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingTools)?);
+            return Ok(());
+        };
+        if !qualities_available {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
+            return Ok(());
+        }
+        if !self.actor_has_detail_light(actor_id)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::TooDarkToDisassemble,
+            )?);
+            return Ok(());
+        }
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let activity = actor
+            .disassembly_activity
+            .as_mut()
+            .ok_or(SimError::InvalidDisassembly)?;
+        if !activity.interrupted {
+            return Err(SimError::InvalidDisassembly);
+        }
+        activity.selected_tool_alternatives = tool_selection.alternatives;
+        activity.interrupted = false;
+        actor.action_points = 0;
+        actor.held_movement = None;
+        events.push(self.make_event(WorldEventKind::DisassemblyResumed {
+            actor_id,
+            target_item_id,
+        })?);
+        Ok(())
+    }
+
+    fn cancel_disassembly(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let target_item_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            if actor.inventory.len() >= MAX_ACTOR_INVENTORY_ITEMS {
+                return Err(SimError::InvalidDisassembly);
+            }
+            let activity = actor
+                .disassembly_activity
+                .take()
+                .ok_or(SimError::InvalidDisassembly)?;
+            let target_item_id = activity.target_item.id;
+            if actor
+                .inventory
+                .insert(
+                    target_item_id,
+                    ItemInstance::from_snapshot(&activity.target_item)?,
+                )
+                .is_some()
+            {
+                return Err(SimError::InvalidDisassembly);
+            }
+            if activity.previously_wielded {
+                actor.wielded = Some(target_item_id);
+            }
+            actor.action_points = 0;
+            target_item_id
+        };
+        events.push(self.make_event(WorldEventKind::DisassemblyCanceled {
+            actor_id,
+            target_item_id,
+        })?);
+        Ok(())
+    }
+
+    fn complete_disassembly(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let activity = self
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.disassembly_activity.clone())
+            .ok_or(SimError::InvalidDisassembly)?;
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if activity.remaining_action_points != 0
+            || activity.interrupted
+            || select_disassembly_tools(&actor.inventory, &activity.recipe, None).is_none()
+            || select_disassembly_quality_items(&actor.inventory, &activity.recipe, None).is_none()
+        {
+            return Err(SimError::InvalidDisassembly);
+        }
+        let practical_skill = activity
+            .recipe
+            .primary_skill_id
+            .as_ref()
+            .map_or(0, |skill_id| actor_skill_level(actor, skill_id, false));
+        let should_attempt_learning = !activity.recipe.learn_requirements.is_empty()
+            && !actor.learned_recipes.contains(&activity.recipe.recipe_id)
+            && !(activity.recipe.autolearn
+                && meets_skill_requirements(
+                    actor,
+                    activity.recipe.autolearn_requirements.clone(),
+                    true,
+                ))
+            && meets_skill_requirements(actor, activity.recipe.learn_requirements.clone(), false);
+        let position = actor.position;
+        let mut component_rng = self.named_session_rng(
+            b"disassembly-component-recovery",
+            &[actor_id.as_u128(), activity.target_item.id.as_u128()],
+            activity.rng_sequence.0,
+        );
+        let skill_dice = 2_u32 + 4 * u32::from(practical_skill);
+        let mut recovered = Vec::new();
+        let mut destroyed = BTreeMap::<String, u32>::new();
+        let mut reserved = activity.reserved_component_items.iter().copied();
+        for component in &activity.recipe.components {
+            for _ in 0..component.output_instances {
+                let item_id = reserved.next().ok_or(SimError::InvalidDisassembly)?;
+                let skill_success = activity.recipe.difficulty == 0
+                    || roll_dice(&mut component_rng, skill_dice, 24)?
+                        > roll_dice(
+                            &mut component_rng,
+                            u32::from(activity.recipe.difficulty),
+                            24,
+                        )?;
+                // Pinned damage-level recovery is 0.8^level. The exact
+                // ten-thousandths table avoids floating point in canonical
+                // outcomes while preserving 100%, 80%, 64%, 51.2%, 40.96%.
+                const DAMAGE_RECOVERY_TEN_THOUSANDTHS: [u32; 5] =
+                    [10_000, 8_000, 6_400, 5_120, 4_096];
+                let damage_chance =
+                    DAMAGE_RECOVERY_TEN_THOUSANDTHS[usize::from(activity.target_item.damage)];
+                let damage_success = component_rng.next_u32() % 10_000 < damage_chance;
+                let recovered_component = skill_success && damage_success;
+                if recovered_component {
+                    let item = component.output_state.as_ref().map_or_else(
+                        || item_from_craft_prototype(item_id, &component.output),
+                        |state| item_from_component(item_id, state),
+                    );
+                    recovered.push((item_id, item));
+                } else {
+                    let count = if component.count_by_charges {
+                        u32::try_from(component.output.charges)
+                            .map_err(|_| SimError::InvalidDisassembly)?
+                    } else {
+                        1
+                    };
+                    let entry = destroyed
+                        .entry(component.output.type_id.clone())
+                        .or_default();
+                    *entry = entry.checked_add(count).ok_or(SimError::NumericOverflow)?;
+                }
+            }
+        }
+        if reserved.next().is_some() {
+            return Err(SimError::InvalidDisassembly);
+        }
+        let learned = if should_attempt_learning {
+            let mut learning_rng = self.named_session_rng(
+                b"disassembly-recipe-learning",
+                &[actor_id.as_u128(), activity.target_item.id.as_u128()],
+                activity.rng_sequence.0,
+            );
+            learning_rng.next_u32().is_multiple_of(4)
+        } else {
+            false
+        };
+        if let Some(skill_id) = &activity.recipe.primary_skill_id {
+            self.award_disassembly_practice(
+                actor_id,
+                skill_id,
+                activity.recipe.difficulty,
+                events,
+            )?;
+        }
+        {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let current = actor
+                .disassembly_activity
+                .take()
+                .ok_or(SimError::InvalidDisassembly)?;
+            if current != activity {
+                return Err(SimError::InvalidDisassembly);
+            }
+            if learned
+                && (actor.learned_recipes.len() >= MAX_LEARNED_RECIPES
+                    || !actor
+                        .learned_recipes
+                        .insert(activity.recipe.recipe_id.clone()))
+            {
+                return Err(SimError::InvalidDisassembly);
+            }
+            actor.action_points = 0;
+        }
+        let mut recovered_items = Vec::with_capacity(recovered.len());
+        for (item_id, item) in recovered {
+            if self
+                .ground_items
+                .insert(item_id, GroundItem { item, position })
+                .is_some()
+            {
+                return Err(SimError::InvalidDisassembly);
+            }
+            recovered_items.push(item_id);
+        }
+        events.push(
+            self.make_event(WorldEventKind::DisassemblyCompleted {
+                actor_id,
+                target_item_id: activity.target_item.id,
+                recipe_id: activity.recipe.recipe_id.clone(),
+                recovered_items,
+                destroyed_components: destroyed
+                    .into_iter()
+                    .map(|(type_id, count)| DisassemblyDestroyedComponentV1 { type_id, count })
+                    .collect(),
+            })?,
+        );
+        if learned {
+            events.push(self.make_event(WorldEventKind::RecipeLearned {
+                actor_id,
+                recipe_id: activity.recipe.recipe_id,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn interrupt_disassembly(
+        &mut self,
+        actor_id: ActorId,
+        reason: DisassemblyInterruptionReason,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let target_item_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let Some(activity) = actor.disassembly_activity.as_mut() else {
+                return Ok(());
+            };
+            if activity.interrupted {
+                return Ok(());
+            }
+            activity.interrupted = true;
+            activity.target_item.id
+        };
+        events.push(self.make_event(WorldEventKind::DisassemblyInterrupted {
+            actor_id,
+            target_item_id,
+            reason,
+        })?);
+        Ok(())
+    }
+
+    fn start_book_study(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        book_type_id: String,
+        study: Option<Box<BookStudyV1>>,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some(study) = study.map(|study| *study) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::BookUnavailable)?);
+            return Ok(());
+        };
+        if study.book_type_id != book_type_id || validate_book_study(&study).is_err() {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::BookUnavailable)?);
+            return Ok(());
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if !actor
+            .inventory
+            .get(&item_id)
+            .is_some_and(|item| item.type_id == book_type_id)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        }
+        if !self.actor_has_detail_light(actor_id)? {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::TooDarkToRead)?);
+            return Ok(());
+        }
+        let theory = actor_skill_level(actor, &study.skill_id, true);
+        if theory < study.required_skill_level {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InsufficientSkills,
+            )?);
+            return Ok(());
+        }
+        if theory >= study.maximum_skill_level {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::BookMastered)?);
+            return Ok(());
+        }
+        let total_action_points = adjusted_book_study_time_moves(
+            study.time_moves,
+            study.intelligence_requirement,
+            effective_base_stat(actor.base_intelligence),
+        )
+        .ok_or(SimError::InvalidBookStudy)?
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)
+        .ok_or(SimError::NumericOverflow)?;
+        let skill_id = study.skill_id.clone();
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        if actor.craft_activity.is_some()
+            || actor.read_activity.is_some()
+            || actor.disassembly_activity.is_some()
+            || actor.construction_activity.is_some()
+        {
+            return Err(SimError::InvalidBookStudy);
+        }
+        actor.action_points = 0;
+        actor.held_movement = None;
+        actor.queued_actions.clear();
+        actor.read_activity = Some(BookStudyActivitySnapshotV1 {
+            study,
+            book_item_id: item_id,
+            remaining_action_points: total_action_points,
+            rng_sequence: sequence,
+            interrupted: false,
+        });
+        events.push(self.make_event(WorldEventKind::BookStudyStarted {
+            actor_id,
+            book_item_id: item_id,
+            skill_id,
+            total_action_points,
+        })?);
+        Ok(())
+    }
+
+    fn resume_book_study(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let activity = actor
+            .read_activity
+            .as_ref()
+            .ok_or(SimError::InvalidBookStudy)?;
+        if !actor
+            .inventory
+            .get(&activity.book_item_id)
+            .is_some_and(|item| item.type_id == activity.study.book_type_id)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        }
+        if !self.actor_has_detail_light(actor_id)? {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::TooDarkToRead)?);
+            return Ok(());
+        }
+        let theory = actor_skill_level(actor, &activity.study.skill_id, true);
+        if theory < activity.study.required_skill_level {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InsufficientSkills,
+            )?);
+            return Ok(());
+        }
+        if theory >= activity.study.maximum_skill_level {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::BookMastered)?);
+            return Ok(());
+        }
+        let book_item_id = activity.book_item_id;
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let activity = actor
+            .read_activity
+            .as_mut()
+            .ok_or(SimError::InvalidBookStudy)?;
+        if !activity.interrupted {
+            return Err(SimError::InvalidBookStudy);
+        }
+        activity.interrupted = false;
+        actor.action_points = 0;
+        actor.held_movement = None;
+        events.push(self.make_event(WorldEventKind::BookStudyResumed {
+            actor_id,
+            book_item_id,
+        })?);
+        Ok(())
+    }
+
+    fn cancel_book_study(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let book_item_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let activity = actor
+                .read_activity
+                .take()
+                .ok_or(SimError::InvalidBookStudy)?;
+            actor.action_points = 0;
+            activity.book_item_id
+        };
+        events.push(self.make_event(WorldEventKind::BookStudyCanceled {
+            actor_id,
+            book_item_id,
+        })?);
+        Ok(())
+    }
+
+    fn complete_book_study(
+        &mut self,
+        actor_id: ActorId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let activity = self
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.read_activity.clone())
+            .ok_or(SimError::InvalidBookStudy)?;
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if activity.remaining_action_points != 0
+            || activity.interrupted
+            || !actor
+                .inventory
+                .get(&activity.book_item_id)
+                .is_some_and(|item| item.type_id == activity.study.book_type_id)
+        {
+            return Err(SimError::InvalidBookStudy);
+        }
+        let original_level = actor_skill_level(actor, &activity.study.skill_id, true);
+        if original_level < activity.study.required_skill_level
+            || original_level >= activity.study.maximum_skill_level
+        {
+            return Err(SimError::InvalidBookStudy);
+        }
+
+        // Pinned self-reading path: canonical actor INT, focus 100, no
+        // enchantment or trait multiplier. `read_activity_actor::read_book`
+        // scales the range once and `SkillLevel::readBook` scales the selected
+        // value once more.
+        let minutes = activity.study.source_time_minutes;
+        let (minimum, maximum) =
+            book_study_experience_range(minutes, actor.base_intelligence, original_level)?;
+        let level_factor = u32::from(original_level) + 1;
+        let span = maximum
+            .checked_sub(minimum)
+            .and_then(|delta| delta.checked_add(1))
+            .ok_or(SimError::NumericOverflow)?;
+        let mut rng = self.named_session_rng(
+            b"book-study-experience",
+            &[actor_id.as_u128(), activity.book_item_id.as_u128()],
+            activity.rng_sequence.0,
+        );
+        let selected = minimum + rng.next_u32() % span;
+        let raw_experience = level_factor
+            .checked_mul(selected)
+            .and_then(|value| value.checked_mul(100))
+            .ok_or(SimError::NumericOverflow)?;
+        let practical_level = actor_skill_level(actor, &activity.study.skill_id, false);
+        let level_gap = original_level.saturating_sub(practical_level).max(1);
+        let experience_gained = raw_experience
+            .checked_mul(2)
+            .ok_or(SimError::NumericOverflow)?
+            / (u32::from(level_gap) + 1);
+
+        let (theoretical_level, theoretical_experience, gained_level) = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let skill = actor
+                .skills
+                .entry(activity.study.skill_id.clone())
+                .or_insert_with(|| SkillLevelSnapshot {
+                    skill_id: activity.study.skill_id.clone(),
+                    practical_level: 0,
+                    practical_experience: 0,
+                    theoretical_level: 0,
+                    theoretical_experience: 0,
+                    last_practiced: self.tick,
+                });
+            if skill.theoretical_level != original_level {
+                return Err(SimError::InvalidBookStudy);
+            }
+            skill.theoretical_experience = skill
+                .theoretical_experience
+                .checked_add(experience_gained)
+                .ok_or(SimError::NumericOverflow)?;
+            let threshold = skill_experience_threshold(skill.theoretical_level);
+            let gained_level = u64::from(skill.theoretical_experience) >= threshold;
+            if gained_level {
+                skill.theoretical_level = skill
+                    .theoretical_level
+                    .checked_add(1)
+                    .ok_or(SimError::NumericOverflow)?;
+                skill.theoretical_experience = 0;
+            }
+            skill.last_practiced = self.tick;
+            let result = (
+                skill.theoretical_level,
+                skill.theoretical_experience,
+                gained_level,
+            );
+            actor.read_activity = None;
+            actor.action_points = 0;
+            result
+        };
+        events.push(self.make_event(WorldEventKind::BookStudyCompleted {
+            actor_id,
+            book_item_id: activity.book_item_id,
+            skill_id: activity.study.skill_id.clone(),
+            experience_gained,
+            theoretical_level,
+            theoretical_experience,
+        })?);
+        if gained_level {
+            events.push(self.make_event(WorldEventKind::SkillLevelGained {
+                actor_id,
+                skill_id: activity.study.skill_id,
+                practical_level,
+                theoretical_level,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn interrupt_book_study(
+        &mut self,
+        actor_id: ActorId,
+        reason: BookStudyInterruptionReason,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let book_item_id = {
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            let Some(activity) = actor.read_activity.as_mut() else {
+                return Ok(());
+            };
+            if activity.interrupted {
+                return Ok(());
+            }
+            activity.interrupted = true;
+            activity.book_item_id
+        };
+        events.push(self.make_event(WorldEventKind::BookStudyInterrupted {
+            actor_id,
+            book_item_id,
+            reason,
+        })?);
+        Ok(())
+    }
+
+    fn advance_fields(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        if !self.tick.0.is_multiple_of(SimTick::HZ) {
+            return Ok(());
+        }
+        let mut fields = Vec::new();
+        for (coord, chunk) in &self.chunks {
+            for (index, tile_fields) in chunk.fields.iter().enumerate() {
+                let position = world_position_for_tile_index(*coord, index)?;
+                fields.extend(tile_fields.iter().map(|field| {
+                    (
+                        position,
+                        field.field_type_id.clone(),
+                        field.display_sequence,
+                        field.age_seconds,
+                    )
+                }));
+            }
+        }
+        for (position, field_type_id, display_sequence, previous_age) in fields {
+            let field_type = self
+                .field_types
+                .get(&field_type_id)
+                .ok_or(SimError::InvalidField)?;
+            let age_seconds = previous_age
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+            let decays = if field_type.half_life_seconds == 0 {
+                false
+            } else if field_type.linear_half_life {
+                age_seconds >= field_type.half_life_seconds
+            } else {
+                let threshold = exponential_decay_threshold(field_type.half_life_seconds);
+                let mut hasher = blake3::Hasher::new_derive_key("cdda-rust FieldDecayV1");
+                hasher.update(&self.world_seed);
+                hasher.update(&self.tick.0.to_be_bytes());
+                hasher.update(&position.x.to_be_bytes());
+                hasher.update(&position.y.to_be_bytes());
+                hasher.update(&position.z.to_be_bytes());
+                hasher.update(&display_sequence.to_be_bytes());
+                hasher.update(&(field_type_id.len() as u64).to_be_bytes());
+                hasher.update(field_type_id.as_bytes());
+                let mut rng = ChaCha8Rng::from_seed(*hasher.finalize().as_bytes());
+                rng.next_u64() < threshold
+            };
+            let (coord, local) = position.chunk_and_local();
+            let chunk = self.chunks.get_mut(&coord).ok_or(SimError::InvalidField)?;
+            let index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
+            let tile_fields = chunk
+                .fields
+                .get_mut(index)
+                .ok_or(SimError::InvalidLocalCoordinate)?;
+            let field_index = tile_fields
+                .binary_search_by(|field| field.field_type_id.cmp(&field_type_id))
+                .map_err(|_| SimError::InvalidField)?;
+            if !decays {
+                tile_fields[field_index].age_seconds = age_seconds;
+                continue;
+            }
+            let intensity = tile_fields[field_index].intensity.saturating_sub(1);
+            if intensity == 0 {
+                tile_fields.remove(field_index);
+            } else {
+                tile_fields[field_index].intensity = intensity;
+                tile_fields[field_index].age_seconds = 0;
+            }
+            chunk.revision = chunk
+                .revision
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+            events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+                position,
+                field_type_id,
+                intensity,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn advance_creature_corpses(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        if !self.tick.0.is_multiple_of(SimTick::HZ) {
+            return Ok(());
+        }
+        let mut corpses = Vec::new();
+        for (item_id, ground) in &self.ground_items {
+            if let Some(corpse) = &ground.item.creature_corpse {
+                corpses.push((
+                    *item_id,
+                    ground.item.damage,
+                    corpse.clone(),
+                    CorpseLocation::Ground(ground.position),
+                ));
+            }
+        }
+        for (actor_id, actor) in &self.actors {
+            for (item_id, item) in &actor.inventory {
+                if let Some(corpse) = &item.creature_corpse {
+                    corpses.push((
+                        *item_id,
+                        item.damage,
+                        corpse.clone(),
+                        CorpseLocation::Inventory(*actor_id, actor.position),
+                    ));
+                }
+            }
+        }
+        corpses.sort_by_key(|(item_id, _damage, _corpse, _location)| *item_id);
+        for (corpse_item_id, damage, corpse, location) in corpses {
+            if !corpse.revivable || !corpse.prototype.revives {
+                continue;
+            }
+            let elapsed_ticks = self
+                .tick
+                .0
+                .checked_sub(corpse.death_tick.0)
+                .ok_or(SimError::InvalidItem)?;
+            let age_hours =
+                elapsed_ticks / CORPSE_REVIVAL_HOUR_TICKS / u64::from(damage).saturating_add(1);
+            if age_hours <= 6 {
+                continue;
+            }
+            let mut rng =
+                self.named_rng(b"creature-corpse-revival", &[corpse_item_id.as_u128()], 0);
+            let revival_denominator = 48_u64.saturating_sub(age_hours);
+            if revival_denominator > 0 && !rng.next_u64().is_multiple_of(revival_denominator) {
+                continue;
+            }
+            let center = match location {
+                CorpseLocation::Ground(position) => position,
+                CorpseLocation::Inventory(_, position) => position,
+            };
+            if corpse.revive_special {
+                let Some(distance) = self
+                    .actors
+                    .values()
+                    .filter(|actor| actor.hp > 0 && actor.position.z == center.z)
+                    .map(|actor| ranged_distance(center, actor.position))
+                    .min()
+                else {
+                    continue;
+                };
+                if distance > 3 || !rng.next_u32().is_multiple_of(distance.saturating_add(1)) {
+                    continue;
+                }
+            }
+            let position = if self.can_place_revived_creature(center) {
+                center
+            } else {
+                let mut candidates = Vec::new();
+                for y_offset in -1_i8..=1 {
+                    for x_offset in -1_i8..=1 {
+                        if x_offset == 0 && y_offset == 0 {
+                            continue;
+                        }
+                        let Some(position) = center.checked_offset(x_offset, y_offset, 0) else {
+                            continue;
+                        };
+                        if self.can_place_revived_creature(position) {
+                            candidates.push(position);
+                        }
+                    }
+                }
+                if candidates.is_empty() {
+                    continue;
+                }
+                let index = usize::try_from(rng.next_u64())
+                    .map_err(|_| SimError::NumericOverflow)?
+                    % candidates.len();
+                candidates[index]
+            };
+            let divisor = i32::from(damage)
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+            let hp = corpse
+                .prototype
+                .max_hp
+                .checked_mul(70)
+                .ok_or(SimError::NumericOverflow)?
+                / 100
+                / divisor;
+            let speed = u32::from(corpse.prototype.speed)
+                .checked_mul(80)
+                .ok_or(SimError::NumericOverflow)?
+                / 100
+                / u32::try_from(divisor).map_err(|_| SimError::NumericOverflow)?;
+            if hp <= 0 || speed == 0 {
+                // Upstream leaves the corpse in place when its reconstructed
+                // monster would have no HP. This can recur harmlessly.
+                continue;
+            }
+            if !self.allocator.can_allocate() {
+                break;
+            }
+            let creature_id = self.allocator.allocate_creature()?;
+            match location {
+                CorpseLocation::Ground(_position) => {
+                    self.ground_items
+                        .remove(&corpse_item_id)
+                        .ok_or(SimError::UnknownItem)?;
+                }
+                CorpseLocation::Inventory(actor_id, _position) => {
+                    let actor = self
+                        .actors
+                        .get_mut(&actor_id)
+                        .ok_or(SimError::UnknownActor)?;
+                    actor
+                        .inventory
+                        .remove(&corpse_item_id)
+                        .ok_or(SimError::UnknownItem)?;
+                    if actor.wielded == Some(corpse_item_id) {
+                        actor.wielded = None;
+                    }
+                }
+            }
+            self.creatures.insert(
+                creature_id,
+                Creature {
+                    id: creature_id,
+                    type_id: corpse.prototype.monster_type_id.clone(),
+                    position,
+                    hp,
+                    max_hp: corpse.prototype.max_hp,
+                    speed: u16::try_from(speed).map_err(|_| SimError::NumericOverflow)?,
+                    attack_cost_moves: corpse.prototype.attack_cost_moves,
+                    aggression: corpse.prototype.aggression,
+                    melee_skill: corpse.prototype.melee_skill,
+                    dodge: corpse.prototype.dodge,
+                    size: corpse.prototype.size,
+                    melee_dice: corpse.prototype.melee_dice,
+                    melee_dice_sides: corpse.prototype.melee_dice_sides,
+                    can_see: corpse.prototype.can_see,
+                    vision_day: corpse.prototype.vision_day,
+                    vision_night: corpse.prototype.vision_night,
+                    stumbles: corpse.prototype.stumbles,
+                    bashes: corpse.prototype.bashes,
+                    group_bash: corpse.prototype.group_bash,
+                    hears: corpse.prototype.hears,
+                    good_hearing: corpse.prototype.good_hearing,
+                    clumsy_attacks: corpse.prototype.clumsy_attacks,
+                    immobile: corpse.prototype.immobile,
+                    pacifist: corpse.prototype.pacifist,
+                    can_open_doors: corpse.prototype.can_open_doors,
+                    path_settings: corpse.prototype.path_settings,
+                    goal: None,
+                    sound_goal: None,
+                    action_points: 0,
+                    downed_until_tick: Some(SimTick(
+                        self.tick
+                            .0
+                            .checked_add(5 * SimTick::HZ)
+                            .ok_or(SimError::NumericOverflow)?,
+                    )),
+                    blood_field_type_id: corpse.prototype.blood_field_type_id.clone(),
+                    corpse: Some(corpse.prototype),
+                },
+            );
+            events.push(self.make_event(WorldEventKind::CreatureRevived {
+                creature_id,
+                corpse_item_id,
+                position,
+            })?);
+        }
+        Ok(())
+    }
+
+    fn can_place_revived_creature(&self, position: WorldPosition) -> bool {
+        self.is_passable(position)
+            && self.actor_at(position).is_none()
+            && self.creature_at(position).is_none()
+    }
+
+    fn advance_needs(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        if !self.tick.0.is_multiple_of(NEEDS_INTERVAL_TICKS) {
+            return Ok(());
+        }
+        let actor_ids: Vec<_> = self.actors.keys().copied().collect();
+        for actor_id in actor_ids {
+            let Some(actor) = self.actors.get(&actor_id) else {
+                return Err(SimError::UnknownActor);
+            };
+            if actor.hp <= 0 {
+                continue;
+            }
+            let was_sleeping = actor.sleeping;
+            let next_sleep_intensity = actor
+                .sleep_intervals
+                .saturating_add(1)
+                .min(MAX_SLEEP_INTENSITY);
+            let accelerated_recovery = if was_sleeping {
+                let denominator = u32::from(25_u16 - next_sleep_intensity);
+                let mut rng = self.named_rng(b"sleep-recovery", &[actor_id.as_u128()], 0);
+                rng.next_u32().is_multiple_of(denominator)
+            } else {
+                false
+            };
+            let needs_ordinal = self.tick.0 / NEEDS_INTERVAL_TICKS;
+            let (
+                stored_kcal,
+                thirst,
+                sleepiness,
+                sleeping,
+                died,
+                wake_reason,
+                sleep_reason,
+                canceled,
+                craft_interrupted,
+                read_interrupted,
+                disassembly_interrupted,
+                construction_interrupted,
+            ) = {
+                let actor = self
+                    .actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?;
+                let kcal_cost = if actor.sleeping {
+                    BASE_KCAL_PER_NEEDS_INTERVAL / 2 + i32::from(needs_ordinal.is_multiple_of(2))
+                } else {
+                    BASE_KCAL_PER_NEEDS_INTERVAL
+                };
+                actor.stored_kcal = actor
+                    .stored_kcal
+                    .checked_sub(kcal_cost)
+                    .ok_or(SimError::NumericOverflow)?;
+                if !actor.sleeping || needs_ordinal.is_multiple_of(2) {
+                    actor.thirst = actor
+                        .thirst
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
+                }
+
+                if actor.sleeping {
+                    actor.sleep_intervals = next_sleep_intensity;
+                    let recovered = 1 + i32::from(accelerated_recovery);
+                    actor.sleepiness = actor.sleepiness.saturating_sub(recovered).max(-1_000);
+                } else {
+                    actor.sleepiness = actor.sleepiness.saturating_add(1).min(SLEEPINESS_MAX);
+                }
+
+                let needs_damage = actor.stored_kcal <= 0 || actor.thirst >= THIRST_DEATH_THRESHOLD;
+                if needs_damage {
+                    actor.hp = actor.hp.checked_sub(1).ok_or(SimError::NumericOverflow)?;
+                }
+                let died = needs_damage && actor.hp <= 0;
+                let mut wake_reason = None;
+                let mut sleep_reason = None;
+                let mut canceled = Vec::new();
+                let should_interrupt_craft =
+                    needs_damage || (!actor.sleeping && actor.sleepiness >= SLEEPINESS_MASSIVE);
+                let craft_interrupted = if should_interrupt_craft {
+                    actor.craft_activity.as_mut().and_then(|activity| {
+                        if activity.interrupted {
+                            None
+                        } else {
+                            activity.interrupted = true;
+                            Some(activity.recipe.recipe_id.clone())
+                        }
+                    })
+                } else {
+                    None
+                };
+                let read_interrupted = if should_interrupt_craft {
+                    actor.read_activity.as_mut().and_then(|activity| {
+                        if activity.interrupted {
+                            None
+                        } else {
+                            activity.interrupted = true;
+                            Some((
+                                activity.book_item_id,
+                                if needs_damage {
+                                    BookStudyInterruptionReason::Needs
+                                } else {
+                                    BookStudyInterruptionReason::Exhaustion
+                                },
+                            ))
+                        }
+                    })
+                } else {
+                    None
+                };
+                let disassembly_interrupted = if should_interrupt_craft {
+                    actor.disassembly_activity.as_mut().and_then(|activity| {
+                        if activity.interrupted {
+                            None
+                        } else {
+                            activity.interrupted = true;
+                            Some((
+                                activity.target_item.id,
+                                if needs_damage {
+                                    DisassemblyInterruptionReason::Needs
+                                } else {
+                                    DisassemblyInterruptionReason::Exhaustion
+                                },
+                            ))
+                        }
+                    })
+                } else {
+                    None
+                };
+                let construction_interrupted = if should_interrupt_craft {
+                    actor.construction_activity.as_mut().and_then(|activity| {
+                        if activity.interrupted {
+                            None
+                        } else {
+                            activity.interrupted = true;
+                            Some((
+                                activity.recipe.construction_id.clone(),
+                                activity.target,
+                                if needs_damage {
+                                    ConstructionInterruptionReason::Needs
+                                } else {
+                                    ConstructionInterruptionReason::Exhaustion
+                                },
+                            ))
+                        }
+                    })
+                } else {
+                    None
+                };
+                if died {
+                    actor.sleeping = false;
+                    actor.sleep_intervals = 0;
+                    actor.queued_actions.clear();
+                } else if actor.sleeping && needs_damage {
+                    actor.sleeping = false;
+                    actor.sleep_intervals = 0;
+                    actor.action_points = 0;
+                    actor.queued_actions.clear();
+                    wake_reason = Some(WakeReason::Damage);
+                } else if actor.sleeping && actor.sleepiness <= RESTED_WAKE_SLEEPINESS {
+                    actor.sleeping = false;
+                    actor.sleep_intervals = 0;
+                    actor.action_points = 0;
+                    actor.queued_actions.clear();
+                    wake_reason = Some(WakeReason::Rested);
+                } else if !actor.sleeping && actor.sleepiness >= SLEEPINESS_MASSIVE {
+                    actor.sleepiness = actor.sleepiness.saturating_sub(10);
+                    actor.sleeping = true;
+                    actor.sleep_intervals = 0;
+                    actor.action_points = 0;
+                    canceled.extend(actor.queued_actions.drain(..).map(|action| action.sequence));
+                    sleep_reason = Some(SleepReason::Exhaustion);
+                }
+                (
+                    actor.stored_kcal,
+                    actor.thirst,
+                    actor.sleepiness,
+                    actor.sleeping,
+                    died,
+                    wake_reason,
+                    sleep_reason,
+                    canceled,
+                    craft_interrupted,
+                    read_interrupted,
+                    disassembly_interrupted,
+                    construction_interrupted,
+                )
+            };
+            events.push(self.make_event(WorldEventKind::ActorNeedsUpdated {
+                actor_id,
+                stored_kcal,
+                thirst,
+                sleepiness,
+                sleeping,
+            })?);
+            if let Some(recipe_id) = craft_interrupted {
+                events.push(self.make_event(WorldEventKind::CraftInterrupted {
+                    actor_id,
+                    recipe_id,
+                })?);
+            }
+            if let Some((book_item_id, reason)) = read_interrupted {
+                events.push(self.make_event(WorldEventKind::BookStudyInterrupted {
+                    actor_id,
+                    book_item_id,
+                    reason,
+                })?);
+            }
+            if let Some((target_item_id, reason)) = disassembly_interrupted {
+                events.push(self.make_event(WorldEventKind::DisassemblyInterrupted {
+                    actor_id,
+                    target_item_id,
+                    reason,
+                })?);
+            }
+            if let Some((construction_id, target, reason)) = construction_interrupted {
+                events.push(self.make_event(WorldEventKind::ConstructionInterrupted {
+                    actor_id,
+                    construction_id,
+                    target,
+                    reason,
+                })?);
+            }
+            if let Some(reason) = wake_reason {
+                events.push(self.make_event(WorldEventKind::ActorWokeUp { actor_id, reason })?);
+            }
+            if let Some(reason) = sleep_reason {
+                events.push(self.make_event(WorldEventKind::ActorFellAsleep { actor_id, reason })?);
+            }
+            for sequence in canceled {
+                events.push(self.rejection(actor_id, sequence, CommandRejection::ActorSleeping)?);
+            }
+            if died {
+                events.push(self.make_event(WorldEventKind::ActorDiedFromNeeds { actor_id })?);
+            }
+        }
+        Ok(())
+    }
+
+    fn rejection(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        reason: CommandRejection,
+    ) -> Result<WorldEvent, SimError> {
+        self.make_event(WorldEventKind::CommandRejected {
+            actor_id,
+            sequence,
+            reason,
+        })
+    }
+
+    fn make_event(&mut self, kind: WorldEventKind) -> Result<WorldEvent, SimError> {
+        let id = EventId::new(self.world_namespace, self.next_event_counter);
+        self.next_event_counter = self
+            .next_event_counter
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        Ok(WorldEvent {
+            id,
+            tick: self.tick,
+            kind,
+        })
+    }
+
+    fn actor_at(&self, position: WorldPosition) -> Option<ActorId> {
+        self.actors
+            .values()
+            .find(|actor| actor.hp > 0 && actor.position == position)
+            .map(|actor| actor.id)
+    }
+
+    fn creature_at(&self, position: WorldPosition) -> Option<CreatureId> {
+        self.creatures
+            .values()
+            .find(|creature| creature.hp > 0 && creature.position == position)
+            .map(|creature| creature.id)
+    }
+
+    fn item_id_exists(&self, item_id: ItemId) -> bool {
+        self.ground_items
+            .values()
+            .any(|ground| item_snapshot_contains_id(&ground.item.snapshot(), item_id))
+            || self.actors.values().any(|actor| {
+                actor
+                    .inventory
+                    .values()
+                    .any(|item| item_snapshot_contains_id(&item.snapshot(), item_id))
+                    || actor.craft_activity.as_ref().is_some_and(|activity| {
+                        activity
+                            .consumed_items
+                            .iter()
+                            .any(|item| item_snapshot_contains_id(&item.item, item_id))
+                            || activity.reserved_output_items.contains(&item_id)
+                    })
+                    || actor.disassembly_activity.as_ref().is_some_and(|activity| {
+                        item_snapshot_contains_id(&activity.target_item, item_id)
+                            || activity.reserved_component_items.contains(&item_id)
+                    })
+                    || actor
+                        .construction_activity
+                        .as_ref()
+                        .is_some_and(|activity| {
+                            activity
+                                .consumed_items
+                                .iter()
+                                .any(|item| item_snapshot_contains_id(&item.item, item_id))
+                        })
+            })
+    }
+
+    fn is_passable(&self, position: WorldPosition) -> bool {
+        let (coord, local) = position.chunk_and_local();
+        self.chunks
+            .get(&coord)
+            .is_some_and(|chunk| chunk.is_passable(local))
+    }
+
+    fn tile_movement_cost(&self, position: WorldPosition) -> Option<i64> {
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self.chunks.get(&coord)?;
+        let terrain_cost = chunk.tile(local)?.move_cost;
+        if terrain_cost <= 0 {
+            return None;
+        }
+        let furniture_cost = chunk
+            .furniture(local)
+            .map_or(0, |furniture| furniture.move_cost_mod);
+        if furniture_cost < 0 {
+            return None;
+        }
+        i64::from(terrain_cost).checked_add(i64::from(furniture_cost))
+    }
+
+    #[must_use]
+    pub fn actor_snapshot(&self, actor_id: ActorId) -> Option<ActorSnapshot> {
+        self.actors.get(&actor_id).map(Actor::snapshot)
+    }
+
+    #[must_use]
+    pub const fn tick(&self) -> SimTick {
+        self.tick
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> WorldSnapshotV1 {
+        WorldSnapshotV1 {
+            world_namespace: self.world_namespace,
+            world_seed: self.world_seed,
+            tick: self.tick,
+            allocator_high_water: self.allocator.high_water(),
+            allocator_next: self.allocator.next(),
+            allocator_reserved_end: self.allocator.reserved_end(),
+            next_event_counter: self.next_event_counter,
+            next_field_sequence: self.next_field_sequence,
+            field_types: self.field_types.values().cloned().collect(),
+            terrain_bash_types: self.terrain_bash_types.values().cloned().collect(),
+            furniture_bash_ids: self.furniture_bash_ids.iter().cloned().collect(),
+            furniture_bash_types: self.furniture_bash_types.values().cloned().collect(),
+            smash_item_types: self.smash_item_types.values().cloned().collect(),
+            worldgen_default_terrain: self.worldgen_default_terrain.clone(),
+            actors: self.actors.values().map(Actor::snapshot).collect(),
+            creatures: self.creatures.values().map(Creature::snapshot).collect(),
+            ground_items: self
+                .ground_items
+                .values()
+                .map(GroundItem::snapshot)
+                .collect(),
+            chunks: self.chunks.values().map(Chunk::snapshot).collect(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &WorldSnapshotV1) -> Result<Self, SimError> {
+        if snapshot
+            .worldgen_default_terrain
+            .as_ref()
+            .is_some_and(|terrain| {
+                validate_terrain_tile(terrain).is_err() || terrain.move_cost <= 0
+            })
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut field_types = BTreeMap::new();
+        for field_type in &snapshot.field_types {
+            validate_field_type(field_type)?;
+            if field_types
+                .insert(field_type.field_type_id.clone(), field_type.clone())
+                .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        if snapshot
+            .field_types
+            .windows(2)
+            .any(|pair| pair[0].field_type_id >= pair[1].field_type_id)
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut terrain_bash_types = BTreeMap::new();
+        for bash in &snapshot.terrain_bash_types {
+            validate_terrain_bash_type(bash, &field_types)?;
+            if terrain_bash_types
+                .insert(bash.terrain_id.clone(), bash.clone())
+                .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        if snapshot
+            .terrain_bash_types
+            .windows(2)
+            .any(|pair| pair[0].terrain_id >= pair[1].terrain_id)
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut furniture_bash_ids = BTreeSet::new();
+        for furniture_id in &snapshot.furniture_bash_ids {
+            if validate_item_type_id(furniture_id).is_err()
+                || !furniture_bash_ids.insert(furniture_id.clone())
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        if snapshot
+            .furniture_bash_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut furniture_bash_types = BTreeMap::new();
+        for bash in &snapshot.furniture_bash_types {
+            validate_furniture_bash_type(bash, &field_types)?;
+            if !furniture_bash_ids.contains(&bash.furniture_id) {
+                return Err(SimError::InvalidSnapshot);
+            }
+            if furniture_bash_types
+                .insert(bash.furniture_id.clone(), bash.clone())
+                .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        if snapshot
+            .furniture_bash_types
+            .windows(2)
+            .any(|pair| pair[0].furniture_id >= pair[1].furniture_id)
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut smash_item_types = BTreeMap::new();
+        for profile in &snapshot.smash_item_types {
+            if validate_item_type_id(&profile.item_type_id).is_err()
+                || profile.bash_damage == 0
+                || profile.attack_time_moves == 0
+                || smash_item_types
+                    .insert(profile.item_type_id.clone(), profile.clone())
+                    .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        if snapshot
+            .smash_item_types
+            .windows(2)
+            .any(|pair| pair[0].item_type_id >= pair[1].item_type_id)
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut actors = BTreeMap::new();
+        let mut occupied = BTreeSet::new();
+        let mut item_ids = BTreeSet::new();
+        let mut maximum_counter = 0_u64;
+        for actor in &snapshot.actors {
+            if actor.id.world_namespace() != snapshot.world_namespace
+                || actors.contains_key(&actor.id)
+                || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
+                || !valid_actor_schedule(actor, snapshot.tick)
+                || (actor.hp > 0 && !occupied.insert(actor.position))
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            maximum_counter = maximum_counter.max(actor.id.counter());
+            let mut inventory = BTreeMap::new();
+            for item in &actor.inventory {
+                validate_creature_corpse_context(item, snapshot.tick, &field_types)?;
+                register_stable_item_ids(
+                    item,
+                    snapshot.world_namespace,
+                    &mut item_ids,
+                    &mut maximum_counter,
+                )?;
+                if inventory
+                    .insert(item.id, ItemInstance::from_snapshot(item)?)
+                    .is_some()
+                {
+                    return Err(SimError::InvalidSnapshot);
+                }
+            }
+            if let Some(activity) = &actor.craft_activity {
+                for consumed in &activity.consumed_items {
+                    if consumed.item.creature_corpse.is_some() {
+                        return Err(SimError::InvalidSnapshot);
+                    }
+                    validate_creature_corpse_context(&consumed.item, snapshot.tick, &field_types)?;
+                    register_stable_item_ids(
+                        &consumed.item,
+                        snapshot.world_namespace,
+                        &mut item_ids,
+                        &mut maximum_counter,
+                    )?;
+                }
+                for item_id in &activity.reserved_output_items {
+                    if item_id.counter() == 0
+                        || item_id.world_namespace() != snapshot.world_namespace
+                        || !item_ids.insert(*item_id)
+                    {
+                        return Err(SimError::InvalidSnapshot);
+                    }
+                    maximum_counter = maximum_counter.max(item_id.counter());
+                }
+                if !craft_reservations_match(&inventory, activity)? {
+                    return Err(SimError::InvalidSnapshot);
+                }
+            }
+            if let Some(activity) = &actor.disassembly_activity {
+                if activity.target_item.creature_corpse.is_some() {
+                    return Err(SimError::InvalidSnapshot);
+                }
+                validate_creature_corpse_context(
+                    &activity.target_item,
+                    snapshot.tick,
+                    &field_types,
+                )?;
+                register_stable_item_ids(
+                    &activity.target_item,
+                    snapshot.world_namespace,
+                    &mut item_ids,
+                    &mut maximum_counter,
+                )?;
+                for item_id in &activity.reserved_component_items {
+                    if item_id.counter() == 0
+                        || item_id.world_namespace() != snapshot.world_namespace
+                        || !item_ids.insert(*item_id)
+                    {
+                        return Err(SimError::InvalidSnapshot);
+                    }
+                    maximum_counter = maximum_counter.max(item_id.counter());
+                }
+            }
+            if let Some(activity) = &actor.construction_activity {
+                for consumed in &activity.consumed_items {
+                    if consumed.item.creature_corpse.is_some() {
+                        return Err(SimError::InvalidSnapshot);
+                    }
+                    validate_creature_corpse_context(&consumed.item, snapshot.tick, &field_types)?;
+                    register_stable_item_ids(
+                        &consumed.item,
+                        snapshot.world_namespace,
+                        &mut item_ids,
+                        &mut maximum_counter,
+                    )?;
+                }
+                if !construction_reservations_match(&inventory, activity)? {
+                    return Err(SimError::InvalidSnapshot);
+                }
+            }
+            if actor
+                .wielded
+                .is_some_and(|item_id| !inventory.contains_key(&item_id))
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            let skills = actor
+                .skills
+                .iter()
+                .cloned()
+                .map(|skill| (skill.skill_id.clone(), skill))
+                .collect::<BTreeMap<_, _>>();
+            let proficiencies = actor
+                .proficiencies
+                .iter()
+                .cloned()
+                .map(|proficiency| (proficiency.proficiency_id.clone(), proficiency))
+                .collect::<BTreeMap<_, _>>();
+            actors.insert(
+                actor.id,
+                Actor {
+                    id: actor.id,
+                    position: actor.position,
+                    hp: actor.hp,
+                    base_strength: actor.base_strength,
+                    base_dexterity: actor.base_dexterity,
+                    base_intelligence: actor.base_intelligence,
+                    base_perception: actor.base_perception,
+                    connected: actor.connected,
+                    last_command_sequence: actor.last_command_sequence,
+                    last_held_input_sequence: actor.last_held_input_sequence,
+                    held_movement: actor.held_movement,
+                    inventory,
+                    wielded: actor.wielded,
+                    stored_kcal: actor.stored_kcal,
+                    thirst: actor.thirst,
+                    sleepiness: actor.sleepiness,
+                    sleeping: actor.sleeping,
+                    sleep_intervals: actor.sleep_intervals,
+                    speed: actor.speed,
+                    action_points: actor.action_points,
+                    queued_actions: actor.queued_actions.clone().into(),
+                    craft_activity: actor.craft_activity.clone(),
+                    read_activity: actor.read_activity.clone(),
+                    disassembly_activity: actor.disassembly_activity.clone(),
+                    construction_activity: actor.construction_activity.clone(),
+                    learned_recipes: actor.learned_recipes.iter().cloned().collect(),
+                    skills,
+                    proficiencies,
+                    map_memory: map_memory_from_snapshot(actor.map_memory.clone()),
+                },
+            );
+        }
+        let mut chunks = BTreeMap::new();
+        let mut field_sequences = BTreeSet::new();
+        let mut maximum_field_sequence = 0_u64;
+        for snapshot_chunk in &snapshot.chunks {
+            let chunk = Chunk::from_snapshot(snapshot_chunk)?;
+            for fields in &snapshot_chunk.fields {
+                if fields.len() > 16
+                    || fields
+                        .windows(2)
+                        .any(|pair| pair[0].field_type_id >= pair[1].field_type_id)
+                {
+                    return Err(SimError::InvalidSnapshot);
+                }
+                for field in fields {
+                    let Some(field_type) = field_types.get(&field.field_type_id) else {
+                        return Err(SimError::InvalidSnapshot);
+                    };
+                    if field.intensity == 0
+                        || usize::from(field.intensity) > field_type.intensity_levels.len()
+                        || field.display_sequence == 0
+                        || !field_sequences.insert(field.display_sequence)
+                    {
+                        return Err(SimError::InvalidSnapshot);
+                    }
+                    maximum_field_sequence = maximum_field_sequence.max(field.display_sequence);
+                }
+            }
+            if chunks.insert(snapshot_chunk.coord, chunk).is_some() {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        for chunk in chunks.values() {
+            for (index, damage) in chunk.map_damage.iter().copied().enumerate() {
+                if damage == 0 {
+                    continue;
+                }
+                let terrain_bounds = || {
+                    chunk.tiles.get(index).and_then(|terrain| {
+                        terrain_bash_types.get(&terrain.terrain_id).map(|bash| {
+                            [bash.str_max, bash.str_max_blocked, bash.str_max_supported]
+                        })
+                    })
+                };
+                let bounds = match chunk.furniture.get(index).and_then(Option::as_ref) {
+                    Some(furniture) => furniture_bash_types
+                        .get(&furniture.furniture_id)
+                        .map(|bash| [bash.str_max, bash.str_max_blocked, bash.str_max_supported])
+                        .or_else(|| {
+                            if furniture_bash_ids.contains(&furniture.furniture_id) {
+                                None
+                            } else {
+                                terrain_bounds()
+                            }
+                        }),
+                    None => terrain_bounds(),
+                };
+                let maximum_hp = bounds
+                    .and_then(|values| values.into_iter().filter(|value| *value >= 0).max())
+                    .and_then(|value| u16::try_from(value).ok());
+                if maximum_hp.is_none_or(|maximum| damage >= maximum) {
+                    return Err(SimError::InvalidSnapshot);
+                }
+            }
+        }
+        if actors.values().filter(|actor| actor.hp > 0).any(|actor| {
+            let (coord, local) = actor.position.chunk_and_local();
+            !chunks
+                .get(&coord)
+                .is_some_and(|chunk| chunk.is_passable(local))
+        }) {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let mut creatures = BTreeMap::new();
+        for creature_snapshot in &snapshot.creatures {
+            if creature_snapshot.id.world_namespace() != snapshot.world_namespace
+                || (!creature_snapshot.blood_field_type_id.is_empty()
+                    && !field_types.contains_key(&creature_snapshot.blood_field_type_id))
+                || (creature_snapshot.hp > 0 && !occupied.insert(creature_snapshot.position))
+                || !is_passable_in_chunks(&chunks, creature_snapshot.position)
+                || creatures
+                    .insert(
+                        creature_snapshot.id,
+                        Creature::from_snapshot(creature_snapshot)?,
+                    )
+                    .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            maximum_counter = maximum_counter.max(creature_snapshot.id.counter());
+        }
+        let mut ground_items = BTreeMap::new();
+        for ground in &snapshot.ground_items {
+            validate_creature_corpse_context(&ground.item, snapshot.tick, &field_types)?;
+            register_stable_item_ids(
+                &ground.item,
+                snapshot.world_namespace,
+                &mut item_ids,
+                &mut maximum_counter,
+            )?;
+            if !is_passable_in_chunks(&chunks, ground.position)
+                || ground_items
+                    .insert(
+                        ground.item.id,
+                        GroundItem {
+                            item: ItemInstance::from_snapshot(&ground.item)?,
+                            position: ground.position,
+                        },
+                    )
+                    .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+        }
+        if snapshot.allocator_high_water < maximum_counter
+            || snapshot.allocator_next == 0
+            || snapshot.allocator_next > snapshot.allocator_reserved_end.saturating_add(1)
+            || snapshot.allocator_reserved_end > snapshot.allocator_high_water
+            || snapshot.allocator_next <= maximum_counter
+            || snapshot.next_event_counter == 0
+            || snapshot.next_field_sequence == 0
+            || snapshot.next_field_sequence <= maximum_field_sequence
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let memory_chunk_revisions = chunks
+            .iter()
+            .map(|(coord, chunk)| (*coord, chunk.revision))
+            .collect();
+        Ok(Self {
+            world_namespace: snapshot.world_namespace,
+            world_seed: snapshot.world_seed,
+            tick: snapshot.tick,
+            allocator: IdAllocator {
+                world_namespace: snapshot.world_namespace,
+                high_water: snapshot.allocator_high_water,
+                next: snapshot.allocator_next,
+                reserved_end: snapshot.allocator_reserved_end,
+            },
+            next_event_counter: snapshot.next_event_counter,
+            next_field_sequence: snapshot.next_field_sequence,
+            field_types,
+            terrain_bash_types,
+            furniture_bash_ids,
+            furniture_bash_types,
+            smash_item_types,
+            worldgen_default_terrain: snapshot.worldgen_default_terrain.clone(),
+            actors,
+            creatures,
+            ground_items,
+            chunks,
+            memory_chunk_revisions,
+            memory_sight_radius: NaturalLightSnapshot::at_tick(snapshot.tick).sight_radius,
+        })
+    }
+
+    pub fn canonical_hash(&self) -> Result<[u8; 32], SimError> {
+        let mut snapshot = self.snapshot();
+        for actor in &mut snapshot.actors {
+            actor.connected = false;
+        }
+        let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV51");
+        hasher.update(&encoded);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    #[must_use]
+    pub fn named_rng(&self, domain: &[u8], stable_ids: &[u128], sequence: u64) -> ChaCha8Rng {
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust ChaCha8 stream v1");
+        hasher.update(&self.world_seed);
+        hasher.update(&(domain.len() as u64).to_be_bytes());
+        hasher.update(domain);
+        hasher.update(&self.tick.0.to_be_bytes());
+        hasher.update(&sequence.to_be_bytes());
+        for id in stable_ids {
+            hasher.update(&id.to_be_bytes());
+        }
+        ChaCha8Rng::from_seed(*hasher.finalize().as_bytes())
+    }
+
+    fn named_session_rng(&self, domain: &[u8], stable_ids: &[u128], sequence: u64) -> ChaCha8Rng {
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust ChaCha8 session stream v1");
+        hasher.update(&self.world_seed);
+        hasher.update(&(domain.len() as u64).to_be_bytes());
+        hasher.update(domain);
+        hasher.update(&sequence.to_be_bytes());
+        for id in stable_ids {
+            hasher.update(&id.to_be_bytes());
+        }
+        ChaCha8Rng::from_seed(*hasher.finalize().as_bytes())
+    }
+}
+
+#[derive(Debug)]
+pub enum SimError {
+    IdReservationExhausted,
+    InvalidActorRestore,
+    InvalidBookStudy,
+    InvalidCharacterCreation,
+    InvalidCreature,
+    InvalidConstruction,
+    InvalidCraft,
+    InvalidDisassembly,
+    InvalidFurniture,
+    InvalidField,
+    InvalidHeldMovement,
+    InvalidItem,
+    InvalidLocalCoordinate,
+    InvalidReservation,
+    InvalidSnapshot,
+    InvalidTerrain,
+    NumericOverflow,
+    NoSpawnLocation,
+    Postcard(postcard::Error),
+    SpawnBlocked,
+    UnknownActor,
+    UnknownCreature,
+    UnknownItem,
+}
+
+impl fmt::Display for SimError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IdReservationExhausted => formatter.write_str("stable ID reservation exhausted"),
+            Self::InvalidActorRestore => formatter.write_str("invalid restored actor state"),
+            Self::InvalidBookStudy => formatter.write_str("invalid book-study state"),
+            Self::InvalidCharacterCreation => {
+                formatter.write_str("invalid character-creation base stats")
+            }
+            Self::InvalidCreature => formatter.write_str("invalid creature state"),
+            Self::InvalidConstruction => formatter.write_str("invalid construction state"),
+            Self::InvalidCraft => formatter.write_str("invalid crafting state"),
+            Self::InvalidDisassembly => formatter.write_str("invalid disassembly state"),
+            Self::InvalidFurniture => formatter.write_str("invalid furniture state"),
+            Self::InvalidField => formatter.write_str("invalid field state"),
+            Self::InvalidHeldMovement => formatter.write_str("invalid held movement state"),
+            Self::InvalidItem => formatter.write_str("invalid item state"),
+            Self::InvalidLocalCoordinate => formatter.write_str("invalid local tile coordinate"),
+            Self::InvalidReservation => formatter.write_str("invalid stable ID reservation"),
+            Self::InvalidSnapshot => formatter.write_str("invalid canonical snapshot"),
+            Self::InvalidTerrain => formatter.write_str("invalid terrain state"),
+            Self::NumericOverflow => formatter.write_str("canonical numeric overflow"),
+            Self::NoSpawnLocation => formatter.write_str("world has no available actor spawn"),
+            Self::Postcard(error) => write!(formatter, "canonical Postcard error: {error}"),
+            Self::SpawnBlocked => formatter.write_str("actor spawn position is blocked"),
+            Self::UnknownActor => formatter.write_str("unknown actor"),
+            Self::UnknownCreature => formatter.write_str("unknown creature"),
+            Self::UnknownItem => formatter.write_str("unknown item"),
+        }
+    }
+}
+
+impl std::error::Error for SimError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_furniture(
+        furniture_id: &str,
+        move_cost_mod: i32,
+        transparent: bool,
+    ) -> FurnitureTileSnapshot {
+        FurnitureTileSnapshot {
+            furniture_id: furniture_id.to_owned(),
+            move_cost_mod,
+            transparent,
+            blocks_door: false,
+            comfort: 0,
+            floor_bedding_warmth: 0,
+        }
+    }
+
+    fn test_terrain(terrain_id: &str) -> TerrainTileSnapshot {
+        TerrainTileSnapshot {
+            terrain_id: terrain_id.to_owned(),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        }
+    }
+
+    fn test_field_type(
+        field_type_id: &str,
+        half_life_seconds: u64,
+        linear_half_life: bool,
+    ) -> FieldTypeSnapshotV1 {
+        FieldTypeSnapshotV1 {
+            field_type_id: field_type_id.to_owned(),
+            intensity_levels: vec![cdda_protocol::FieldIntensityLevelV1 {
+                name: String::from("blood splatter"),
+                symbol: String::from("%"),
+                color: String::from("red"),
+                dangerous: false,
+                transparent: true,
+            }],
+            priority: 0,
+            half_life_seconds,
+            linear_half_life,
+            is_splattering: true,
+            display_field: true,
+        }
+    }
+
+    fn world_with_two_actors() -> (WorldState, ActorId, ActorId) {
+        let mut world = WorldState::new(7, [3; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let first = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("first actor should spawn");
+        let second = world
+            .spawn_actor(WorldPosition { x: 3, y: 1, z: 0 }, true)
+            .expect("second actor should spawn");
+        (world, first, second)
+    }
+
+    fn world_with_sleeping_actor_and_classic_zombie(
+        clumsy_attacks: bool,
+    ) -> (WorldState, ActorId, CreatureId) {
+        let mut world = WorldState::new(70, [70; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, false)
+            .expect("sleeping actor should spawn");
+        world.actors.get_mut(&actor).expect("actor exists").sleeping = true;
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 80,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 4,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: true,
+                bashes: true,
+                group_bash: true,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("classic zombie should spawn");
+        (world, actor, creature)
+    }
+
+    fn make_actor_act_each_tick(world: &mut WorldState, actor_id: ActorId) {
+        world.actors.get_mut(&actor_id).expect("actor exists").speed =
+            u16::try_from(ACTOR_ACTION_THRESHOLD).expect("action threshold fits u16");
+    }
+
+    #[test]
+    fn pinned_integer_light_ranges_cover_low_and_saturated_sources() {
+        assert_eq!(powered_light_sight_radius(3), 0);
+        assert_eq!(powered_light_sight_radius(4), 3);
+        assert_eq!(powered_light_sight_radius(15), 37);
+        assert_eq!(powered_light_sight_radius(35), 60);
+        assert_eq!(powered_light_sight_radius(u16::MAX), 60);
+        assert_eq!(powered_light_external_detail_radius(6), None);
+        assert_eq!(powered_light_external_detail_radius(7), Some(0));
+        assert_eq!(powered_light_external_detail_radius(14), Some(18));
+        assert_eq!(powered_light_external_detail_radius(70), Some(60));
+        assert!(!powered_light_is_personal_detail(3));
+        assert!(powered_light_is_personal_detail(4));
+        assert_eq!(
+            powered_light_effective_emission(300, true, 11_200_000, 56),
+            300,
+            "one fifth remains undimmed"
+        );
+        assert_eq!(
+            powered_light_effective_emission(300, true, 11_000_000, 56),
+            294
+        );
+        assert_eq!(
+            powered_light_effective_emission(300, true, 1_000_000, 56),
+            26
+        );
+        assert_eq!(
+            powered_light_effective_emission(300, false, 1, 56),
+            300,
+            "non-CHARGEDIM sources keep full output until empty"
+        );
+        assert_eq!(powered_light_effective_emission(300, true, 0, 56), 0);
+    }
+
+    #[test]
+    fn low_output_carried_light_is_personal_detail_but_ground_light_is_not() {
+        let (mut world, actor_id, _) = world_with_two_actors();
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ);
+        let item_id = world
+            .allocator
+            .allocate_item()
+            .expect("light should receive a stable ID");
+        let item = ItemInstance::from_snapshot(&ItemSnapshot {
+            id: item_id,
+            type_id: String::from("wizard_cane_cheap_on"),
+            charges: 0,
+            damage: 0,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            component_provenance: None,
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            magazine_well: Some(MagazineWellSnapshotV1 {
+                compatible_magazine_type_ids: vec![String::from("light_minus_battery_cell")],
+                installed_magazine: Some(Box::new(ItemSnapshot {
+                    id: world
+                        .allocator
+                        .allocate_item()
+                        .expect("battery should receive a stable ID"),
+                    type_id: String::from("light_minus_battery_cell"),
+                    charges: 1,
+                    damage: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::from("battery"),
+                    ranged_weapon: None,
+                    component_provenance: None,
+                    magazine_capacity: 2,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                    creature_corpse: None,
+                })),
+            }),
+            residual_energy_millijoules: 0,
+            powered_tool: Some(PoweredToolStateV1 {
+                inactive_type_id: String::from("wizard_cane_cheap"),
+                active_type_id: String::from("wizard_cane_cheap_on"),
+                activation_charges: 1,
+                power_draw_milliwatts: 1_000,
+                light_emission: 4,
+                dims_with_charge: true,
+                active: true,
+            }),
+            creature_corpse: None,
+        })
+        .expect("low-output powered light should be valid");
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor should exist")
+            .inventory
+            .insert(item_id, item);
+        assert!(
+            world
+                .actor_has_detail_light(actor_id)
+                .expect("personal light should resolve"),
+            "pinned own-light bonus makes luminance four sufficient for detail work"
+        );
+        assert!(
+            world
+                .actor_can_see_position(actor_id, WorldPosition { x: 4, y: 1, z: 0 })
+                .expect("three-tile target should resolve")
+        );
+        assert!(
+            !world
+                .actor_can_see_position(actor_id, WorldPosition { x: 5, y: 1, z: 0 })
+                .expect("four-tile target should resolve")
+        );
+
+        let position = world
+            .actors
+            .get(&actor_id)
+            .expect("actor should exist")
+            .position;
+        let item = world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor should exist")
+            .inventory
+            .remove(&item_id)
+            .expect("light should be carried");
+        world
+            .ground_items
+            .insert(item_id, GroundItem { item, position });
+        assert!(
+            !world
+                .actor_has_detail_light(actor_id)
+                .expect("external light should resolve"),
+            "luminance four is below the external fine-detail threshold"
+        );
+        assert!(
+            world
+                .actor_can_see_position(actor_id, WorldPosition { x: 4, y: 1, z: 0 })
+                .expect("ground-light sight should resolve")
+        );
+    }
+
+    fn test_craft_recipe(
+        time_moves: u64,
+        output_instances: u16,
+        components: Vec<Vec<(&str, u32, bool)>>,
+    ) -> CraftRecipeV1 {
+        CraftRecipeV1 {
+            recipe_id: String::from("test_recipe"),
+            time_moves,
+            output_instances,
+            output: CraftItemPrototypeV1 {
+                type_id: String::from("test_output"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 5_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                magazine_well: None,
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            },
+            retain_components: false,
+            byproducts: Vec::new(),
+            components: components
+                .into_iter()
+                .map(|group| {
+                    group
+                        .into_iter()
+                        .map(|(type_id, count, count_by_charges)| {
+                            cdda_protocol::CraftComponentRequirementV1 {
+                                type_id: type_id.to_owned(),
+                                count,
+                                count_by_charges,
+                                recoverable: true,
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            tools: Vec::new(),
+            qualities: Vec::new(),
+            proficiencies: Vec::new(),
+            primary_skill: None,
+            required_skills: Vec::new(),
+            can_be_learned: false,
+            autolearn: true,
+            autolearn_skills: Vec::new(),
+            book_requirements: Vec::new(),
+        }
+    }
+
+    fn test_skill_craft_recipe(time_moves: u64, difficulty: u8, component: &str) -> CraftRecipeV1 {
+        let mut recipe = test_craft_recipe(time_moves, 1, vec![vec![(component, 1, false)]]);
+        recipe.primary_skill = Some(CraftSkillRequirementV1 {
+            skill_id: String::from("fabrication"),
+            level: difficulty,
+        });
+        recipe.autolearn_skills = vec![CraftSkillRequirementV1 {
+            skill_id: String::from("fabrication"),
+            level: difficulty,
+        }];
+        recipe
+    }
+
+    fn test_disassembly_recipe(
+        time_moves: u64,
+        difficulty: u8,
+        learn_requirements: Vec<CraftSkillRequirementV1>,
+    ) -> DisassemblyRecipeV1 {
+        DisassemblyRecipeV1 {
+            recipe_id: String::from("test_reversible_recipe"),
+            target_type_id: String::from("test_assembled_item"),
+            time_moves,
+            difficulty,
+            primary_skill_id: Some(String::from("fabrication")),
+            learn_requirements,
+            autolearn: false,
+            autolearn_requirements: Vec::new(),
+            unload_charges_as: None,
+            requires_empty_charges: false,
+            components: vec![cdda_protocol::DisassemblyComponentV1 {
+                output_instances: 2,
+                count_by_charges: false,
+                output: CraftItemPrototypeV1 {
+                    type_id: String::from("test_component"),
+                    charges: 1,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                    magazine_capacity: 0,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                },
+                output_state: Some(ItemComponentSnapshotV1 {
+                    type_id: String::from("test_component"),
+                    charges: 1,
+                    damage: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                    count_by_charges: false,
+                    recoverable: true,
+                    component_provenance: None,
+                    magazine_capacity: 0,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                }),
+            }],
+            tools: Vec::new(),
+            qualities: Vec::new(),
+        }
+    }
+
+    fn test_construction_recipe(
+        time_moves: u64,
+        component: &str,
+        count: u32,
+        count_by_charges: bool,
+    ) -> ConstructionRecipeV1 {
+        ConstructionRecipeV1 {
+            construction_id: String::from("constr_place_test_table"),
+            name: String::from("Place test table"),
+            time_moves,
+            required_skills: vec![CraftSkillRequirementV1 {
+                skill_id: String::from("fabrication"),
+                level: 0,
+            }],
+            components: vec![vec![cdda_protocol::CraftComponentRequirementV1 {
+                type_id: component.to_owned(),
+                count,
+                count_by_charges,
+                recoverable: true,
+            }]],
+            qualities: Vec::new(),
+            pre_terrain: Vec::new(),
+            requires_empty: true,
+            result: ConstructionResultV1::Furniture(test_furniture("f_test_table", 0, true)),
+        }
+    }
+
+    fn test_craft_proficiency(
+        proficiency_id: &str,
+        required: bool,
+        time_multiplier_millionths: u32,
+        time_to_learn_action_points: u64,
+    ) -> CraftProficiencyV1 {
+        CraftProficiencyV1 {
+            proficiency_id: proficiency_id.to_owned(),
+            required,
+            time_multiplier_millionths,
+            skill_penalty_millionths: if required { 0 } else { 500_000 },
+            learning_time_multiplier_millionths: CRAFT_PROFICIENCY_SCALE,
+            max_experience_action_points: None,
+            time_to_learn_action_points,
+            can_learn: !required,
+            required_proficiencies: Vec::new(),
+        }
+    }
+
+    fn spawn_and_pick_up(
+        world: &mut WorldState,
+        actor_id: ActorId,
+        sequence: u64,
+        type_id: &str,
+        charges: i32,
+    ) -> ItemId {
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("test actor exists")
+            .position;
+        let item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: type_id.to_owned(),
+                charges,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("test component should spawn");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(sequence),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp { item_id },
+            }])
+            .expect("test component should be picked up");
+        item_id
+    }
+
+    fn advance_to_next_needs_tick(world: &mut WorldState) -> TickOutcome {
+        let next_boundary = world
+            .tick
+            .0
+            .checked_div(NEEDS_INTERVAL_TICKS)
+            .and_then(|interval| interval.checked_add(1))
+            .and_then(|interval| interval.checked_mul(NEEDS_INTERVAL_TICKS))
+            .expect("test tick should not overflow");
+        world.tick = SimTick(next_boundary - 1);
+        world
+            .advance_tick(Vec::new())
+            .expect("needs boundary should advance")
+    }
+
+    #[test]
+    fn construction_consumes_component_and_completes_while_disconnected() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component = spawn_and_pick_up(&mut world, actor_id, 1, "w_table", 1);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(
+                        100, "w_table", 1, false,
+                    ))),
+                },
+            }])
+            .expect("construction should start");
+        assert!(
+            started.events.iter().any(|event| matches!(
+                event.kind,
+                WorldEventKind::ConstructionStarted { target: event_target, .. }
+                    if event_target == target
+            )),
+            "events: {:?}",
+            started.events
+        );
+        let actor = world.actor_snapshot(actor_id).expect("actor should exist");
+        assert!(!actor.inventory.iter().any(|item| item.id == component));
+        assert!(actor.construction_activity.is_some());
+
+        world
+            .set_connected(actor_id, false)
+            .expect("actor should disconnect");
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("offline construction should advance");
+        assert!(completed.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ConstructionCompleted { target: event_target, .. }
+                if event_target == target
+        )));
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor should remain")
+                .construction_activity
+                .is_none()
+        );
+        let (coord, local) = target.chunk_and_local();
+        assert_eq!(
+            world
+                .chunks
+                .get(&coord)
+                .and_then(|chunk| chunk.furniture(local))
+                .map(|furniture| furniture.furniture_id.as_str()),
+            Some("f_test_table")
+        );
+    }
+
+    #[test]
+    fn exact_terrain_construction_persists_result_and_preserves_furniture_layer() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "g_carpet", 1);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        let (coord, local) = target.chunk_and_local();
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("target chunk should exist")
+            .set_furniture(local, Some(test_furniture("f_chair", 0, true)))
+            .expect("independent furniture layer should be valid");
+        let mut recipe = test_construction_recipe(100, "g_carpet", 1, false);
+        recipe.construction_id = String::from("constr_carpet_green");
+        recipe.pre_terrain = vec![String::from("t_floor")];
+        recipe.requires_empty = false;
+        recipe.result = ConstructionResultV1::Terrain(test_terrain("t_carpet_green"));
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: recipe.construction_id.clone(),
+                    construction: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("exact-floor construction should start");
+        world
+            .set_connected(actor_id, false)
+            .expect("builder should disconnect");
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("terrain construction should finish offline");
+        assert!(completed.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ConstructionCompleted { target: event_target, .. }
+                if event_target == target
+        )));
+        let chunk = world.chunks.get(&coord).expect("target chunk remains");
+        assert_eq!(
+            chunk.tile(local).map(|tile| tile.terrain_id.as_str()),
+            Some("t_carpet_green")
+        );
+        assert_eq!(
+            chunk
+                .furniture(local)
+                .map(|furniture| furniture.furniture_id.as_str()),
+            Some("f_chair"),
+            "upstream terrain mutation preserves the independent furniture layer"
+        );
+        let recovered = WorldState::from_snapshot(&world.snapshot())
+            .expect("terrain construction result should recover");
+        assert_eq!(
+            recovered.canonical_hash().expect("recovered world hashes"),
+            world.canonical_hash().expect("live world hashes")
+        );
+    }
+
+    #[test]
+    fn construction_quality_is_protected_and_required_through_resume() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "g_carpet", 1);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        let mut recipe = test_construction_recipe(300, "g_carpet", 1, false);
+        recipe.construction_id = String::from("constr_carpet_green");
+        recipe.pre_terrain = vec![String::from("t_floor")];
+        recipe.requires_empty = false;
+        recipe.result = ConstructionResultV1::Terrain(test_terrain("t_carpet_green"));
+        recipe.qualities = vec![vec![cdda_protocol::CraftQualityRequirementV1 {
+            quality_id: String::from("HAMMER"),
+            level: 2,
+            amount: 1,
+            providers: vec![cdda_protocol::CraftQualityProviderV1 {
+                type_id: String::from("hammer"),
+                minimum_charges: 0,
+            }],
+        }]];
+
+        let missing = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: recipe.construction_id.clone(),
+                    construction: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("missing construction quality should reject cleanly");
+        assert!(missing.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingQualities,
+                ..
+            }
+        )));
+
+        let hammer_id = spawn_and_pick_up(&mut world, actor_id, 3, "hammer", 1);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: recipe.construction_id.clone(),
+                    construction: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("hammer-backed construction should start");
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("builder exists")
+                .inventory
+                .iter()
+                .any(|item| item.id == hammer_id),
+            "quality provider must not be consumed as a component"
+        );
+        let hammer = world
+            .actors
+            .get_mut(&actor_id)
+            .expect("builder exists")
+            .inventory
+            .remove(&hammer_id)
+            .expect("hammer remains carried");
+        let interrupted = world
+            .advance_tick(Vec::new())
+            .expect("missing quality should interrupt work");
+        assert!(interrupted.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ConstructionInterrupted {
+                reason: ConstructionInterruptionReason::MissingQualities,
+                ..
+            }
+        )));
+        let recovered = WorldState::from_snapshot(&world.snapshot())
+            .expect("quality-interrupted construction should recover");
+        assert_eq!(
+            recovered.canonical_hash().expect("recovered world hashes"),
+            world.canonical_hash().expect("live world hashes")
+        );
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("builder exists")
+            .inventory
+            .insert(hammer_id, hammer);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::ResumeConstruction,
+            }])
+            .expect("restored quality should allow resume");
+        for _ in 0..3 {
+            world
+                .advance_tick(Vec::new())
+                .expect("resumed construction should advance");
+            if world
+                .actor_snapshot(actor_id)
+                .is_some_and(|actor| actor.construction_activity.is_none())
+            {
+                break;
+            }
+        }
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("builder remains")
+                .construction_activity
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn remote_construction_target_rejects_before_generating_chunks() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "w_table", 1);
+        let chunks_before = world.chunks.len();
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target: WorldPosition {
+                        x: 1_000_000,
+                        y: 1_000_000,
+                        z: 0,
+                    },
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(
+                        100, "w_table", 1, false,
+                    ))),
+                },
+            }])
+            .expect("remote target should reject cleanly");
+        assert!(rejected.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                WorldEventKind::CommandRejected {
+                    reason: CommandRejection::InvalidConstructionTarget,
+                    ..
+                }
+            )
+        }));
+        assert_eq!(world.chunks.len(), chunks_before);
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .is_some_and(|actor| actor.construction_activity.is_none())
+        );
+    }
+
+    #[test]
+    fn construction_requires_the_upstream_flat_terrain_flag() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component = spawn_and_pick_up(&mut world, actor_id, 1, "w_table", 1);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        let (coord, local) = target.chunk_and_local();
+        let mut uneven = world
+            .chunks
+            .get(&coord)
+            .and_then(|chunk| chunk.tile(local))
+            .cloned()
+            .expect("target terrain should exist");
+        uneven.terrain_id = String::from("t_uneven_floor");
+        uneven.flat = false;
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("target chunk should exist")
+            .set_terrain(local, uneven)
+            .expect("uneven terrain should remain a valid canonical tile");
+
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(
+                        100, "w_table", 1, false,
+                    ))),
+                },
+            }])
+            .expect("non-flat target should reject cleanly");
+        assert!(rejected.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                WorldEventKind::CommandRejected {
+                    reason: CommandRejection::InvalidConstructionTarget,
+                    ..
+                }
+            )
+        }));
+        let actor = world.actor_snapshot(actor_id).expect("actor should remain");
+        assert!(actor.construction_activity.is_none());
+        assert!(actor.inventory.iter().any(|item| item.id == component));
+    }
+
+    #[test]
+    fn canceled_construction_restores_exact_split_component_and_wield_state() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component = spawn_and_pick_up(&mut world, actor_id, 1, "nails", 5);
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .wielded = Some(component);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(1_000, "nails", 2, true))),
+                },
+            }])
+            .expect("construction should start");
+        let snapshot = world.snapshot();
+        let recovered = WorldState::from_snapshot(&snapshot)
+            .expect("active construction should survive snapshot recovery");
+        assert_eq!(
+            recovered.canonical_hash().expect("hash should encode"),
+            world.canonical_hash().expect("hash should encode")
+        );
+        world
+            .interrupt_construction(
+                actor_id,
+                ConstructionInterruptionReason::Damage,
+                &mut Vec::new(),
+            )
+            .expect("construction should interrupt");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::CancelConstruction,
+            }])
+            .expect("construction should cancel");
+        let actor = world.actor_snapshot(actor_id).expect("actor should exist");
+        let restored = actor
+            .inventory
+            .iter()
+            .find(|item| item.id == component)
+            .expect("split parent should remain");
+        assert_eq!(restored.charges, 5);
+        assert_eq!(actor.wielded, Some(component));
+        assert!(actor.construction_activity.is_none());
+    }
+
+    #[test]
+    fn construction_interrupts_when_another_mutation_invalidates_target() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "w_table", 1);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(
+                        1_000, "w_table", 1, false,
+                    ))),
+                },
+            }])
+            .expect("construction should start");
+        let (coord, local) = target.chunk_and_local();
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("target chunk exists")
+            .set_furniture(local, Some(test_furniture("f_obstacle", 0, true)))
+            .expect("target should mutate");
+        let interrupted = world
+            .advance_tick(Vec::new())
+            .expect("target mutation should be observed");
+        assert!(interrupted.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ConstructionInterrupted {
+                reason: ConstructionInterruptionReason::TargetChanged,
+                ..
+            }
+        )));
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .and_then(|actor| actor.construction_activity)
+                .is_some_and(|activity| activity.interrupted)
+        );
+    }
+
+    #[test]
+    fn interrupted_construction_rejects_every_competing_activity_start() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component = spawn_and_pick_up(&mut world, actor_id, 1, "w_table", 1);
+        let target = WorldPosition { x: 2, y: 1, z: 0 };
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target,
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(
+                        1_000, "w_table", 1, false,
+                    ))),
+                },
+            }])
+            .expect("construction should start");
+        world
+            .interrupt_construction(
+                actor_id,
+                ConstructionInterruptionReason::Damage,
+                &mut Vec::new(),
+            )
+            .expect("construction should interrupt");
+
+        let rejected = world
+            .advance_tick(vec![
+                ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(3),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Craft {
+                        recipe_id: String::from("untrusted"),
+                        recipe: None,
+                    },
+                },
+                ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(4),
+                    client_tick: world.tick(),
+                    kind: CommandKind::ReadBook {
+                        item_id: component,
+                        book_type_id: String::from("untrusted"),
+                        study: None,
+                    },
+                },
+                ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(5),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Disassemble {
+                        item_id: component,
+                        item_type_id: String::from("untrusted"),
+                        recipe: None,
+                    },
+                },
+            ])
+            .expect("competing starts should reject without corrupting construction");
+        assert_eq!(
+            rejected
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        WorldEventKind::CommandRejected {
+                            reason: CommandRejection::ActorBusy,
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            3
+        );
+        let actor = world.actor_snapshot(actor_id).expect("actor should remain");
+        assert!(
+            actor
+                .construction_activity
+                .is_some_and(|activity| activity.interrupted)
+        );
+        assert!(actor.craft_activity.is_none());
+        assert!(actor.read_activity.is_none());
+        assert!(actor.disassembly_activity.is_none());
+    }
+
+    #[test]
+    fn ranged_disassembly_unloads_ammunition_before_reserving_target() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("actor exists")
+            .position;
+        let target_item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("test_ranged_target"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: Some(RangedWeaponSnapshot {
+                    ammunition_type: String::from("test_ammo"),
+                    ammunition_remaining: 4,
+                    ammunition_capacity: 6,
+                    range: 8,
+                    damage: 10,
+                    dispersion: 100,
+                    sound_volume: 0,
+                }),
+            })
+            .expect("loaded target should spawn");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp {
+                    item_id: target_item_id,
+                },
+            }])
+            .expect("loaded target should be picked up");
+
+        let mut recipe = test_disassembly_recipe(100, 0, Vec::new());
+        recipe.target_type_id = String::from("test_ranged_target");
+        recipe.unload_charges_as = Some(CraftItemPrototypeV1 {
+            type_id: String::from("test_round"),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::from("test_ammo"),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            magazine_well: None,
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+        });
+
+        let mut exhausted = world.clone();
+        exhausted.allocator.reserved_end = 5;
+        let exhausted_outcome = exhausted
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: exhausted.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("insufficient IDs should be an ordinary rejection");
+        assert!(exhausted_outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::StableIdsUnavailable,
+                ..
+            }
+        )));
+        assert_eq!(exhausted.allocator.next(), 4, "rejection burns no IDs");
+        assert!(exhausted.snapshot().ground_items.is_empty());
+        assert_eq!(
+            exhausted
+                .actor_snapshot(actor_id)
+                .and_then(|actor| {
+                    actor
+                        .inventory
+                        .into_iter()
+                        .find(|item| item.id == target_item_id)
+                })
+                .and_then(|item| item.ranged_weapon)
+                .expect("rejection should retain the loaded target")
+                .ammunition_remaining,
+            4
+        );
+
+        let mut mismatched = world.clone();
+        let mut mismatched_recipe = recipe.clone();
+        mismatched_recipe
+            .unload_charges_as
+            .as_mut()
+            .expect("test recipe unloads ammunition")
+            .ammunition_type = String::from("wrong_ammo");
+        let mismatched_outcome = mismatched
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: mismatched.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: mismatched_recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(mismatched_recipe)),
+                },
+            }])
+            .expect("mismatched ammunition should be an ordinary rejection");
+        assert!(mismatched_outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::DisassemblyUnavailable,
+                ..
+            }
+        )));
+        assert_eq!(mismatched.allocator.next(), 4, "rejection burns no IDs");
+        assert!(mismatched.snapshot().ground_items.is_empty());
+
+        let mut empty = world.clone();
+        empty
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .and_then(|item| item.ranged_weapon.as_mut())
+            .expect("empty-target fixture remains ranged")
+            .ammunition_remaining = 0;
+        let empty_outcome = empty
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: empty.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("an empty ranged target should start without an unload stack");
+        assert!(
+            !empty_outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::ItemDropped { .. }))
+        );
+        assert_eq!(
+            empty
+                .actor_snapshot(actor_id)
+                .and_then(|actor| actor.disassembly_activity)
+                .expect("empty ranged target should be reserved")
+                .reserved_component_items,
+            [ItemId::new(7, 4), ItemId::new(7, 5)]
+        );
+
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("loaded ranged disassembly should start");
+        let unloaded_item_id = ItemId::new(7, 4);
+        let unload_event = started
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.kind,
+                    WorldEventKind::ItemDropped { item_id, .. } if item_id == unloaded_item_id
+                )
+            })
+            .expect("unloading should emit a ground-item event");
+        let start_event = started
+            .events
+            .iter()
+            .position(|event| matches!(event.kind, WorldEventKind::DisassemblyStarted { .. }))
+            .expect("disassembly should emit its start event");
+        assert!(
+            unload_event < start_event,
+            "ammunition unload is start-atomic"
+        );
+        let ammunition = world
+            .ground_item_snapshot(unloaded_item_id)
+            .expect("unloaded ammunition should be on the ground");
+        assert_eq!(ammunition.position, position);
+        assert_eq!(ammunition.item.type_id, "test_round");
+        assert_eq!(ammunition.item.charges, 4);
+        assert_eq!(ammunition.item.ammunition_type, "test_ammo");
+        let activity = world
+            .actor_snapshot(actor_id)
+            .and_then(|actor| actor.disassembly_activity)
+            .expect("target should be reserved");
+        assert_eq!(
+            activity
+                .target_item
+                .ranged_weapon
+                .as_ref()
+                .expect("reserved target remains ranged")
+                .ammunition_remaining,
+            0
+        );
+        assert_eq!(
+            activity.reserved_component_items,
+            [ItemId::new(7, 5), ItemId::new(7, 6)]
+        );
+
+        let snapshot = world.snapshot();
+        let mut invalid_loaded_snapshot = snapshot.clone();
+        invalid_loaded_snapshot
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .and_then(|actor| actor.disassembly_activity.as_mut())
+            .and_then(|activity| activity.target_item.ranged_weapon.as_mut())
+            .expect("active ranged target should be present")
+            .ammunition_remaining = 1;
+        assert!(
+            WorldState::from_snapshot(&invalid_loaded_snapshot).is_err(),
+            "recovery must reject an activity that reserves a still-loaded target"
+        );
+        let mut canceled = WorldState::from_snapshot(&snapshot)
+            .expect("an unloaded in-progress target should restore");
+        assert_eq!(
+            canceled.canonical_hash().expect("restored state hashes"),
+            world.canonical_hash().expect("live state hashes")
+        );
+        canceled
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: canceled.tick(),
+                kind: CommandKind::CancelDisassembly,
+            }])
+            .expect("unloaded disassembly should cancel");
+        let canceled_actor = canceled.actor_snapshot(actor_id).expect("actor remains");
+        let restored_target = canceled_actor
+            .inventory
+            .iter()
+            .find(|item| item.id == target_item_id)
+            .expect("cancel should restore the target");
+        assert_eq!(
+            restored_target
+                .ranged_weapon
+                .as_ref()
+                .expect("restored target remains ranged")
+                .ammunition_remaining,
+            0,
+            "cancel must not duplicate the ammunition already unloaded"
+        );
+        let canceled_ammunition = canceled
+            .snapshot()
+            .ground_items
+            .into_iter()
+            .filter(|ground| ground.item.type_id == "test_round")
+            .collect::<Vec<_>>();
+        assert_eq!(canceled_ammunition.len(), 1);
+        assert_eq!(canceled_ammunition[0].item.charges, 4);
+
+        world
+            .advance_tick(Vec::new())
+            .expect("unloaded disassembly should complete");
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .is_some_and(|actor| actor.disassembly_activity.is_none())
+        );
+        assert_eq!(
+            world
+                .ground_item_snapshot(unloaded_item_id)
+                .expect("completion keeps unloaded ammunition")
+                .item
+                .charges,
+            4
+        );
+    }
+
+    #[test]
+    fn integral_tool_disassembly_unloads_charges_without_cancel_duplication() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("actor exists")
+            .position;
+        let target_item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("test_integral_tool"),
+                charges: 7,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("charged tool should spawn");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp {
+                    item_id: target_item_id,
+                },
+            }])
+            .expect("charged tool should be picked up");
+        let mut recipe = test_disassembly_recipe(100, 0, Vec::new());
+        recipe.target_type_id = String::from("test_integral_tool");
+        recipe.unload_charges_as = Some(CraftItemPrototypeV1 {
+            type_id: String::from("battery"),
+            charges: 100,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::from("battery"),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            magazine_well: None,
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+        });
+        let mut contradictory = recipe.clone();
+        contradictory.requires_empty_charges = true;
+        assert!(
+            validate_disassembly_recipe(&contradictory).is_err(),
+            "simulation must reject contradictory empty-only and unload semantics"
+        );
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("integral-tool disassembly should start");
+        let unloaded_item_id = ItemId::new(7, 4);
+        assert!(started.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ItemDropped { item_id, .. } if item_id == unloaded_item_id
+        )));
+        let unloaded = world
+            .ground_item_snapshot(unloaded_item_id)
+            .expect("unloaded tool charges should be on the ground");
+        assert_eq!(unloaded.position, position);
+        assert_eq!(unloaded.item.type_id, "battery");
+        assert_eq!(unloaded.item.ammunition_type, "battery");
+        assert_eq!(unloaded.item.charges, 7);
+        let activity = world
+            .actor_snapshot(actor_id)
+            .and_then(|actor| actor.disassembly_activity)
+            .expect("empty tool should be reserved");
+        assert_eq!(activity.target_item.charges, 0);
+        assert!(activity.target_item.ranged_weapon.is_none());
+        assert_eq!(
+            activity.reserved_component_items,
+            [ItemId::new(7, 5), ItemId::new(7, 6)]
+        );
+
+        let snapshot = world.snapshot();
+        let mut invalid_snapshot = snapshot.clone();
+        invalid_snapshot
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .and_then(|actor| actor.disassembly_activity.as_mut())
+            .expect("tool activity exists")
+            .target_item
+            .charges = 1;
+        assert!(
+            WorldState::from_snapshot(&invalid_snapshot).is_err(),
+            "recovery must reject a reserved tool that still contains charges"
+        );
+        let mut canceled =
+            WorldState::from_snapshot(&snapshot).expect("empty reserved tool should restore");
+        canceled
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: canceled.tick(),
+                kind: CommandKind::CancelDisassembly,
+            }])
+            .expect("integral-tool disassembly should cancel");
+        let actor = canceled.actor_snapshot(actor_id).expect("actor remains");
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == target_item_id)
+                .expect("cancel restores the tool")
+                .charges,
+            0
+        );
+        assert_eq!(
+            canceled
+                .ground_item_snapshot(unloaded_item_id)
+                .expect("cancel retains the one unloaded stack")
+                .item
+                .charges,
+            7
+        );
+    }
+
+    #[test]
+    fn unmodeled_tool_charge_storage_must_be_empty_before_disassembly() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("actor exists")
+            .position;
+        let target_item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("test_pocket_tool"),
+                charges: 7,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("charged tool should spawn");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp {
+                    item_id: target_item_id,
+                },
+            }])
+            .expect("charged tool should be picked up");
+        let mut recipe = test_disassembly_recipe(100, 0, Vec::new());
+        recipe.target_type_id = String::from("test_pocket_tool");
+        recipe.requires_empty_charges = true;
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("charged unsupported storage should be an ordinary rejection");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::DisassemblyUnavailable,
+                ..
+            }
+        )));
+        assert_eq!(world.allocator.next(), 4, "rejection burns no IDs");
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .and_then(|actor| actor
+                    .inventory
+                    .into_iter()
+                    .find(|item| item.id == target_item_id))
+                .expect("rejection retains the tool")
+                .charges,
+            7
+        );
+
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("tool remains carried")
+            .charges = 0;
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("empty tool disassembly should start");
+        let activity = world
+            .actor_snapshot(actor_id)
+            .and_then(|actor| actor.disassembly_activity)
+            .expect("empty tool should be reserved");
+        assert_eq!(activity.target_item.charges, 0);
+        assert!(activity.recipe.requires_empty_charges);
+        assert_eq!(world.allocator.next(), 6, "only component IDs are reserved");
+    }
+
+    #[test]
+    fn canonical_intelligence_controls_pinned_reading_time_and_experience() {
+        assert_eq!(adjusted_book_study_time_moves(90_000, 12, 8), Some(96_000));
+        assert_eq!(adjusted_book_study_time_moves(90_000, 12, 12), Some(90_000));
+        assert_eq!(
+            book_study_experience_range(15, 8, 1).expect("bounded range"),
+            (6, 12)
+        );
+        assert_eq!(
+            book_study_experience_range(15, 12, 1).expect("bounded range"),
+            (8, 16)
+        );
+
+        let (mut lower_intelligence, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut lower_intelligence, actor_id);
+        let book_item_id =
+            spawn_and_pick_up(&mut lower_intelligence, actor_id, 1, "manual_pistol", 1);
+        let mut sufficient_intelligence = lower_intelligence.clone();
+        sufficient_intelligence
+            .actors
+            .get_mut(&actor_id)
+            .expect("reader exists")
+            .base_intelligence = 12;
+        let study = BookStudyV1 {
+            book_type_id: String::from("manual_pistol"),
+            skill_id: String::from("pistol"),
+            required_skill_level: 0,
+            maximum_skill_level: 3,
+            intelligence_requirement: 12,
+            time_moves: 100,
+            source_time_minutes: 15,
+        };
+        let start = |world: &mut WorldState| {
+            let tick = world.tick();
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(2),
+                    client_tick: tick,
+                    kind: CommandKind::ReadBook {
+                        item_id: book_item_id,
+                        book_type_id: study.book_type_id.clone(),
+                        study: Some(Box::new(study.clone())),
+                    },
+                }])
+                .expect("study should start")
+                .events
+                .into_iter()
+                .find_map(|event| match event.kind {
+                    WorldEventKind::BookStudyStarted {
+                        total_action_points,
+                        ..
+                    } => Some(total_action_points),
+                    _ => None,
+                })
+                .expect("start event should expose the duration")
+        };
+        assert_eq!(start(&mut lower_intelligence), 2_120);
+        assert_eq!(start(&mut sufficient_intelligence), 2_000);
+    }
+
+    #[test]
+    fn timed_book_study_is_authoritative_interruptible_deterministic_and_recoverable() {
+        let (mut world, actor_id, attacker_id) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        make_actor_act_each_tick(&mut world, attacker_id);
+        world
+            .actors
+            .get_mut(&attacker_id)
+            .expect("attacker exists")
+            .position = WorldPosition { x: 2, y: 1, z: 0 };
+        let study = BookStudyV1 {
+            book_type_id: String::from("manual_pistol"),
+            skill_id: String::from("pistol"),
+            required_skill_level: 1,
+            maximum_skill_level: 3,
+            intelligence_requirement: 3,
+            time_moves: 200,
+            source_time_minutes: 15,
+        };
+        let missing = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::ReadBook {
+                    item_id: ItemId::new(7, 4_000),
+                    book_type_id: study.book_type_id.clone(),
+                    study: Some(Box::new(study.clone())),
+                },
+            }])
+            .expect("missing-book rejection should advance");
+        assert!(missing.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::ItemNotOwned,
+                ..
+            }
+        )));
+
+        let book_item_id = spawn_and_pick_up(&mut world, actor_id, 2, "manual_pistol", 1);
+        let insufficient = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::ReadBook {
+                    item_id: book_item_id,
+                    book_type_id: study.book_type_id.clone(),
+                    study: Some(Box::new(study.clone())),
+                },
+            }])
+            .expect("skill rejection should advance");
+        assert!(insufficient.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::InsufficientSkills,
+                ..
+            }
+        )));
+        let practiced_at = world.tick();
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("reader exists")
+            .skills
+            .insert(
+                String::from("pistol"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("pistol"),
+                    practical_level: 0,
+                    practical_experience: 0,
+                    theoretical_level: 1,
+                    theoretical_experience: 0,
+                    last_practiced: practiced_at,
+                },
+            );
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::ReadBook {
+                    item_id: book_item_id,
+                    book_type_id: study.book_type_id.clone(),
+                    study: Some(Box::new(study)),
+                },
+            }])
+            .expect("study should start");
+        assert!(started.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::BookStudyStarted { book_item_id: event_book, .. }
+                if event_book == book_item_id
+        )));
+        let snapshot = world.snapshot();
+        let mut restored =
+            WorldState::from_snapshot(&snapshot).expect("active study should restore");
+        let mut dark = WorldState::from_snapshot(&snapshot).expect("active study should clone");
+        dark.tick = SimTick(12 * 60 * 60 * SimTick::HZ);
+        let darkened = dark
+            .advance_tick(Vec::new())
+            .expect("nightfall should interrupt reading");
+        assert!(darkened.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::BookStudyInterrupted {
+                reason: BookStudyInterruptionReason::Darkness,
+                ..
+            }
+        )));
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+
+        let attack = ClientCommand {
+            actor_id: attacker_id,
+            sequence: CommandSequence(1),
+            client_tick: world.tick(),
+            kind: CommandKind::Attack { target: actor_id },
+        };
+        let interrupted = world
+            .advance_tick(vec![attack.clone()])
+            .expect("damage should interrupt study");
+        let restored_interrupted = restored
+            .advance_tick(vec![attack])
+            .expect("recovered damage should interrupt identically");
+        assert_eq!(interrupted.events, restored_interrupted.events);
+        assert_eq!(
+            world.canonical_hash().expect("original interrupted hash"),
+            restored
+                .canonical_hash()
+                .expect("restored interrupted hash")
+        );
+        assert!(interrupted.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::BookStudyInterrupted {
+                reason: BookStudyInterruptionReason::Damage,
+                ..
+            }
+        )));
+
+        let resumed = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::ResumeRead,
+            }])
+            .expect("study should resume");
+        assert!(
+            resumed
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::BookStudyResumed { .. }))
+        );
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("resumed study should complete");
+        let experience = completed.events.iter().find_map(|event| match event.kind {
+            WorldEventKind::BookStudyCompleted {
+                experience_gained, ..
+            } => Some(experience_gained),
+            _ => None,
+        });
+        let experience = experience.expect("completion should report theory experience");
+        assert!((1_200..=2_400).contains(&experience) && experience % 200 == 0);
+        let actor = world.actor_snapshot(actor_id).expect("reader exists");
+        assert!(actor.read_activity.is_none());
+        assert!(actor.inventory.iter().any(|item| item.id == book_item_id));
+        assert_eq!(actor.skills[0].theoretical_level, 1);
+        assert_eq!(actor.skills[0].theoretical_experience, experience);
+
+        let mut delayed = restored.clone();
+        for _ in 0..3 {
+            delayed
+                .advance_tick(Vec::new())
+                .expect("interrupted study may remain paused");
+        }
+        delayed
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(5),
+                client_tick: delayed.tick(),
+                kind: CommandKind::ResumeRead,
+            }])
+            .expect("delayed study should resume");
+        let delayed_completion = delayed
+            .advance_tick(Vec::new())
+            .expect("delayed study should complete");
+        assert!(delayed_completion.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::BookStudyCompleted {
+                experience_gained,
+                ..
+            } if experience_gained == experience
+        )));
+
+        let dropped = restored
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(5),
+                client_tick: restored.tick(),
+                kind: CommandKind::Drop {
+                    item_id: book_item_id,
+                },
+            }])
+            .expect("an interrupted study may drop its book");
+        assert!(
+            dropped
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::ItemDropped { .. }))
+        );
+        let cannot_resume = restored
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(6),
+                client_tick: restored.tick(),
+                kind: CommandKind::ResumeRead,
+            }])
+            .expect("missing-book resume should reject");
+        assert!(cannot_resume.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::ItemNotOwned,
+                ..
+            }
+        )));
+        let canceled = restored
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(7),
+                client_tick: restored.tick(),
+                kind: CommandKind::CancelRead,
+            }])
+            .expect("missing-book study should remain cancelable");
+        assert!(
+            canceled
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::BookStudyCanceled { .. }))
+        );
+    }
+
+    #[test]
+    fn disassembly_practice_uses_pinned_stats_focus_catchup_and_cap() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        let mut events = Vec::new();
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .skills
+            .insert(
+                String::from("fabrication"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("fabrication"),
+                    practical_level: 1,
+                    practical_experience: 0,
+                    theoretical_level: 2,
+                    theoretical_experience: 0,
+                    last_practiced: SimTick(0),
+                },
+            );
+        world
+            .award_disassembly_practice(actor_id, "fabrication", 2, &mut events)
+            .expect("default-focus practice should apply");
+        let skill = world
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.skills.get("fabrication"))
+            .expect("skill exists");
+        assert_eq!(skill.practical_experience, 1_600);
+        assert_eq!(skill.theoretical_experience, 480);
+        assert!(events.is_empty());
+
+        {
+            let skill = world
+                .actors
+                .get_mut(&actor_id)
+                .and_then(|actor| actor.skills.get_mut("fabrication"))
+                .expect("skill exists");
+            skill.practical_level = 9;
+            skill.practical_experience = 0;
+            skill.theoretical_level = MAX_SKILL_LEVEL;
+            skill.theoretical_experience = 0;
+        }
+        world
+            .award_disassembly_practice(actor_id, "fabrication", 10, &mut events)
+            .expect("maximum theory should suppress only theory gain");
+        let skill = world
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.skills.get("fabrication"))
+            .expect("skill exists");
+        assert_eq!(skill.practical_experience, 4_444);
+        assert_eq!(skill.theoretical_experience, 0);
+
+        world
+            .advance_tick(Vec::new())
+            .expect("world tick should advance");
+        let practiced_at = world.tick();
+        {
+            let skill = world
+                .actors
+                .get_mut(&actor_id)
+                .and_then(|actor| actor.skills.get_mut("fabrication"))
+                .expect("skill exists");
+            skill.practical_level = 3;
+            skill.practical_experience = 123;
+            skill.theoretical_level = 3;
+            skill.theoretical_experience = 123;
+            skill.last_practiced = SimTick(0);
+        }
+        world
+            .award_disassembly_practice(actor_id, "fabrication", 2, &mut events)
+            .expect("over-cap practice should remain a successful no-op");
+        let skill = world
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.skills.get("fabrication"))
+            .expect("skill exists");
+        assert_eq!(skill.practical_experience, 123);
+        assert_eq!(skill.theoretical_experience, 123);
+        assert_eq!(skill.last_practiced, practiced_at);
+
+        let skill = world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.skills.get_mut("fabrication"))
+            .expect("skill exists");
+        skill.practical_level = 0;
+        skill.practical_experience = 9_900;
+        skill.theoretical_level = 0;
+        skill.theoretical_experience = 9_900;
+        events.clear();
+        world
+            .award_disassembly_practice(actor_id, "fabrication", 1, &mut events)
+            .expect("practice should cross one level");
+        let skill = world
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.skills.get("fabrication"))
+            .expect("skill exists");
+        assert_eq!(skill.practical_level, 1);
+        assert_eq!(skill.practical_experience, 0);
+        assert_eq!(skill.theoretical_level, 1);
+        assert_eq!(skill.theoretical_experience, 0);
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::SkillLevelGained {
+                practical_level: 1,
+                theoretical_level: 1,
+                ..
+            }
+        )));
+
+        {
+            let actor = world.actors.get_mut(&actor_id).expect("actor exists");
+            actor.base_intelligence = 12;
+            actor.base_perception = 12;
+            actor.skills.insert(
+                String::from("fabrication"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("fabrication"),
+                    practical_level: 1,
+                    practical_experience: 0,
+                    theoretical_level: 2,
+                    theoretical_experience: 0,
+                    last_practiced: world.tick,
+                },
+            );
+        }
+        events.clear();
+        world
+            .award_disassembly_practice(actor_id, "fabrication", 2, &mut events)
+            .expect("higher canonical stats should apply");
+        let skill = world
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.skills.get("fabrication"))
+            .expect("skill exists");
+        assert_eq!(skill.practical_experience, 2_000);
+        assert_eq!(skill.theoretical_experience, 520);
+
+        {
+            let actor = world.actors.get_mut(&actor_id).expect("actor exists");
+            actor.base_intelligence = 1;
+            actor.base_perception = 1;
+            actor.skills.insert(
+                String::from("fabrication"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("fabrication"),
+                    practical_level: 1,
+                    practical_experience: 9_900,
+                    theoretical_level: 1,
+                    theoretical_experience: 10_000,
+                    last_practiced: world.tick,
+                },
+            );
+        }
+        world
+            .award_disassembly_practice(actor_id, "fabrication", 1, &mut events)
+            .expect("the pinned minimum multiplier should apply");
+        let skill = world
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.skills.get("fabrication"))
+            .expect("skill exists");
+        assert_eq!(skill.practical_experience, 10_100);
+        assert_eq!(skill.theoretical_experience, 10_180);
+    }
+
+    #[test]
+    fn damaged_disassembly_uses_pinned_recovery_chance_and_cancel_restores_condition() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let target_item_id = spawn_and_pick_up(&mut world, actor_id, 1, "test_assembled_item", 1);
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("target is carried")
+            .damage = MAX_ITEM_DAMAGE_LEVEL;
+        let sequence = (2_u64..100)
+            .find(|sequence| {
+                let mut rng = world.named_session_rng(
+                    b"disassembly-component-recovery",
+                    &[actor_id.as_u128(), target_item_id.as_u128()],
+                    *sequence,
+                );
+                let recovered = (0..2)
+                    .map(|_| rng.next_u32() % 10_000 < 4_096)
+                    .collect::<Vec<_>>();
+                recovered.iter().any(|value| *value) && recovered.iter().any(|value| !*value)
+            })
+            .expect("a deterministic mixed damage outcome should exist");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(sequence),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: String::from("test_assembled_item"),
+                    recipe: Some(Box::new(test_disassembly_recipe(100, 0, Vec::new()))),
+                },
+            }])
+            .expect("damaged target should begin disassembly");
+        let mut canceled = world.clone();
+        canceled
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(sequence + 1),
+                client_tick: canceled.tick(),
+                kind: CommandKind::CancelDisassembly,
+            }])
+            .expect("active damaged disassembly should cancel");
+        let restored = canceled.actor_snapshot(actor_id).expect("actor exists");
+        assert_eq!(
+            restored
+                .inventory
+                .iter()
+                .find(|item| item.id == target_item_id)
+                .expect("exact target should return")
+                .damage,
+            MAX_ITEM_DAMAGE_LEVEL
+        );
+
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("damaged disassembly should complete");
+        let (recovered, destroyed) = completed
+            .events
+            .iter()
+            .find_map(|event| match &event.kind {
+                WorldEventKind::DisassemblyCompleted {
+                    recovered_items,
+                    destroyed_components,
+                    ..
+                } => Some((recovered_items, destroyed_components)),
+                _ => None,
+            })
+            .expect("completion event should exist");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(destroyed.len(), 1);
+        assert_eq!(destroyed[0].type_id, "test_component");
+        assert_eq!(destroyed[0].count, 1);
+    }
+
+    #[test]
+    fn reversible_craft_disassembles_to_the_exact_consumed_component_state() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component_id = spawn_and_pick_up(&mut world, actor_id, 1, "actual_component", 7);
+        let nested = ItemComponentSnapshotV1 {
+            type_id: String::from("raw_thread"),
+            charges: 23,
+            damage: 1,
+            melee_damage_milli: BTreeMap::from([(String::from("cut"), 250)]),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            count_by_charges: true,
+            recoverable: true,
+            component_provenance: None,
+            magazine_capacity: 0,
+            magazine_well: None,
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+        };
+        {
+            let component = world
+                .actors
+                .get_mut(&actor_id)
+                .and_then(|actor| actor.inventory.get_mut(&component_id))
+                .expect("actual alternative is carried");
+            component.damage = 2;
+            component.melee_damage_milli = BTreeMap::from([(String::from("bash"), 1_750)]);
+            component.component_provenance = Some(vec![nested.clone()]);
+        }
+
+        let mut craft = test_craft_recipe(
+            100,
+            1,
+            vec![vec![
+                ("default_component", 1, false),
+                ("actual_component", 1, false),
+            ]],
+        );
+        craft.retain_components = true;
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: craft.recipe_id.clone(),
+                    recipe: Some(Box::new(craft)),
+                },
+            }])
+            .expect("reversible craft should start with the available alternative");
+        world
+            .advance_tick(Vec::new())
+            .expect("reversible craft should complete");
+        let crafted = world
+            .actor_snapshot(actor_id)
+            .expect("actor exists")
+            .inventory
+            .into_iter()
+            .find(|item| item.type_id == "test_output")
+            .expect("crafted output is carried");
+        let expected_component = ItemComponentSnapshotV1 {
+            type_id: String::from("actual_component"),
+            charges: 7,
+            damage: 2,
+            melee_damage_milli: BTreeMap::from([(String::from("bash"), 1_750)]),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            count_by_charges: false,
+            recoverable: true,
+            component_provenance: Some(vec![nested]),
+            magazine_capacity: 0,
+            magazine_well: None,
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+        };
+        assert_eq!(
+            crafted.component_provenance,
+            Some(vec![expected_component.clone()])
+        );
+
+        let mut disassembly = test_disassembly_recipe(100, 0, Vec::new());
+        disassembly.target_type_id = String::from("test_output");
+        disassembly.components = vec![cdda_protocol::DisassemblyComponentV1 {
+            output_instances: 1,
+            count_by_charges: false,
+            output: CraftItemPrototypeV1 {
+                type_id: String::from("wrong_recipe_default"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                magazine_well: None,
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            },
+            output_state: None,
+        }];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: crafted.id,
+                    item_type_id: crafted.type_id.clone(),
+                    recipe: Some(Box::new(disassembly)),
+                },
+            }])
+            .expect("crafted output should begin disassembly");
+        let active = world.actor_snapshot(actor_id).expect("actor exists");
+        let activity = active
+            .disassembly_activity
+            .as_ref()
+            .expect("disassembly activity is durable");
+        assert_eq!(activity.recipe.components.len(), 1);
+        assert_eq!(
+            activity.recipe.components[0].output_state,
+            Some(expected_component.clone())
+        );
+
+        let mut canceled = world.clone();
+        canceled
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: canceled.tick(),
+                kind: CommandKind::CancelDisassembly,
+            }])
+            .expect("disassembly should cancel");
+        let restored = canceled
+            .actor_snapshot(actor_id)
+            .expect("actor exists")
+            .inventory
+            .into_iter()
+            .find(|item| item.id == crafted.id)
+            .expect("the crafted target should be restored");
+        assert_eq!(restored, crafted);
+
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("difficulty-zero disassembly should complete");
+        let recovered_id = completed
+            .events
+            .iter()
+            .find_map(|event| match &event.kind {
+                WorldEventKind::DisassemblyCompleted {
+                    recovered_items,
+                    destroyed_components,
+                    ..
+                } => {
+                    assert!(destroyed_components.is_empty());
+                    recovered_items.first().copied()
+                }
+                _ => None,
+            })
+            .expect("the exact component should be recovered");
+        let recovered = world
+            .ground_item_snapshot(recovered_id)
+            .expect("recovered component should be on the ground")
+            .item;
+        assert_eq!(recovered.type_id, expected_component.type_id);
+        assert_eq!(recovered.charges, expected_component.charges);
+        assert_eq!(recovered.damage, expected_component.damage);
+        assert_eq!(
+            recovered.melee_damage_milli,
+            expected_component.melee_damage_milli
+        );
+        assert_eq!(
+            recovered.component_provenance,
+            expected_component.component_provenance
+        );
+    }
+
+    #[test]
+    fn craft_rejects_provenance_depth_overflow_before_consuming_any_state() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component_id = spawn_and_pick_up(&mut world, actor_id, 1, "deep_component", 1);
+        let component = || ItemComponentSnapshotV1 {
+            type_id: String::from("nested_component"),
+            charges: 1,
+            damage: 0,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            count_by_charges: false,
+            recoverable: true,
+            component_provenance: None,
+            magazine_capacity: 0,
+            magazine_well: None,
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+        };
+        let mut deepest = component();
+        for _ in 1..MAX_ITEM_COMPONENT_DEPTH {
+            let mut parent = component();
+            parent.component_provenance = Some(vec![deepest]);
+            deepest = parent;
+        }
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&component_id))
+            .expect("deep component is carried")
+            .component_provenance = Some(vec![deepest]);
+        let before = world.snapshot();
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("deep_component", 1, false)]]);
+        recipe.retain_components = true;
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("over-deep provenance should reject without a simulation error");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::RecipeUnavailable,
+                ..
+            }
+        )));
+        let after = world.snapshot();
+        assert_eq!(after.allocator_next, before.allocator_next);
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == component_id)
+                .expect("component remains unchanged"),
+            before.actors[0]
+                .inventory
+                .iter()
+                .find(|item| item.id == component_id)
+                .expect("pre-craft component exists")
+        );
+
+        let safe_recipe = test_craft_recipe(100, 1, vec![vec![("deep_component", 1, false)]]);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: safe_recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(safe_recipe)),
+                },
+            }])
+            .expect("a non-retaining craft may consume the same deep item");
+        let mut invalid_snapshot = world.snapshot();
+        invalid_snapshot.actors[0]
+            .craft_activity
+            .as_mut()
+            .expect("craft remains in progress")
+            .recipe
+            .retain_components = true;
+        assert!(
+            WorldState::from_snapshot(&invalid_snapshot).is_err(),
+            "recovery must reject an activity that could overflow at completion"
+        );
+    }
+
+    #[test]
+    fn disassembly_is_authoritative_interruptible_recoverable_and_can_teach_recipe() {
+        let (mut world, actor_id, attacker_id) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        make_actor_act_each_tick(&mut world, attacker_id);
+        world
+            .actors
+            .get_mut(&attacker_id)
+            .expect("attacker exists")
+            .position = WorldPosition { x: 2, y: 1, z: 0 };
+        let target_item_id = spawn_and_pick_up(&mut world, actor_id, 1, "test_assembled_item", 1);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Wield {
+                    item_id: target_item_id,
+                },
+            }])
+            .expect("target should be wielded");
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("target is carried")
+            .damage = MAX_ITEM_DAMAGE_LEVEL + 1;
+        let damaged = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: String::from("test_assembled_item"),
+                    recipe: Some(Box::new(test_disassembly_recipe(200, 0, Vec::new()))),
+                },
+            }])
+            .expect("out-of-range damage should reject");
+        assert!(damaged.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::ItemDamaged,
+                ..
+            }
+        )));
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("target remains carried")
+            .damage = 0;
+        let practiced_at = world.tick();
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .skills
+            .insert(
+                String::from("fabrication"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("fabrication"),
+                    practical_level: 1,
+                    practical_experience: 0,
+                    theoretical_level: 1,
+                    theoretical_experience: 0,
+                    last_practiced: practiced_at,
+                },
+            );
+        let start_sequence = (4_u64..100)
+            .find(|sequence| {
+                let mut rng = world.named_session_rng(
+                    b"disassembly-recipe-learning",
+                    &[actor_id.as_u128(), target_item_id.as_u128()],
+                    *sequence,
+                );
+                rng.next_u32().is_multiple_of(4)
+            })
+            .expect("a deterministic learning sequence should exist");
+        let recipe = test_disassembly_recipe(
+            200,
+            0,
+            vec![CraftSkillRequirementV1 {
+                skill_id: String::from("fabrication"),
+                level: 1,
+            }],
+        );
+        let mut learned_craft = test_craft_recipe(100, 1, vec![vec![("test_component", 1, false)]]);
+        learned_craft.recipe_id = recipe.recipe_id.clone();
+        learned_craft.autolearn = false;
+        learned_craft.autolearn_skills.clear();
+        learned_craft.can_be_learned = true;
+        assert!(!actor_knows_recipe(
+            world.actors.get(&actor_id).expect("actor exists"),
+            &learned_craft,
+        ));
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(start_sequence),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: target_item_id,
+                    item_type_id: recipe.target_type_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("disassembly should start");
+        assert!(started.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::DisassemblyStarted {
+                target_item_id: event_item,
+                ..
+            } if event_item == target_item_id
+        )));
+        let active = world.actor_snapshot(actor_id).expect("actor exists");
+        assert!(
+            active
+                .inventory
+                .iter()
+                .all(|item| item.id != target_item_id)
+        );
+        assert_eq!(active.wielded, None);
+        let reserved = active
+            .disassembly_activity
+            .as_ref()
+            .expect("activity is canonical")
+            .reserved_component_items
+            .clone();
+        assert_eq!(reserved.len(), 2);
+
+        let mut restored = WorldState::from_snapshot(&world.snapshot())
+            .expect("active disassembly should restore");
+        let interrupted = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: attacker_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Attack { target: actor_id },
+            }])
+            .expect("damage should interrupt disassembly");
+        restored
+            .advance_tick(vec![ClientCommand {
+                actor_id: attacker_id,
+                sequence: CommandSequence(1),
+                client_tick: restored.tick(),
+                kind: CommandKind::Attack { target: actor_id },
+            }])
+            .expect("restored damage should interrupt identically");
+        assert!(interrupted.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::DisassemblyInterrupted {
+                reason: DisassemblyInterruptionReason::Damage,
+                ..
+            }
+        )));
+        assert_eq!(
+            world.canonical_hash().expect("original hash"),
+            restored.canonical_hash().expect("restored hash")
+        );
+
+        let mut canceled = restored.clone();
+        canceled
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(start_sequence + 1),
+                client_tick: canceled.tick(),
+                kind: CommandKind::CancelDisassembly,
+            }])
+            .expect("interrupted disassembly should cancel");
+        let canceled_actor = canceled.actor_snapshot(actor_id).expect("actor exists");
+        assert!(canceled_actor.disassembly_activity.is_none());
+        assert_eq!(canceled_actor.wielded, Some(target_item_id));
+        assert!(
+            canceled_actor
+                .inventory
+                .iter()
+                .any(|item| item.id == target_item_id)
+        );
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(start_sequence + 1),
+                client_tick: world.tick(),
+                kind: CommandKind::ResumeDisassembly,
+            }])
+            .expect("disassembly should resume");
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("disassembly should complete");
+        assert!(completed.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::DisassemblyCompleted {
+                target_item_id: event_item,
+                recovered_items,
+                destroyed_components,
+                ..
+            } if *event_item == target_item_id
+                && recovered_items == &reserved
+                && destroyed_components.is_empty()
+        )));
+        assert!(completed.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::RecipeLearned { recipe_id, .. }
+                if recipe_id == &recipe.recipe_id
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert!(actor.disassembly_activity.is_none());
+        assert_eq!(actor.learned_recipes, vec![recipe.recipe_id]);
+        assert_eq!(actor.skills[0].last_practiced, world.tick());
+        assert!(actor_knows_recipe(
+            world.actors.get(&actor_id).expect("actor exists"),
+            &learned_craft,
+        ));
+        assert!(actor.inventory.iter().all(|item| item.id != target_item_id));
+        for item_id in reserved {
+            let ground = world
+                .ground_item_snapshot(item_id)
+                .expect("recovered component should be on the ground");
+            assert_eq!(ground.position, actor.position);
+            assert_eq!(ground.item.type_id, "test_component");
+        }
+    }
+
+    #[test]
+    fn voluntary_sleep_blocks_actions_and_wake_is_immediate() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .sleepiness = SLEEPINESS_TIRED;
+        let sleep = world
+            .advance_tick(vec![
+                ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(1),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Sleep,
+                },
+                ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(2),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Move {
+                        dx: 1,
+                        dy: 0,
+                        dz: 0,
+                    },
+                },
+            ])
+            .expect("sleep should execute");
+        assert!(sleep.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorFellAsleep {
+                actor_id: event_actor,
+                reason: SleepReason::Voluntary,
+            } if event_actor == actor_id
+        )));
+        assert!(sleep.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                actor_id: event_actor,
+                sequence: CommandSequence(2),
+                reason: CommandRejection::ActorSleeping,
+            } if event_actor == actor_id
+        )));
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor exists")
+                .sleeping
+        );
+
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("sleeping command should be rejected");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                actor_id: event_actor,
+                reason: CommandRejection::ActorSleeping,
+                ..
+            } if event_actor == actor_id
+        )));
+
+        let wake = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Wake,
+            }])
+            .expect("wake should execute without accrued action points");
+        assert!(wake.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorWokeUp {
+                actor_id: event_actor,
+                reason: WakeReason::Voluntary,
+            } if event_actor == actor_id
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert!(!actor.sleeping);
+        assert_eq!(actor.sleep_intervals, 0);
+    }
+
+    #[test]
+    fn disconnected_sleep_recovers_and_slows_food_and_water_needs() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        let actor = world.actors.get_mut(&actor_id).expect("actor exists");
+        actor.connected = false;
+        actor.sleepiness = SLEEPINESS_DEAD_TIRED;
+        actor.sleeping = true;
+        let outcome = advance_to_next_needs_tick(&mut world);
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert!(!actor.connected);
+        assert!(actor.sleeping);
+        assert!(actor.sleepiness < SLEEPINESS_DEAD_TIRED);
+        assert_eq!(actor.sleep_intervals, 1);
+        assert_eq!(actor.stored_kcal, DEFAULT_STORED_KCAL - 3);
+        assert_eq!(actor.thirst, 0);
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorNeedsUpdated {
+                actor_id: event_actor,
+                sleeping: true,
+                ..
+            } if event_actor == actor_id
+        )));
+        let restored = WorldState::from_snapshot(&world.snapshot()).expect("sleep should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+    }
+
+    #[test]
+    fn exhaustion_forces_sleep_and_rest_wakes_at_the_pinned_floor() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .sleepiness = SLEEPINESS_MASSIVE - 1;
+        let exhausted = advance_to_next_needs_tick(&mut world);
+        assert!(exhausted.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorFellAsleep {
+                actor_id: event_actor,
+                reason: SleepReason::Exhaustion,
+            } if event_actor == actor_id
+        )));
+        let actor = world.actors.get_mut(&actor_id).expect("actor exists");
+        assert!(actor.sleeping);
+        assert_eq!(actor.sleepiness, SLEEPINESS_MASSIVE - 10);
+        actor.sleepiness = RESTED_WAKE_SLEEPINESS + 1;
+        let rested = advance_to_next_needs_tick(&mut world);
+        assert!(rested.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorWokeUp {
+                actor_id: event_actor,
+                reason: WakeReason::Rested,
+            } if event_actor == actor_id
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert!(!actor.sleeping);
+        assert_eq!(actor.sleepiness, RESTED_WAKE_SLEEPINESS);
+    }
+
+    #[test]
+    fn creature_damage_wakes_a_sleeping_disconnected_actor() {
+        let (mut world, actor_id, other) = world_with_two_actors();
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .connected = false;
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .sleeping = true;
+        world
+            .despawn_actor(other)
+            .expect("other actor should be removed from the test");
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_test"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 20,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits u16"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("creature should spawn");
+        let hit_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                world.tick = SimTick(*tick);
+                world
+                    .sleeping_target_creature_attack_roll(creature_id, actor_id, 0)
+                    .expect("sleeping-target roll should resolve")
+                    .is_some_and(|(spread, _)| spread >= 0)
+            })
+            .expect("deterministic stream should contain a hit");
+        world.tick = SimTick(hit_tick - 1);
+        let outcome = world
+            .advance_tick(Vec::new())
+            .expect("creature attack should advance");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature {
+                source,
+                target,
+                ..
+            } if source == creature_id && target == actor_id
+        )));
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorWokeUp {
+                actor_id: event_actor,
+                reason: WakeReason::Damage,
+            } if event_actor == actor_id
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert!(!actor.connected);
+        assert!(!actor.sleeping);
+        assert_eq!(actor.hp, DEFAULT_ACTOR_HP - 1);
+    }
+
+    #[test]
+    fn classic_zombie_sleeping_hit_and_miss_boundary_is_deterministic() {
+        let (mut miss_world, actor, creature) = world_with_sleeping_actor_and_classic_zombie(true);
+        let miss_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                miss_world.tick = SimTick(*tick);
+                matches!(
+                    miss_world
+                        .sleeping_target_creature_attack_roll(creature, actor, 0)
+                        .expect("sleeping-target roll should resolve"),
+                    Some((spread, false)) if spread < 0
+                )
+            })
+            .expect("deterministic stream should contain a plain miss");
+        miss_world.tick = SimTick(miss_tick - 1);
+        let before = miss_world.clone();
+        let mut replay = before.clone();
+
+        let missed = miss_world
+            .advance_tick(Vec::new())
+            .expect("sleeping-target miss should resolve");
+        assert_eq!(
+            missed,
+            replay
+                .advance_tick(Vec::new())
+                .expect("sleeping-target miss should replay")
+        );
+        assert!(matches!(
+            missed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureMissedActor {
+                    source,
+                    target,
+                    stumbled: false,
+                },
+                ..
+            }] if *source == creature && *target == actor
+        ));
+        let missed_actor = miss_world
+            .actor_snapshot(actor)
+            .expect("actor should remain");
+        assert_eq!(missed_actor.hp, DEFAULT_ACTOR_HP);
+        assert!(missed_actor.sleeping, "a miss must not wake its target");
+        let missed_creature = miss_world
+            .creature_snapshot(creature)
+            .expect("creature should remain");
+        assert_eq!(missed_creature.action_points, 0);
+        assert_eq!(missed_creature.downed_until_tick, None);
+
+        let mut awake_fallback = before;
+        let awake_actor = awake_fallback.actors.get_mut(&actor).expect("actor exists");
+        awake_actor.sleeping = false;
+        awake_actor.connected = true;
+        let awake = awake_fallback
+            .advance_tick(Vec::new())
+            .expect("awake fallback should resolve");
+        assert!(awake.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature {
+                source,
+                target,
+                amount: 2..=6,
+                ..
+            } if source == creature && target == actor
+        )));
+        assert!(
+            !awake
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CreatureMissedActor { .. }))
+        );
+
+        let (mut hit_world, hit_actor, hit_creature) =
+            world_with_sleeping_actor_and_classic_zombie(true);
+        let hit_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                hit_world.tick = SimTick(*tick);
+                hit_world
+                    .sleeping_target_creature_attack_roll(hit_creature, hit_actor, 0)
+                    .expect("sleeping-target roll should resolve")
+                    .is_some_and(|(spread, _)| spread >= 0)
+            })
+            .expect("deterministic stream should contain a hit");
+        hit_world.tick = SimTick(hit_tick - 1);
+        let hit = hit_world
+            .advance_tick(Vec::new())
+            .expect("sleeping-target hit should resolve");
+        assert!(hit.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature {
+                source,
+                target,
+                amount: 2..=6,
+                ..
+            } if source == hit_creature && target == hit_actor
+        )));
+        assert!(
+            !hit_world
+                .actor_snapshot(hit_actor)
+                .expect("hit actor should remain")
+                .sleeping
+        );
+    }
+
+    #[test]
+    fn every_ordinary_monster_type_uses_melee_skill_against_sleeping_zero_dodge() {
+        let (mut world, actor, creature) = world_with_sleeping_actor_and_classic_zombie(false);
+        let monster = world.creatures.get_mut(&creature).expect("creature exists");
+        monster.type_id = String::from("mon_other_test");
+        monster.melee_skill = 0;
+        let transition_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                world.tick = SimTick(*tick);
+                world
+                    .creatures
+                    .get_mut(&creature)
+                    .expect("creature exists")
+                    .melee_skill = 0;
+                let low = world
+                    .sleeping_target_creature_attack_roll(creature, actor, 0)
+                    .expect("low-skill roll should resolve")
+                    .expect("ordinary sleeping-target attack is admitted")
+                    .0;
+                world
+                    .creatures
+                    .get_mut(&creature)
+                    .expect("creature exists")
+                    .melee_skill = 8;
+                let high = world
+                    .sleeping_target_creature_attack_roll(creature, actor, 0)
+                    .expect("high-skill roll should resolve")
+                    .expect("ordinary sleeping-target attack is admitted")
+                    .0;
+                low < 0 && high >= 0
+            })
+            .expect("deterministic stream should cross the skill boundary");
+        world.tick = SimTick(transition_tick - 1);
+        world
+            .creatures
+            .get_mut(&creature)
+            .expect("creature exists")
+            .melee_skill = 0;
+        let mut high_skill = world.clone();
+        high_skill
+            .creatures
+            .get_mut(&creature)
+            .expect("creature exists")
+            .melee_skill = 8;
+        let mut no_melee_dice = world.clone();
+        no_melee_dice
+            .creatures
+            .get_mut(&creature)
+            .expect("creature exists")
+            .melee_dice = 0;
+        assert_eq!(
+            no_melee_dice
+                .sleeping_target_creature_attack_roll(creature, actor, 0)
+                .expect("zero-dice boundary should resolve"),
+            None,
+            "upstream returns before miss handling when melee_dice is zero"
+        );
+
+        let missed = world
+            .advance_tick(Vec::new())
+            .expect("low-skill attack should resolve");
+        assert!(matches!(
+            missed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureMissedActor {
+                    source,
+                    target,
+                    stumbled: false,
+                },
+                ..
+            }] if *source == creature && *target == actor
+        ));
+        assert!(
+            world
+                .actor_snapshot(actor)
+                .expect("missed actor should remain")
+                .sleeping
+        );
+
+        let hit = high_skill
+            .advance_tick(Vec::new())
+            .expect("high-skill attack should resolve");
+        assert!(hit.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature {
+                source,
+                target,
+                amount: 2..=6,
+                ..
+            } if source == creature && target == actor
+        )));
+        assert!(
+            !high_skill
+                .actor_snapshot(actor)
+                .expect("hit actor should remain")
+                .sleeping
+        );
+
+        let no_attack = no_melee_dice
+            .advance_tick(Vec::new())
+            .expect("zero-dice attack should resolve");
+        assert!(no_attack.events.is_empty());
+        let untouched = no_melee_dice
+            .actor_snapshot(actor)
+            .expect("actor should remain");
+        assert_eq!(untouched.hp, DEFAULT_ACTOR_HP);
+        assert!(untouched.sleeping);
+    }
+
+    #[test]
+    fn clumsy_classic_zombie_miss_falls_for_exactly_two_seconds() {
+        let (mut world, actor, creature) = world_with_sleeping_actor_and_classic_zombie(true);
+        let stumble_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                world.tick = SimTick(*tick);
+                matches!(
+                    world
+                        .sleeping_target_creature_attack_roll(creature, actor, 0)
+                        .expect("sleeping-target roll should resolve"),
+                    Some((spread, true)) if spread < 0
+                )
+            })
+            .expect("deterministic stream should contain a clumsy miss");
+        world.tick = SimTick(stumble_tick - 1);
+        let mut replay = world.clone();
+        let before_hash = world.canonical_hash().expect("world should hash");
+        replay
+            .creatures
+            .get_mut(&creature)
+            .expect("creature exists")
+            .clumsy_attacks = false;
+        assert_ne!(
+            before_hash,
+            replay.canonical_hash().expect("changed world should hash"),
+            "clumsy attack capability must participate in CanonicalStateV51"
+        );
+        replay = world.clone();
+
+        let missed = world
+            .advance_tick(Vec::new())
+            .expect("clumsy miss should resolve");
+        assert_eq!(
+            missed,
+            replay
+                .advance_tick(Vec::new())
+                .expect("clumsy miss should replay")
+        );
+        assert!(matches!(
+            missed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureMissedActor {
+                    source,
+                    target,
+                    stumbled: true,
+                },
+                ..
+            }] if *source == creature && *target == actor
+        ));
+        assert!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .sleeping
+        );
+        let until = SimTick(
+            missed
+                .tick
+                .0
+                .checked_add(2 * SimTick::HZ)
+                .expect("down duration should fit"),
+        );
+        assert_eq!(
+            world
+                .creature_snapshot(creature)
+                .expect("creature should remain")
+                .downed_until_tick,
+            Some(until)
+        );
+        assert_eq!(
+            WorldState::from_snapshot(&world.snapshot())
+                .expect("clumsy downing should restore")
+                .snapshot(),
+            world.snapshot()
+        );
+
+        world
+            .creatures
+            .get_mut(&creature)
+            .expect("creature exists")
+            .speed = 1;
+        while world.tick().0 + 1 < until.0 {
+            world
+                .advance_tick(Vec::new())
+                .expect("down duration should advance");
+            assert_eq!(
+                world
+                    .creature_snapshot(creature)
+                    .expect("creature should remain")
+                    .downed_until_tick,
+                Some(until)
+            );
+        }
+        world
+            .advance_tick(Vec::new())
+            .expect("down effect should expire");
+        let recovered = world
+            .creature_snapshot(creature)
+            .expect("creature should remain");
+        assert_eq!(recovered.downed_until_tick, None);
+        assert_eq!(recovered.action_points, 1);
+    }
+
+    #[test]
+    fn creature_vision_obeys_pinned_day_night_range_and_opaque_terrain() {
+        let mut world = WorldState::new(52, [52; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let coord = ChunkCoord { x: 0, y: 0, z: 0 };
+        world.insert_chunk(Chunk::floor(coord));
+        let actor_position = WorldPosition { x: 1, y: 1, z: 0 };
+        world
+            .spawn_actor(actor_position, true)
+            .expect("actor should spawn");
+        let creature_position = WorldPosition { x: 6, y: 1, z: 0 };
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: creature_position,
+                hp: 80,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 40,
+                vision_night: 3,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("zombie should spawn");
+
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ);
+        assert_eq!(
+            NaturalLightSnapshot::at_tick(world.tick).phase,
+            SkyPhase::Night
+        );
+        assert!(
+            !world
+                .creature_can_see_position(creature_id, actor_position, &[])
+                .expect("night perception should evaluate")
+        );
+        assert!(
+            world
+                .creature_can_see_position(
+                    creature_id,
+                    actor_position,
+                    &[ActiveLightSource {
+                        position: actor_position,
+                        sight_radius: TERRAIN_MEMORY_RADIUS_TILES,
+                        external_detail_radius: Some(TERRAIN_MEMORY_RADIUS_TILES),
+                    }],
+                )
+                .expect("an illuminated target should use maximum type vision")
+        );
+        world
+            .advance_tick(Vec::new())
+            .expect("unseen actor should not fail a turn");
+        assert_eq!(
+            world
+                .creature_snapshot(creature_id)
+                .expect("creature remains")
+                .position,
+            creature_position
+        );
+
+        world.tick = SimTick(0);
+        assert_eq!(
+            NaturalLightSnapshot::at_tick(world.tick).phase,
+            SkyPhase::Day
+        );
+        let wall = TerrainTileSnapshot {
+            terrain_id: String::from("t_wall"),
+            move_cost: 0,
+            transparent: false,
+            flat: false,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("chunk exists")
+            .set_terrain(LocalTileCoord { x: 3, y: 1 }, wall)
+            .expect("wall should install");
+        assert!(
+            !world
+                .creature_can_see_position(creature_id, actor_position, &[])
+                .expect("opaque perception should evaluate")
+        );
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("chunk exists")
+            .set_terrain(LocalTileCoord { x: 3, y: 1 }, test_terrain("t_floor"))
+            .expect("floor should restore transparency");
+        assert!(
+            world
+                .creature_can_see_position(creature_id, actor_position, &[])
+                .expect("day perception should evaluate")
+        );
+        let moved = world
+            .advance_tick(Vec::new())
+            .expect("visible actor should permit pursuit");
+        assert!(moved.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CreatureMoved {
+                creature_id: event_creature,
+                from,
+                to,
+            } if event_creature == creature_id
+                && from == creature_position
+                && to == (WorldPosition { x: 5, y: 1, z: 0 })
+        )));
+    }
+
+    #[test]
+    fn creature_movement_cost_creates_persistent_signed_debt() {
+        let mut world = WorldState::new(53, [53; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let coord = ChunkCoord { x: 0, y: 0, z: 0 };
+        let mut chunk = Chunk::floor(coord);
+        chunk
+            .set_furniture(
+                LocalTileCoord { x: 3, y: 1 },
+                Some(FurnitureTileSnapshot {
+                    furniture_id: String::from("f_bed"),
+                    move_cost_mod: 3,
+                    transparent: true,
+                    blocks_door: false,
+                    comfort: 5,
+                    floor_bedding_warmth: 1_000,
+                }),
+            )
+            .expect("bed should install");
+        world.insert_chunk(chunk);
+        world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: WorldPosition { x: 4, y: 1, z: 0 },
+                hp: 80,
+                speed: 100,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 40,
+                vision_night: 3,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("zombie should spawn");
+
+        for _ in 0..19 {
+            world
+                .advance_tick(Vec::new())
+                .expect("readiness should accrue");
+        }
+        assert_eq!(
+            world
+                .creature_snapshot(creature_id)
+                .expect("creature remains")
+                .position,
+            WorldPosition { x: 4, y: 1, z: 0 }
+        );
+        world
+            .advance_tick(Vec::new())
+            .expect("ready creature should enter the bed tile");
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature remains");
+        assert_eq!(creature.position, WorldPosition { x: 3, y: 1, z: 0 });
+        assert_eq!(
+            creature.action_points, -1_500,
+            "floor-to-bed costs 3,500 action points after 2,000 readiness"
+        );
+
+        let restored = WorldState::from_snapshot(&world.snapshot())
+            .expect("negative creature movement debt should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+
+        for _ in 0..34 {
+            world
+                .advance_tick(Vec::new())
+                .expect("movement debt should recover deterministically");
+        }
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature remains");
+        assert_eq!(creature.position, WorldPosition { x: 3, y: 1, z: 0 });
+        assert_eq!(creature.action_points, 1_900);
+        world
+            .advance_tick(Vec::new())
+            .expect("creature should move on the exact readiness boundary");
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature remains");
+        assert_eq!(creature.position, WorldPosition { x: 2, y: 1, z: 0 });
+        assert_eq!(creature.action_points, -1_500);
+    }
+
+    #[test]
+    fn creature_diagonal_pursuit_uses_pinned_euclidean_stagger_cost() {
+        let far_target = WorldPosition {
+            x: i32::MAX,
+            y: i32::MAX - 2,
+            z: 0,
+        };
+        assert_eq!(
+            euclidean_progress_q30(
+                WorldPosition { x: 0, y: 0, z: 0 },
+                far_target,
+                WorldPosition { x: 1, y: -1, z: 0 },
+            )
+            .expect("extreme progress should remain bounded"),
+            Some(1),
+            "an exactly positive sub-Q30 candidate must remain selectable"
+        );
+        assert_eq!(
+            scaled_creature_movement_action_cost(175, 1).expect("minimum stagger cost should fit"),
+            40,
+            "upstream clamps stagger adjustment to 0.01 before ceiling"
+        );
+        let mut world = WorldState::new(54, [54; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_direct_test"),
+                position: WorldPosition { x: 3, y: 3, z: 0 },
+                hp: 20,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("creature should spawn");
+
+        world
+            .advance_tick(Vec::new())
+            .expect("diagonal pursuit should advance");
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature should remain");
+        assert_eq!(creature.position, WorldPosition { x: 2, y: 2, z: 0 });
+        assert_eq!(
+            creature.action_points, -840,
+            "ceil(100 * sqrt(2)) upstream moves scale to 2,840 action points"
+        );
+    }
+
+    #[test]
+    fn creature_pursues_persisted_last_seen_goal_and_clears_it_on_arrival() {
+        let mut world = WorldState::new(55, [55; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let coord = ChunkCoord { x: 0, y: 0, z: 0 };
+        world.insert_chunk(Chunk::floor(coord));
+        let actor_position = WorldPosition { x: 1, y: 1, z: 0 };
+        let actor_id = world
+            .spawn_actor(actor_position, true)
+            .expect("actor should spawn");
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_memory_test"),
+                position: WorldPosition { x: 5, y: 1, z: 0 },
+                hp: 20,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("creature should spawn");
+
+        world
+            .advance_tick(Vec::new())
+            .expect("visible target should establish a goal");
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature should remain");
+        assert_eq!(creature.position, WorldPosition { x: 4, y: 1, z: 0 });
+        assert_eq!(creature.goal, Some(actor_position));
+        let goal_hash = world.canonical_hash().expect("goal state should hash");
+        let mut no_goal_snapshot = world.snapshot();
+        no_goal_snapshot
+            .creatures
+            .iter_mut()
+            .find(|creature| creature.id == creature_id)
+            .expect("creature should be canonical")
+            .goal = None;
+        let no_goal = WorldState::from_snapshot(&no_goal_snapshot)
+            .expect("the same creature without remembered intent is valid");
+        assert_ne!(
+            goal_hash,
+            no_goal.canonical_hash().expect("no-goal state should hash"),
+            "last-seen intent must participate in CanonicalStateV51"
+        );
+        let mut wrong_z_snapshot = world.snapshot();
+        wrong_z_snapshot
+            .creatures
+            .iter_mut()
+            .find(|creature| creature.id == creature_id)
+            .expect("creature should be canonical")
+            .goal = Some(WorldPosition { x: 1, y: 1, z: 1 });
+        assert!(matches!(
+            WorldState::from_snapshot(&wrong_z_snapshot),
+            Err(SimError::InvalidCreature)
+        ));
+
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("chunk exists")
+            .set_terrain(
+                LocalTileCoord { x: 3, y: 1 },
+                TerrainTileSnapshot {
+                    terrain_id: String::from("t_wall"),
+                    move_cost: 0,
+                    transparent: false,
+                    flat: false,
+                    open: String::new(),
+                    open_move_cost: None,
+                    open_transparent: None,
+                    open_flat: None,
+                    close: String::new(),
+                    close_move_cost: None,
+                    close_transparent: None,
+                    close_flat: None,
+                },
+            )
+            .expect("wall should install");
+        world
+            .refresh_terrain_memory(&[])
+            .expect("terrain revision should enter canonical actor memory");
+        assert!(
+            !world
+                .creature_can_see_position(creature_id, actor_position, &[])
+                .expect("occluded perception should evaluate")
+        );
+
+        let mut restored =
+            WorldState::from_snapshot(&world.snapshot()).expect("last-seen goal should restore");
+        let live = world
+            .advance_tick(Vec::new())
+            .expect("hidden goal pursuit should advance");
+        let replayed = restored
+            .advance_tick(Vec::new())
+            .expect("restored hidden goal pursuit should advance");
+        assert_eq!(live, replayed);
+        assert_eq!(
+            world.canonical_hash().expect("live world should hash"),
+            restored
+                .canonical_hash()
+                .expect("restored world should hash")
+        );
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature should remain");
+        assert_eq!(creature.position, WorldPosition { x: 3, y: 2, z: 0 });
+        assert_eq!(creature.goal, Some(actor_position));
+
+        world
+            .despawn_actor(actor_id)
+            .expect("target should despawn without erasing remembered intent");
+        for _ in 0..10 {
+            world
+                .advance_tick(Vec::new())
+                .expect("remembered pursuit should keep advancing");
+            if world
+                .creature_snapshot(creature_id)
+                .expect("creature should remain")
+                .goal
+                .is_none()
+            {
+                break;
+            }
+        }
+        let creature = world
+            .creature_snapshot(creature_id)
+            .expect("creature should remain");
+        assert_eq!(creature.position, actor_position);
+        assert_eq!(creature.goal, None);
+    }
+
+    #[test]
+    fn stumbling_selection_is_seeded_weighted_and_replay_stable() {
+        let run = |namespace: u64, seed: [u8; 32]| {
+            let mut world = WorldState::new(namespace, seed);
+            world
+                .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+                .expect("block should install");
+            world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+            world
+                .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+                .expect("actor should spawn");
+            let creature_id = world
+                .spawn_creature(CreatureSpawn {
+                    type_id: String::from("mon_stumbling_test"),
+                    position: WorldPosition { x: 6, y: 1, z: 0 },
+                    hp: 20,
+                    speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                    attack_cost_moves: 100,
+                    aggression: 100,
+                    melee_skill: 0,
+                    dodge: 0,
+                    size: Default::default(),
+                    melee_dice: 1,
+                    melee_dice_sides: 1,
+                    can_see: true,
+                    vision_day: 60,
+                    vision_night: 60,
+                    stumbles: true,
+                    bashes: false,
+                    group_bash: false,
+                    hears: false,
+                    good_hearing: false,
+                    clumsy_attacks: false,
+                    immobile: false,
+                    pacifist: false,
+                    can_open_doors: false,
+                    path_settings: Default::default(),
+                    blood_field_type_id: String::new(),
+                    corpse: None,
+                })
+                .expect("creature should spawn");
+            world
+                .advance_tick(Vec::new())
+                .expect("stumbling pursuit should advance");
+            let creature = world
+                .creature_snapshot(creature_id)
+                .expect("creature should remain");
+            (
+                creature.position,
+                creature.action_points,
+                world.canonical_hash().expect("world should hash"),
+            )
+        };
+
+        let mut flanking_case = None;
+        for seed_byte in 0_u8..=u8::MAX {
+            let seed = [seed_byte; 32];
+            let namespace = 1_000 + u64::from(seed_byte);
+            let first = run(namespace, seed);
+            let second = run(namespace, seed);
+            assert_eq!(first, second, "named stumble RNG must reproduce exactly");
+            if first.0.y != 1 {
+                flanking_case = Some(first);
+                break;
+            }
+        }
+        let (position, action_points, _hash) =
+            flanking_case.expect("the pinned weighted fan should permit a flanking stumble");
+        assert!(matches!(
+            position,
+            WorldPosition { x: 5, y: 0, z: 0 } | WorldPosition { x: 5, y: 2, z: 0 }
+        ));
+        assert_eq!(
+            action_points, 240,
+            "the flanking step makes 0.876... tiles of progress and costs 88 moves"
+        );
+    }
+
+    #[test]
+    fn sleeping_actor_does_not_perceive_terrain_changes_until_waking() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        let coord = ChunkCoord { x: 0, y: 0, z: 0 };
+        let changed = TerrainTileSnapshot {
+            terrain_id: String::from("t_changed_floor"),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .sleeping = true;
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("chunk exists")
+            .set_terrain(LocalTileCoord { x: 2, y: 1 }, changed)
+            .expect("terrain should change");
+        world
+            .advance_tick(Vec::new())
+            .expect("sleeping tick should advance");
+        let remembered_id = |world: &WorldState| {
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor exists")
+                .map_memory
+                .into_iter()
+                .find(|memory| memory.coord == coord)
+                .expect("memory exists")
+                .tiles[usize::from(1_u8) * SUBMAP_SIZE as usize + usize::from(2_u8)]
+            .as_ref()
+            .expect("tile was remembered before sleep")
+            .terrain
+            .terrain_id
+            .clone()
+        };
+        assert_eq!(remembered_id(&world), "t_floor");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Wake,
+            }])
+            .expect("wake should advance");
+        assert_eq!(remembered_id(&world), "t_changed_floor");
+    }
+
+    #[test]
+    fn lower_stable_id_wins_same_tile_movement_conflict() {
+        let (mut world, first, second) = world_with_two_actors();
+        let commands = vec![
+            ClientCommand {
+                actor_id: second,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::Move {
+                    dx: -1,
+                    dy: 0,
+                    dz: 0,
+                },
+            },
+            ClientCommand {
+                actor_id: first,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            },
+        ];
+        let outcome = world.advance_tick(commands).expect("tick should succeed");
+        assert!(
+            matches!(outcome.events[0].kind, WorldEventKind::ActorMoved { actor_id, .. } if actor_id == first)
+        );
+        assert!(
+            matches!(outcome.events[1].kind, WorldEventKind::CommandRejected { actor_id, reason: CommandRejection::Blocked, .. } if actor_id == second)
+        );
+    }
+
+    #[test]
+    fn actor_speed_banks_readiness_and_bounds_the_semantic_queue() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 0,
+                    dy: 1,
+                    dz: 0,
+                },
+            }])
+            .expect("initial banked action should execute");
+        let queued = world
+            .advance_tick(
+                (2..=4)
+                    .map(|sequence| ClientCommand {
+                        actor_id: actor,
+                        sequence: CommandSequence(sequence),
+                        client_tick: world.tick(),
+                        kind: CommandKind::Move {
+                            dx: 0,
+                            dy: 1,
+                            dz: 0,
+                        },
+                    })
+                    .collect(),
+            )
+            .expect("queue admission should be deterministic");
+        assert!(matches!(
+            queued.events[0].kind,
+            WorldEventKind::CommandRejected {
+                actor_id,
+                sequence: CommandSequence(4),
+                reason: CommandRejection::ActionQueueFull,
+            } if actor_id == actor
+        ));
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .queued_actions
+                .len(),
+            2
+        );
+        for _ in 0..19 {
+            world
+                .advance_tick(Vec::new())
+                .expect("readiness should accrue");
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .position
+                .y,
+            3
+        );
+        for _ in 0..20 {
+            world
+                .advance_tick(Vec::new())
+                .expect("readiness should accrue");
+        }
+        let actor = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(actor.position.y, 4);
+        assert!(actor.queued_actions.is_empty());
+        assert_eq!(actor.last_command_sequence, CommandSequence(4));
+    }
+
+    #[test]
+    fn held_movement_is_stateful_replayable_and_lease_bounded() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        let held = HeldMovementUpdateV1 {
+            actor_id: actor,
+            sequence: HeldInputSequence(1),
+            client_tick: world.tick(),
+            direction: Some(HorizontalDirection { dx: 0, dy: 1 }),
+            source: HeldMovementUpdateSource::Client,
+        };
+        world
+            .advance_tick_with_inputs(Vec::new(), vec![held])
+            .expect("held movement should enter canonical input state");
+        let actor_snapshot = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(actor_snapshot.position.y, 2);
+        assert_eq!(
+            actor_snapshot.last_held_input_sequence,
+            HeldInputSequence(1)
+        );
+        assert_eq!(actor_snapshot.held_movement, held.direction);
+
+        for _ in 0..19 {
+            world
+                .advance_tick(Vec::new())
+                .expect("held movement should wait for readiness");
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .position
+                .y,
+            2
+        );
+        world
+            .advance_tick(Vec::new())
+            .expect("held movement should repeat when ready");
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .position
+                .y,
+            3
+        );
+
+        let lease_expired = HeldMovementUpdateV1 {
+            direction: None,
+            source: HeldMovementUpdateSource::LeaseExpired,
+            client_tick: world.tick(),
+            ..held
+        };
+        world
+            .advance_tick_with_inputs(Vec::new(), vec![lease_expired])
+            .expect("matching lease expiry should clear movement");
+        let stopped = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(stopped.last_held_input_sequence, HeldInputSequence(1));
+        assert_eq!(stopped.held_movement, None);
+
+        let restored = WorldState::from_snapshot(&world.snapshot())
+            .expect("held input state should restore from a canonical snapshot");
+        assert_eq!(
+            restored
+                .canonical_hash()
+                .expect("restored state should hash"),
+            world.canonical_hash().expect("source state should hash")
+        );
+    }
+
+    #[test]
+    fn semantic_commands_take_priority_over_held_movement() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        let start = world.actor_snapshot(actor).expect("actor remains").position;
+        world
+            .advance_tick_with_inputs(
+                vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence(1),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Wait,
+                }],
+                vec![HeldMovementUpdateV1 {
+                    actor_id: actor,
+                    sequence: HeldInputSequence(1),
+                    client_tick: world.tick(),
+                    direction: Some(HorizontalDirection { dx: 0, dy: 1 }),
+                    source: HeldMovementUpdateSource::Client,
+                }],
+            )
+            .expect("semantic command and held state should coexist");
+        assert_eq!(
+            world.actor_snapshot(actor).expect("actor remains").position,
+            start,
+            "the queued semantic action consumes the ready action slot first"
+        );
+        for _ in 0..20 {
+            world
+                .advance_tick(Vec::new())
+                .expect("held input should remain active after the semantic action");
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .position
+                .y,
+            start.y + 1
+        );
+    }
+
+    #[test]
+    fn disconnected_actor_remains_present_and_vulnerable() {
+        let (mut world, attacker, target) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, attacker);
+        world
+            .set_connected(target, false)
+            .expect("disconnect should succeed");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: attacker,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("movement should succeed");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: attacker,
+                sequence: CommandSequence(2),
+                client_tick: SimTick(1),
+                kind: CommandKind::Attack { target },
+            }])
+            .expect("attack should succeed");
+        let target = world
+            .actor_snapshot(target)
+            .expect("target remains present");
+        assert!(!target.connected);
+        assert_eq!(target.hp, DEFAULT_ACTOR_HP - i32::from(UNARMED_DAMAGE));
+    }
+
+    #[test]
+    fn craft_reserves_components_and_completes_offline_at_the_exact_duration() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let rock = spawn_and_pick_up(&mut world, actor_id, 1, "rock", 1);
+        let socks = spawn_and_pick_up(&mut world, actor_id, 2, "socks", 1);
+        let recipe = test_craft_recipe(
+            500,
+            1,
+            vec![vec![("rock", 1, false)], vec![("socks", 1, false)]],
+        );
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("craft should start");
+        assert!(matches!(
+            started.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CraftStarted {
+                    actor_id: event_actor,
+                    total_action_points: 10_000,
+                    ..
+                },
+                ..
+            }] if *event_actor == actor_id
+        ));
+        let actor = world.actor_snapshot(actor_id).expect("actor should remain");
+        assert!(actor.inventory.is_empty());
+        assert_eq!(
+            actor
+                .craft_activity
+                .as_ref()
+                .expect("craft is active")
+                .consumed_items
+                .iter()
+                .map(|consumed| consumed.item.id)
+                .collect::<Vec<_>>(),
+            vec![rock, socks]
+        );
+
+        world
+            .set_connected(actor_id, false)
+            .expect("actor should disconnect");
+        world.actors.get_mut(&actor_id).expect("actor exists").speed = 100;
+        for _ in 0..99 {
+            let outcome = world
+                .advance_tick(Vec::new())
+                .expect("offline craft should progress");
+            assert!(
+                !outcome
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.kind, WorldEventKind::CraftCompleted { .. }))
+            );
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .craft_activity
+                .expect("one interval remains")
+                .remaining_action_points,
+            100
+        );
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("the final interval should complete");
+        let output_id = ItemId::new(world.world_namespace, 5);
+        assert!(completed.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::CraftCompleted {
+                actor_id: event_actor,
+                recipe_id,
+                output_items,
+            } if *event_actor == actor_id
+                && recipe_id == "test_recipe"
+                && output_items == &vec![output_id]
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(!actor.connected);
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(actor.inventory.len(), 1);
+        assert_eq!(actor.inventory[0].id, output_id);
+        assert_eq!(actor.inventory[0].type_id, "test_output");
+        assert!(!world.item_id_exists(rock));
+        assert!(!world.item_id_exists(socks));
+    }
+
+    #[test]
+    fn craft_preallocates_persists_and_materializes_byproducts_in_stable_order() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let log = spawn_and_pick_up(&mut world, actor_id, 1, "log", 1);
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("log", 1, false)]]);
+        recipe.byproducts = vec![cdda_protocol::CraftByproductV1 {
+            output_instances: 2,
+            output: CraftItemPrototypeV1 {
+                type_id: String::from("splinter"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                magazine_well: None,
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            },
+        }];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("byproduct craft should start");
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert_eq!(
+            actor
+                .craft_activity
+                .as_ref()
+                .expect("craft remains active")
+                .reserved_output_items,
+            vec![
+                ItemId::new(world.world_namespace, 4),
+                ItemId::new(world.world_namespace, 5),
+                ItemId::new(world.world_namespace, 6),
+            ]
+        );
+        let snapshot = world.snapshot();
+        let mut restored = WorldState::from_snapshot(&snapshot).expect("byproduct craft restores");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("source hash")
+        );
+        let completed = restored
+            .advance_tick(Vec::new())
+            .expect("restored byproduct craft should complete");
+        assert!(completed.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::CraftCompleted { output_items, .. }
+                if output_items == &vec![
+                    ItemId::new(restored.world_namespace, 4),
+                    ItemId::new(restored.world_namespace, 5),
+                    ItemId::new(restored.world_namespace, 6),
+                ]
+        )));
+        let actor = restored.actor_snapshot(actor_id).expect("actor remains");
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .map(|item| item.type_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test_output", "splinter", "splinter"]
+        );
+        assert!(!restored.item_id_exists(log));
+    }
+
+    #[test]
+    fn carried_book_authorizes_recipe_at_start_without_being_consumed() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "scrap", 1);
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("scrap", 1, false)]]);
+        recipe.autolearn = false;
+        recipe.primary_skill = Some(CraftSkillRequirementV1 {
+            skill_id: String::from("fabrication"),
+            level: 0,
+        });
+        recipe.book_requirements = vec![cdda_protocol::CraftBookRequirementV1 {
+            book_type_id: String::from("manual_fabrication"),
+            required_skill_level: 1,
+        }];
+
+        let without_book = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("missing book should reject cleanly");
+        assert!(without_book.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::RecipeNotKnown,
+                ..
+            }
+        )));
+
+        let book = spawn_and_pick_up(&mut world, actor_id, 3, "manual_fabrication", 1);
+        let insufficient_theory = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("book threshold should reject cleanly");
+        assert!(insufficient_theory.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::RecipeNotKnown,
+                ..
+            }
+        )));
+
+        let practiced_at = world.tick();
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .skills
+            .insert(
+                String::from("fabrication"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("fabrication"),
+                    practical_level: 0,
+                    practical_experience: 0,
+                    theoretical_level: 1,
+                    theoretical_experience: 0,
+                    last_practiced: practiced_at,
+                },
+            );
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("carried book should authorize craft start");
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_some());
+        assert!(actor.inventory.iter().any(|item| item.id == book));
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == book)
+                .expect("book remains carried")
+                .type_id,
+            "manual_fabrication"
+        );
+    }
+
+    #[test]
+    fn crafting_practice_is_canonical_and_unlocks_higher_autolearn_recipes() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "stick", 1);
+
+        let higher = test_skill_craft_recipe(100, 1, "plank");
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: higher.recipe_id.clone(),
+                    recipe: Some(Box::new(higher.clone())),
+                },
+            }])
+            .expect("unknown recipe should reject cleanly");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::RecipeNotKnown,
+                ..
+            }
+        )));
+
+        let basic = test_skill_craft_recipe(10_000, 0, "stick");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: basic.recipe_id.clone(),
+                    recipe: Some(Box::new(basic)),
+                },
+            }])
+            .expect("basic craft should start");
+        world
+            .set_connected(actor_id, false)
+            .expect("practice should continue while disconnected");
+        world.actors.get_mut(&actor_id).expect("actor exists").speed = 100;
+        for _ in 0..1_980 {
+            world
+                .advance_tick(Vec::new())
+                .expect("practice-bearing craft should progress");
+        }
+        let skill = &world
+            .actor_snapshot(actor_id)
+            .expect("actor remains")
+            .skills[0];
+        assert_eq!(skill.skill_id, "fabrication");
+        assert_eq!(skill.practical_level, 0);
+        assert_eq!(skill.practical_experience, 9_900);
+        assert_eq!(skill.theoretical_experience, 9_900);
+
+        let mut gained = false;
+        for _ in 0..20 {
+            let outcome = world
+                .advance_tick(Vec::new())
+                .expect("final practice second should complete");
+            gained |= outcome.events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    WorldEventKind::SkillLevelGained {
+                        actor_id: event_actor,
+                        skill_id,
+                        practical_level: 1,
+                        theoretical_level: 1,
+                    } if *event_actor == actor_id && skill_id == "fabrication"
+                )
+            });
+        }
+        assert!(gained);
+        let snapshot = world.snapshot();
+        let restored = WorldState::from_snapshot(&snapshot).expect("skill state should restore");
+        let skill = &restored
+            .actor_snapshot(actor_id)
+            .expect("restored actor remains")
+            .skills[0];
+        assert_eq!(skill.practical_level, 1);
+        assert_eq!(skill.practical_experience, 0);
+        assert_eq!(skill.theoretical_level, 1);
+        assert_eq!(skill.theoretical_experience, 0);
+
+        let now_known = restored
+            .actors
+            .get(&actor_id)
+            .is_some_and(|actor| actor_knows_recipe(actor, &higher));
+        assert!(now_known, "level one theory should unlock the recipe");
+    }
+
+    #[test]
+    fn canceling_a_craft_retains_practice_already_earned() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "stick", 1);
+        let recipe = test_skill_craft_recipe(20_000, 0, "stick");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("practice craft should start");
+        for _ in 0..50 {
+            world
+                .advance_tick(Vec::new())
+                .expect("one nominal second should progress per tick");
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .skills[0]
+                .practical_experience,
+            5_000
+        );
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::CancelCraft,
+            }])
+            .expect("cancel should restore the input");
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(actor.skills[0].practical_experience, 5_000);
+        assert_eq!(actor.skills[0].theoretical_experience, 5_000);
+        assert!(actor.inventory.iter().any(|item| item.type_id == "stick"));
+    }
+
+    #[test]
+    fn canceling_craft_restores_exact_inputs_and_burns_reserved_ids() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let water = spawn_and_pick_up(&mut world, actor_id, 1, "water", 5);
+        let rock = spawn_and_pick_up(&mut world, actor_id, 2, "rock", 1);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Wield { item_id: rock },
+            }])
+            .expect("component should be wielded");
+        let mut recipe = test_craft_recipe(
+            500,
+            1,
+            vec![vec![("water", 2, true)], vec![("rock", 1, false)]],
+        );
+        recipe.byproducts = vec![cdda_protocol::CraftByproductV1 {
+            output_instances: 2,
+            output: CraftItemPrototypeV1 {
+                type_id: String::from("splinter"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                magazine_well: None,
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            },
+        }];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("craft should start");
+        let snapshot = world.snapshot();
+        let actor = snapshot.actors.first().expect("actor is snapshotted");
+        let activity = actor.craft_activity.as_ref().expect("craft is snapshotted");
+        assert_eq!(actor.wielded, None);
+        assert_eq!(actor.inventory[0].id, water);
+        assert_eq!(actor.inventory[0].charges, 3);
+        assert_eq!(activity.consumed_items[0].split_from, Some(water));
+        assert_eq!(activity.consumed_items[0].item.charges, 2);
+        assert_eq!(activity.previously_wielded, Some(rock));
+        assert_eq!(
+            activity.reserved_output_items,
+            vec![ItemId::new(7, 6), ItemId::new(7, 7), ItemId::new(7, 8)]
+        );
+
+        let restored = WorldState::from_snapshot(&snapshot).expect("active craft should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored craft hashes"),
+            world.canonical_hash().expect("source craft hashes")
+        );
+        let mut corrupt = snapshot.clone();
+        corrupt.actors[0]
+            .craft_activity
+            .as_mut()
+            .expect("craft exists")
+            .consumed_items[0]
+            .item
+            .type_id = String::from("not_water");
+        assert!(matches!(
+            WorldState::from_snapshot(&corrupt),
+            Err(SimError::InvalidSnapshot)
+        ));
+        let mut overflowing_split = snapshot.clone();
+        overflowing_split.actors[0].inventory[0].charges = i32::MAX;
+        assert!(matches!(
+            WorldState::from_snapshot(&overflowing_split),
+            Err(SimError::InvalidSnapshot)
+        ));
+
+        let canceled = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::CancelCraft,
+            }])
+            .expect("craft should cancel");
+        assert!(canceled.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::CraftCanceled { actor_id: event_actor, recipe_id }
+                if *event_actor == actor_id && recipe_id == "test_recipe"
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(actor.wielded, Some(rock));
+        assert_eq!(actor.inventory.len(), 2);
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == water)
+                .expect("water restored")
+                .charges,
+            5
+        );
+        assert!(actor.inventory.iter().any(|item| item.id == rock));
+        assert!(!world.item_id_exists(ItemId::new(7, 5)));
+        assert!(!world.item_id_exists(ItemId::new(7, 6)));
+        assert!(!world.item_id_exists(ItemId::new(7, 7)));
+        assert!(!world.item_id_exists(ItemId::new(7, 8)));
+        let next = world
+            .spawn_ground_item(ItemSpawn {
+                position: actor.position,
+                type_id: String::from("next_item"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("next stable ID should allocate");
+        assert_eq!(next, ItemId::new(7, 9));
+    }
+
+    #[test]
+    fn craft_byproducts_count_toward_inventory_capacity_before_reserving_ids() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component = spawn_and_pick_up(&mut world, actor_id, 1, "log", 1);
+        for sequence in 2..=255 {
+            spawn_and_pick_up(&mut world, actor_id, sequence, "filler", 1);
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .inventory
+                .len(),
+            MAX_ACTOR_INVENTORY_ITEMS - 1
+        );
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("log", 1, false)]]);
+        recipe.byproducts = vec![cdda_protocol::CraftByproductV1 {
+            output_instances: 2,
+            output: CraftItemPrototypeV1 {
+                type_id: String::from("splinter"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                magazine_well: None,
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            },
+        }];
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(256),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("capacity rejection should be a deterministic outcome");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::InventoryFull,
+                ..
+            }
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert!(actor.inventory.iter().any(|item| item.id == component));
+        let next = world
+            .spawn_ground_item(ItemSpawn {
+                position: actor.position,
+                type_id: String::from("next_item"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("rejected craft must not consume stable IDs");
+        assert_eq!(next, ItemId::new(7, 258));
+    }
+
+    #[test]
+    fn damage_interrupts_offline_craft_until_explicit_resume() {
+        let (mut world, actor_id, attacker) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let rock = spawn_and_pick_up(&mut world, actor_id, 1, "rock", 1);
+        let socks = spawn_and_pick_up(&mut world, actor_id, 2, "socks", 1);
+        let recipe = test_craft_recipe(
+            500,
+            1,
+            vec![vec![("rock", 1, false)], vec![("socks", 1, false)]],
+        );
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("craft should start");
+        world.actors.get_mut(&actor_id).expect("actor exists").speed = 100;
+        world
+            .actors
+            .get_mut(&attacker)
+            .expect("attacker exists")
+            .position = WorldPosition { x: 2, y: 1, z: 0 };
+        make_actor_act_each_tick(&mut world, attacker);
+        world
+            .set_connected(actor_id, false)
+            .expect("crafter should disconnect");
+        let attacked = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: attacker,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Attack { target: actor_id },
+            }])
+            .expect("offline crafter should be attackable");
+        assert!(attacked.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CraftInterrupted { actor_id: event_actor, .. }
+                if event_actor == actor_id
+        )));
+        let interrupted = world
+            .actor_snapshot(actor_id)
+            .expect("crafter remains")
+            .craft_activity
+            .expect("craft remains reserved");
+        assert!(interrupted.interrupted);
+        assert_eq!(interrupted.remaining_action_points, 9_900);
+        assert_eq!(
+            world.actor_snapshot(actor_id).expect("crafter remains").hp,
+            DEFAULT_ACTOR_HP - i32::from(UNARMED_DAMAGE)
+        );
+        for _ in 0..20 {
+            world
+                .advance_tick(Vec::new())
+                .expect("interrupted craft should remain paused");
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("crafter remains")
+                .craft_activity
+                .expect("craft remains")
+                .remaining_action_points,
+            9_900
+        );
+
+        world
+            .set_connected(actor_id, true)
+            .expect("crafter should reconnect");
+        let resumed = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::ResumeCraft,
+            }])
+            .expect("craft should resume");
+        assert!(resumed.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CraftResumed { actor_id: event_actor, .. }
+                if event_actor == actor_id
+        )));
+        for _ in 0..98 {
+            world
+                .advance_tick(Vec::new())
+                .expect("resumed craft should progress");
+        }
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("crafter remains")
+                .craft_activity
+                .is_some()
+        );
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("resumed craft should complete");
+        assert!(completed.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CraftCompleted { actor_id: event_actor, .. }
+                if event_actor == actor_id
+        )));
+        assert!(!world.item_id_exists(rock));
+        assert!(!world.item_id_exists(socks));
+    }
+
+    #[test]
+    fn unavailable_or_underprovisioned_crafts_reject_without_mutation() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let rock = spawn_and_pick_up(&mut world, actor_id, 1, "rock", 1);
+        let recipe = test_craft_recipe(
+            500,
+            1,
+            vec![vec![("rock", 1, false)], vec![("socks", 1, false)]],
+        );
+        let allocator_before = world.snapshot().allocator_next;
+        let missing = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("missing craft should reject");
+        assert!(missing.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingComponents,
+                ..
+            }
+        )));
+        assert_eq!(world.snapshot().allocator_next, allocator_before);
+        assert!(world.item_id_exists(rock));
+
+        let unavailable = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: None,
+                },
+            }])
+            .expect("unnormalized craft should reject");
+        assert!(unavailable.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::RecipeUnavailable,
+                ..
+            }
+        )));
+        let mut invalid = recipe;
+        invalid.time_moves = 0;
+        let invalid = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: invalid.recipe_id.clone(),
+                    recipe: Some(Box::new(invalid)),
+                },
+            }])
+            .expect("invalid normalized craft should reject");
+        assert!(invalid.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::RecipeUnavailable,
+                ..
+            }
+        )));
+        assert_eq!(world.snapshot().allocator_next, allocator_before);
+    }
+
+    #[test]
+    fn craft_rejects_cleanly_when_stable_id_reservation_is_exhausted() {
+        let mut world = WorldState::new(31, [23; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 2).expect("valid tiny block"))
+            .expect("tiny block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should consume the first ID");
+        make_actor_act_each_tick(&mut world, actor_id);
+        let rock = spawn_and_pick_up(&mut world, actor_id, 1, "rock", 1);
+        let recipe = test_craft_recipe(100, 1, vec![vec![("rock", 1, false)]]);
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("ID exhaustion should be an ordinary rejection");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::StableIdsUnavailable,
+                ..
+            }
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor remains valid");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(actor.inventory[0].id, rock);
+    }
+
+    #[test]
+    fn craft_requires_and_preserves_noncharge_tools_and_inherent_qualities() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let stick = spawn_and_pick_up(&mut world, actor_id, 1, "stick", 1);
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("stick", 1, false)]]);
+        recipe.tools = vec![vec![cdda_protocol::CraftToolRequirementV1 {
+            type_id: String::from("hammer"),
+            amount: 1,
+            consumes_charges: false,
+        }]];
+        recipe.qualities = vec![vec![cdda_protocol::CraftQualityRequirementV1 {
+            quality_id: String::from("CUT"),
+            level: 1,
+            amount: 1,
+            providers: vec![cdda_protocol::CraftQualityProviderV1 {
+                type_id: String::from("knife"),
+                minimum_charges: 0,
+            }],
+        }]];
+        let attempt = |world: &mut WorldState, sequence| {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(sequence),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Craft {
+                        recipe_id: recipe.recipe_id.clone(),
+                        recipe: Some(Box::new(recipe.clone())),
+                    },
+                }])
+                .expect("supported craft attempt should advance")
+        };
+        let missing_tool = attempt(&mut world, 2);
+        assert!(missing_tool.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingTools,
+                ..
+            }
+        )));
+
+        let hammer = spawn_and_pick_up(&mut world, actor_id, 3, "hammer", 1);
+        let missing_quality = attempt(&mut world, 4);
+        assert!(missing_quality.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingQualities,
+                ..
+            }
+        )));
+
+        let knife = spawn_and_pick_up(&mut world, actor_id, 5, "knife", 1);
+        let started = attempt(&mut world, 6);
+        assert!(
+            started
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CraftStarted { .. }))
+        );
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(!actor.inventory.iter().any(|item| item.id == stick));
+        assert!(actor.inventory.iter().any(|item| item.id == hammer));
+        assert!(actor.inventory.iter().any(|item| item.id == knife));
+
+        let completed = world
+            .advance_tick(Vec::new())
+            .expect("one-second craft should complete");
+        assert!(
+            completed
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CraftCompleted { .. }))
+        );
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.inventory.iter().any(|item| item.id == hammer));
+        assert!(actor.inventory.iter().any(|item| item.id == knife));
+        assert!(
+            actor
+                .inventory
+                .iter()
+                .any(|item| item.type_id == "test_output")
+        );
+
+        let mut overlapping = test_craft_recipe(100, 1, vec![vec![("knife", 1, false)]]);
+        overlapping.qualities = recipe.qualities.clone();
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(7),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: overlapping.recipe_id.clone(),
+                    recipe: Some(Box::new(overlapping)),
+                },
+            }])
+            .expect("overlapping support/component craft should reject cleanly");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingComponents,
+                ..
+            }
+        )));
+        assert!(world.item_id_exists(knife));
+    }
+
+    #[test]
+    fn charged_quality_requires_each_provider_threshold_without_consuming_it() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        let low = spawn_and_pick_up(&mut world, actor_id, 2, "power_drill", 4);
+        let first = spawn_and_pick_up(&mut world, actor_id, 3, "power_drill", 6);
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("steel", 1, false)]]);
+        recipe.qualities = vec![vec![cdda_protocol::CraftQualityRequirementV1 {
+            quality_id: String::from("DRILL"),
+            level: 3,
+            amount: 2,
+            providers: vec![cdda_protocol::CraftQualityProviderV1 {
+                type_id: String::from("power_drill"),
+                minimum_charges: 5,
+            }],
+        }]];
+        let missing = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("aggregate charges must not satisfy per-provider quality thresholds");
+        assert!(missing.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingQualities,
+                ..
+            }
+        )));
+
+        let second = spawn_and_pick_up(&mut world, actor_id, 5, "power_drill", 5);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(6),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("two individually powered providers should start the craft");
+        world
+            .advance_tick(Vec::new())
+            .expect("one-second charged-quality craft should complete");
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        let charges = |item_id| {
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == item_id)
+                .expect("quality provider remains carried")
+                .charges
+        };
+        assert_eq!(charges(low), 4);
+        assert_eq!(charges(first), 6);
+        assert_eq!(charges(second), 5);
+    }
+
+    #[test]
+    fn required_proficiency_gates_crafting_until_learned() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("steel", 1, false)]]);
+        recipe.proficiencies = vec![test_craft_proficiency("prof_metalworking", true, 0, 4_000)];
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe.clone())),
+                },
+            }])
+            .expect("missing required proficiency should reject cleanly");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::MissingProficiencies,
+                ..
+            }
+        )));
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .proficiencies
+            .insert(
+                String::from("prof_metalworking"),
+                ProficiencyLevelSnapshot {
+                    proficiency_id: String::from("prof_metalworking"),
+                    practiced_action_points: 4_000,
+                    practice_remainder_millionths: 0,
+                    learned: true,
+                },
+            );
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("learned required proficiency should allow crafting");
+        assert!(
+            started
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CraftStarted { .. }))
+        );
+    }
+
+    #[test]
+    fn zero_learning_multiplier_does_not_create_invalid_empty_practice() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        let mut recipe = test_craft_recipe(400, 1, vec![vec![("steel", 1, false)]]);
+        let mut proficiency = test_craft_proficiency("prof_lockpicking", false, 1_500_000, 40_000);
+        proficiency.learning_time_multiplier_millionths = 0;
+        recipe.proficiencies = vec![proficiency];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("zero-learning proficiency should not gate the craft");
+        world
+            .advance_tick(Vec::new())
+            .expect("crossing proficiency buckets should remain valid");
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .proficiencies
+                .is_empty(),
+            "a zero learning multiplier must not create invalid zero-progress state"
+        );
+        WorldState::from_snapshot(&world.snapshot())
+            .expect("zero-learning craft should remain recoverable");
+    }
+
+    #[test]
+    fn optional_proficiency_slows_trains_offline_and_recovers_deterministically() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        let mut recipe = test_craft_recipe(4_000, 1, vec![vec![("steel", 1, false)]]);
+        recipe.proficiencies = vec![test_craft_proficiency(
+            "prof_metalworking",
+            false,
+            1_500_000,
+            4_000,
+        )];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("optional proficiency should not gate crafting");
+        world
+            .set_connected(actor_id, false)
+            .expect("actor should disconnect without pausing the world");
+        world
+            .advance_tick(Vec::new())
+            .expect("offline missing proficiency should make fractional progress");
+        let activity = world
+            .actor_snapshot(actor_id)
+            .expect("actor remains")
+            .craft_activity
+            .expect("craft remains active");
+        assert_eq!(activity.remaining_action_points, 78_667);
+        assert_eq!(activity.proficiency_progress_millionths, 333_333);
+        assert_eq!(activity.proficiency_buckets_awarded, 0);
+
+        let mut recovered = WorldState::from_snapshot(&world.snapshot())
+            .expect("fractional proficiency progress should recover");
+        let mut learned_event = false;
+        for _ in 0..3 {
+            let live = world
+                .advance_tick(Vec::new())
+                .expect("live offline craft should progress");
+            let replayed = recovered
+                .advance_tick(Vec::new())
+                .expect("recovered offline craft should progress identically");
+            assert_eq!(live.events, replayed.events);
+            assert_eq!(live.canonical_hash, replayed.canonical_hash);
+            learned_event |= live.events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    WorldEventKind::ProficiencyLearned {
+                        ref proficiency_id,
+                        ..
+                    } if proficiency_id == "prof_metalworking"
+                )
+            });
+        }
+        assert!(learned_event);
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        let proficiency = actor
+            .proficiencies
+            .iter()
+            .find(|state| state.proficiency_id == "prof_metalworking")
+            .expect("crafting should create canonical proficiency state");
+        assert!(proficiency.learned);
+        assert_eq!(proficiency.practiced_action_points, 4_000);
+        let before = actor
+            .craft_activity
+            .expect("craft remains active")
+            .remaining_action_points;
+        world
+            .advance_tick(Vec::new())
+            .expect("learned proficiency should remove the time penalty");
+        let after = world
+            .actor_snapshot(actor_id)
+            .expect("actor remains")
+            .craft_activity
+            .expect("craft remains active")
+            .remaining_action_points;
+        assert_eq!(before - after, u64::from(ACTOR_ACTION_THRESHOLD));
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::CancelCraft,
+            }])
+            .expect("cancel should preserve proficiency practice");
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .proficiencies[0]
+                .learned
+        );
+    }
+
+    #[test]
+    fn charged_craft_tools_debit_pinned_buckets_and_recover_exactly() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component = spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        let tool = spawn_and_pick_up(&mut world, actor_id, 2, "welder", 30);
+        let mut recipe = test_craft_recipe(2_000, 1, vec![vec![("steel", 1, false)]]);
+        recipe.tools = vec![vec![cdda_protocol::CraftToolRequirementV1 {
+            type_id: String::from("welder"),
+            amount: 23,
+            consumes_charges: true,
+        }]];
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("charged-tool craft should start");
+        assert!(started.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CraftToolChargesConsumed {
+                item_id,
+                charges: 4,
+                remaining_charges: 26,
+                ..
+            } if item_id == tool
+        )));
+        let activity = world
+            .actor_snapshot(actor_id)
+            .expect("actor remains")
+            .craft_activity
+            .expect("craft remains active");
+        assert_eq!(activity.selected_tool_alternatives, [0]);
+
+        for _ in 0..10 {
+            world
+                .advance_tick(Vec::new())
+                .expect("first half should consume one charge per bucket");
+        }
+        let snapshot = world.snapshot();
+        let tool_charges = |world: &WorldState| {
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .inventory
+                .into_iter()
+                .find(|item| item.id == tool)
+                .expect("tool remains carried")
+                .charges
+        };
+        assert_eq!(tool_charges(&world), 16);
+
+        let mut canceled =
+            WorldState::from_snapshot(&snapshot).expect("mid-craft charge state should restore");
+        canceled
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: canceled.tick(),
+                kind: CommandKind::CancelCraft,
+            }])
+            .expect("cancel should retain spent tool charges");
+        let canceled_actor = canceled.actor_snapshot(actor_id).expect("actor remains");
+        assert!(canceled_actor.craft_activity.is_none());
+        assert!(
+            canceled_actor
+                .inventory
+                .iter()
+                .any(|item| item.id == component)
+        );
+        assert_eq!(tool_charges(&canceled), 16);
+
+        let mut recovered =
+            WorldState::from_snapshot(&snapshot).expect("mid-craft charge state should recover");
+        for _ in 0..10 {
+            let live = world
+                .advance_tick(Vec::new())
+                .expect("live charged craft should finish");
+            let replayed = recovered
+                .advance_tick(Vec::new())
+                .expect("recovered charged craft should finish identically");
+            assert_eq!(live.canonical_hash, replayed.canonical_hash);
+            assert_eq!(live.events, replayed.events);
+        }
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(tool_charges(&world), 7);
+        assert!(
+            actor
+                .inventory
+                .iter()
+                .any(|item| item.type_id == "test_output")
+        );
+    }
+
+    #[test]
+    fn charged_tool_shortfall_rewinds_progress_and_can_be_resupplied() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let component_parent = spawn_and_pick_up(&mut world, actor_id, 1, "steel", 10);
+        let depleted_tool = spawn_and_pick_up(&mut world, actor_id, 2, "welder", 4);
+        let mut recipe = test_craft_recipe(2_000, 1, vec![vec![("steel", 3, true)]]);
+        recipe.tools = vec![vec![cdda_protocol::CraftToolRequirementV1 {
+            type_id: String::from("welder"),
+            amount: 23,
+            consumes_charges: true,
+        }]];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("the front-loaded charge amount should permit starting");
+        let interrupted = world
+            .advance_tick(Vec::new())
+            .expect("charge shortfall should be an ordinary interruption");
+        assert!(
+            interrupted
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CraftInterrupted { .. }))
+        );
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        let activity = actor.craft_activity.expect("craft remains reserved");
+        assert!(activity.interrupted);
+        assert_eq!(activity.remaining_action_points, 40_000);
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == depleted_tool)
+                .expect("depleted tool remains")
+                .charges,
+            0
+        );
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == component_parent)
+                .expect("partial component parent remains")
+                .charges,
+            7
+        );
+
+        let protected_drop = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::Drop {
+                    item_id: component_parent,
+                },
+            }])
+            .expect("reserved split parent mutation should reject cleanly");
+        assert!(protected_drop.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::ActorBusy,
+                ..
+            }
+        )));
+        WorldState::from_snapshot(&world.snapshot())
+            .expect("rejected mutation must preserve recoverable reservations");
+
+        let replacement = spawn_and_pick_up(&mut world, actor_id, 5, "welder", 19);
+        let resumed = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(6),
+                client_tick: world.tick(),
+                kind: CommandKind::ResumeCraft,
+            }])
+            .expect("resupplied charged craft should resume");
+        assert!(
+            resumed
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CraftResumed { .. }))
+        );
+        for _ in 0..20 {
+            world
+                .advance_tick(Vec::new())
+                .expect("resupplied craft should finish");
+        }
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.id == replacement)
+                .expect("replacement tool remains")
+                .charges,
+            0
+        );
+    }
+
+    #[test]
+    fn interrupted_craft_preserves_inventory_slots_for_finish_or_cancel() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        spawn_and_pick_up(&mut world, actor_id, 2, "welder", 4);
+        let mut filler_ids = Vec::new();
+        for sequence in 3..=256 {
+            filler_ids.push(spawn_and_pick_up(
+                &mut world, actor_id, sequence, "filler", 1,
+            ));
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor remains")
+                .inventory
+                .len(),
+            MAX_ACTOR_INVENTORY_ITEMS
+        );
+
+        let mut recipe = test_craft_recipe(2_000, 1, vec![vec![("steel", 1, false)]]);
+        recipe.tools = vec![vec![cdda_protocol::CraftToolRequirementV1 {
+            type_id: String::from("welder"),
+            amount: 23,
+            consumes_charges: true,
+        }]];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(257),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("full-inventory craft should reserve its output slot");
+        world
+            .advance_tick(Vec::new())
+            .expect("tool shortage should interrupt");
+
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("actor remains")
+            .position;
+        let replacement = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("welder"),
+                charges: 19,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("replacement tool should spawn");
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(258),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp {
+                    item_id: replacement,
+                },
+            }])
+            .expect("reserved output capacity should reject pickup cleanly");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::InventoryFull,
+                ..
+            }
+        )));
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(259),
+                client_tick: world.tick(),
+                kind: CommandKind::Drop {
+                    item_id: filler_ids[0],
+                },
+            }])
+            .expect("dropping an unrelated item should free a resupply slot");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(260),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp {
+                    item_id: replacement,
+                },
+            }])
+            .expect("replacement tool should fit after freeing one slot");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(261),
+                client_tick: world.tick(),
+                kind: CommandKind::ResumeCraft,
+            }])
+            .expect("resupplied craft should resume");
+        for _ in 0..20 {
+            world
+                .advance_tick(Vec::new())
+                .expect("resupplied full-inventory craft should finish");
+        }
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.craft_activity.is_none());
+        assert_eq!(actor.inventory.len(), MAX_ACTOR_INVENTORY_ITEMS);
+        assert!(
+            actor
+                .inventory
+                .iter()
+                .any(|item| item.type_id == "test_output")
+        );
+    }
+
+    #[test]
+    fn interrupted_craft_ordinary_actions_obey_actor_readiness() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "steel", 1);
+        spawn_and_pick_up(&mut world, actor_id, 2, "welder", 4);
+        let actor = world.actors.get_mut(&actor_id).expect("actor remains");
+        actor.speed = 100;
+        actor.action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        let mut recipe = test_craft_recipe(100, 1, vec![vec![("steel", 1, false)]]);
+        recipe.tools = vec![vec![cdda_protocol::CraftToolRequirementV1 {
+            type_id: String::from("welder"),
+            amount: 23,
+            consumes_charges: true,
+        }]];
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: recipe.recipe_id.clone(),
+                    recipe: Some(Box::new(recipe)),
+                },
+            }])
+            .expect("craft should start");
+        world
+            .advance_tick(Vec::new())
+            .expect("first 5% boundary should interrupt");
+
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("actor remains")
+            .position;
+        let replacement = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("welder"),
+                charges: 19,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("replacement should spawn");
+        let first_wait = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::PickUp {
+                    item_id: replacement,
+                },
+            }])
+            .expect("pickup should queue while readiness accrues");
+        assert!(!first_wait.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ItemPickedUp { item_id, .. } if item_id == replacement
+        )));
+        assert!(world.ground_item_snapshot(replacement).is_some());
+
+        for _ in 1..(ACTOR_ACTION_THRESHOLD / 100) {
+            world
+                .advance_tick(Vec::new())
+                .expect("ordinary action readiness should accrue deterministically");
+        }
+        assert!(world.ground_item_snapshot(replacement).is_none());
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert_eq!(actor.action_points, 0);
+        assert!(
+            actor
+                .craft_activity
+                .is_some_and(|activity| activity.interrupted)
+        );
+    }
+
+    #[test]
+    fn pickup_and_drop_move_the_same_stable_item_instance() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("rock"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 7_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("ground item should spawn");
+        let pickup = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::PickUp { item_id },
+            }])
+            .expect("pickup tick should advance");
+        assert!(matches!(
+            pickup.events[0].kind,
+            WorldEventKind::ItemPickedUp { actor_id: event_actor, item_id: event_item, .. }
+                if event_actor == actor_id && event_item == item_id
+        ));
+        assert!(world.ground_item_snapshot(item_id).is_none());
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor should exist")
+                .inventory[0]
+                .id,
+            item_id
+        );
+
+        let drop = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: SimTick(1),
+                kind: CommandKind::Drop { item_id },
+            }])
+            .expect("drop tick should advance");
+        assert!(matches!(
+            drop.events[0].kind,
+            WorldEventKind::ItemDropped { actor_id: event_actor, item_id: event_item, .. }
+                if event_actor == actor_id && event_item == item_id
+        ));
+        assert!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor should exist")
+                .inventory
+                .is_empty()
+        );
+        assert_eq!(
+            world
+                .ground_item_snapshot(item_id)
+                .expect("item should be on the ground")
+                .item
+                .type_id,
+            "rock"
+        );
+        WorldState::from_snapshot(&world.snapshot()).expect("item state should round trip");
+    }
+
+    #[test]
+    fn wielded_item_uses_content_derived_melee_damage() {
+        let (mut world, attacker, target) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, attacker);
+        let item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("rock"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 7_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("weapon should spawn");
+        let commands = [
+            CommandKind::PickUp { item_id },
+            CommandKind::Wield { item_id },
+            CommandKind::Move {
+                dx: 1,
+                dy: 0,
+                dz: 0,
+            },
+            CommandKind::Attack { target },
+        ];
+        for (index, kind) in commands.into_iter().enumerate() {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: attacker,
+                    sequence: CommandSequence((index + 1) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("weapon command should advance");
+        }
+        let attacker = world
+            .actor_snapshot(attacker)
+            .expect("attacker should remain");
+        assert_eq!(attacker.wielded, Some(item_id));
+        assert_eq!(
+            world
+                .actor_snapshot(target)
+                .expect("target should remain")
+                .hp,
+            DEFAULT_ACTOR_HP - 7
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_canonical_hash() {
+        let (mut world, _, _) = world_with_two_actors();
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_canonical_combat_stats"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 10,
+                speed: 100,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 4,
+                dodge: 2,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("combat-stat creature should spawn");
+        let before = world.canonical_hash().expect("state should hash");
+        let restored =
+            WorldState::from_snapshot(&world.snapshot()).expect("snapshot should restore");
+        let after = restored
+            .canonical_hash()
+            .expect("restored state should hash");
+        assert_eq!(before, after);
+        let mut changed_snapshot = world.snapshot();
+        let changed = changed_snapshot
+            .creatures
+            .iter_mut()
+            .find(|creature| creature.id == creature_id)
+            .expect("combat-stat creature is canonical");
+        changed.melee_skill = 5;
+        changed.dodge = 3;
+        let changed = WorldState::from_snapshot(&changed_snapshot)
+            .expect("bounded changed combat stats should restore");
+        assert_ne!(
+            before,
+            changed.canonical_hash().expect("changed state should hash"),
+            "monster melee_skill and dodge must participate in CanonicalStateV51"
+        );
+    }
+
+    #[test]
+    fn furniture_blocks_authoritative_movement_and_survives_snapshot_round_trip() {
+        let mut world = WorldState::new(39, [31; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let dresser = test_furniture("f_dresser", -1, true);
+        chunk
+            .set_furniture(LocalTileCoord { x: 2, y: 1 }, Some(dresser.clone()))
+            .expect("dresser should install");
+        world.insert_chunk(chunk);
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor_id);
+
+        let outcome = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("blocked move should resolve deterministically");
+        assert!(matches!(
+            outcome.events[0].kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::Blocked,
+                ..
+            }
+        ));
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor exists")
+                .position,
+            WorldPosition { x: 1, y: 1, z: 0 }
+        );
+
+        let snapshot = world.snapshot();
+        let index = usize::from(1_u8) * SUBMAP_SIZE as usize + usize::from(2_u8);
+        assert_eq!(snapshot.chunks[0].furniture[index], Some(dresser));
+        let restored = WorldState::from_snapshot(&snapshot).expect("furniture should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+    }
+
+    #[test]
+    fn furniture_and_terrain_costs_create_deterministic_movement_debt() {
+        let mut world = WorldState::new(41, [33; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        chunk
+            .set_furniture(
+                LocalTileCoord { x: 2, y: 1 },
+                Some(FurnitureTileSnapshot {
+                    furniture_id: String::from("f_bed"),
+                    move_cost_mod: 3,
+                    transparent: true,
+                    blocks_door: false,
+                    comfort: 5,
+                    floor_bedding_warmth: 1_000,
+                }),
+            )
+            .expect("bed should install");
+        world.insert_chunk(chunk);
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn with one banked ordinary action");
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("floor-to-bed move should execute immediately");
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert_eq!(actor.position, WorldPosition { x: 2, y: 1, z: 0 });
+        assert_eq!(
+            actor.action_points, -1_500,
+            "average tile cost (2 + 5) * 500 charges 3,500 readiness"
+        );
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("exit move should queue while debt recovers");
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor exists")
+                .position,
+            WorldPosition { x: 2, y: 1, z: 0 }
+        );
+        for _ in 0..33 {
+            world
+                .advance_tick(Vec::new())
+                .expect("movement debt should recover deterministically");
+        }
+        assert_eq!(
+            world
+                .actor_snapshot(actor_id)
+                .expect("actor exists")
+                .action_points,
+            1_900
+        );
+        world
+            .advance_tick(Vec::new())
+            .expect("exit move should execute at the exact readiness boundary");
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert_eq!(actor.position, WorldPosition { x: 3, y: 1, z: 0 });
+        assert_eq!(actor.action_points, -1_500);
+
+        let restored = WorldState::from_snapshot(&world.snapshot())
+            .expect("negative movement debt should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+    }
+
+    #[test]
+    fn diagonal_movement_uses_the_pinned_integer_axis_multiplier() {
+        let mut world = WorldState::new(42, [34; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        chunk
+            .set_furniture(
+                LocalTileCoord { x: 2, y: 2 },
+                Some(FurnitureTileSnapshot {
+                    furniture_id: String::from("f_bed"),
+                    move_cost_mod: 3,
+                    transparent: true,
+                    blocks_door: false,
+                    comfort: 5,
+                    floor_bedding_warmth: 1_000,
+                }),
+            )
+            .expect("bed should install");
+        world.insert_chunk(chunk);
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 1,
+                    dz: 0,
+                },
+            }])
+            .expect("diagonal move should execute");
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        assert_eq!(actor.position, WorldPosition { x: 2, y: 2, z: 0 });
+        assert_eq!(
+            actor.action_points, -2_960,
+            "(2 + 5) * 71 / 2 truncates to 248 upstream moves, then scales by 20"
+        );
+    }
+
+    #[test]
+    fn diagonal_neighbors_are_in_melee_range_for_players_and_creatures() {
+        let mut world = WorldState::new(43, [35; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let attacker = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("attacker should spawn");
+        let target = world
+            .spawn_actor(WorldPosition { x: 2, y: 2, z: 0 }, true)
+            .expect("diagonal target should spawn");
+        make_actor_act_each_tick(&mut world, attacker);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: attacker,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Attack { target },
+            }])
+            .expect("diagonal player melee should resolve");
+        assert_eq!(
+            world.actor_snapshot(target).expect("target exists").hp,
+            DEFAULT_ACTOR_HP - i32::from(UNARMED_DAMAGE)
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(attacker)
+                .expect("attacker exists")
+                .action_points,
+            800,
+            "default unarmed melee pays the pinned 60-move DEX-adjusted cost"
+        );
+
+        world
+            .despawn_actor(target)
+            .expect("player target should leave the creature test");
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_diagonal_test"),
+                position: WorldPosition { x: 2, y: 2, z: 0 },
+                hp: 20,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits u16"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("diagonal creature should spawn");
+        let outcome = world
+            .advance_tick(Vec::new())
+            .expect("diagonal creature melee should resolve");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature {
+                source,
+                target,
+                amount: 1,
+                ..
+            } if source == creature && target == attacker
+        )));
+    }
+
+    #[test]
+    fn opaque_furniture_blocks_sight_and_preserves_stale_furniture_memory() {
+        let mut world = WorldState::new(40, [32; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let coord = ChunkCoord { x: 0, y: 0, z: 0 };
+        let mut chunk = Chunk::floor(coord);
+        let bed = FurnitureTileSnapshot {
+            furniture_id: String::from("f_bed"),
+            move_cost_mod: 3,
+            transparent: true,
+            blocks_door: false,
+            comfort: 5,
+            floor_bedding_warmth: 1_000,
+        };
+        chunk
+            .set_furniture(LocalTileCoord { x: 3, y: 1 }, Some(bed.clone()))
+            .expect("bed should install");
+        world.insert_chunk(chunk);
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn and perceive the bed");
+
+        let opaque = test_furniture("f_opaque_test", 0, false);
+        let chair = FurnitureTileSnapshot {
+            furniture_id: String::from("f_chair"),
+            move_cost_mod: 1,
+            transparent: true,
+            blocks_door: false,
+            comfort: 1,
+            floor_bedding_warmth: -1_500,
+        };
+        let chunk = world.chunks.get_mut(&coord).expect("chunk exists");
+        chunk
+            .set_furniture(LocalTileCoord { x: 2, y: 1 }, Some(opaque.clone()))
+            .expect("occluder should install");
+        chunk
+            .set_furniture(LocalTileCoord { x: 3, y: 1 }, Some(chair))
+            .expect("hidden furniture should change");
+        world
+            .advance_tick(Vec::new())
+            .expect("memory refresh should complete");
+
+        assert!(!world.has_clear_shot(
+            WorldPosition { x: 1, y: 1, z: 0 },
+            WorldPosition { x: 3, y: 1, z: 0 }
+        ));
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        let memory = actor
+            .map_memory
+            .iter()
+            .find(|memory| memory.coord == coord)
+            .expect("center memory exists");
+        let index = |x: usize, y: usize| y * SUBMAP_SIZE as usize + x;
+        assert_eq!(
+            memory.tiles[index(2, 1)]
+                .as_ref()
+                .and_then(|tile| tile.furniture.as_ref()),
+            Some(&opaque)
+        );
+        assert_eq!(
+            memory.tiles[index(3, 1)]
+                .as_ref()
+                .and_then(|tile| tile.furniture.as_ref()),
+            Some(&bed),
+            "the hidden tile must retain the last perceived furniture"
+        );
+    }
+
+    #[test]
+    fn terrain_memory_keeps_the_last_perceived_tile_behind_an_occluder() {
+        let mut world = WorldState::new(37, [29; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn and perceive the floor");
+        let coord = ChunkCoord { x: 0, y: 0, z: 0 };
+        let wall = TerrainTileSnapshot {
+            terrain_id: String::from("t_wall"),
+            move_cost: 0,
+            transparent: false,
+            flat: false,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("chunk exists")
+            .set_terrain(LocalTileCoord { x: 2, y: 1 }, wall)
+            .expect("wall should install");
+        world
+            .advance_tick(Vec::new())
+            .expect("memory should refresh");
+        let changed_behind_wall = TerrainTileSnapshot {
+            terrain_id: String::from("t_lava"),
+            move_cost: 0,
+            transparent: true,
+            flat: false,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        world
+            .chunks
+            .get_mut(&coord)
+            .expect("chunk exists")
+            .set_terrain(LocalTileCoord { x: 3, y: 1 }, changed_behind_wall)
+            .expect("hidden terrain should change");
+        world
+            .advance_tick(Vec::new())
+            .expect("memory should refresh");
+
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        let memory = actor
+            .map_memory
+            .iter()
+            .find(|memory| memory.coord == coord)
+            .expect("center memory exists");
+        let index = usize::from(1_u8) * SUBMAP_SIZE as usize + usize::from(3_u8);
+        assert_eq!(
+            memory.tiles[index]
+                .as_ref()
+                .expect("tile was seen before occlusion")
+                .terrain
+                .terrain_id,
+            "t_floor"
+        );
+        let restored = WorldState::from_snapshot(&world.snapshot()).expect("memory should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+    }
+
+    #[test]
+    fn new_moon_night_limits_new_terrain_memory_to_two_tiles() {
+        let mut world = WorldState::new(38, [30; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ);
+        assert_eq!(
+            NaturalLightSnapshot::at_tick(world.tick).sight_radius,
+            2,
+            "the generic start date is still a new moon after civil dusk"
+        );
+        let actor_id = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        let actor = world.actor_snapshot(actor_id).expect("actor exists");
+        let memory = actor
+            .map_memory
+            .iter()
+            .find(|memory| memory.coord == ChunkCoord { x: 0, y: 0, z: 0 })
+            .expect("center memory exists");
+        let index = |x: usize, y: usize| y * SUBMAP_SIZE as usize + x;
+        assert!(memory.tiles[index(3, 1)].is_some());
+        assert!(memory.tiles[index(4, 1)].is_none());
+    }
+
+    #[test]
+    fn ephemeral_connection_presence_does_not_change_canonical_hash() {
+        let (mut world, actor, other) = world_with_two_actors();
+        world
+            .despawn_actor(other)
+            .expect("unrelated actor should leave the test");
+        let connected = world.canonical_hash().expect("connected world should hash");
+        world
+            .set_connected(actor, false)
+            .expect("actor should disconnect");
+        assert_eq!(
+            world
+                .canonical_hash()
+                .expect("disconnected world should hash"),
+            connected
+        );
+        assert!(
+            !world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .connected
+        );
+        world
+            .actors
+            .get_mut(&actor)
+            .expect("actor should remain")
+            .held_movement = Some(HorizontalDirection { dx: 1, dy: 0 });
+        assert_eq!(
+            world.disconnect_all_for_recovery(),
+            vec![ActorConnectionUpdateV1 {
+                actor_id: actor,
+                connected: false,
+            }],
+            "recovery must journal clearing a raced offline movement lease"
+        );
+        assert!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .held_movement
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn provisional_actor_rollback_burns_its_stable_id() {
+        let (mut world, first, _second) = world_with_two_actors();
+        world
+            .despawn_actor(first)
+            .expect("provisional actor should despawn");
+        let replacement = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("replacement actor should spawn");
+        assert!(replacement.counter() > first.counter());
+        assert!(world.actor_snapshot(first).is_none());
+        assert!(world.actor_snapshot(replacement).is_some());
+    }
+
+    #[test]
+    fn actor_restore_requires_the_exact_next_stable_id() {
+        let mut world = WorldState::new(13, [9; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = ActorSnapshot {
+            id: ActorId::new(13, 1),
+            position: WorldPosition { x: 2, y: 2, z: 0 },
+            hp: DEFAULT_ACTOR_HP,
+            base_strength: DEFAULT_ACTOR_BASE_STAT,
+            base_dexterity: DEFAULT_ACTOR_BASE_STAT,
+            base_intelligence: DEFAULT_ACTOR_BASE_STAT,
+            base_perception: DEFAULT_ACTOR_BASE_STAT,
+            connected: true,
+            last_command_sequence: CommandSequence(0),
+            last_held_input_sequence: HeldInputSequence(0),
+            held_movement: None,
+            inventory: Vec::new(),
+            wielded: None,
+            stored_kcal: DEFAULT_STORED_KCAL,
+            thirst: 0,
+            sleepiness: 0,
+            sleeping: false,
+            sleep_intervals: 0,
+            speed: DEFAULT_ACTOR_SPEED,
+            action_points: i64::from(ACTOR_ACTION_THRESHOLD),
+            queued_actions: Vec::new(),
+            craft_activity: None,
+            read_activity: None,
+            disassembly_activity: None,
+            construction_activity: None,
+            learned_recipes: Vec::new(),
+            skills: Vec::new(),
+            proficiencies: Vec::new(),
+            map_memory: Vec::new(),
+        };
+        world
+            .restore_actor(actor.clone())
+            .expect("next actor should restore");
+        assert_eq!(world.actor_snapshot(actor.id), Some(actor.clone()));
+        assert!(matches!(
+            world.restore_actor(ActorSnapshot {
+                id: ActorId::new(13, 3),
+                position: WorldPosition { x: 3, y: 2, z: 0 },
+                hp: DEFAULT_ACTOR_HP,
+                base_strength: DEFAULT_ACTOR_BASE_STAT,
+                base_dexterity: DEFAULT_ACTOR_BASE_STAT,
+                base_intelligence: DEFAULT_ACTOR_BASE_STAT,
+                base_perception: DEFAULT_ACTOR_BASE_STAT,
+                connected: false,
+                last_command_sequence: CommandSequence(0),
+                last_held_input_sequence: HeldInputSequence(0),
+                held_movement: None,
+                inventory: Vec::new(),
+                wielded: None,
+                stored_kcal: DEFAULT_STORED_KCAL,
+                thirst: 0,
+                sleepiness: 0,
+                sleeping: false,
+                sleep_intervals: 0,
+                speed: DEFAULT_ACTOR_SPEED,
+                action_points: i64::from(ACTOR_ACTION_THRESHOLD),
+                queued_actions: Vec::new(),
+                craft_activity: None,
+                read_activity: None,
+                disassembly_activity: None,
+                construction_activity: None,
+                learned_recipes: Vec::new(),
+                skills: Vec::new(),
+                proficiencies: Vec::new(),
+                map_memory: Vec::new(),
+            }),
+            Err(SimError::InvalidActorRestore)
+        ));
+
+        let mut powered_world = WorldState::new(13, [10; 32]);
+        powered_world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        powered_world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let mut powered_actor = actor;
+        powered_actor.inventory = vec![ItemSnapshot {
+            id: ItemId::new(13, 2),
+            type_id: String::from("flashlight"),
+            charges: 0,
+            damage: 0,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            component_provenance: None,
+            magazine_capacity: 0,
+            magazine_well: Some(MagazineWellSnapshotV1 {
+                compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+                installed_magazine: Some(Box::new(ItemSnapshot {
+                    id: ItemId::new(13, 3),
+                    type_id: String::from("medium_battery_cell"),
+                    charges: 37,
+                    damage: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::from("battery"),
+                    ranged_weapon: None,
+                    component_provenance: None,
+                    magazine_capacity: 56,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                    creature_corpse: None,
+                })),
+            }),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            creature_corpse: None,
+        }];
+        powered_actor.wielded = Some(ItemId::new(13, 2));
+        powered_world
+            .restore_actor(powered_actor)
+            .expect("nested stable IDs should restore contiguously");
+        let next = powered_world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 2, y: 2, z: 0 },
+                type_id: String::from("next_item"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("next item should allocate after the nested cell");
+        assert_eq!(next, ItemId::new(13, 4));
+    }
+
+    #[test]
+    fn player_can_attack_and_kill_a_stable_creature() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_test"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 10,
+                speed: 100,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("creature should spawn");
+        let outcome = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::AttackCreature { target: creature },
+            }])
+            .expect("attack should advance");
+        assert!(matches!(
+            outcome.events[0].kind,
+            WorldEventKind::CreatureDamaged { source, target, amount: 10, remaining_hp: 0 }
+                if source == actor && target == creature
+        ));
+        assert!(matches!(
+            outcome.events[1].kind,
+            WorldEventKind::CreatureDied { creature_id, killer }
+                if creature_id == creature && killer == actor
+        ));
+        assert!(world.creature_snapshot(creature).is_none());
+    }
+
+    #[test]
+    fn unarmed_classic_zombie_hit_and_miss_use_pinned_stats_and_named_rng() {
+        assert_eq!(pinned_unarmed_melee_accuracy_quarters(8, 0), 0);
+        assert_eq!(pinned_unarmed_melee_accuracy_quarters(20, 0), 12);
+        assert_eq!(pinned_unarmed_melee_accuracy_quarters(20, 2), 16);
+        assert_eq!(
+            pinned_unarmed_melee_accuracy_quarters(MAX_ACTOR_BASE_STAT, 0),
+            12,
+            "effective DEX remains capped at the pinned 20"
+        );
+
+        let (mut world, actor, other) = world_with_two_actors();
+        world
+            .despawn_actor(other)
+            .expect("unused actor should despawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 30,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 4,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 40,
+                vision_night: 3,
+                stumbles: true,
+                bashes: true,
+                group_bash: true,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("classic zombie should spawn");
+
+        let miss_sequence = (1..=1_000)
+            .find(|sequence| {
+                world
+                    .actor_creature_hit_spread(actor, target, *sequence)
+                    .expect("hit spread should resolve")
+                    .is_some_and(|spread| spread < 0)
+            })
+            .expect("named stream should contain a miss");
+        let hit_sequence = (miss_sequence + 1..=2_000)
+            .find(|sequence| {
+                world
+                    .actor_creature_hit_spread(actor, target, *sequence)
+                    .expect("hit spread should resolve")
+                    .is_some_and(|spread| spread >= 0)
+            })
+            .expect("named stream should contain a later hit");
+        let baseline_spread = world
+            .actor_creature_hit_spread(actor, target, hit_sequence)
+            .expect("baseline spread should resolve")
+            .expect("classic zombie is admitted");
+        world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .dodge = 3;
+        assert_eq!(
+            world
+                .actor_creature_hit_spread(actor, target, hit_sequence)
+                .expect("dodge spread should resolve")
+                .expect("classic zombie is admitted"),
+            baseline_spread - 15,
+            "pinned monster dodge_roll is dodge times five"
+        );
+        world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .dodge = 0;
+
+        let command = |sequence, client_tick| ClientCommand {
+            actor_id: actor,
+            sequence: CommandSequence(sequence),
+            client_tick,
+            kind: CommandKind::AttackCreature { target },
+        };
+        let mut replay = world.clone();
+        let miss_tick = world.tick();
+        let missed = world
+            .advance_tick(vec![command(miss_sequence, miss_tick)])
+            .expect("miss should resolve");
+        let replay_missed = replay
+            .advance_tick(vec![command(miss_sequence, miss_tick)])
+            .expect("miss should replay");
+        assert_eq!(missed, replay_missed);
+        assert!(
+            matches!(
+                missed.events.as_slice(),
+                [WorldEvent {
+                    kind: WorldEventKind::ActorMissedCreature { source, target: event_target },
+                    ..
+                }] if *source == actor && *event_target == target
+            ),
+            "unexpected miss events: {:?}",
+            missed.events
+        );
+        assert_eq!(
+            world
+                .creature_snapshot(target)
+                .expect("missed zombie should remain")
+                .hp,
+            30
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .action_points,
+            800,
+            "an unarmed miss spends the same 60-move attack cost"
+        );
+
+        let hit_tick = world.tick();
+        let hit = world
+            .advance_tick(vec![command(hit_sequence, hit_tick)])
+            .expect("hit should resolve");
+        let replay_hit = replay
+            .advance_tick(vec![command(hit_sequence, hit_tick)])
+            .expect("hit should replay");
+        assert_eq!(hit, replay_hit);
+        assert!(matches!(
+            hit.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureDamaged {
+                    source,
+                    target: event_target,
+                    amount: UNARMED_DAMAGE,
+                    remaining_hp: 20,
+                },
+                ..
+            }] if *source == actor && *event_target == target
+        ));
+    }
+
+    #[test]
+    fn every_base_monster_size_uses_the_pinned_player_melee_modifier() {
+        assert_eq!(creature_size_melee_penalty(CreatureSizeV1::Tiny), 30);
+        assert_eq!(creature_size_melee_penalty(CreatureSizeV1::Small), 15);
+        assert_eq!(creature_size_melee_penalty(CreatureSizeV1::Medium), 0);
+        assert_eq!(creature_size_melee_penalty(CreatureSizeV1::Large), -10);
+        assert_eq!(creature_size_melee_penalty(CreatureSizeV1::Huge), -20);
+
+        let (mut medium_world, actor, other) = world_with_two_actors();
+        medium_world
+            .despawn_actor(other)
+            .expect("unused actor should despawn");
+        make_actor_act_each_tick(&mut medium_world, actor);
+        let target = medium_world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_arbitrary_small_target"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 30,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 1,
+                dodge: 0,
+                size: CreatureSizeV1::Medium,
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("arbitrary canonical monster should spawn");
+        let sequence = (1..=2_000)
+            .find(|sequence| {
+                medium_world
+                    .actor_creature_hit_spread(actor, target, *sequence)
+                    .expect("medium spread should resolve")
+                    .is_some_and(|spread| (0..30).contains(&spread))
+            })
+            .expect("named stream should contain a medium hit that tiny size turns into a miss");
+        let medium_spread = medium_world
+            .actor_creature_hit_spread(actor, target, sequence)
+            .expect("medium spread should resolve")
+            .expect("all canonical monster type IDs are admitted");
+        for (size, penalty) in [
+            (CreatureSizeV1::Tiny, 30),
+            (CreatureSizeV1::Small, 15),
+            (CreatureSizeV1::Medium, 0),
+            (CreatureSizeV1::Large, -10),
+            (CreatureSizeV1::Huge, -20),
+        ] {
+            medium_world
+                .creatures
+                .get_mut(&target)
+                .expect("target should remain")
+                .size = size;
+            assert_eq!(
+                medium_world
+                    .actor_creature_hit_spread(actor, target, sequence)
+                    .expect("sized spread should resolve")
+                    .expect("canonical monster should remain admitted"),
+                medium_spread - penalty
+            );
+        }
+        medium_world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .size = CreatureSizeV1::Medium;
+        let medium_hash = medium_world.canonical_hash().expect("medium world hashes");
+        let mut tiny_world = medium_world.clone();
+        tiny_world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .size = CreatureSizeV1::Tiny;
+        assert_ne!(
+            tiny_world.canonical_hash().expect("tiny world hashes"),
+            medium_hash,
+            "base size must participate in CanonicalStateV51"
+        );
+        let restored = WorldState::from_snapshot(&tiny_world.snapshot())
+            .expect("private monster size should restore");
+        assert_eq!(
+            restored
+                .creature_snapshot(target)
+                .expect("restored target should remain")
+                .size,
+            CreatureSizeV1::Tiny
+        );
+
+        let command = ClientCommand {
+            actor_id: actor,
+            sequence: CommandSequence(sequence),
+            client_tick: medium_world.tick(),
+            kind: CommandKind::AttackCreature { target },
+        };
+        let medium = medium_world
+            .advance_tick(vec![command.clone()])
+            .expect("medium attack should resolve");
+        let tiny = tiny_world
+            .advance_tick(vec![command])
+            .expect("tiny attack should resolve");
+        assert!(medium.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CreatureDamaged { source, target: event_target, .. }
+                if source == actor && event_target == target
+        )));
+        assert!(matches!(
+            tiny.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorMissedCreature { source, target: event_target },
+                ..
+            }] if *source == actor && *event_target == target
+        ));
+    }
+
+    #[test]
+    fn immobile_monster_clears_moves_and_adds_exact_player_hit_bonus() {
+        let (mut world, actor, other) = world_with_two_actors();
+        world
+            .despawn_actor(other)
+            .expect("unused actor should despawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_immobile_test"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 30,
+                speed: 2_001,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 4,
+                dodge: 0,
+                size: CreatureSizeV1::Medium,
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("test monster should spawn");
+        let sequence = (1..=2_000)
+            .find(|sequence| {
+                world
+                    .actor_creature_hit_spread(actor, target, *sequence)
+                    .expect("mobile spread should resolve")
+                    .is_some_and(|spread| (-40..0).contains(&spread))
+            })
+            .expect("named stream should cross the exact immobile boundary");
+        let mobile_spread = world
+            .actor_creature_hit_spread(actor, target, sequence)
+            .expect("mobile spread should resolve")
+            .expect("unarmed attack is admitted");
+        assert!(mobile_spread < 0);
+        world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .immobile = true;
+        let immobile_spread = world
+            .actor_creature_hit_spread(actor, target, sequence)
+            .expect("immobile spread should resolve")
+            .expect("unarmed attack is admitted");
+        assert!(immobile_spread >= 0);
+        assert_eq!(
+            immobile_spread,
+            mobile_spread + IMMOBILE_MELEE_HIT_BONUS,
+            "pinned Creature::deal_melee_attack adds forty after size and dodge"
+        );
+        let mobile_hash = {
+            let mut mobile = world.clone();
+            mobile
+                .creatures
+                .get_mut(&target)
+                .expect("target should remain")
+                .immobile = false;
+            mobile.canonical_hash().expect("mobile world should hash")
+        };
+        assert_ne!(
+            world.canonical_hash().expect("immobile world should hash"),
+            mobile_hash,
+            "immobility must participate in CanonicalStateV51"
+        );
+        assert!(
+            WorldState::from_snapshot(&world.snapshot())
+                .expect("immobility should restore")
+                .creature_snapshot(target)
+                .expect("restored target should remain")
+                .immobile
+        );
+
+        let mut movement_world = world.clone();
+        let creature = movement_world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain");
+        creature.action_points = i64::from(CREATURE_ACTION_THRESHOLD) - 1;
+        let mut mobile_world = movement_world.clone();
+        mobile_world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .immobile = false;
+        let actor_hp = movement_world
+            .actor_snapshot(actor)
+            .expect("actor should remain")
+            .hp;
+        let stopped = movement_world
+            .advance_tick(Vec::new())
+            .expect("immobile turn should resolve");
+        assert!(stopped.events.is_empty());
+        let stopped = movement_world
+            .creature_snapshot(target)
+            .expect("immobile target should remain");
+        assert_eq!(stopped.position, WorldPosition { x: 2, y: 1, z: 0 });
+        assert_eq!(stopped.goal, Some(WorldPosition { x: 1, y: 1, z: 0 }));
+        assert_eq!(stopped.action_points, 0, "all accrued moves are cleared");
+        assert_eq!(
+            movement_world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .hp,
+            actor_hp
+        );
+        let moved = mobile_world
+            .advance_tick(Vec::new())
+            .expect("mobile turn should resolve");
+        assert!(moved.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature { source, target: event_target, .. }
+                if source == target && event_target == actor
+        )));
+    }
+
+    #[test]
+    fn pacifist_monster_moves_but_never_makes_an_ordinary_melee_attack() {
+        let (mut world, actor, other) = world_with_two_actors();
+        world
+            .despawn_actor(other)
+            .expect("unused actor should despawn");
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_pacifist_test"),
+                position: WorldPosition { x: 3, y: 1, z: 0 },
+                hp: 30,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 8,
+                dodge: 0,
+                size: CreatureSizeV1::Medium,
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: true,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("pacifist should spawn");
+        let advanced = world
+            .advance_tick(Vec::new())
+            .expect("pacifist movement should resolve");
+        assert!(advanced.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CreatureMoved { creature_id, from, to }
+                if creature_id == creature
+                    && from == (WorldPosition { x: 3, y: 1, z: 0 })
+                    && to == (WorldPosition { x: 2, y: 1, z: 0 })
+        )));
+
+        let pacifist_hash = world.canonical_hash().expect("pacifist world hashes");
+        let mut attacker = world.clone();
+        attacker
+            .creatures
+            .get_mut(&creature)
+            .expect("creature should remain")
+            .pacifist = false;
+        assert_ne!(
+            attacker.canonical_hash().expect("attacker world hashes"),
+            pacifist_hash,
+            "pacifism must participate in CanonicalStateV51"
+        );
+        assert!(
+            WorldState::from_snapshot(&world.snapshot())
+                .expect("pacifism should restore")
+                .creature_snapshot(creature)
+                .expect("restored creature should remain")
+                .pacifist
+        );
+
+        let hp = world.actor_snapshot(actor).expect("actor should remain").hp;
+        let stopped = world
+            .advance_tick(Vec::new())
+            .expect("pacifist adjacent turn should resolve");
+        assert!(stopped.events.is_empty());
+        assert_eq!(
+            world.actor_snapshot(actor).expect("actor should remain").hp,
+            hp
+        );
+        let attacked = attacker
+            .advance_tick(Vec::new())
+            .expect("ordinary attacker turn should resolve");
+        assert!(attacked.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature { source, target, amount: 1, .. }
+                if source == creature && target == actor
+        )));
+    }
+
+    #[test]
+    fn monster_attack_cost_charges_exact_signed_readiness_and_banked_actions() {
+        let (mut slow, actor, creature) = world_with_sleeping_actor_and_classic_zombie(false);
+        slow.creatures
+            .get_mut(&creature)
+            .expect("creature should exist")
+            .attack_cost_moves = 150;
+        let hit_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                slow.tick = SimTick(*tick);
+                slow.sleeping_target_creature_attack_roll(creature, actor, 0)
+                    .expect("sleeping-target roll should resolve")
+                    .is_some_and(|(spread, _)| spread >= 0)
+            })
+            .expect("deterministic stream should contain a hit");
+        slow.tick = SimTick(hit_tick - 1);
+        let mut fast = slow.clone();
+        fast.creatures
+            .get_mut(&creature)
+            .expect("creature should exist")
+            .attack_cost_moves = 40;
+        assert_ne!(
+            slow.canonical_hash().expect("slow world hashes"),
+            fast.canonical_hash().expect("fast world hashes"),
+            "attack cost must participate in CanonicalStateV51"
+        );
+        assert_eq!(
+            WorldState::from_snapshot(&fast.snapshot())
+                .expect("attack cost should restore")
+                .creature_snapshot(creature)
+                .expect("restored creature should remain")
+                .attack_cost_moves,
+            40
+        );
+        let mut invalid = fast.snapshot();
+        let invalid_creature = invalid
+            .creatures
+            .iter_mut()
+            .find(|snapshot| snapshot.id == creature)
+            .expect("creature should be canonical");
+        invalid_creature.attack_cost_moves = 0;
+        if let Some(corpse) = invalid_creature.corpse.as_mut() {
+            corpse.attack_cost_moves = 0;
+        }
+        assert!(matches!(
+            WorldState::from_snapshot(&invalid),
+            Err(SimError::InvalidCreature)
+        ));
+        let slow_hit = slow
+            .advance_tick(Vec::new())
+            .expect("slow attack should resolve");
+        let fast_hit = fast
+            .advance_tick(Vec::new())
+            .expect("fast attack should resolve");
+        assert!(slow_hit.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature { source, target, .. }
+                if source == creature && target == actor
+        )));
+        assert!(fast_hit.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorDamagedByCreature { source, target, .. }
+                if source == creature && target == actor
+        )));
+        assert_eq!(
+            slow.creature_snapshot(creature)
+                .expect("slow creature should remain")
+                .action_points,
+            -1_000,
+            "150 moves subtract exactly 3,000 action points"
+        );
+        assert_eq!(
+            fast.creature_snapshot(creature)
+                .expect("fast creature should remain")
+                .action_points,
+            1_200,
+            "40 moves subtract exactly 800 action points"
+        );
+
+        let slow_wait = slow
+            .advance_tick(Vec::new())
+            .expect("slow debt tick should resolve");
+        assert!(slow_wait.events.is_empty());
+        let fast_again = fast
+            .advance_tick(Vec::new())
+            .expect("banked fast attacks should resolve");
+        assert_eq!(
+            fast_again
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    WorldEventKind::ActorDamagedByCreature { source, target, .. }
+                        if source == creature && target == actor
+                ))
+                .count(),
+            2,
+            "banked readiness permits two exact 40-move attacks"
+        );
+        assert_eq!(
+            fast.creature_snapshot(creature)
+                .expect("fast creature should remain")
+                .action_points,
+            1_600
+        );
+    }
+
+    #[test]
+    fn monster_attack_cost_is_charged_on_an_exact_sleeping_target_miss() {
+        let (mut world, actor, creature) = world_with_sleeping_actor_and_classic_zombie(false);
+        let creature_state = world
+            .creatures
+            .get_mut(&creature)
+            .expect("creature should exist");
+        creature_state.attack_cost_moves = 37;
+        creature_state.melee_skill = 0;
+        let miss_tick = (1..NEEDS_INTERVAL_TICKS)
+            .find(|tick| {
+                world.tick = SimTick(*tick);
+                world
+                    .sleeping_target_creature_attack_roll(creature, actor, 0)
+                    .expect("sleeping-target roll should resolve")
+                    .is_some_and(|(spread, _)| spread < 0)
+            })
+            .expect("deterministic stream should contain a miss");
+        world.tick = SimTick(miss_tick - 1);
+        let outcome = world
+            .advance_tick(Vec::new())
+            .expect("variable-cost miss should resolve");
+        assert!(matches!(
+            outcome.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureMissedActor { source, target, .. },
+                ..
+            }] if *source == creature && *target == actor
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(creature)
+                .expect("creature should remain")
+                .action_points,
+            1_260,
+            "37 moves subtract exactly 740 action points even on a miss"
+        );
+    }
+
+    #[test]
+    fn strict_bash_weapon_hit_and_miss_use_pinned_to_hit_and_dominant_skill() {
+        assert_eq!(
+            pinned_bash_weapon_melee_accuracy_twelfths(8, 0, 0, -1, 9),
+            12,
+            "the pinned hammer gives default accuracy one"
+        );
+        assert_eq!(
+            pinned_bash_weapon_melee_accuracy_twelfths(8, 3, 0, -1, 9),
+            24,
+            "bash above MELEE_STAT uses practical bashing divided by three"
+        );
+        assert_eq!(
+            pinned_bash_weapon_melee_accuracy_twelfths(8, 3, 0, -1, 5),
+            12,
+            "bash at MELEE_STAT does not make the item a melee weapon"
+        );
+        assert_eq!(
+            pinned_bash_weapon_melee_accuracy_twelfths(8, 0, 2, -1, 9),
+            24,
+            "general practical melee contributes one half"
+        );
+
+        let (mut world, actor, other) = world_with_two_actors();
+        world
+            .despawn_actor(other)
+            .expect("unused actor should despawn");
+        world
+            .register_smash_item_type(SmashItemTypeV1 {
+                item_type_id: String::from("hammer"),
+                bash_damage: 9,
+                attack_time_moves: 79,
+                melee_to_hit: -1,
+            })
+            .expect("hammer profile should register");
+        make_actor_act_each_tick(&mut world, actor);
+        let hammer = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("hammer"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 9_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("hammer should spawn");
+        for (sequence, kind) in [
+            (CommandSequence(1), CommandKind::PickUp { item_id: hammer }),
+            (CommandSequence(2), CommandKind::Wield { item_id: hammer }),
+        ] {
+            let tick = world.tick();
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence,
+                    client_tick: tick,
+                    kind,
+                }])
+                .expect("hammer setup command should resolve");
+        }
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 30,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 4,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 40,
+                vision_night: 3,
+                stumbles: true,
+                bashes: true,
+                group_bash: true,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("classic zombie should spawn");
+        let miss_sequence = (3..=1_000)
+            .find(|sequence| {
+                world
+                    .actor_creature_hit_spread(actor, target, *sequence)
+                    .expect("hammer spread should resolve")
+                    .is_some_and(|spread| spread < 0)
+            })
+            .expect("hammer stream should contain a miss");
+        let baseline = world
+            .actor_creature_hit_spread(actor, target, miss_sequence)
+            .expect("baseline hammer spread should resolve")
+            .expect("strict hammer is admitted");
+        world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .immobile = true;
+        assert_eq!(
+            world
+                .actor_creature_hit_spread(actor, target, miss_sequence)
+                .expect("immobile hammer spread should resolve")
+                .expect("strict hammer is admitted"),
+            baseline + IMMOBILE_MELEE_HIT_BONUS
+        );
+        world
+            .creatures
+            .get_mut(&target)
+            .expect("target should remain")
+            .immobile = false;
+        world
+            .actors
+            .get_mut(&actor)
+            .expect("actor should remain")
+            .skills
+            .insert(
+                String::from("bashing"),
+                SkillLevelSnapshot {
+                    skill_id: String::from("bashing"),
+                    practical_level: 3,
+                    practical_experience: 0,
+                    theoretical_level: 3,
+                    theoretical_experience: 0,
+                    last_practiced: world.tick,
+                },
+            );
+        let skilled = world
+            .actor_creature_hit_spread(actor, target, miss_sequence)
+            .expect("skilled hammer spread should resolve")
+            .expect("strict hammer is admitted");
+        assert!(
+            matches!(skilled - baseline, 4 | 5),
+            "one exact accuracy adds five before C++-matching signed integer truncation"
+        );
+        world
+            .actors
+            .get_mut(&actor)
+            .expect("actor should remain")
+            .skills
+            .clear();
+
+        let mut replay = world.clone();
+        let attack_tick = world.tick();
+        let command = ClientCommand {
+            actor_id: actor,
+            sequence: CommandSequence(miss_sequence),
+            client_tick: attack_tick,
+            kind: CommandKind::AttackCreature { target },
+        };
+        let missed = world
+            .advance_tick(vec![command.clone()])
+            .expect("hammer miss should resolve");
+        assert_eq!(
+            missed,
+            replay
+                .advance_tick(vec![command])
+                .expect("hammer miss should replay")
+        );
+        assert!(matches!(
+            missed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorMissedCreature { source, target: event_target },
+                ..
+            }] if *source == actor && *event_target == target
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(target)
+                .expect("missed zombie should remain")
+                .hp,
+            30
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .action_points,
+            520,
+            "the hammer miss spends the pinned 74-move attack cost"
+        );
+    }
+
+    #[test]
+    fn trapped_disconnected_unarmed_survivor_can_miss_the_classic_zombie() {
+        let mut world = WorldState::new(68, [68; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let mut wall = test_terrain("t_wall");
+        wall.move_cost = 0;
+        wall.transparent = false;
+        for (x, y) in [(0, 0), (1, 0), (2, 0), (0, 1), (0, 2), (1, 2), (2, 2)] {
+            chunk
+                .set_terrain(LocalTileCoord { x, y }, wall.clone())
+                .expect("trap wall should install");
+        }
+        world.insert_chunk(chunk);
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, false)
+            .expect("disconnected actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 4,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 40,
+                vision_night: 3,
+                stumbles: true,
+                bashes: true,
+                group_bash: true,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("classic zombie should spawn");
+        let miss_tick = (1..=1_000)
+            .find(|tick| {
+                world
+                    .actor_creature_hit_spread(actor, target, *tick)
+                    .expect("offline hit spread should resolve")
+                    .is_some_and(|spread| spread < 0)
+            })
+            .expect("offline named stream should contain a miss");
+        world.tick = SimTick(miss_tick - 1);
+        let mut replay = world.clone();
+
+        let missed = world
+            .advance_tick(Vec::new())
+            .expect("disconnected miss should resolve");
+        assert_eq!(
+            missed,
+            replay
+                .advance_tick(Vec::new())
+                .expect("disconnected miss should replay")
+        );
+        assert!(matches!(
+            missed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorMissedCreature { source, target: event_target },
+                ..
+            }] if *source == actor && *event_target == target
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(target)
+                .expect("missed zombie should remain")
+                .hp,
+            20
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .action_points,
+            800
+        );
+    }
+
+    #[test]
+    fn trapped_disconnected_hammer_wielder_uses_the_same_pinned_miss_rule() {
+        let mut world = WorldState::new(69, [69; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let mut wall = test_terrain("t_wall");
+        wall.move_cost = 0;
+        wall.transparent = false;
+        for (x, y) in [(0, 0), (1, 0), (2, 0), (0, 1), (0, 2), (1, 2), (2, 2)] {
+            chunk
+                .set_terrain(LocalTileCoord { x, y }, wall.clone())
+                .expect("trap wall should install");
+        }
+        world.insert_chunk(chunk);
+        world
+            .register_smash_item_type(SmashItemTypeV1 {
+                item_type_id: String::from("hammer"),
+                bash_damage: 9,
+                attack_time_moves: 79,
+                melee_to_hit: -1,
+            })
+            .expect("hammer profile should register");
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let hammer = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("hammer"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 9_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("hammer should spawn");
+        for (sequence, kind) in [
+            (CommandSequence(1), CommandKind::PickUp { item_id: hammer }),
+            (CommandSequence(2), CommandKind::Wield { item_id: hammer }),
+        ] {
+            let tick = world.tick();
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence,
+                    client_tick: tick,
+                    kind,
+                }])
+                .expect("hammer setup should resolve");
+        }
+        world
+            .set_connected(actor, false)
+            .expect("actor should disconnect");
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_zombie"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 4,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 40,
+                vision_night: 3,
+                stumbles: true,
+                bashes: true,
+                group_bash: true,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("classic zombie should spawn");
+        let first_candidate_tick = world.tick.0 + 1;
+        let miss_tick = (first_candidate_tick..=first_candidate_tick + 1_000)
+            .find(|tick| {
+                world
+                    .actor_creature_hit_spread(actor, target, *tick)
+                    .expect("offline hammer spread should resolve")
+                    .is_some_and(|spread| spread < 0)
+            })
+            .expect("offline hammer stream should contain a miss");
+        world.tick = SimTick(miss_tick - 1);
+        let mut replay = world.clone();
+
+        let missed = world
+            .advance_tick(Vec::new())
+            .expect("disconnected hammer miss should resolve");
+        assert_eq!(
+            missed,
+            replay
+                .advance_tick(Vec::new())
+                .expect("disconnected hammer miss should replay")
+        );
+        assert!(matches!(
+            missed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorMissedCreature { source, target: event_target },
+                ..
+            }] if *source == actor && *event_target == target
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(target)
+                .expect("missed zombie should remain")
+                .hp,
+            20
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .action_points,
+            520
+        );
+    }
+
+    #[test]
+    fn creature_death_splatters_canonical_blood_that_survives_restore_and_decays() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        world
+            .register_field_type(test_field_type("fd_blood", 1, true))
+            .expect("field type should register at world creation");
+        let position = WorldPosition { x: 2, y: 1, z: 0 };
+        let corpse_prototype = CreatureCorpsePrototypeV1 {
+            monster_type_id: String::from("mon_test"),
+            max_hp: 10,
+            speed: 100,
+            attack_cost_moves: 100,
+            aggression: 0,
+            melee_skill: 4,
+            dodge: 2,
+            size: Default::default(),
+            melee_dice: 1,
+            melee_dice_sides: 1,
+            can_see: true,
+            vision_day: 60,
+            vision_night: 60,
+            stumbles: true,
+            bashes: false,
+            group_bash: false,
+            hears: false,
+            good_hearing: false,
+            clumsy_attacks: false,
+            immobile: false,
+            pacifist: false,
+            can_open_doors: false,
+            path_settings: Default::default(),
+            blood_field_type_id: String::from("fd_blood"),
+            revives: true,
+        };
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_test"),
+                position,
+                hp: 10,
+                speed: 100,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: corpse_prototype.melee_skill,
+                dodge: corpse_prototype.dodge,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: true,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::from("fd_blood"),
+                corpse: Some(corpse_prototype.clone()),
+            })
+            .expect("blood-bearing creature should spawn");
+        let outcome = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::AttackCreature { target: creature },
+            }])
+            .expect("fatal attack should advance");
+        assert!(matches!(
+            outcome.events.get(2).map(|event| &event.kind),
+            Some(WorldEventKind::FieldIntensityChanged {
+                position: event_position,
+                field_type_id,
+                intensity: 1,
+            }) if *event_position == position && field_type_id == "fd_blood"
+        ));
+        let corpse_event = outcome
+            .events
+            .iter()
+            .find_map(|event| match event.kind {
+                WorldEventKind::CreatureCorpseCreated {
+                    creature_id,
+                    corpse_item_id,
+                    position: event_position,
+                } if creature_id == creature && event_position == position => Some(corpse_item_id),
+                _ => None,
+            })
+            .expect("ordinary death should create a stable corpse item");
+        let corpse = world
+            .ground_item_snapshot(corpse_event)
+            .expect("corpse should remain on its death tile");
+        assert_eq!(corpse.position, position);
+        assert_eq!(corpse.item.type_id, "corpse");
+        assert_eq!(corpse.item.damage, 0);
+        assert_eq!(
+            corpse
+                .item
+                .creature_corpse
+                .as_ref()
+                .expect("corpse metadata should be canonical")
+                .prototype,
+            corpse_prototype
+        );
+        let field = world
+            .fields_at(position)
+            .and_then(|fields| fields.first())
+            .expect("blood should remain on the death tile");
+        assert_eq!(field.age_seconds, 0);
+        assert_eq!(field.display_sequence, 1);
+
+        let snapshot = world.snapshot();
+        let mut restored =
+            WorldState::from_snapshot(&snapshot).expect("field state should restore");
+        assert_eq!(restored.snapshot(), snapshot);
+        let mut decay_event = None;
+        while restored.tick().0 < SimTick::HZ {
+            let tick = restored
+                .advance_tick(Vec::new())
+                .expect("field lifetime should advance");
+            decay_event = tick.events.into_iter().find(|event| {
+                matches!(
+                    event.kind,
+                    WorldEventKind::FieldIntensityChanged { intensity: 0, .. }
+                )
+            });
+        }
+        assert!(decay_event.is_some());
+        assert!(
+            restored
+                .fields_at(position)
+                .is_some_and(<[FieldSnapshotV1]>::is_empty)
+        );
+    }
+
+    #[test]
+    fn fixed_point_exponential_decay_probability_is_monotonic() {
+        let one_second = exponential_decay_threshold(1);
+        assert!(one_second > u64::MAX / 100 * 49);
+        assert!(one_second < u64::MAX / 100 * 51);
+        assert!(one_second > exponential_decay_threshold(2));
+        assert!(exponential_decay_threshold(2) > exponential_decay_threshold(2 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn carried_reviving_corpse_rises_adjacent_and_survives_snapshot_restore() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        let position = WorldPosition { x: 2, y: 1, z: 0 };
+        let prototype = CreatureCorpsePrototypeV1 {
+            monster_type_id: String::from("mon_reviver"),
+            max_hp: 10,
+            speed: 100,
+            attack_cost_moves: 37,
+            aggression: 100,
+            melee_skill: 6,
+            dodge: 3,
+            size: CreatureSizeV1::Large,
+            melee_dice: 1,
+            melee_dice_sides: 2,
+            can_see: true,
+            vision_day: 60,
+            vision_night: 60,
+            stumbles: true,
+            bashes: false,
+            group_bash: false,
+            hears: false,
+            good_hearing: false,
+            clumsy_attacks: true,
+            immobile: true,
+            pacifist: true,
+            can_open_doors: true,
+            path_settings: CreaturePathSettingsV1 {
+                max_distance: 45,
+                allow_open_doors: true,
+                avoid_traps: true,
+                avoid_sharp: true,
+                ..CreaturePathSettingsV1::default()
+            },
+            blood_field_type_id: String::new(),
+            revives: true,
+        };
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: prototype.monster_type_id.clone(),
+                position,
+                hp: prototype.max_hp,
+                speed: prototype.speed,
+                attack_cost_moves: prototype.attack_cost_moves,
+                aggression: prototype.aggression,
+                melee_skill: prototype.melee_skill,
+                dodge: prototype.dodge,
+                size: prototype.size,
+                melee_dice: prototype.melee_dice,
+                melee_dice_sides: prototype.melee_dice_sides,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: true,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: true,
+                immobile: true,
+                pacifist: true,
+                can_open_doors: true,
+                path_settings: prototype.path_settings,
+                blood_field_type_id: String::new(),
+                corpse: Some(prototype.clone()),
+            })
+            .expect("reviving creature should spawn");
+        let mut mismatched = world.snapshot();
+        let mismatched_creature = mismatched
+            .creatures
+            .iter_mut()
+            .find(|snapshot| snapshot.id == creature)
+            .expect("reviving creature should be canonical");
+        mismatched_creature.attack_cost_moves = 38;
+        assert!(matches!(
+            WorldState::from_snapshot(&mismatched),
+            Err(SimError::InvalidCreature)
+        ));
+        let death = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::AttackCreature { target: creature },
+            }])
+            .expect("fatal attack should create a corpse");
+        let corpse_item_id = death
+            .events
+            .iter()
+            .find_map(|event| match event.kind {
+                WorldEventKind::CreatureCorpseCreated { corpse_item_id, .. } => {
+                    Some(corpse_item_id)
+                }
+                _ => None,
+            })
+            .expect("corpse event should expose stable item identity");
+        let mut corpse = world
+            .ground_items
+            .remove(&corpse_item_id)
+            .expect("corpse should be on the ground")
+            .item;
+        corpse.damage = 1;
+        corpse
+            .creature_corpse
+            .as_mut()
+            .expect("corpse metadata should exist")
+            .revive_special = false;
+        let carrier = world.actors.get_mut(&actor).expect("carrier should exist");
+        carrier.inventory.insert(corpse_item_id, corpse);
+        carrier.wielded = Some(corpse_item_id);
+
+        let death_tick = death.tick.0;
+        let too_early_check = death_tick
+            .checked_add(12 * CORPSE_REVIVAL_HOUR_TICKS)
+            .expect("early check should fit")
+            .div_ceil(SimTick::HZ)
+            * SimTick::HZ;
+        world.tick = SimTick(too_early_check - 1);
+        let too_early = world
+            .advance_tick(Vec::new())
+            .expect("damage-delayed corpse check should be harmless");
+        assert!(!too_early.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CreatureRevived {
+                corpse_item_id: event_corpse,
+                ..
+            } if event_corpse == corpse_item_id
+        )));
+        assert!(
+            world
+                .actor_snapshot(actor)
+                .expect("carrier should remain")
+                .inventory
+                .iter()
+                .any(|item| item.id == corpse_item_id)
+        );
+        let first_check = death_tick
+            .checked_add(96 * CORPSE_REVIVAL_HOUR_TICKS)
+            .expect("revival time should fit")
+            .div_ceil(SimTick::HZ)
+            * SimTick::HZ;
+        world.tick = SimTick(first_check - 1);
+        let snapshot = world.snapshot();
+        let mut restored = WorldState::from_snapshot(&snapshot)
+            .expect("carried corpse should survive snapshot restore");
+        let outcome = restored
+            .advance_tick(Vec::new())
+            .expect("forced-age corpse should process");
+        let (revived_id, revived_position) = outcome
+            .events
+            .iter()
+            .find_map(|event| match event.kind {
+                WorldEventKind::CreatureRevived {
+                    creature_id,
+                    corpse_item_id: event_corpse,
+                    position,
+                } if event_corpse == corpse_item_id => Some((creature_id, position)),
+                _ => None,
+            })
+            .expect("aged corpse should rise deterministically");
+        let carrier = restored
+            .actor_snapshot(actor)
+            .expect("carrier should remain");
+        assert!(
+            !carrier
+                .inventory
+                .iter()
+                .any(|item| item.id == corpse_item_id)
+        );
+        assert_eq!(carrier.wielded, None);
+        assert_ne!(revived_position, carrier.position);
+        assert!(horizontally_adjacent(revived_position, carrier.position));
+        let revived = restored
+            .creature_snapshot(revived_id)
+            .expect("revived creature should be canonical");
+        assert_eq!(revived.hp, 3);
+        assert_eq!(revived.max_hp, 10);
+        assert_eq!(revived.speed, 40);
+        assert_eq!(revived.attack_cost_moves, 37);
+        assert_eq!(revived.melee_skill, 6);
+        assert_eq!(revived.dodge, 3);
+        assert_eq!(revived.size, CreatureSizeV1::Large);
+        assert!(revived.stumbles);
+        assert!(revived.clumsy_attacks);
+        assert!(revived.immobile);
+        assert!(revived.pacifist);
+        assert!(revived.can_open_doors);
+        assert_eq!(revived.path_settings, prototype.path_settings);
+        assert_eq!(revived.corpse, Some(prototype));
+        assert_eq!(
+            revived.downed_until_tick,
+            Some(SimTick(outcome.tick.0 + 5 * SimTick::HZ))
+        );
+        for _ in 1..5 * SimTick::HZ {
+            restored
+                .advance_tick(Vec::new())
+                .expect("downed revival time should advance");
+        }
+        let still_downed = restored
+            .creature_snapshot(revived_id)
+            .expect("revived creature should remain");
+        assert_eq!(still_downed.position, revived_position);
+        assert_eq!(still_downed.action_points, 0);
+        restored
+            .advance_tick(Vec::new())
+            .expect("downed effect should expire");
+        let active = restored
+            .creature_snapshot(revived_id)
+            .expect("revived creature should activate");
+        assert_eq!(active.downed_until_tick, None);
+        assert_eq!(active.action_points, 40);
+        assert_eq!(
+            WorldState::from_snapshot(&restored.snapshot())
+                .expect("revived world should restore")
+                .canonical_hash()
+                .expect("restored world should hash"),
+            restored.canonical_hash().expect("live world should hash")
+        );
+    }
+
+    #[test]
+    fn corpse_overkill_mapping_preserves_exact_pulverization_boundary() {
+        assert_eq!(
+            corpse_damage_level(0, 80).expect("valid HP"),
+            Some((0, true))
+        );
+        assert_eq!(
+            corpse_damage_level(-1, 80).expect("valid HP"),
+            Some((1, true))
+        );
+        assert_eq!(
+            corpse_damage_level(-160, 80).expect("boundary should fit"),
+            Some((MAX_ITEM_DAMAGE_LEVEL, false))
+        );
+        assert_eq!(
+            corpse_damage_level(-161, 80).expect("pulverization should fit"),
+            None
+        );
+    }
+
+    #[test]
+    fn corpse_that_cannot_reconstruct_positive_stats_stays_without_failing_tick() {
+        let mut world = WorldState::new(51, [51; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let corpse_item_id = world
+            .allocator
+            .allocate_item()
+            .expect("corpse ID should allocate");
+        let position = WorldPosition { x: 3, y: 3, z: 0 };
+        world.ground_items.insert(
+            corpse_item_id,
+            GroundItem {
+                item: ItemInstance {
+                    id: corpse_item_id,
+                    type_id: String::from("corpse"),
+                    charges: 1,
+                    damage: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                    component_provenance: None,
+                    magazine_capacity: 0,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                    creature_corpse: Some(CreatureCorpseSnapshotV1 {
+                        prototype: CreatureCorpsePrototypeV1 {
+                            monster_type_id: String::from("mon_tiny_reviver"),
+                            max_hp: 1,
+                            speed: 1,
+                            attack_cost_moves: 100,
+                            aggression: 1,
+                            melee_skill: 0,
+                            dodge: 0,
+                            size: Default::default(),
+                            melee_dice: 1,
+                            melee_dice_sides: 1,
+                            can_see: true,
+                            vision_day: 60,
+                            vision_night: 60,
+                            stumbles: false,
+                            bashes: false,
+                            group_bash: false,
+                            hears: false,
+                            good_hearing: false,
+                            clumsy_attacks: false,
+                            immobile: false,
+                            pacifist: false,
+                            can_open_doors: false,
+                            path_settings: Default::default(),
+                            blood_field_type_id: String::new(),
+                            revives: true,
+                        },
+                        death_tick: SimTick(0),
+                        revive_special: false,
+                        revivable: true,
+                    }),
+                },
+                position,
+            },
+        );
+        world.tick = SimTick(48 * CORPSE_REVIVAL_HOUR_TICKS - 1);
+        let outcome = world
+            .advance_tick(Vec::new())
+            .expect("failed reconstruction should not fail a world tick");
+        assert!(
+            !outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, WorldEventKind::CreatureRevived { .. }))
+        );
+        assert!(world.ground_item_snapshot(corpse_item_id).is_some());
+        assert!(world.snapshot().creatures.is_empty());
+    }
+
+    #[test]
+    fn fatal_ranged_attack_rejects_atomically_when_corpse_id_is_unavailable() {
+        let mut world = WorldState::new(50, [50; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 3).expect("valid short block"))
+            .expect("short block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should use first ID");
+        let weapon_id = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("test_revolver"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: Some(RangedWeaponSnapshot {
+                    ammunition_type: String::from("38"),
+                    ammunition_remaining: 1,
+                    ammunition_capacity: 1,
+                    range: 5,
+                    damage: 10,
+                    dispersion: 0,
+                    sound_volume: 0,
+                }),
+            })
+            .expect("weapon should use second ID");
+        let weapon = world
+            .ground_items
+            .remove(&weapon_id)
+            .expect("weapon should exist")
+            .item;
+        let actor_state = world.actors.get_mut(&actor).expect("actor should exist");
+        actor_state.inventory.insert(weapon_id, weapon);
+        actor_state.wielded = Some(weapon_id);
+        actor_state.action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        let prototype = CreatureCorpsePrototypeV1 {
+            monster_type_id: String::from("mon_test"),
+            max_hp: 10,
+            speed: 100,
+            attack_cost_moves: 100,
+            aggression: 0,
+            melee_skill: 0,
+            dodge: 0,
+            size: Default::default(),
+            melee_dice: 1,
+            melee_dice_sides: 1,
+            can_see: true,
+            vision_day: 60,
+            vision_night: 60,
+            stumbles: false,
+            bashes: false,
+            group_bash: false,
+            hears: false,
+            good_hearing: false,
+            clumsy_attacks: false,
+            immobile: false,
+            pacifist: false,
+            can_open_doors: false,
+            path_settings: Default::default(),
+            blood_field_type_id: String::new(),
+            revives: false,
+        };
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: prototype.monster_type_id.clone(),
+                position: WorldPosition { x: 3, y: 1, z: 0 },
+                hp: 10,
+                speed: 100,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: Some(prototype),
+            })
+            .expect("creature should use final ID");
+        let outcome = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(1),
+                client_tick: SimTick(0),
+                kind: CommandKind::ShootCreature { target },
+            }])
+            .expect("ID shortage should be a typed rejection, not a failed tick");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                actor_id,
+                sequence: CommandSequence(1),
+                reason: CommandRejection::StableIdsUnavailable,
+            } if actor_id == actor
+        )));
+        assert_eq!(
+            world.creature_snapshot(target).expect("target remains").hp,
+            10
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .inventory
+                .iter()
+                .find(|item| item.id == weapon_id)
+                .and_then(|item| item.ranged_weapon.as_ref())
+                .map(|weapon| weapon.ammunition_remaining),
+            Some(1)
+        );
+        assert!(world.snapshot().ground_items.is_empty());
+    }
+
+    #[test]
+    fn ranged_weapon_spends_ammunition_and_kills_deterministically() {
+        let mut world = WorldState::new(15, [10; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let weapon = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("test_revolver"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: Some(RangedWeaponSnapshot {
+                    ammunition_type: String::from("38"),
+                    ammunition_remaining: 2,
+                    ammunition_capacity: 6,
+                    range: 10,
+                    damage: 10,
+                    dispersion: 0,
+                    sound_volume: 0,
+                }),
+            })
+            .expect("weapon should spawn");
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_target"),
+                position: WorldPosition { x: 5, y: 1, z: 0 },
+                hp: 10,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("target should spawn");
+        let commands = [
+            CommandKind::PickUp { item_id: weapon },
+            CommandKind::Wield { item_id: weapon },
+            CommandKind::ShootCreature { target: creature },
+        ];
+        let mut shot_events = Vec::new();
+        for (index, kind) in commands.into_iter().enumerate() {
+            shot_events = world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((index + 1) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("ranged action should advance")
+                .events;
+        }
+        assert!(matches!(
+            shot_events[0].kind,
+            WorldEventKind::RangedAttackResolved {
+                source,
+                weapon: event_weapon,
+                target: RangedTarget::Creature(event_target),
+                hit: true,
+                remaining_ammunition: 1,
+                ..
+            } if source == actor && event_weapon == weapon && event_target == creature
+        ));
+        assert!(matches!(
+            shot_events[2].kind,
+            WorldEventKind::CreatureDied { creature_id, killer }
+                if creature_id == creature && killer == actor
+        ));
+        let actor = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            actor.inventory[0]
+                .ranged_weapon
+                .as_ref()
+                .expect("weapon stats persist")
+                .ammunition_remaining,
+            1
+        );
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ);
+        let dark_target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_dark_target"),
+                position: WorldPosition { x: 5, y: 1, z: 0 },
+                hp: 10,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("dark target should spawn on the dead creature's tile");
+        let dark_shot = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor.id,
+                sequence: CommandSequence(4),
+                client_tick: world.tick(),
+                kind: CommandKind::ShootCreature {
+                    target: dark_target,
+                },
+            }])
+            .expect("dark shot should resolve");
+        assert!(dark_shot.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::NoClearShot,
+                ..
+            }
+        )));
+        assert_eq!(
+            world
+                .actor_snapshot(actor.id)
+                .expect("actor remains")
+                .inventory[0]
+                .ranged_weapon
+                .as_ref()
+                .expect("weapon remains")
+                .ammunition_remaining,
+            1,
+            "an unseen targeted shot must not spend ammunition"
+        );
+        WorldState::from_snapshot(&world.snapshot()).expect("ranged state should round trip");
+    }
+
+    #[test]
+    fn gunfire_drives_private_deterministic_hearing_goals_with_visual_memory_priority() {
+        let mut world = WorldState::new(56, [56; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let wall = TerrainTileSnapshot {
+            terrain_id: String::from("t_wall"),
+            move_cost: 0,
+            transparent: false,
+            flat: false,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        for y in 0..cdda_protocol::SUBMAP_SIZE as u8 {
+            chunk
+                .set_terrain(LocalTileCoord { x: 5, y }, wall.clone())
+                .expect("occluding wall should install");
+        }
+        world.insert_chunk(chunk);
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let weapon = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("test_revolver"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: Some(RangedWeaponSnapshot {
+                    ammunition_type: String::from("38"),
+                    ammunition_remaining: 2,
+                    ammunition_capacity: 6,
+                    range: 10,
+                    damage: 1,
+                    dispersion: 0,
+                    sound_volume: 70,
+                }),
+            })
+            .expect("weapon should spawn");
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_target"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 10,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("target should spawn");
+        let listener_speed =
+            u16::try_from(CREATURE_ACTION_THRESHOLD).expect("action threshold fits u16");
+        let spawn_listener = |world: &mut WorldState,
+                              type_id: &str,
+                              position: WorldPosition,
+                              hears: bool,
+                              good_hearing: bool| {
+            world
+                .spawn_creature(CreatureSpawn {
+                    type_id: type_id.to_owned(),
+                    position,
+                    hp: 20,
+                    speed: listener_speed,
+                    attack_cost_moves: 100,
+                    aggression: 100,
+                    melee_skill: 0,
+                    dodge: 0,
+                    size: Default::default(),
+                    melee_dice: 1,
+                    melee_dice_sides: 1,
+                    can_see: true,
+                    vision_day: 60,
+                    vision_night: 60,
+                    stumbles: false,
+                    bashes: false,
+                    group_bash: false,
+                    hears,
+                    good_hearing,
+                    clumsy_attacks: false,
+                    immobile: false,
+                    pacifist: false,
+                    can_open_doors: false,
+                    path_settings: Default::default(),
+                    blood_field_type_id: String::new(),
+                    corpse: None,
+                })
+                .expect("listener should spawn")
+        };
+        let listener = spawn_listener(
+            &mut world,
+            "mon_listener",
+            WorldPosition { x: 8, y: 2, z: 0 },
+            true,
+            false,
+        );
+        let deaf = spawn_listener(
+            &mut world,
+            "mon_deaf",
+            WorldPosition { x: 8, y: 4, z: 0 },
+            false,
+            false,
+        );
+        let good_listener = spawn_listener(
+            &mut world,
+            "mon_good_listener",
+            WorldPosition { x: 8, y: 6, z: 0 },
+            true,
+            true,
+        );
+        let remembered = spawn_listener(
+            &mut world,
+            "mon_remembered_target",
+            WorldPosition { x: 8, y: 8, z: 0 },
+            true,
+            false,
+        );
+        let remembered_destination = WorldPosition { x: 8, y: 10, z: 0 };
+        assert!(matches!(
+            world.spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_invalid_hearing"),
+                position: WorldPosition { x: 10, y: 10, z: 0 },
+                hp: 1,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: true,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            }),
+            Err(SimError::InvalidCreature)
+        ));
+
+        let commands = [
+            CommandKind::PickUp { item_id: weapon },
+            CommandKind::Wield { item_id: weapon },
+            CommandKind::ShootCreature { target },
+        ];
+        let mut shot = None;
+        for (index, kind) in commands.into_iter().enumerate() {
+            if index == 2 {
+                world
+                    .creatures
+                    .get_mut(&remembered)
+                    .expect("listener should exist")
+                    .goal = Some(remembered_destination);
+            }
+            shot = Some(
+                world
+                    .advance_tick(vec![ClientCommand {
+                        actor_id: actor,
+                        sequence: CommandSequence((index + 1) as u64),
+                        client_tick: world.tick(),
+                        kind,
+                    }])
+                    .expect("ranged action should advance"),
+            );
+        }
+        let shot = shot.expect("shot outcome should exist");
+        assert!(shot.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::RangedAttackResolved {
+                origin: WorldPosition { x: 1, y: 1, z: 0 },
+                sound,
+                sound_volume: 70,
+                ..
+            } if sound == "bang!"
+        )));
+
+        let listener = world
+            .creature_snapshot(listener)
+            .expect("listener should remain");
+        assert!(
+            listener.position.x < 8,
+            "the hidden listener pursues the shot"
+        );
+        assert_eq!(
+            listener.sound_goal,
+            Some(CreatureSoundGoalV1 {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                remaining_actions: 62,
+            })
+        );
+        let deaf = world
+            .creature_snapshot(deaf)
+            .expect("deaf creature remains");
+        assert_eq!(deaf.position, WorldPosition { x: 8, y: 4, z: 0 });
+        assert_eq!(deaf.sound_goal, None);
+        let good_listener = world
+            .creature_snapshot(good_listener)
+            .expect("good listener should remain");
+        assert!(good_listener.position.x < 8);
+        assert_eq!(
+            good_listener
+                .sound_goal
+                .expect("good hearing should retain a longer goal")
+                .remaining_actions,
+            797
+        );
+        let remembered = world
+            .creature_snapshot(remembered)
+            .expect("remembering listener should remain");
+        assert_eq!(remembered.position, WorldPosition { x: 8, y: 9, z: 0 });
+        assert_eq!(remembered.goal, Some(remembered_destination));
+        assert_eq!(
+            remembered
+                .sound_goal
+                .expect("the lower-priority sound remains canonical")
+                .position,
+            WorldPosition { x: 1, y: 1, z: 0 }
+        );
+
+        let mut invalid_lifetime = world.snapshot();
+        invalid_lifetime
+            .creatures
+            .iter_mut()
+            .find(|creature| creature.id == listener.id)
+            .and_then(|creature| creature.sound_goal.as_mut())
+            .expect("listener should expose private snapshot state")
+            .remaining_actions = MAX_CREATURE_SOUND_GOAL_ACTIONS + 1;
+        assert!(matches!(
+            WorldState::from_snapshot(&invalid_lifetime),
+            Err(SimError::InvalidCreature)
+        ));
+
+        let mut restored = WorldState::from_snapshot(&world.snapshot())
+            .expect("private hearing state should restore");
+        assert_eq!(
+            restored.canonical_hash().expect("restored state hashes"),
+            world.canonical_hash().expect("live state hashes")
+        );
+        restored
+            .creatures
+            .get_mut(&listener.id)
+            .and_then(|creature| creature.sound_goal.as_mut())
+            .expect("listener should retain its sound goal")
+            .remaining_actions = 1;
+        restored
+            .advance_tick(Vec::new())
+            .expect("sound-goal expiry should advance");
+        assert_eq!(
+            restored
+                .creature_snapshot(listener.id)
+                .expect("listener should remain")
+                .sound_goal,
+            None,
+            "sound pursuit expires once per creature action"
+        );
+
+        let edge_source = WorldPosition {
+            x: i32::MAX,
+            y: i32::MAX,
+            z: 0,
+        };
+        restored.insert_chunk(Chunk::floor(edge_source.chunk_and_local().0));
+        let edge_listener = restored
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_edge_listener"),
+                position: WorldPosition {
+                    x: i32::MAX - 1,
+                    y: i32::MAX - 1,
+                    z: 0,
+                },
+                hp: 1,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("edge listener should spawn");
+        for event_id in 0..128 {
+            restored
+                .creatures
+                .get_mut(&edge_listener)
+                .expect("edge listener should remain")
+                .sound_goal = None;
+            restored
+                .creature_hear_sound(edge_listener, edge_source, 2, true, event_id)
+                .expect("imprecise edge sound must saturate instead of aborting a tick");
+        }
+    }
+
+    #[test]
+    fn capable_creature_opens_and_enters_terrain_door_at_pinned_zero_move_cost() {
+        let mut base = WorldState::new(57, [57; 32]);
+        base.install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let mut wall = test_terrain("t_wall");
+        wall.move_cost = 0;
+        wall.transparent = false;
+        for x in 0..SUBMAP_SIZE as u8 {
+            for y in [0, 2] {
+                chunk
+                    .set_terrain(LocalTileCoord { x, y }, wall.clone())
+                    .expect("corridor wall should install");
+            }
+        }
+        let closed_door = TerrainTileSnapshot {
+            terrain_id: String::from("t_door_c"),
+            move_cost: 0,
+            transparent: true,
+            flat: false,
+            open: String::from("t_door_o"),
+            open_move_cost: Some(2),
+            open_transparent: Some(true),
+            open_flat: Some(true),
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        chunk
+            .set_terrain(LocalTileCoord { x: 4, y: 1 }, closed_door.clone())
+            .expect("door should install");
+        chunk
+            .set_map_damage(LocalTileCoord { x: 4, y: 1 }, 2)
+            .expect("partial structural damage should install");
+        base.insert_chunk(chunk);
+        base.spawn_actor(WorldPosition { x: 5, y: 1, z: 0 }, true)
+            .expect("target actor should spawn");
+        let spawn = |world: &mut WorldState, can_see, can_open_doors| {
+            world
+                .spawn_creature(CreatureSpawn {
+                    type_id: String::from("mon_door_test"),
+                    position: WorldPosition { x: 3, y: 1, z: 0 },
+                    hp: 20,
+                    speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits u16"),
+                    attack_cost_moves: 100,
+                    aggression: 100,
+                    melee_skill: 0,
+                    dodge: 0,
+                    size: Default::default(),
+                    melee_dice: 1,
+                    melee_dice_sides: 1,
+                    can_see,
+                    vision_day: if can_see { 60 } else { 0 },
+                    vision_night: if can_see { 60 } else { 0 },
+                    stumbles: false,
+                    bashes: false,
+                    group_bash: false,
+                    hears: true,
+                    good_hearing: false,
+                    clumsy_attacks: false,
+                    immobile: false,
+                    pacifist: false,
+                    can_open_doors,
+                    path_settings: CreaturePathSettingsV1 {
+                        max_distance: 45,
+                        allow_open_doors: can_open_doors,
+                        ..CreaturePathSettingsV1::default()
+                    },
+                    blood_field_type_id: String::new(),
+                    corpse: None,
+                })
+                .expect("door-test creature should spawn")
+        };
+
+        let mut incapable = base.clone();
+        let incapable_id = spawn(&mut incapable, true, false);
+        let incapable_outcome = incapable
+            .advance_tick(Vec::new())
+            .expect("incapable turn should advance");
+        assert!(incapable_outcome.events.is_empty());
+        assert_eq!(
+            incapable
+                .creature_snapshot(incapable_id)
+                .expect("incapable creature should remain")
+                .position,
+            WorldPosition { x: 3, y: 1, z: 0 }
+        );
+        assert_eq!(
+            incapable.snapshot().chunks[0].tiles
+                [tile_index(LocalTileCoord { x: 4, y: 1 }).expect("door index")]
+            .terrain_id,
+            "t_door_c"
+        );
+
+        let mut visible = base.clone();
+        let visible_id = spawn(&mut visible, true, true);
+        let visible_outcome = visible
+            .advance_tick(Vec::new())
+            .expect("visible door-opening turn should advance");
+        assert!(matches!(
+            &visible_outcome.events[0].kind,
+            WorldEventKind::CreatureOpenedTerrain {
+                creature_id,
+                position: WorldPosition { x: 4, y: 1, z: 0 },
+                from,
+                to,
+                sound,
+                volume: 6,
+            } if *creature_id == visible_id
+                && from == "t_door_c"
+                && to == "t_door_o"
+                && sound == "swish"
+        ));
+        assert!(matches!(
+            visible_outcome.events[1].kind,
+            WorldEventKind::CreatureMoved {
+                creature_id,
+                from: WorldPosition { x: 3, y: 1, z: 0 },
+                to: WorldPosition { x: 4, y: 1, z: 0 },
+            } if creature_id == visible_id
+        ));
+        let visible_creature = visible
+            .creature_snapshot(visible_id)
+            .expect("visible opener should remain");
+        assert_eq!(visible_creature.action_points, 0);
+        assert!(visible_creature.can_open_doors);
+        let door_index = tile_index(LocalTileCoord { x: 4, y: 1 }).expect("door index");
+        assert_eq!(
+            visible.snapshot().chunks[0].tiles[door_index].terrain_id,
+            "t_door_o"
+        );
+        assert_eq!(visible.snapshot().chunks[0].map_damage[door_index], 0);
+        WorldState::from_snapshot(&visible.snapshot())
+            .expect("door-opening capability and terrain should restore");
+
+        let mut sound_driven = base;
+        let sound_driven_id = spawn(&mut sound_driven, false, true);
+        sound_driven
+            .creatures
+            .get_mut(&sound_driven_id)
+            .expect("sound-driven opener should exist")
+            .sound_goal = Some(CreatureSoundGoalV1 {
+            position: WorldPosition { x: 5, y: 1, z: 0 },
+            remaining_actions: 10,
+        });
+        let sound_outcome = sound_driven
+            .advance_tick(Vec::new())
+            .expect("sound-driven door-opening turn should advance");
+        assert!(matches!(
+            sound_outcome.events[0].kind,
+            WorldEventKind::CreatureOpenedTerrain { creature_id, .. }
+                if creature_id == sound_driven_id
+        ));
+        assert_eq!(
+            sound_driven
+                .creature_snapshot(sound_driven_id)
+                .expect("sound-driven opener should remain")
+                .position,
+            WorldPosition { x: 4, y: 1, z: 0 }
+        );
+    }
+
+    #[test]
+    fn content_routing_takes_a_deterministic_nonprogress_step_around_a_wall() {
+        let mut base = WorldState::new(58, [58; 32]);
+        base.install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let mut wall = test_terrain("t_wall");
+        wall.move_cost = 0;
+        wall.transparent = false;
+        for y in 0..=2 {
+            chunk
+                .set_terrain(LocalTileCoord { x: 4, y }, wall.clone())
+                .expect("barrier should install");
+        }
+        base.insert_chunk(chunk);
+        let target_position = WorldPosition { x: 5, y: 1, z: 0 };
+        base.spawn_actor(target_position, true)
+            .expect("target actor should spawn");
+        let spawn = |world: &mut WorldState, max_distance| {
+            let id = world
+                .spawn_creature(CreatureSpawn {
+                    type_id: String::from("mon_route_test"),
+                    position: WorldPosition { x: 3, y: 1, z: 0 },
+                    hp: 20,
+                    speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                    attack_cost_moves: 100,
+                    aggression: 100,
+                    melee_skill: 0,
+                    dodge: 0,
+                    size: Default::default(),
+                    melee_dice: 1,
+                    melee_dice_sides: 1,
+                    can_see: false,
+                    vision_day: 0,
+                    vision_night: 0,
+                    stumbles: false,
+                    bashes: false,
+                    group_bash: false,
+                    hears: false,
+                    good_hearing: false,
+                    clumsy_attacks: false,
+                    immobile: false,
+                    pacifist: false,
+                    can_open_doors: false,
+                    path_settings: CreaturePathSettingsV1 {
+                        max_distance,
+                        ..CreaturePathSettingsV1::default()
+                    },
+                    blood_field_type_id: String::new(),
+                    corpse: None,
+                })
+                .expect("route-test creature should spawn");
+            world
+                .creatures
+                .get_mut(&id)
+                .expect("route-test creature should remain")
+                .goal = Some(target_position);
+            id
+        };
+
+        let mut greedy = base.clone();
+        let greedy_id = spawn(&mut greedy, 0);
+        let greedy_outcome = greedy
+            .advance_tick(Vec::new())
+            .expect("greedy fallback tick should advance");
+        assert!(greedy_outcome.events.is_empty());
+        assert_eq!(
+            greedy
+                .creature_snapshot(greedy_id)
+                .expect("greedy creature should remain")
+                .position,
+            WorldPosition { x: 3, y: 1, z: 0 }
+        );
+
+        let mut routed = base;
+        let routed_id = spawn(&mut routed, 10);
+        let planned_step = routed
+            .creature_route_step(
+                routed_id,
+                WorldPosition { x: 3, y: 1, z: 0 },
+                target_position,
+            )
+            .expect("route search should be valid");
+        assert_eq!(planned_step, Some(WorldPosition { x: 3, y: 2, z: 0 }));
+        let routed_outcome = routed
+            .advance_tick(Vec::new())
+            .expect("routed tick should advance");
+        assert!(
+            matches!(
+                routed_outcome.events.as_slice(),
+                [WorldEvent {
+                    kind: WorldEventKind::CreatureMoved {
+                        creature_id,
+                        from: WorldPosition { x: 3, y: 1, z: 0 },
+                        to: WorldPosition { x: 3, y: 2, z: 0 },
+                    },
+                    ..
+                }] if *creature_id == routed_id
+            ),
+            "unexpected routed events: {:?}",
+            (
+                &routed_outcome.events,
+                routed
+                    .creature_snapshot(routed_id)
+                    .expect("routed creature should remain")
+            )
+        );
+        let routed_snapshot = routed
+            .creature_snapshot(routed_id)
+            .expect("routed creature should remain");
+        assert_eq!(routed_snapshot.path_settings.max_distance, 10);
+        assert_eq!(routed_snapshot.goal, Some(target_position));
+        WorldState::from_snapshot(&routed.snapshot()).expect("routed state should round trip");
+
+        let mut hostile = routed.snapshot();
+        hostile.creatures[0].path_settings.max_distance = 401;
+        assert!(matches!(
+            WorldState::from_snapshot(&hostile),
+            Err(SimError::InvalidCreature)
+        ));
+    }
+
+    #[test]
+    fn route_planned_bashing_uses_base_strength_and_pinned_costs() {
+        let mut base = WorldState::new(61, [61; 32]);
+        base.install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        base.register_terrain_bash_type(TerrainBashTypeV1 {
+            terrain_id: String::from("t_door_c"),
+            str_min: 6,
+            str_max: 26,
+            str_min_blocked: 150,
+            str_max_blocked: 160,
+            str_min_supported: -1,
+            str_max_supported: -1,
+            bash_multiplier_millionths: 1_000_000,
+            result: test_terrain("t_floor"),
+            drops: Vec::new(),
+            hit_field: None,
+            destroyed_field: None,
+            sound: String::from("smash!"),
+            failure_sound: String::from("whump!"),
+            sound_volume: 20,
+            failure_sound_volume: 12,
+        })
+        .expect("door bash should register");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let mut wall = test_terrain("t_wall");
+        wall.move_cost = 0;
+        wall.transparent = false;
+        for y in 0..=10 {
+            chunk
+                .set_terrain(LocalTileCoord { x: 4, y }, wall.clone())
+                .expect("barrier should install");
+        }
+        let mut door = test_terrain("t_door_c");
+        door.move_cost = 0;
+        door.transparent = false;
+        chunk
+            .set_terrain(LocalTileCoord { x: 4, y: 5 }, door)
+            .expect("door should install");
+        base.insert_chunk(chunk);
+        let from = WorldPosition { x: 3, y: 5, z: 0 };
+        let target = WorldPosition { x: 5, y: 5, z: 0 };
+        let spawn = |world: &mut WorldState, melee_dice, melee_dice_sides, group_bash| {
+            let creature_id = world
+                .spawn_creature(CreatureSpawn {
+                    type_id: String::from("mon_route_basher"),
+                    position: from,
+                    hp: 20,
+                    speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                    attack_cost_moves: 100,
+                    aggression: 100,
+                    melee_skill: 0,
+                    dodge: 0,
+                    size: Default::default(),
+                    melee_dice,
+                    melee_dice_sides,
+                    can_see: false,
+                    vision_day: 0,
+                    vision_night: 0,
+                    stumbles: false,
+                    bashes: true,
+                    group_bash,
+                    hears: false,
+                    good_hearing: false,
+                    clumsy_attacks: false,
+                    immobile: false,
+                    pacifist: false,
+                    can_open_doors: false,
+                    path_settings: CreaturePathSettingsV1 {
+                        max_distance: 20,
+                        ..CreaturePathSettingsV1::default()
+                    },
+                    blood_field_type_id: String::new(),
+                    corpse: None,
+                })
+                .expect("route basher should spawn");
+            world
+                .creatures
+                .get_mut(&creature_id)
+                .expect("route basher should remain")
+                .goal = Some(target);
+            creature_id
+        };
+
+        let mut strong = base.clone();
+        let strong_id = spawn(&mut strong, 10, 10, false);
+        let door_position = WorldPosition { x: 4, y: 5, z: 0 };
+        assert_eq!(
+            strong
+                .creature_route_bash_rating(strong_id, door_position)
+                .expect("route rating should compute"),
+            Some(10)
+        );
+        assert_eq!(
+            strong
+                .creature_route_tile_cost(
+                    strong_id,
+                    strong.creatures.get(&strong_id).expect("strong basher"),
+                    door_position,
+                )
+                .expect("route cost should compute"),
+            Some(14)
+        );
+        assert_eq!(
+            strong
+                .creature_route_step(strong_id, from, target)
+                .expect("strong route should compute"),
+            Some(door_position)
+        );
+        let mut restored =
+            WorldState::from_snapshot(&strong.snapshot()).expect("strong route should restore");
+        let strong_outcome = strong
+            .advance_tick(Vec::new())
+            .expect("strong route bash should advance");
+        assert_eq!(
+            strong_outcome,
+            restored
+                .advance_tick(Vec::new())
+                .expect("restored route bash should advance")
+        );
+        assert!(matches!(
+            strong_outcome.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureBashed {
+                    creature_id,
+                    target: event_target,
+                    target_kind: BashTargetKindV1::Terrain,
+                    target_type_id,
+                    success: true,
+                    ..
+                },
+                ..
+            }] if *creature_id == strong_id
+                && *event_target == door_position
+                && target_type_id == "t_door_c"
+        ));
+        assert_eq!(
+            strong.canonical_hash().expect("strong world should hash"),
+            restored
+                .canonical_hash()
+                .expect("restored world should hash")
+        );
+
+        let mut blocked = base.clone();
+        let blocker_position = WorldPosition { x: 4, y: 4, z: 0 };
+        let (blocker_coord, blocker_local) = blocker_position.chunk_and_local();
+        blocked
+            .chunks
+            .get_mut(&blocker_coord)
+            .expect("blocker chunk should remain")
+            .set_furniture(
+                blocker_local,
+                Some(FurnitureTileSnapshot {
+                    blocks_door: true,
+                    ..test_furniture("f_door_blocker", 0, true)
+                }),
+            )
+            .expect("door blocker should install");
+        let blocked_id = spawn(&mut blocked, 10, 10, false);
+        assert_eq!(
+            blocked
+                .creature_route_bash_rating(blocked_id, door_position)
+                .expect("blocked route estimate should compute"),
+            Some(10),
+            "route estimates use ordinary bounds like upstream bash_rating_internal"
+        );
+        let blocked_outcome = blocked
+            .advance_tick(Vec::new())
+            .expect("blocked route bash should advance");
+        assert!(matches!(
+            blocked_outcome.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureBashed {
+                    creature_id,
+                    target: event_target,
+                    success: false,
+                    damage: 0,
+                    ..
+                },
+                ..
+            }] if *creature_id == blocked_id && *event_target == door_position
+        ));
+
+        let mut desperate = base;
+        let desperate_id = spawn(&mut desperate, 2, 4, true);
+        assert_eq!(
+            desperate
+                .creature_route_bash_rating(desperate_id, door_position)
+                .expect("base route rating should compute"),
+            Some(1)
+        );
+        assert_eq!(
+            desperate
+                .creature_bash_rating(desperate_id, door_position)
+                .expect("direct group estimate should compute"),
+            Some(3)
+        );
+        assert_eq!(
+            desperate
+                .creature_route_tile_cost(
+                    desperate_id,
+                    desperate
+                        .creatures
+                        .get(&desperate_id)
+                        .expect("desperate basher"),
+                    door_position,
+                )
+                .expect("desperate route cost should compute"),
+            Some(500)
+        );
+        let detour_step = desperate
+            .creature_route_step(desperate_id, from, target)
+            .expect("desperate route should compute")
+            .expect("detour should exist");
+        assert_ne!(detour_step, door_position);
+        let desperate_outcome = desperate
+            .advance_tick(Vec::new())
+            .expect("desperate detour should advance");
+        assert!(matches!(
+            desperate_outcome.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureMoved {
+                    creature_id,
+                    from: event_from,
+                    to,
+                },
+                ..
+            }] if *creature_id == desperate_id
+                && *event_from == from
+                && *to == detour_step
+        ));
+    }
+
+    #[test]
+    fn opaque_terrain_rejects_a_shot_without_spending_ammunition() {
+        let mut world = WorldState::new(16, [10; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        chunk
+            .set_terrain(
+                LocalTileCoord { x: 3, y: 1 },
+                TerrainTileSnapshot {
+                    terrain_id: String::from("t_wall"),
+                    move_cost: 0,
+                    transparent: false,
+                    flat: false,
+                    open: String::new(),
+                    open_move_cost: None,
+                    open_transparent: None,
+                    open_flat: None,
+                    close: String::new(),
+                    close_move_cost: None,
+                    close_transparent: None,
+                    close_flat: None,
+                },
+            )
+            .expect("wall should be valid");
+        world.insert_chunk(chunk);
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let weapon = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("test_revolver"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: Some(RangedWeaponSnapshot {
+                    ammunition_type: String::from("38"),
+                    ammunition_remaining: 2,
+                    ammunition_capacity: 6,
+                    range: 10,
+                    damage: 10,
+                    dispersion: 0,
+                    sound_volume: 0,
+                }),
+            })
+            .expect("weapon should spawn");
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_target"),
+                position: WorldPosition { x: 5, y: 1, z: 0 },
+                hp: 10,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("target should spawn");
+        for (index, kind) in [
+            CommandKind::PickUp { item_id: weapon },
+            CommandKind::Wield { item_id: weapon },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((index + 1) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("inventory action should advance");
+        }
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(3),
+                client_tick: world.tick(),
+                kind: CommandKind::ShootCreature { target: creature },
+            }])
+            .expect("blocked shot should resolve");
+        assert!(matches!(
+            rejected.events[0].kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::NoClearShot,
+                ..
+            }
+        ));
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .inventory[0]
+                .ranged_weapon
+                .as_ref()
+                .expect("weapon remains ranged")
+                .ammunition_remaining,
+            2
+        );
+    }
+
+    #[test]
+    fn detachable_battery_reload_power_use_disassembly_and_recovery_preserve_identity() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor);
+        let position = world.actor_snapshot(actor).expect("actor exists").position;
+        let well = MagazineWellPrototypeV1 {
+            compatible_magazine_type_ids: vec![String::from("medium_battery")],
+        };
+        assert!(matches!(
+            world.spawn_ground_item_with_powered_storage(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("medium_battery"),
+                    charges: 10,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::from("battery"),
+                    ranged_weapon: None,
+                },
+                10,
+                None,
+                1,
+                None,
+            ),
+            Err(SimError::InvalidItem)
+        ));
+        let tool = world
+            .spawn_ground_item_with_magazine_storage(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("powered_tool"),
+                    charges: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                },
+                0,
+                Some(well),
+            )
+            .expect("tool should spawn");
+        let mut spawn_battery = |type_id: &str, charges: i32| {
+            world
+                .spawn_ground_item_with_magazine_storage(
+                    ItemSpawn {
+                        position,
+                        type_id: type_id.to_owned(),
+                        charges,
+                        melee_damage_milli: BTreeMap::new(),
+                        calories: 0,
+                        quench: 0,
+                        comestible_type: String::new(),
+                        ammunition_type: String::from("battery"),
+                        ranged_weapon: None,
+                    },
+                    10,
+                    None,
+                )
+                .expect("battery should spawn")
+        };
+        let first_battery = spawn_battery("medium_battery", 5);
+        let second_battery = spawn_battery("medium_battery", 10);
+        let incompatible = spawn_battery("heavy_battery", 10);
+        let component = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("rock"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("component should spawn");
+        for (index, item_id) in [tool, first_battery, second_battery, incompatible, component]
+            .into_iter()
+            .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence(u64::try_from(index + 1).expect("small index")),
+                    client_tick: world.tick(),
+                    kind: CommandKind::PickUp { item_id },
+                }])
+                .expect("item should be picked up");
+        }
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(6),
+                client_tick: world.tick(),
+                kind: CommandKind::Wield { item_id: tool },
+            }])
+            .expect("tool should be wielded");
+
+        let rejected = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(7),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: incompatible,
+                },
+            }])
+            .expect("incompatible reload should resolve atomically");
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::IncompatibleAmmunition,
+                ..
+            }
+        )));
+        assert!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .inventory
+                .iter()
+                .any(|item| item.id == incompatible)
+        );
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(8),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: first_battery,
+                },
+            }])
+            .expect("first battery should install");
+        let swapped = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(9),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: second_battery,
+                },
+            }])
+            .expect("second battery should swap in");
+        assert!(swapped.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::MagazineReloaded {
+                tool: event_tool,
+                magazine,
+                ejected_magazine: Some(ejected),
+                charges: 10,
+                ..
+            } if event_tool == tool && magazine == second_battery && ejected == first_battery
+        )));
+        let actor_state = world.actor_snapshot(actor).expect("actor remains");
+        let powered = actor_state
+            .inventory
+            .iter()
+            .find(|item| item.id == tool)
+            .expect("tool remains carried");
+        assert_eq!(
+            powered
+                .magazine_well
+                .as_ref()
+                .and_then(|well| well.installed_magazine.as_deref())
+                .map(|magazine| (magazine.id, magazine.charges)),
+            Some((second_battery, 10))
+        );
+        assert!(
+            actor_state
+                .inventory
+                .iter()
+                .any(|item| item.id == first_battery && item.charges == 5)
+        );
+
+        let mut craft = test_craft_recipe(100, 1, vec![vec![("rock", 1, false)]]);
+        craft.tools = vec![vec![cdda_protocol::CraftToolRequirementV1 {
+            type_id: String::from("powered_tool"),
+            amount: 4,
+            consumes_charges: true,
+        }]];
+        let started = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(10),
+                client_tick: world.tick(),
+                kind: CommandKind::Craft {
+                    recipe_id: craft.recipe_id.clone(),
+                    recipe: Some(Box::new(craft)),
+                },
+            }])
+            .expect("installed battery should power crafting");
+        assert!(started.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CraftToolChargesConsumed {
+                item_id,
+                charges: 4,
+                remaining_charges: 6,
+                ..
+            } if item_id == tool
+        )));
+        world
+            .advance_tick(Vec::new())
+            .expect("short craft should complete");
+
+        let mut disassembly = test_disassembly_recipe(100, 0, Vec::new());
+        disassembly.target_type_id = String::from("powered_tool");
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(11),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: tool,
+                    item_type_id: disassembly.target_type_id.clone(),
+                    recipe: Some(Box::new(disassembly)),
+                },
+            }])
+            .expect("disassembly should detach the installed battery");
+        let snapshot = world.snapshot();
+        let dropped = snapshot
+            .ground_items
+            .iter()
+            .find(|ground| ground.item.id == second_battery)
+            .expect("same battery identity should be dropped");
+        assert_eq!(dropped.item.charges, 6);
+        let activity = snapshot
+            .actors
+            .iter()
+            .find(|candidate| candidate.id == actor)
+            .and_then(|actor| actor.disassembly_activity.as_ref())
+            .expect("disassembly should be active");
+        assert!(
+            activity
+                .target_item
+                .magazine_well
+                .as_ref()
+                .is_some_and(|well| well.installed_magazine.is_none())
+        );
+
+        let mut hostile = snapshot.clone();
+        let installed = hostile
+            .ground_items
+            .iter()
+            .find(|ground| ground.item.id == second_battery)
+            .expect("battery should exist")
+            .item
+            .clone();
+        hostile
+            .ground_items
+            .retain(|ground| ground.item.id != second_battery);
+        hostile
+            .actors
+            .iter_mut()
+            .find(|candidate| candidate.id == actor)
+            .and_then(|actor| actor.disassembly_activity.as_mut())
+            .and_then(|activity| activity.target_item.magazine_well.as_mut())
+            .expect("target well should exist")
+            .installed_magazine = Some(Box::new(installed));
+        assert!(WorldState::from_snapshot(&hostile).is_err());
+
+        let mut impossible_residual = snapshot.clone();
+        let overfilled = impossible_residual
+            .ground_items
+            .iter_mut()
+            .find(|ground| ground.item.id == second_battery)
+            .expect("battery should exist");
+        overfilled.item.charges =
+            i32::try_from(overfilled.item.magazine_capacity).expect("small capacity");
+        overfilled.item.residual_energy_millijoules = 1;
+        assert!(matches!(
+            WorldState::from_snapshot(&impossible_residual),
+            Err(SimError::InvalidItem)
+        ));
+
+        let mut recovered = WorldState::from_snapshot(&snapshot).expect("snapshot should recover");
+        recovered
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(12),
+                client_tick: recovered.tick(),
+                kind: CommandKind::CancelDisassembly,
+            }])
+            .expect("disassembly should cancel");
+        assert!(recovered.ground_item_snapshot(second_battery).is_some());
+        assert!(
+            recovered
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .inventory
+                .iter()
+                .find(|item| item.id == tool)
+                .and_then(|item| item.magazine_well.as_ref())
+                .is_some_and(|well| well.installed_magazine.is_none())
+        );
+    }
+
+    #[test]
+    fn powered_flashlight_drains_exact_energy_and_keeps_running_offline_and_on_ground() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor);
+        let position = world.actor_snapshot(actor).expect("actor exists").position;
+        let flashlight = world
+            .spawn_ground_item_with_powered_storage(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("flashlight"),
+                    charges: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                },
+                0,
+                Some(MagazineWellPrototypeV1 {
+                    compatible_magazine_type_ids: vec![String::from("medium_battery")],
+                }),
+                0,
+                Some(PoweredToolStateV1 {
+                    inactive_type_id: String::from("flashlight"),
+                    active_type_id: String::from("flashlight_on"),
+                    activation_charges: 1,
+                    power_draw_milliwatts: 1_560,
+                    light_emission: 300,
+                    dims_with_charge: true,
+                    active: false,
+                }),
+            )
+            .expect("flashlight should spawn");
+        let battery = world
+            .spawn_ground_item_with_powered_storage(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("medium_battery"),
+                    charges: 3,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::from("battery"),
+                    ranged_weapon: None,
+                },
+                10,
+                None,
+                0,
+                None,
+            )
+            .expect("battery should spawn");
+        for (index, kind) in [
+            CommandKind::PickUp {
+                item_id: flashlight,
+            },
+            CommandKind::PickUp { item_id: battery },
+            CommandKind::Wield {
+                item_id: flashlight,
+            },
+            CommandKind::Reload {
+                ammunition_item: battery,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence(u64::try_from(index + 1).expect("small index")),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("flashlight setup should advance");
+        }
+
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ + 7);
+        assert!(
+            !world
+                .actor_has_detail_light(actor)
+                .expect("darkness should resolve")
+        );
+        let activated = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::Activate {
+                    item_id: flashlight,
+                },
+            }])
+            .expect("activation should advance");
+        assert!(activated.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::PoweredToolChanged {
+                actor_id: Some(event_actor),
+                item_id,
+                active: true,
+                reason: PoweredToolTransitionReason::Activated,
+                available_energy_millijoules: 2_000_000,
+            } if event_actor == actor && item_id == flashlight
+        )));
+        let activated_actor = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            activated_actor.action_points,
+            i64::from(ACTOR_ACTION_THRESHOLD),
+            "the pinned transform has zero move cost"
+        );
+        let carried = activated_actor
+            .inventory
+            .into_iter()
+            .find(|item| item.id == flashlight)
+            .expect("flashlight remains carried");
+        assert_eq!(carried.type_id, "flashlight_on");
+        assert_eq!(
+            carried
+                .magazine_well
+                .as_ref()
+                .and_then(|well| well.installed_magazine.as_deref())
+                .map(|battery| (
+                    battery.id,
+                    battery.charges,
+                    battery.residual_energy_millijoules
+                )),
+            Some((battery, 2, 0)),
+            "activation spends exactly one whole upstream charge"
+        );
+        assert!(
+            world
+                .actor_has_detail_light(actor)
+                .expect("carried flashlight should illuminate the actor")
+        );
+
+        world
+            .set_connected(actor, false)
+            .expect("actor should disconnect");
+        while !world.tick().0.is_multiple_of(SimTick::HZ) {
+            world
+                .advance_tick(Vec::new())
+                .expect("offline world should advance");
+        }
+        let carried = world
+            .actor_snapshot(actor)
+            .expect("disconnected actor remains")
+            .inventory
+            .into_iter()
+            .find(|item| item.id == flashlight)
+            .expect("flashlight remains carried");
+        assert_eq!(
+            carried
+                .magazine_well
+                .as_ref()
+                .and_then(|well| well.installed_magazine.as_deref())
+                .map(|battery| (battery.charges, battery.residual_energy_millijoules)),
+            Some((1, 998_440)),
+            "one second consumes exactly 1,560 millijoules while disconnected"
+        );
+
+        world
+            .set_connected(actor, true)
+            .expect("actor should reconnect");
+        let active_reload = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(6),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: battery,
+                },
+            }])
+            .expect("active reload should resolve");
+        assert!(active_reload.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                actor_id: event_actor,
+                reason: CommandRejection::PoweredToolActive,
+                ..
+            } if event_actor == actor
+        )));
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(7),
+                client_tick: world.tick(),
+                kind: CommandKind::Activate {
+                    item_id: flashlight,
+                },
+            }])
+            .expect("manual deactivation should advance");
+        assert!(
+            !world
+                .actor_has_detail_light(actor)
+                .expect("inactive flashlight should not emit")
+        );
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(8),
+                client_tick: world.tick(),
+                kind: CommandKind::Activate {
+                    item_id: flashlight,
+                },
+            }])
+            .expect("reactivation should spend the last whole charge");
+        let reactivated = world
+            .actor_snapshot(actor)
+            .expect("actor remains")
+            .inventory
+            .into_iter()
+            .find(|item| item.id == flashlight)
+            .expect("flashlight remains carried");
+        assert_eq!(
+            reactivated
+                .magazine_well
+                .as_ref()
+                .and_then(|well| well.installed_magazine.as_deref())
+                .map(|battery| (battery.charges, battery.residual_energy_millijoules)),
+            Some((0, 998_440)),
+            "deactivation is free and reactivation spends one whole charge"
+        );
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(9),
+                client_tick: world.tick(),
+                kind: CommandKind::Drop {
+                    item_id: flashlight,
+                },
+            }])
+            .expect("active flashlight should drop");
+        assert!(world.ground_item_snapshot(flashlight).is_some());
+        assert!(
+            world
+                .actor_has_detail_light(actor)
+                .expect("ground flashlight should illuminate the actor")
+        );
+        world
+            .set_connected(actor, false)
+            .expect("actor should disconnect again");
+
+        let snapshot = world.snapshot();
+        let expected_hash = world.canonical_hash().expect("state should hash");
+        let mut recovered = WorldState::from_snapshot(&snapshot).expect("state should recover");
+        assert_eq!(
+            recovered.canonical_hash().expect("recovery should hash"),
+            expected_hash
+        );
+        while !world.tick().next().0.is_multiple_of(SimTick::HZ) {
+            world
+                .advance_tick(Vec::new())
+                .expect("original should advance");
+            recovered
+                .advance_tick(Vec::new())
+                .expect("recovered should advance");
+        }
+        let original = world
+            .advance_tick(Vec::new())
+            .expect("original boundary should advance");
+        let replayed = recovered
+            .advance_tick(Vec::new())
+            .expect("recovered boundary should advance");
+        assert_eq!(original.canonical_hash, replayed.canonical_hash);
+        assert_eq!(world.snapshot(), recovered.snapshot());
+        let ground = world
+            .ground_item_snapshot(flashlight)
+            .expect("flashlight remains on the ground");
+        assert_eq!(
+            ground
+                .item
+                .magazine_well
+                .as_ref()
+                .and_then(|well| well.installed_magazine.as_deref())
+                .map(|battery| battery.residual_energy_millijoules),
+            Some(996_880),
+            "ground tools drain at the same persistent-server rate"
+        );
+
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ + SimTick::HZ - 1);
+        world
+            .ground_items
+            .get_mut(&flashlight)
+            .and_then(|ground| {
+                ground
+                    .item
+                    .magazine_well
+                    .as_mut()
+                    .and_then(|well| well.installed_magazine.as_deref_mut())
+            })
+            .expect("installed battery remains nested")
+            .residual_energy_millijoules = 1_560;
+        world
+            .advance_tick(Vec::new())
+            .expect("exact final powered second should advance");
+        let final_paid_second = world
+            .ground_item_snapshot(flashlight)
+            .expect("flashlight remains for its final paid second");
+        assert!(
+            final_paid_second
+                .item
+                .powered_tool
+                .as_ref()
+                .expect("powered state remains")
+                .active
+        );
+        assert_eq!(
+            final_paid_second
+                .item
+                .magazine_well
+                .as_ref()
+                .and_then(|well| well.installed_magazine.as_deref())
+                .map(|battery| battery.residual_energy_millijoules),
+            Some(0)
+        );
+        assert!(
+            !world
+                .actor_has_detail_light(actor)
+                .expect("zero stored energy should stop emission"),
+            "the transform remains active until the next boundary but emits no free light"
+        );
+
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ + 2 * SimTick::HZ - 1);
+        world
+            .ground_items
+            .get_mut(&flashlight)
+            .and_then(|ground| {
+                ground
+                    .item
+                    .magazine_well
+                    .as_mut()
+                    .and_then(|well| well.installed_magazine.as_deref_mut())
+            })
+            .expect("installed battery remains nested")
+            .residual_energy_millijoules = 1_559;
+        let depleted = world
+            .advance_tick(Vec::new())
+            .expect("depletion boundary should advance");
+        assert!(depleted.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::PoweredToolChanged {
+                actor_id: None,
+                item_id,
+                active: false,
+                reason: PoweredToolTransitionReason::EnergyDepleted,
+                available_energy_millijoules: 1_559,
+            } if item_id == flashlight
+        )));
+        let depleted_tool = world
+            .ground_item_snapshot(flashlight)
+            .expect("depleted flashlight remains");
+        assert_eq!(depleted_tool.item.type_id, "flashlight");
+        assert!(
+            !depleted_tool
+                .item
+                .powered_tool
+                .as_ref()
+                .expect("powered state remains")
+                .active
+        );
+        assert!(
+            !world
+                .actor_has_detail_light(actor)
+                .expect("depleted light should no longer illuminate")
+        );
+    }
+
+    #[test]
+    fn reload_uses_only_compatible_carried_ammunition() {
+        let mut world = WorldState::new(18, [12; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let position = WorldPosition { x: 1, y: 1, z: 0 };
+        let actor = world
+            .spawn_actor(position, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let weapon = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("test_revolver"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: Some(RangedWeaponSnapshot {
+                    ammunition_type: String::from("38"),
+                    ammunition_remaining: 5,
+                    ammunition_capacity: 6,
+                    range: 10,
+                    damage: 1,
+                    dispersion: 0,
+                    sound_volume: 0,
+                }),
+            })
+            .expect("weapon should spawn");
+        let compatible = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("38_special"),
+                charges: 2,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::from("38"),
+                ranged_weapon: None,
+            })
+            .expect("compatible ammunition should spawn");
+        let incompatible = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("9mm"),
+                charges: 4,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::from("9mm"),
+                ranged_weapon: None,
+            })
+            .expect("incompatible ammunition should spawn");
+        let target = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_target"),
+                position: WorldPosition { x: 4, y: 1, z: 0 },
+                hp: 100,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("target should spawn");
+
+        let commands = [
+            CommandKind::PickUp { item_id: weapon },
+            CommandKind::PickUp {
+                item_id: compatible,
+            },
+            CommandKind::PickUp {
+                item_id: incompatible,
+            },
+            CommandKind::Wield { item_id: weapon },
+            CommandKind::ShootCreature { target },
+            CommandKind::Reload {
+                ammunition_item: compatible,
+            },
+        ];
+        let mut reload_events = Vec::new();
+        for (index, kind) in commands.into_iter().enumerate() {
+            reload_events = world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((index + 1) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("inventory and ranged actions should advance")
+                .events;
+        }
+        assert!(reload_events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::WeaponReloaded {
+                actor_id,
+                weapon: event_weapon,
+                ammunition_item,
+                loaded: 2,
+                ammunition_remaining: 6,
+                source_charges_remaining: 0,
+            } if actor_id == actor && event_weapon == weapon && ammunition_item == compatible
+        )));
+        let actor_snapshot = world.actor_snapshot(actor).expect("actor remains");
+        assert!(
+            !actor_snapshot
+                .inventory
+                .iter()
+                .any(|item| item.id == compatible)
+        );
+        assert_eq!(
+            actor_snapshot
+                .inventory
+                .iter()
+                .find(|item| item.id == weapon)
+                .and_then(|item| item.ranged_weapon.as_ref())
+                .expect("weapon remains ranged")
+                .ammunition_remaining,
+            6
+        );
+
+        for (sequence, kind) in [
+            CommandKind::ShootCreature { target },
+            CommandKind::Reload {
+                ammunition_item: incompatible,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reload_events = world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((sequence + 7) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("incompatible reload should resolve")
+                .events;
+        }
+        assert!(reload_events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::IncompatibleAmmunition,
+                ..
+            }
+        )));
+        let actor_snapshot = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            actor_snapshot
+                .inventory
+                .iter()
+                .find(|item| item.id == weapon)
+                .and_then(|item| item.ranged_weapon.as_ref())
+                .expect("weapon remains ranged")
+                .ammunition_remaining,
+            5
+        );
+        assert_eq!(
+            actor_snapshot
+                .inventory
+                .iter()
+                .find(|item| item.id == incompatible)
+                .expect("incompatible ammunition remains")
+                .charges,
+            4
+        );
+        WorldState::from_snapshot(&world.snapshot()).expect("reload state should round trip");
+    }
+
+    #[test]
+    fn disconnected_autopilot_flees_a_visible_hostile_deterministically() {
+        let mut world = WorldState::new(17, [11; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 0, y: 0, z: 0 }, false)
+            .expect("offline actor should spawn");
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_slow_test"),
+                position: WorldPosition { x: 1, y: 0, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("hostile creature should spawn");
+        let chunks_before = world.chunks.len();
+        let mut replay = world.clone();
+        let fled = world
+            .advance_tick(Vec::new())
+            .expect("autopilot should flee");
+        let replay_fled = replay
+            .advance_tick(Vec::new())
+            .expect("autopilot replay should flee");
+        assert_eq!(fled, replay_fled);
+        assert!(matches!(
+            fled.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorMoved { actor_id, from, to },
+                ..
+            }] if *actor_id == actor
+                && *from == (WorldPosition { x: 0, y: 0, z: 0 })
+                && *to == (WorldPosition { x: 0, y: 1, z: 0 })
+        ));
+        assert_eq!(world.chunks.len(), chunks_before);
+        assert_eq!(
+            world
+                .creature_snapshot(creature)
+                .expect("creature remains")
+                .hp,
+            20,
+            "fleeing must never initiate combat"
+        );
+        WorldState::from_snapshot(&world.snapshot()).expect("autopilot state should round trip");
+        world
+            .set_connected(actor, true)
+            .expect("reconnection should succeed");
+        world
+            .actors
+            .get_mut(&actor)
+            .expect("actor should remain")
+            .action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        let connected_position = world
+            .actor_snapshot(actor)
+            .expect("actor should remain")
+            .position;
+        world
+            .advance_tick(Vec::new())
+            .expect("connected boundary should advance");
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .position,
+            connected_position,
+            "reconnection must return control before another autopilot action"
+        );
+    }
+
+    #[test]
+    fn armed_actor_smashing_is_diagonal_layered_fail_closed_and_replay_stable() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let target = WorldPosition { x: 2, y: 2, z: 0 };
+        let floor = test_terrain("t_floor");
+        let mut door = test_terrain("t_actor_bash_door");
+        door.move_cost = 0;
+        door.transparent = false;
+        world
+            .register_terrain_bash_type(TerrainBashTypeV1 {
+                terrain_id: door.terrain_id.clone(),
+                str_min: 8,
+                str_max: 12,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 950_000,
+                result: floor,
+                drops: Vec::new(),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("crash!"),
+                failure_sound: String::from("whump!"),
+                sound_volume: 18,
+                failure_sound_volume: 12,
+            })
+            .expect("door bash should register");
+        world
+            .register_smash_item_type(SmashItemTypeV1 {
+                item_type_id: String::from("hammer"),
+                bash_damage: 9,
+                attack_time_moves: 79,
+                melee_to_hit: -1,
+            })
+            .expect("hammer smash profile should register");
+        world
+            .register_furniture_bash_type(FurnitureBashTypeV1 {
+                furniture_id: String::from("f_actor_bash_table"),
+                str_min: 5,
+                str_max: 10,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 1_000_000,
+                result: None,
+                drops: Vec::new(),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("splinter!"),
+                failure_sound: String::from("thump!"),
+                sound_volume: 15,
+                failure_sound_volume: 12,
+            })
+            .expect("furniture bash should register");
+        world
+            .register_furniture_bash_presence(String::from("f_unsupported_actor_bash"))
+            .expect("unsupported furniture bash presence should register");
+        assert_eq!(
+            pinned_melee_attack_speed_moves(65, 8, 0).expect("default unarmed speed"),
+            60
+        );
+        assert_eq!(
+            pinned_melee_attack_speed_moves(65, 20, 0).expect("high-DEX unarmed speed"),
+            54
+        );
+        assert_eq!(
+            pinned_melee_attack_speed_moves(65, 8, 10).expect("skilled unarmed speed"),
+            38
+        );
+        assert_eq!(
+            pinned_melee_attack_speed_moves(65, 100, 10).expect("effective DEX cap"),
+            32,
+            "pinned effective character stats cap at 20"
+        );
+        assert_eq!(
+            pinned_melee_attack_speed_moves(1, 20, 10).expect("minimum attack speed"),
+            25
+        );
+        assert_eq!(
+            world
+                .actor_melee_action_cost(actor_id)
+                .expect("unarmed action cost"),
+            60 * cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE,
+            "the pinned null item has attack time 65 before skill and DEX"
+        );
+        let (coord, local) = target.chunk_and_local();
+        let unsupported_target = WorldPosition { x: 1, y: 0, z: 0 };
+        let (unsupported_coord, unsupported_local) = unsupported_target.chunk_and_local();
+        assert_eq!(coord, unsupported_coord);
+        let chunk = world.chunks.get_mut(&coord).expect("target chunk exists");
+        chunk
+            .set_terrain(local, door.clone())
+            .expect("door should install");
+        chunk
+            .set_furniture(local, Some(test_furniture("f_actor_bash_table", -1, false)))
+            .expect("table should install above the door");
+        chunk
+            .set_terrain(unsupported_local, door)
+            .expect("underlying door should install");
+        chunk
+            .set_furniture(
+                unsupported_local,
+                Some(test_furniture("f_unsupported_actor_bash", -1, false)),
+            )
+            .expect("unsupported bash furniture should install above the door");
+
+        let hammer_id = world
+            .spawn_ground_item(ItemSpawn {
+                position: world
+                    .actor_snapshot(actor_id)
+                    .expect("actor exists")
+                    .position,
+                type_id: String::from("hammer"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 9_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("hammer should spawn");
+        let unarmed = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Smash { dx: 1, dy: 1 },
+            }])
+            .expect("unsupported unarmed smash should resolve");
+        assert!(matches!(
+            unarmed.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CommandRejected {
+                    reason: CommandRejection::InvalidBashTool,
+                    ..
+                },
+                ..
+            }]
+        ));
+        for (sequence, kind) in [
+            CommandKind::PickUp { item_id: hammer_id },
+            CommandKind::Wield { item_id: hammer_id },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id,
+                    sequence: CommandSequence(sequence as u64 + 2),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("hammer setup should resolve");
+        }
+        assert_eq!(
+            world.actor_bash_strength(actor_id).expect("strength"),
+            Some(17),
+            "pinned armed smash adds default base Strength 8 to hammer bash 9"
+        );
+        assert_eq!(
+            world
+                .actor_smash_action_cost(actor_id)
+                .expect("smash action cost"),
+            63 * cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE,
+            "pinned hammer attack time 79 pays the truncated 80% smash cost"
+        );
+        assert_eq!(
+            world
+                .actor_melee_action_cost(actor_id)
+                .expect("hammer melee action cost"),
+            74 * cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE,
+            "attack time 79 halves to 39, adds 39 at melee zero, then subtracts DEX 8 / 2"
+        );
+
+        let mut stronger_snapshot = world.snapshot();
+        stronger_snapshot
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .expect("actor is canonical")
+            .base_strength = 12;
+        let stronger =
+            WorldState::from_snapshot(&stronger_snapshot).expect("stronger actor restores");
+        assert_eq!(
+            stronger
+                .actor_bash_strength(actor_id)
+                .expect("stronger bash resolves"),
+            Some(21),
+            "canonical base Strength feeds the healthy-arm smash subset"
+        );
+        let mut overbound_snapshot = stronger_snapshot.clone();
+        let overbound_actor = overbound_snapshot
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .expect("actor is canonical");
+        overbound_actor.base_strength = MAX_ACTOR_BASE_STAT;
+        overbound_actor.base_dexterity = MAX_ACTOR_BASE_STAT;
+        let overbound =
+            WorldState::from_snapshot(&overbound_snapshot).expect("defensive ceiling restores");
+        assert_eq!(
+            overbound
+                .actor_bash_strength(actor_id)
+                .expect("effective Strength cap"),
+            Some(29)
+        );
+        assert_eq!(
+            overbound
+                .actor_melee_action_cost(actor_id)
+                .expect("effective DEX cap"),
+            68 * cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE
+        );
+
+        let setup_snapshot = world.snapshot();
+        assert!(
+            setup_snapshot
+                .furniture_bash_ids
+                .binary_search(&String::from("f_unsupported_actor_bash"))
+                .is_ok(),
+            "unsupported upstream bash presence remains canonical"
+        );
+        let mut invalid_strength = setup_snapshot.clone();
+        invalid_strength
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .expect("actor is canonical")
+            .base_strength = 0;
+        assert!(matches!(
+            WorldState::from_snapshot(&invalid_strength),
+            Err(SimError::InvalidSnapshot)
+        ));
+        let mut invalid_intelligence = setup_snapshot.clone();
+        invalid_intelligence
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .expect("actor is canonical")
+            .base_intelligence = 0;
+        assert!(matches!(
+            WorldState::from_snapshot(&invalid_intelligence),
+            Err(SimError::InvalidSnapshot)
+        ));
+        let setup_world =
+            WorldState::from_snapshot(&setup_snapshot).expect("canonical setup restores");
+        let mut changed_stats = setup_snapshot.clone();
+        let changed_actor = changed_stats
+            .actors
+            .iter_mut()
+            .find(|actor| actor.id == actor_id)
+            .expect("actor is canonical");
+        changed_actor.base_dexterity = 20;
+        changed_actor.base_intelligence = 10;
+        changed_actor.base_perception = 11;
+        let changed_stats =
+            WorldState::from_snapshot(&changed_stats).expect("bounded base stats restore");
+        assert_eq!(
+            changed_stats
+                .actor_melee_action_cost(actor_id)
+                .expect("high-DEX hammer cost"),
+            68 * cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE
+        );
+        assert_ne!(
+            setup_world.canonical_hash().expect("setup state hashes"),
+            changed_stats
+                .canonical_hash()
+                .expect("changed base stats hash"),
+            "all canonical base stats must participate in CanonicalStateV51"
+        );
+        let mut invalid_profile = setup_snapshot.clone();
+        invalid_profile.smash_item_types[0].attack_time_moves = 0;
+        assert!(matches!(
+            WorldState::from_snapshot(&invalid_profile),
+            Err(SimError::InvalidSnapshot)
+        ));
+        let mut changed_accuracy_profile = setup_snapshot.clone();
+        changed_accuracy_profile.smash_item_types[0].melee_to_hit = 0;
+        let changed_accuracy_world = WorldState::from_snapshot(&changed_accuracy_profile)
+            .expect("bounded weapon accuracy should restore");
+        assert_ne!(
+            setup_world.canonical_hash().expect("setup state hashes"),
+            changed_accuracy_world
+                .canonical_hash()
+                .expect("changed accuracy state hashes"),
+            "strict weapon to-hit must participate in CanonicalStateV51"
+        );
+        let mut unsupported =
+            WorldState::from_snapshot(&setup_snapshot).expect("unsupported setup restores");
+        let unsupported_rejection = unsupported
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: unsupported.tick(),
+                kind: CommandKind::Smash { dx: 0, dy: -1 },
+            }])
+            .expect("unsupported furniture smash should resolve");
+        assert!(matches!(
+            unsupported_rejection.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CommandRejected {
+                    reason: CommandRejection::InvalidBashInteraction,
+                    ..
+                },
+                ..
+            }]
+        ));
+        let unsupported_snapshot = unsupported.snapshot();
+        let unsupported_chunk = unsupported_snapshot
+            .chunks
+            .iter()
+            .find(|chunk| chunk.coord == unsupported_coord)
+            .expect("unsupported target chunk remains");
+        let unsupported_index = tile_index(unsupported_local).expect("unsupported target index");
+        assert_eq!(
+            unsupported_chunk.tiles[unsupported_index].terrain_id, "t_actor_bash_door",
+            "unsupported furniture must block the registered terrain beneath it"
+        );
+        assert_eq!(
+            unsupported_chunk.furniture[unsupported_index]
+                .as_ref()
+                .map(|furniture| furniture.furniture_id.as_str()),
+            Some("f_unsupported_actor_bash")
+        );
+
+        let mut mixed_damage =
+            WorldState::from_snapshot(&world.snapshot()).expect("mixed setup restores");
+        mixed_damage
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor remains")
+            .inventory
+            .get_mut(&hammer_id)
+            .expect("hammer remains")
+            .melee_damage_milli
+            .insert(String::from("cut"), 1_000);
+        let mixed_rejection = mixed_damage
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(4),
+                client_tick: mixed_damage.tick(),
+                kind: CommandKind::Smash { dx: 1, dy: 1 },
+            }])
+            .expect("unsupported mixed-profile smash should resolve");
+        assert!(matches!(
+            mixed_rejection.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CommandRejected {
+                    reason: CommandRejection::InvalidBashTool,
+                    ..
+                },
+                ..
+            }]
+        ));
+        let mut degraded =
+            WorldState::from_snapshot(&world.snapshot()).expect("degraded setup restores");
+        degraded
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor remains")
+            .inventory
+            .get_mut(&hammer_id)
+            .expect("hammer remains")
+            .damage = 2;
+        assert_eq!(
+            degraded
+                .actor_bash_strength(actor_id)
+                .expect("degraded strength resolves"),
+            None,
+            "damage adjustment remains fail-closed until item charge mode is canonical"
+        );
+        let mut mismatched =
+            WorldState::from_snapshot(&world.snapshot()).expect("mismatched setup restores");
+        *mismatched
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor remains")
+            .inventory
+            .get_mut(&hammer_id)
+            .expect("hammer remains")
+            .melee_damage_milli
+            .get_mut("bash")
+            .expect("hammer has bash damage") = 10_000;
+        assert_eq!(
+            mismatched
+                .actor_bash_strength(actor_id)
+                .expect("mismatched strength resolves"),
+            None,
+            "instance damage must exactly match its canonical smash-item profile"
+        );
+        let mut ranged =
+            WorldState::from_snapshot(&world.snapshot()).expect("ranged setup restores");
+        ranged
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor remains")
+            .inventory
+            .get_mut(&hammer_id)
+            .expect("hammer remains")
+            .ranged_weapon = Some(RangedWeaponSnapshot {
+            ammunition_type: String::from("test_ammo"),
+            ammunition_remaining: 1,
+            ammunition_capacity: 1,
+            range: 1,
+            damage: 1,
+            dispersion: 1,
+            sound_volume: 1,
+        });
+        assert_eq!(
+            ranged
+                .actor_bash_strength(actor_id)
+                .expect("ranged strength resolves"),
+            None,
+            "live ranged/ammunition state must not use a static empty-item timing profile"
+        );
+
+        let mut replay = WorldState::from_snapshot(&world.snapshot()).expect("setup restores");
+        let mut outcomes = Vec::new();
+        for sequence in 4..=6 {
+            let command = ClientCommand {
+                actor_id,
+                sequence: CommandSequence(sequence),
+                client_tick: world.tick(),
+                kind: CommandKind::Smash { dx: 1, dy: 1 },
+            };
+            let outcome = world
+                .advance_tick(vec![command.clone()])
+                .expect("actor smash should advance");
+            let replay_outcome = replay
+                .advance_tick(vec![ClientCommand {
+                    client_tick: replay.tick(),
+                    ..command
+                }])
+                .expect("restored smash should advance");
+            assert_eq!(outcome, replay_outcome);
+            outcomes.push(outcome);
+        }
+        assert!(matches!(
+            outcomes[0].events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorBashed {
+                    actor_id: event_actor,
+                    target: event_target,
+                    target_kind: BashTargetKindV1::Furniture,
+                    target_type_id,
+                    success: true,
+                    damage: 12,
+                    ..
+                },
+                ..
+            }] if *event_actor == actor_id
+                && *event_target == target
+                && target_type_id == "f_actor_bash_table"
+        ));
+        assert!(matches!(
+            outcomes[1].events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorBashed {
+                    target_kind: BashTargetKindV1::Terrain,
+                    success: false,
+                    damage: 8,
+                    accumulated_damage: 8,
+                    ..
+                },
+                ..
+            }]
+        ));
+        assert!(matches!(
+            outcomes[2].events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorBashed {
+                    target_kind: BashTargetKindV1::Terrain,
+                    success: true,
+                    damage: 8,
+                    accumulated_damage: 0,
+                    ..
+                },
+                ..
+            }]
+        ));
+        let snapshot = world.snapshot();
+        let index = tile_index(local).expect("target index");
+        assert_eq!(snapshot.chunks[0].tiles[index].terrain_id, "t_floor");
+        assert_eq!(snapshot.chunks[0].furniture[index], None);
+        assert_eq!(snapshot.chunks[0].map_damage[index], 0);
+        assert_eq!(
+            world.canonical_hash().expect("live hash"),
+            replay.canonical_hash().expect("replay hash")
+        );
+    }
+
+    #[test]
+    fn group_bash_persists_damage_and_atomically_transforms_drops_fields_and_sound() {
+        let mut world = WorldState::new(41, [19; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        for field_type_id in ["fd_dust", "fd_splinters"] {
+            let mut field_type = test_field_type(field_type_id, 0, false);
+            field_type.intensity_levels = vec![field_type.intensity_levels[0].clone(); 3];
+            world
+                .register_field_type(field_type)
+                .expect("bash field should register");
+        }
+        let mut closed_door = test_terrain("t_door_c");
+        closed_door.move_cost = 0;
+        closed_door.transparent = false;
+        let mut damaged_door = test_terrain("t_door_b");
+        damaged_door.move_cost = 0;
+        let door_bash = TerrainBashTypeV1 {
+            terrain_id: String::from("t_door_c"),
+            str_min: 8,
+            str_max: 12,
+            str_min_blocked: 15,
+            str_max_blocked: 20,
+            str_min_supported: -1,
+            str_max_supported: -1,
+            bash_multiplier_millionths: 950_000,
+            result: damaged_door.clone(),
+            drops: vec![cdda_protocol::BashDropPrototypeV1 {
+                prototype: CraftItemPrototypeV1 {
+                    type_id: String::from("splinter"),
+                    charges: 1,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                    magazine_capacity: 0,
+                    magazine_well: None,
+                    residual_energy_millijoules: 0,
+                    powered_tool: None,
+                },
+                probability_percent: 100,
+                count_min: 1,
+                count_max: 1,
+                charges_min: None,
+                charges_max: None,
+            }],
+            hit_field: Some(cdda_protocol::BashFieldEffectV1 {
+                field_type_id: String::from("fd_dust"),
+                intensity: 2,
+            }),
+            destroyed_field: Some(cdda_protocol::BashFieldEffectV1 {
+                field_type_id: String::from("fd_splinters"),
+                intensity: 1,
+            }),
+            sound: String::from("smash!"),
+            failure_sound: String::from("whump!"),
+            sound_volume: 70,
+            failure_sound_volume: -1,
+        };
+        let mut invalid_sound = door_bash.clone();
+        invalid_sound.sound_volume = i32::from(u16::MAX) + 1;
+        assert!(matches!(
+            world.register_terrain_bash_type(invalid_sound),
+            Err(SimError::InvalidTerrain)
+        ));
+        world
+            .register_terrain_bash_type(door_bash)
+            .expect("door bash should register");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let mut corridor_wall = test_terrain("t_wall");
+        corridor_wall.move_cost = 0;
+        corridor_wall.transparent = false;
+        for x in 0..SUBMAP_SIZE as u8 {
+            for y in [0, 2] {
+                chunk
+                    .set_terrain(LocalTileCoord { x, y }, corridor_wall.clone())
+                    .expect("corridor wall should install");
+            }
+        }
+        chunk
+            .set_terrain(LocalTileCoord { x: 4, y: 1 }, closed_door)
+            .expect("door should install");
+        world.insert_chunk(chunk);
+        let actor = world
+            .spawn_actor(WorldPosition { x: 5, y: 1, z: 0 }, true)
+            .expect("target should spawn");
+        let spawn_bashing_zombie = |world: &mut WorldState, x| {
+            world
+                .spawn_creature(CreatureSpawn {
+                    type_id: String::from("mon_zombie"),
+                    position: WorldPosition { x, y: 1, z: 0 },
+                    hp: 80,
+                    speed: 70,
+                    attack_cost_moves: 100,
+                    aggression: 100,
+                    melee_skill: 0,
+                    dodge: 0,
+                    size: Default::default(),
+                    melee_dice: 2,
+                    melee_dice_sides: 3,
+                    can_see: true,
+                    vision_day: 40,
+                    vision_night: 3,
+                    stumbles: true,
+                    bashes: true,
+                    group_bash: true,
+                    hears: false,
+                    good_hearing: false,
+                    clumsy_attacks: false,
+                    immobile: false,
+                    pacifist: false,
+                    can_open_doors: false,
+                    path_settings: Default::default(),
+                    blood_field_type_id: String::new(),
+                    corpse: None,
+                })
+                .expect("zombie should spawn")
+        };
+        let basher = spawn_bashing_zombie(&mut world, 3);
+        world.creatures.get_mut(&basher).expect("basher").goal =
+            Some(world.actor_snapshot(actor).expect("target").position);
+        let solo_event = loop {
+            let outcome = world.advance_tick(Vec::new()).expect("solo bash tick");
+            if let Some(event) = outcome
+                .events
+                .into_iter()
+                .find(|event| matches!(event.kind, WorldEventKind::CreatureBashed { .. }))
+            {
+                break event;
+            }
+        };
+        assert!(matches!(
+            solo_event.kind,
+            WorldEventKind::CreatureBashed {
+                creature_id,
+                damage: 0,
+                success: false,
+                volume: 12,
+                ..
+            } if creature_id == basher
+        ));
+        assert_eq!(
+            world.snapshot().chunks[0].map_damage
+                [tile_index(LocalTileCoord { x: 4, y: 1 }).expect("index")],
+            0,
+            "one default zombie cannot damage a closed wooden door"
+        );
+        for x in [2, 1] {
+            let helper = spawn_bashing_zombie(&mut world, x);
+            world.creatures.get_mut(&helper).expect("helper").goal =
+                Some(world.actor_snapshot(actor).expect("target").position);
+        }
+        let sound_listener = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_sound_listener"),
+                position: WorldPosition { x: 10, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 0,
+                melee_dice_sides: 1,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: true,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("sound listener should spawn");
+        assert_eq!(
+            world.creature_snapshot(basher).expect("basher").position,
+            WorldPosition { x: 3, y: 1, z: 0 }
+        );
+        assert_eq!(
+            world
+                .creature_group_bash_strength(basher, WorldPosition { x: 4, y: 1, z: 0 })
+                .expect("group strength"),
+            11
+        );
+        let mut observed_bashes = Vec::new();
+        let positive_event = (0..300)
+            .find_map(|_| {
+                let basher_state = world.creatures.get(&basher).expect("basher remains");
+                if basher_state.action_points + i64::from(basher_state.speed)
+                    >= i64::from(CREATURE_ACTION_THRESHOLD)
+                {
+                    assert_eq!(basher_state.position, WorldPosition { x: 3, y: 1, z: 0 });
+                    assert_eq!(
+                        world
+                            .creature_group_bash_strength(
+                                basher,
+                                WorldPosition { x: 4, y: 1, z: 0 },
+                            )
+                            .expect("turn group strength"),
+                        11
+                    );
+                }
+                let outcome = world.advance_tick(Vec::new()).expect("group bash tick");
+                for event in outcome.events {
+                    if let WorldEventKind::CreatureBashed {
+                        creature_id,
+                        target,
+                        damage,
+                        ..
+                    } = &event.kind
+                    {
+                        observed_bashes.push((*creature_id, *target, *damage));
+                        if *damage > 0 {
+                            return Some(event);
+                        }
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| panic!("group never damaged door; bashes={observed_bashes:?}"));
+        let positive_damage = match positive_event.kind {
+            WorldEventKind::CreatureBashed {
+                damage,
+                success: false,
+                accumulated_damage,
+                ..
+            } => {
+                assert_eq!(accumulated_damage, damage);
+                damage
+            }
+            ref kind => panic!("unexpected positive bash event {kind:?}"),
+        };
+        assert!(positive_damage > 0);
+        let partial_hash = world.canonical_hash().expect("partial hash");
+        let mut replay = WorldState::from_snapshot(&world.snapshot()).expect("partial restore");
+        assert_eq!(
+            replay.canonical_hash().expect("restored hash"),
+            partial_hash
+        );
+        for candidate in [&mut world, &mut replay] {
+            candidate.allocator.next = candidate
+                .allocator
+                .reserved_end
+                .checked_add(1)
+                .expect("reservation end should advance");
+        }
+        let allocation_blocked = (0..500)
+            .find_map(|_| {
+                let outcome = world
+                    .advance_tick(Vec::new())
+                    .expect("allocation-blocked bash tick");
+                let replay_outcome = replay
+                    .advance_tick(Vec::new())
+                    .expect("allocation-blocked replay tick");
+                assert_eq!(outcome, replay_outcome);
+                outcome
+                    .events
+                    .iter()
+                    .any(|event| {
+                        matches!(
+                            event.kind,
+                            WorldEventKind::CreatureBashed {
+                                success: false,
+                                accumulated_damage: 11,
+                                ..
+                            }
+                        )
+                    })
+                    .then_some(outcome)
+            })
+            .expect("exhausted IDs should hold structural damage below success");
+        assert!(allocation_blocked.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CreatureBashed {
+                success: false,
+                accumulated_damage: 11,
+                ..
+            }
+        )));
+        let blocked_snapshot = world.snapshot();
+        let door_index = tile_index(LocalTileCoord { x: 4, y: 1 }).expect("door index");
+        assert_eq!(
+            blocked_snapshot.chunks[0].tiles[door_index].terrain_id,
+            "t_door_c"
+        );
+        assert_eq!(blocked_snapshot.chunks[0].map_damage[door_index], 11);
+        assert!(blocked_snapshot.ground_items.is_empty());
+        for candidate in [&mut world, &mut replay] {
+            candidate
+                .install_reserved_block(
+                    ReservedIdBlock::new(4_097, 8_192).expect("replacement block"),
+                )
+                .expect("replacement reservation should install");
+        }
+        let completed = (0..500)
+            .find_map(|_| {
+                let outcome = world
+                    .advance_tick(Vec::new())
+                    .expect("bash completion tick");
+                let replay_outcome = replay.advance_tick(Vec::new()).expect("replay bash tick");
+                assert_eq!(outcome, replay_outcome);
+                outcome
+                    .events
+                    .iter()
+                    .any(|event| {
+                        matches!(
+                            event.kind,
+                            WorldEventKind::CreatureBashed { success: true, .. }
+                        )
+                    })
+                    .then_some(outcome)
+            })
+            .expect("group bash should eventually destroy the door");
+        assert!(completed.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CreatureBashed {
+                success: true,
+                ref sound,
+                volume: 70,
+                ..
+            } if sound == "smash!"
+        )));
+        assert!(
+            world
+                .creature_snapshot(sound_listener)
+                .expect("sound listener should remain")
+                .sound_goal
+                .is_some(),
+            "canonical structural sound should feed private monster hearing"
+        );
+        let snapshot = world.snapshot();
+        assert_eq!(snapshot.chunks[0].tiles[door_index], damaged_door);
+        assert_eq!(snapshot.chunks[0].map_damage[door_index], 0);
+        assert!(snapshot.ground_items.iter().any(|ground| {
+            ground.item.type_id == "splinter" && ground.item.id.world_namespace() == 41
+        }));
+        let fields = &snapshot.chunks[0].fields[door_index];
+        assert!(fields.iter().any(|field| field.field_type_id == "fd_dust"));
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.field_type_id == "fd_splinters")
+        );
+        assert_eq!(
+            replay.canonical_hash().expect("replay final hash"),
+            world.canonical_hash().expect("live final hash")
+        );
+    }
+
+    #[test]
+    fn furniture_bash_precedes_terrain_and_door_frame_repairs_to_floor() {
+        let mut world = WorldState::new(59, [59; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .register_terrain_bash_type(TerrainBashTypeV1 {
+                terrain_id: String::from("t_door_frame"),
+                str_min: 6,
+                str_max: 25,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 1_000_000,
+                result: test_terrain("t_floor"),
+                drops: Vec::new(),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("crunch!"),
+                failure_sound: String::from("whump!"),
+                sound_volume: -1,
+                failure_sound_volume: -1,
+            })
+            .expect("door-frame bash should register");
+        world
+            .register_furniture_bash_type(FurnitureBashTypeV1 {
+                furniture_id: String::from("f_dresser"),
+                str_min: 12,
+                str_max: 40,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 1_000_000,
+                result: None,
+                drops: Vec::new(),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("smash!"),
+                failure_sound: String::from("whump."),
+                sound_volume: -1,
+                failure_sound_volume: -1,
+            })
+            .expect("dresser bash should register");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        chunk
+            .set_terrain(
+                LocalTileCoord { x: 4, y: 1 },
+                TerrainTileSnapshot {
+                    move_cost: 2,
+                    ..test_terrain("t_door_frame")
+                },
+            )
+            .expect("door frame should install");
+        chunk
+            .set_furniture(
+                LocalTileCoord { x: 4, y: 1 },
+                Some(test_furniture("f_dresser", -1, true)),
+            )
+            .expect("dresser should install");
+        world.insert_chunk(chunk);
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_strong_basher"),
+                position: WorldPosition { x: 3, y: 1, z: 0 },
+                hp: 80,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 10,
+                melee_dice_sides: 10,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: true,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("basher should spawn");
+        world
+            .creatures
+            .get_mut(&creature_id)
+            .expect("basher should remain")
+            .goal = Some(WorldPosition { x: 5, y: 1, z: 0 });
+        let mut replay = WorldState::from_snapshot(&world.snapshot())
+            .expect("pre-bash furniture state should restore");
+
+        let furniture_outcome = world
+            .advance_tick(Vec::new())
+            .expect("furniture bash tick should advance");
+        let replay_furniture_outcome = replay
+            .advance_tick(Vec::new())
+            .expect("restored furniture bash tick should advance");
+        assert_eq!(furniture_outcome, replay_furniture_outcome);
+        assert!(matches!(
+            furniture_outcome.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureBashed {
+                    creature_id: event_creature,
+                    target_kind: BashTargetKindV1::Furniture,
+                    target_type_id,
+                    success: true,
+                    ..
+                },
+                ..
+            }] if *event_creature == creature_id && target_type_id == "f_dresser"
+        ));
+        let after_furniture = world.snapshot();
+        let index = tile_index(LocalTileCoord { x: 4, y: 1 }).expect("tile index");
+        assert!(after_furniture.chunks[0].furniture[index].is_none());
+        assert_eq!(
+            after_furniture.chunks[0].tiles[index].terrain_id,
+            "t_door_frame"
+        );
+        assert_eq!(after_furniture.chunks[0].map_damage[index], 0);
+
+        let mut terrain_events = Vec::new();
+        let mut replay_terrain_events = Vec::new();
+        world
+            .perform_creature_bash(
+                creature_id,
+                WorldPosition { x: 4, y: 1, z: 0 },
+                1,
+                &mut terrain_events,
+            )
+            .expect("door frame should bash");
+        replay
+            .perform_creature_bash(
+                creature_id,
+                WorldPosition { x: 4, y: 1, z: 0 },
+                1,
+                &mut replay_terrain_events,
+            )
+            .expect("restored door frame should bash");
+        assert_eq!(terrain_events, replay_terrain_events);
+        assert!(matches!(
+            terrain_events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureBashed {
+                    target_kind: BashTargetKindV1::Terrain,
+                    target_type_id,
+                    success: true,
+                    ..
+                },
+                ..
+            }] if target_type_id == "t_door_frame"
+        ));
+        let final_snapshot = world.snapshot();
+        assert_eq!(final_snapshot.chunks[0].tiles[index].terrain_id, "t_floor");
+        assert!(final_snapshot.chunks[0].furniture[index].is_none());
+        assert_eq!(final_snapshot.chunks[0].map_damage[index], 0);
+        WorldState::from_snapshot(&final_snapshot)
+            .expect("furniture and final terrain results should restore");
+        assert_eq!(
+            world.canonical_hash().expect("live state should hash"),
+            replay.canonical_hash().expect("restored state should hash")
+        );
+    }
+
+    #[test]
+    fn furniture_bash_can_replace_furniture_without_changing_terrain() {
+        let mut world = WorldState::new(60, [60; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let broken_table = test_furniture("f_table_broken", 0, true);
+        world
+            .register_furniture_bash_type(FurnitureBashTypeV1 {
+                furniture_id: String::from("f_table"),
+                str_min: 4,
+                str_max: 20,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 1_000_000,
+                result: Some(broken_table.clone()),
+                drops: Vec::new(),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("crash!"),
+                failure_sound: String::from("whump."),
+                sound_volume: -1,
+                failure_sound_volume: -1,
+            })
+            .expect("table bash should register");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        chunk
+            .set_furniture(
+                LocalTileCoord { x: 4, y: 1 },
+                Some(test_furniture("f_table", -1, true)),
+            )
+            .expect("table should install");
+        world.insert_chunk(chunk);
+        let creature_id = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_furniture_basher"),
+                position: WorldPosition { x: 3, y: 1, z: 0 },
+                hp: 20,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 10,
+                melee_dice_sides: 10,
+                can_see: false,
+                vision_day: 0,
+                vision_night: 0,
+                stumbles: false,
+                bashes: true,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("basher should spawn");
+        world
+            .creatures
+            .get_mut(&creature_id)
+            .expect("basher should remain")
+            .goal = Some(WorldPosition { x: 5, y: 1, z: 0 });
+
+        let outcome = world
+            .advance_tick(Vec::new())
+            .expect("replacement bash should advance");
+        assert!(outcome.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::CreatureBashed {
+                target_kind: BashTargetKindV1::Furniture,
+                target_type_id,
+                success: true,
+                ..
+            } if target_type_id == "f_table"
+        )));
+        let snapshot = world.snapshot();
+        let index = tile_index(LocalTileCoord { x: 4, y: 1 }).expect("tile index");
+        assert_eq!(snapshot.chunks[0].tiles[index].terrain_id, "t_floor");
+        assert_eq!(snapshot.chunks[0].furniture[index], Some(broken_table));
+        assert_eq!(snapshot.chunks[0].map_damage[index], 0);
+        WorldState::from_snapshot(&snapshot).expect("replacement result should restore");
+    }
+
+    #[test]
+    fn safe_disconnected_autopilot_uses_stable_ordinary_emergency_nutrition() {
+        let (mut world, actor, other) = world_with_two_actors();
+        world
+            .despawn_actor(other)
+            .expect("unrelated actor should leave the test");
+        make_actor_act_each_tick(&mut world, actor);
+        let position = world
+            .actor_snapshot(actor)
+            .expect("actor should exist")
+            .position;
+        let spawn_consumable = |world: &mut WorldState,
+                                type_id: &str,
+                                charges: i32,
+                                calories: i32,
+                                quench: i32,
+                                comestible_type: &str| {
+            world
+                .spawn_ground_item(ItemSpawn {
+                    position,
+                    type_id: type_id.to_owned(),
+                    charges,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories,
+                    quench,
+                    comestible_type: comestible_type.to_owned(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                })
+                .expect("consumable should spawn")
+        };
+        let food = spawn_consumable(&mut world, "ordinary_food", 1, 400, 0, "FOOD");
+        let wielded_drink = spawn_consumable(&mut world, "wielded_drink", 2, 0, 100, "DRINK");
+        let selected_drink = spawn_consumable(&mut world, "selected_drink", 2, 0, 100, "DRINK");
+        let later_drink = spawn_consumable(&mut world, "later_drink", 2, 0, 100, "DRINK");
+        for (sequence, item_id) in [food, wielded_drink, selected_drink, later_drink]
+            .into_iter()
+            .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((sequence + 1) as u64),
+                    client_tick: world.tick(),
+                    kind: CommandKind::PickUp { item_id },
+                }])
+                .expect("consumable should be picked up");
+        }
+        let actor_state = world.actors.get_mut(&actor).expect("actor should exist");
+        actor_state.connected = false;
+        actor_state.speed = DEFAULT_ACTOR_SPEED;
+        actor_state.action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        actor_state.stored_kcal = 1;
+        actor_state.thirst = THIRST_DEATH_THRESHOLD - 1;
+        actor_state.wielded = Some(wielded_drink);
+        let early = world
+            .advance_tick(Vec::new())
+            .expect("pre-harmful needs should not consume");
+        assert!(early.events.is_empty());
+        let actor_state = world.actors.get_mut(&actor).expect("actor should exist");
+        actor_state.stored_kcal = 0;
+        actor_state.thirst = THIRST_DEATH_THRESHOLD;
+        let mut replay = world.clone();
+
+        let drank = world
+            .advance_tick(Vec::new())
+            .expect("dehydrated autopilot should drink");
+        assert_eq!(
+            drank,
+            replay
+                .advance_tick(Vec::new())
+                .expect("drinking should replay deterministically")
+        );
+        assert!(matches!(
+            drank.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ItemConsumed {
+                    actor_id,
+                    item_id,
+                    remaining_charges: 1,
+                    stored_kcal: 0,
+                    thirst,
+                },
+                ..
+            }] if *actor_id == actor
+                && *item_id == selected_drink
+                && *thirst == THIRST_DEATH_THRESHOLD - 100
+        ));
+        let actor_state = world.actor_snapshot(actor).expect("actor should remain");
+        assert_eq!(actor_state.wielded, Some(wielded_drink));
+        assert_eq!(
+            actor_state
+                .inventory
+                .iter()
+                .find(|item| item.id == later_drink)
+                .expect("later stable drink should remain")
+                .charges,
+            2
+        );
+
+        for candidate in [&mut world, &mut replay] {
+            candidate
+                .actors
+                .get_mut(&actor)
+                .expect("actor should remain")
+                .action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        }
+        let ate = world
+            .advance_tick(Vec::new())
+            .expect("starving autopilot should eat");
+        assert_eq!(
+            ate,
+            replay
+                .advance_tick(Vec::new())
+                .expect("eating should replay deterministically")
+        );
+        assert!(matches!(
+            ate.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ItemConsumed {
+                    actor_id,
+                    item_id,
+                    remaining_charges: 0,
+                    stored_kcal: 400,
+                    ..
+                },
+                ..
+            }] if *actor_id == actor && *item_id == food
+        ));
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .action_points,
+            0
+        );
+        let actor_state = world.actors.get_mut(&actor).expect("actor should remain");
+        actor_state.action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        actor_state.stored_kcal = 0;
+        actor_state.thirst = THIRST_DEATH_THRESHOLD;
+        let hostile = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_slow_test"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("nearby hostile should spawn");
+        let danger = world
+            .advance_tick(Vec::new())
+            .expect("danger should take priority over nutrition");
+        assert!(matches!(
+            danger.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::ActorMoved { actor_id, .. },
+                ..
+            }] if *actor_id == actor
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(hostile)
+                .expect("hostile should remain")
+                .hp,
+            20
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .inventory
+                .iter()
+                .find(|item| item.id == later_drink)
+                .expect("reserved drink should remain during danger")
+                .charges,
+            2
+        );
+    }
+
+    #[test]
+    fn safe_disconnected_autopilot_sleeps_only_on_comfortable_furniture() {
+        let mut world = WorldState::new(20, [14; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        let bed = FurnitureTileSnapshot {
+            furniture_id: String::from("f_bed"),
+            move_cost_mod: 0,
+            transparent: true,
+            blocks_door: false,
+            comfort: 5,
+            floor_bedding_warmth: 1_000,
+        };
+        for local in [LocalTileCoord { x: 1, y: 1 }, LocalTileCoord { x: 3, y: 1 }] {
+            chunk
+                .set_furniture(local, Some(bed.clone()))
+                .expect("bed should install");
+        }
+        world.insert_chunk(chunk);
+        let mut danger_chunk = Chunk::floor(ChunkCoord { x: 1, y: 0, z: 0 });
+        danger_chunk
+            .set_furniture(LocalTileCoord { x: 1, y: 1 }, Some(bed))
+            .expect("danger bed should install");
+        world.insert_chunk(danger_chunk);
+        let safe = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, false)
+            .expect("safe actor should spawn");
+        let starving = world
+            .spawn_actor(WorldPosition { x: 3, y: 1, z: 0 }, false)
+            .expect("starving actor should spawn");
+        let floor = world
+            .spawn_actor(WorldPosition { x: 5, y: 1, z: 0 }, false)
+            .expect("floor actor should spawn");
+        let endangered = world
+            .spawn_actor(WorldPosition { x: 13, y: 1, z: 0 }, false)
+            .expect("endangered actor should spawn");
+        for actor_id in [safe, starving, floor, endangered] {
+            let actor = world.actors.get_mut(&actor_id).expect("actor should exist");
+            actor.action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+            actor.sleepiness = SLEEPINESS_TIRED;
+        }
+        world
+            .actors
+            .get_mut(&starving)
+            .expect("starving actor should exist")
+            .stored_kcal = 0;
+        world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_slow_test"),
+                position: WorldPosition { x: 14, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("threat beside the distant bed should spawn");
+        let mut replay = world.clone();
+
+        let slept = world
+            .advance_tick(Vec::new())
+            .expect("safe actor should sleep");
+        assert_eq!(
+            slept,
+            replay
+                .advance_tick(Vec::new())
+                .expect("autopilot sleep should replay deterministically")
+        );
+        assert!(matches!(
+            slept.events.as_slice(),
+            [
+                WorldEvent {
+                    kind: WorldEventKind::ActorFellAsleep {
+                        actor_id,
+                        reason: SleepReason::Autopilot,
+                    },
+                    ..
+                },
+                WorldEvent {
+                    kind: WorldEventKind::ActorMoved {
+                        actor_id: moved_actor,
+                        ..
+                    },
+                    ..
+                }
+            ] if *actor_id == safe && *moved_actor == endangered
+        ));
+        assert!(
+            world
+                .actor_snapshot(safe)
+                .expect("safe actor should remain")
+                .sleeping
+        );
+        assert!(
+            !world
+                .actor_snapshot(starving)
+                .expect("starving actor should remain")
+                .sleeping
+        );
+        assert!(
+            !world
+                .actor_snapshot(floor)
+                .expect("floor actor should remain")
+                .sleeping
+        );
+        assert!(
+            !world
+                .actor_snapshot(endangered)
+                .expect("endangered actor should remain")
+                .sleeping
+        );
+        WorldState::from_snapshot(&world.snapshot())
+            .expect("autopilot sleep should survive snapshot recovery");
+    }
+
+    #[test]
+    fn interrupted_activity_allows_disconnected_autopilot_without_canceling_it() {
+        let (mut world, actor_id, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        spawn_and_pick_up(&mut world, actor_id, 1, "w_table", 1);
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(2),
+                client_tick: world.tick(),
+                kind: CommandKind::Construct {
+                    target: WorldPosition { x: 2, y: 1, z: 0 },
+                    construction_id: String::from("constr_place_test_table"),
+                    construction: Some(Box::new(test_construction_recipe(
+                        1_000, "w_table", 1, false,
+                    ))),
+                },
+            }])
+            .expect("construction should start");
+        world
+            .interrupt_construction(
+                actor_id,
+                ConstructionInterruptionReason::Damage,
+                &mut Vec::new(),
+            )
+            .expect("construction should interrupt");
+        let actor = world.actors.get_mut(&actor_id).expect("actor should exist");
+        actor.connected = false;
+        actor.action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_slow_test"),
+                position: WorldPosition { x: 4, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("hostile creature should spawn");
+
+        world
+            .advance_tick(Vec::new())
+            .expect("interrupted activity should permit flight");
+        let actor = world.actor_snapshot(actor_id).expect("actor should remain");
+        assert_eq!(actor.position, (WorldPosition { x: 0, y: 0, z: 0 }));
+        assert!(
+            actor
+                .construction_activity
+                .is_some_and(|activity| activity.interrupted),
+            "flight must preserve the interrupted project's exact reservation"
+        );
+    }
+
+    #[test]
+    fn trapped_autopilot_ignores_neutral_creatures_and_defends_by_stable_id() {
+        let mut world = WorldState::new(18, [12; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, false)
+            .expect("offline actor should spawn");
+        let wall = TerrainTileSnapshot {
+            terrain_id: String::from("t_wall"),
+            move_cost: 0,
+            transparent: false,
+            flat: false,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        for (x, y) in [(0, 0), (1, 0), (0, 2), (1, 2), (2, 2)] {
+            world
+                .chunks
+                .get_mut(&ChunkCoord { x: 0, y: 0, z: 0 })
+                .expect("test chunk should exist")
+                .set_terrain(LocalTileCoord { x, y }, wall.clone())
+                .expect("wall should install");
+        }
+        let neutral = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_neutral_test"),
+                position: WorldPosition { x: 2, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 0,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("neutral creature should spawn first");
+        let hostile = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_hostile_test"),
+                position: WorldPosition { x: 0, y: 1, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("hostile creature should spawn second");
+        let later_hostile = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_later_hostile_test"),
+                position: WorldPosition { x: 2, y: 0, z: 0 },
+                hp: 20,
+                speed: 1,
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 1,
+                melee_dice_sides: 1,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("second hostile creature should spawn third");
+        assert!(neutral < hostile, "fixture should order the neutral first");
+        assert!(
+            hostile < later_hostile,
+            "fixture should order the selected hostile first"
+        );
+
+        let hit_tick = (1..=1_000)
+            .find(|tick| {
+                world
+                    .actor_creature_hit_spread(actor, hostile, *tick)
+                    .expect("offline hit spread should resolve")
+                    .is_some_and(|spread| spread >= 0)
+            })
+            .expect("offline named stream should contain a hit");
+        world.tick = SimTick(hit_tick - 1);
+
+        let mut replay = world.clone();
+        let defended = world
+            .advance_tick(Vec::new())
+            .expect("trapped autopilot should defend");
+        assert_eq!(
+            defended,
+            replay
+                .advance_tick(Vec::new())
+                .expect("defense should replay deterministically")
+        );
+        assert!(matches!(
+            defended.events.as_slice(),
+            [WorldEvent {
+                kind: WorldEventKind::CreatureDamaged {
+                    source,
+                    target,
+                    amount: UNARMED_DAMAGE,
+                    remaining_hp: 10,
+                },
+                ..
+            }] if *source == actor && *target == hostile
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(neutral)
+                .expect("neutral creature should remain")
+                .hp,
+            20
+        );
+        assert_eq!(
+            world
+                .creature_snapshot(later_hostile)
+                .expect("later hostile should remain")
+                .hp,
+            20
+        );
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("defender should remain")
+                .action_points,
+            800,
+            "disconnected defense must spend the same unarmed melee cost"
+        );
+    }
+
+    #[test]
+    fn trapped_disconnected_actor_defends_but_remains_vulnerable() {
+        let mut world = WorldState::new(17, [11; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, false)
+            .expect("offline actor should spawn");
+        let wall = TerrainTileSnapshot {
+            terrain_id: String::from("t_wall"),
+            move_cost: 0,
+            transparent: false,
+            flat: false,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        for (x, y) in [(0, 0), (1, 0), (2, 0), (0, 1), (0, 2), (1, 2), (2, 2)] {
+            world
+                .chunks
+                .get_mut(&ChunkCoord { x: 0, y: 0, z: 0 })
+                .expect("test chunk should exist")
+                .set_terrain(LocalTileCoord { x, y }, wall.clone())
+                .expect("wall should install");
+        }
+        let creature = world
+            .spawn_creature(CreatureSpawn {
+                type_id: String::from("mon_test"),
+                position: WorldPosition { x: 3, y: 1, z: 0 },
+                hp: 20,
+                speed: u16::try_from(CREATURE_ACTION_THRESHOLD).expect("threshold fits"),
+                attack_cost_moves: 100,
+                aggression: 100,
+                melee_skill: 0,
+                dodge: 0,
+                size: Default::default(),
+                melee_dice: 2,
+                melee_dice_sides: 3,
+                can_see: true,
+                vision_day: 60,
+                vision_night: 60,
+                stumbles: false,
+                bashes: false,
+                group_bash: false,
+                hears: false,
+                good_hearing: false,
+                clumsy_attacks: false,
+                immobile: false,
+                pacifist: false,
+                can_open_doors: false,
+                path_settings: Default::default(),
+                blood_field_type_id: String::new(),
+                corpse: None,
+            })
+            .expect("creature should spawn");
+        let mut replay = world.clone();
+        let movement = world.advance_tick(Vec::new()).expect("AI should move");
+        let replay_movement = replay
+            .advance_tick(Vec::new())
+            .expect("AI replay should move");
+        assert_eq!(movement, replay_movement);
+        assert!(matches!(
+            movement.events[0].kind,
+            WorldEventKind::CreatureMoved { creature_id, to, .. }
+                if creature_id == creature && to == (WorldPosition { x: 2, y: 1, z: 0 })
+        ));
+        let attack = world.advance_tick(Vec::new()).expect("AI should attack");
+        let replay_attack = replay
+            .advance_tick(Vec::new())
+            .expect("AI replay should attack");
+        assert_eq!(attack, replay_attack);
+        assert!(matches!(
+            attack.events[0].kind,
+            WorldEventKind::CreatureDamaged {
+                source,
+                target,
+                amount: UNARMED_DAMAGE,
+                remaining_hp: 10,
+            } if source == actor && target == creature
+        ));
+        assert!(matches!(
+            attack.events[1].kind,
+            WorldEventKind::ActorDamagedByCreature { source, target, amount: 2..=6, .. }
+                if source == creature && target == actor
+        ));
+        assert_eq!(
+            world
+                .creature_snapshot(creature)
+                .expect("creature should remain")
+                .hp,
+            10
+        );
+        let actor = world.actor_snapshot(actor).expect("actor should remain");
+        assert!(!actor.connected);
+        assert_eq!(actor.action_points, 800);
+        assert!(actor.hp < DEFAULT_ACTOR_HP);
+        WorldState::from_snapshot(&world.snapshot()).expect("AI state should round trip");
+    }
+
+    #[test]
+    fn replay_derived_events_do_not_exhaust_persistent_object_ids() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        world.tick = SimTick(13 * 60 * 60 * SimTick::HZ);
+        world.memory_sight_radius = NaturalLightSnapshot::at_tick(world.tick).sight_radius;
+        make_actor_act_each_tick(&mut world, actor);
+        let object_cursor = world.snapshot().allocator_next;
+        for sequence in 1..=5_000 {
+            let dx = if sequence % 2 == 1 { 1 } else { -1 };
+            let outcome = world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence(sequence),
+                    client_tick: world.tick(),
+                    kind: CommandKind::Move { dx, dy: 0, dz: 0 },
+                }])
+                .expect("event sequence must outlive one object reservation block");
+            assert_eq!(outcome.events[0].id.counter(), sequence);
+        }
+        assert_eq!(world.snapshot().allocator_next, object_cursor);
+    }
+
+    #[test]
+    fn consuming_pinned_stats_updates_needs_and_spends_the_item() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor);
+        world.actors.get_mut(&actor).expect("actor exists").thirst = 100;
+        let item = world
+            .spawn_ground_item(ItemSpawn {
+                position: WorldPosition { x: 1, y: 1, z: 0 },
+                type_id: String::from("test_meal"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 402,
+                quench: 50,
+                comestible_type: String::from("FOOD"),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("meal should spawn");
+        for (sequence, kind) in [
+            CommandKind::PickUp { item_id: item },
+            CommandKind::Consume { item_id: item },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((sequence + 1) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("item command should advance");
+        }
+        let actor = world.actor_snapshot(actor).expect("actor should remain");
+        assert_eq!(actor.stored_kcal, DEFAULT_STORED_KCAL + 402);
+        assert_eq!(actor.thirst, 50);
+        assert!(actor.inventory.is_empty());
+    }
+
+    #[test]
+    fn disconnected_actor_needs_advance_and_can_kill() {
+        let mut world = WorldState::new(19, [13; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, false)
+            .expect("offline actor should spawn");
+        let actor_state = world.actors.get_mut(&actor).expect("actor should exist");
+        actor_state.hp = 1;
+        actor_state.stored_kcal = 0;
+        actor_state.thirst = THIRST_DEATH_THRESHOLD - 1;
+        world.tick = SimTick(NEEDS_INTERVAL_TICKS - 1);
+        let outcome = world
+            .advance_tick(Vec::new())
+            .expect("offline needs tick should advance");
+        assert!(matches!(
+            outcome.events[0].kind,
+            WorldEventKind::ActorNeedsUpdated {
+                actor_id,
+                stored_kcal: -7,
+                thirst: THIRST_DEATH_THRESHOLD,
+                ..
+            } if actor_id == actor
+        ));
+        assert!(matches!(
+            outcome.events[1].kind,
+            WorldEventKind::ActorDiedFromNeeds { actor_id } if actor_id == actor
+        ));
+        let actor = world.actor_snapshot(actor).expect("dead actor remains");
+        assert!(!actor.connected);
+        assert_eq!(actor.hp, 0);
+    }
+
+    #[test]
+    fn authoritative_open_and_close_transform_and_block_terrain() {
+        let mut world = WorldState::new(23, [17; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        let mut chunk = Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 });
+        chunk
+            .set_terrain(
+                LocalTileCoord { x: 2, y: 1 },
+                TerrainTileSnapshot {
+                    terrain_id: String::from("t_door_c"),
+                    move_cost: 0,
+                    transparent: false,
+                    flat: false,
+                    open: String::from("t_door_o"),
+                    open_move_cost: Some(2),
+                    open_transparent: Some(true),
+                    open_flat: Some(true),
+                    close: String::new(),
+                    close_move_cost: None,
+                    close_transparent: None,
+                    close_flat: None,
+                },
+            )
+            .expect("door should be valid");
+        world.insert_chunk(chunk);
+        let actor = world
+            .spawn_actor(WorldPosition { x: 1, y: 1, z: 0 }, true)
+            .expect("actor should spawn");
+        make_actor_act_each_tick(&mut world, actor);
+        let commands = [
+            CommandKind::Open { dx: 1, dy: 0 },
+            CommandKind::Move {
+                dx: 1,
+                dy: 0,
+                dz: 0,
+            },
+            CommandKind::Move {
+                dx: 1,
+                dy: 0,
+                dz: 0,
+            },
+            CommandKind::Close { dx: -1, dy: 0 },
+        ];
+        for (index, kind) in commands.into_iter().enumerate() {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence((index + 1) as u64),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("terrain command should advance");
+            let door = world
+                .chunks
+                .get(&ChunkCoord { x: 0, y: 0, z: 0 })
+                .and_then(|chunk| chunk.tile(LocalTileCoord { x: 2, y: 1 }))
+                .expect("door tile should remain canonical");
+            if index == 0 {
+                assert!(door.flat);
+                assert_eq!(door.close_flat, Some(false));
+            } else if index == 3 {
+                assert!(!door.flat);
+                assert_eq!(door.open_flat, Some(true));
+            }
+        }
+        let snapshot = world.snapshot();
+        let door_index = usize::from(1_u8) * SUBMAP_SIZE as usize + usize::from(2_u8);
+        assert_eq!(snapshot.chunks[0].tiles[door_index].terrain_id, "t_door_c");
+        assert_eq!(snapshot.chunks[0].tiles[door_index].move_cost, 0);
+        let blocked = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: -1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("blocked move should resolve");
+        assert!(matches!(
+            blocked.events[0].kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::Blocked,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn center_chunk_spawns_first() {
+        let mut world = WorldState::new(29, [19; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        for y in -1..=1 {
+            for x in -1..=1 {
+                world.insert_chunk(Chunk::floor(ChunkCoord { x, y, z: 0 }));
+            }
+        }
+        let invalid_stats = CharacterCreationStatsV1 {
+            strength: cdda_protocol::MIN_CHARACTER_CREATION_STAT - 1,
+            ..CharacterCreationStatsV1::default()
+        };
+        assert!(matches!(
+            world.spawn_actor_first_available_with_stats(true, invalid_stats),
+            Err(SimError::InvalidCharacterCreation)
+        ));
+        assert_eq!(
+            world.allocator.next(),
+            1,
+            "invalid stats must not burn an ID"
+        );
+        let custom_stats = CharacterCreationStatsV1 {
+            strength: 12,
+            dexterity: 11,
+            intelligence: 10,
+            perception: 9,
+        };
+        let actor = world
+            .spawn_actor_first_available_with_stats(true, custom_stats)
+            .expect("center spawn should exist");
+        let actor = world.actor_snapshot(actor).expect("actor should exist");
+        assert_eq!(actor.position, (WorldPosition { x: 0, y: 0, z: 0 }));
+        assert_eq!(actor.base_strength, 12);
+        assert_eq!(actor.base_dexterity, 11);
+        assert_eq!(actor.base_intelligence, 10);
+        assert_eq!(actor.base_perception, 9);
+    }
+
+    #[test]
+    fn crossing_a_chunk_edge_generates_persistent_flat_wilderness() {
+        let terrain = TerrainTileSnapshot {
+            terrain_id: String::from("t_grass"),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        let mut world = WorldState::new(19, [13; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_flat_worldgen(terrain.clone())
+            .expect("world generation should configure once");
+        world.insert_chunk(
+            Chunk::filled(ChunkCoord { x: 0, y: 0, z: 0 }, terrain)
+                .expect("initial wilderness should be valid"),
+        );
+        let actor = world
+            .spawn_actor(WorldPosition { x: 11, y: 1, z: 0 }, true)
+            .expect("actor should spawn at the edge");
+        let command = ClientCommand {
+            actor_id: actor,
+            sequence: CommandSequence(1),
+            client_tick: world.tick(),
+            kind: CommandKind::Move {
+                dx: 1,
+                dy: 0,
+                dz: 0,
+            },
+        };
+        let outcome = world
+            .advance_tick(vec![command])
+            .expect("edge crossing should advance");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::ActorMoved { actor_id, to, .. }
+                if actor_id == actor && to == (WorldPosition { x: 12, y: 1, z: 0 })
+        )));
+        let snapshot = world.snapshot();
+        assert_eq!(snapshot.chunks.len(), 121);
+        assert!(
+            snapshot
+                .chunks
+                .iter()
+                .any(|chunk| chunk.coord == (ChunkCoord { x: 1, y: 0, z: 0 }))
+        );
+        assert_eq!(
+            snapshot
+                .worldgen_default_terrain
+                .as_ref()
+                .expect("worldgen terrain should persist")
+                .terrain_id,
+            "t_grass"
+        );
+        let restored =
+            WorldState::from_snapshot(&snapshot).expect("generated chunk should restore");
+        assert_eq!(
+            restored
+                .actor_snapshot(actor)
+                .expect("actor should restore")
+                .position,
+            (WorldPosition { x: 12, y: 1, z: 0 })
+        );
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("original hash")
+        );
+    }
+}

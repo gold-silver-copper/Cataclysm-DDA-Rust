@@ -205,9 +205,12 @@ regenerates events, and aborts on hash mismatch; never apply stored outputs twic
 Create verified backups hourly, retaining 24 hourly and 30 daily. Include the
 protected server `SecretKey`; restore must derive and match its manifest
 `EndpointId` before replacement or startup. Roll compressed replays hourly and
-retain 30 days. Replay records every recovery input, including
-commands, admin/key/connection changes, commandless ticks, allocator operations,
-and unexpected-downtime catch-up; it never consults a live clock or allocator.
+retain 30 days. Replay records every recovery input, including commands,
+admin/key/session-authorization changes, commandless ticks, allocator
+operations, and unexpected-downtime catch-up; it never consults a live clock or
+allocator. Ephemeral socket presence is audited but excluded from canonical
+hashes and resets offline on recovery; the persistent actor is never removed or
+protected.
 
 Use exact integer domain units and signed Q32.32 `i64` for remaining fractions.
 Use checked `i128` intermediates, ties-to-even rounding, and no floating-point,
@@ -277,6 +280,10 @@ lower findings, and rerun affected checks. Never weaken tests for green CI.
 
 ## Completion gate
 
+A fresh user must be able to follow the documentation on a clean supported
+machine, start the standalone server, enroll through iroh, create/select a
+character, and play ordinary complete gameplay loops through the Bevy client
+without source edits, fixtures, placeholders, or undocumented operator steps.
 Finish only when every in-scope parity row is behaviorally verified or has a
 tested authorized adaptation; all included content is usable through the Bevy
 client; persistent 0-16-player operation, disconnected vulnerability, catch-up,
@@ -287,7 +294,6 @@ client graph; documentation and licensing are audited; all required checks are
 green; and a final independent review has no critical/high issue, placeholder,
 silent unsupported field, or undocumented manual completion step.
 
-If permissions, hardware, or external services block a required check, do not
-claim completion. Record the exact blocker, verified work, and remaining action.
-Lead progress reports with working outcomes, verification, risks, and the next
-concrete target—not file creation or compilation alone.
+If permissions, hardware, or external services block a required check, record
+the blocker and never claim completion. Lead progress reports with working
+outcomes, verification, risks, and the next concrete target.

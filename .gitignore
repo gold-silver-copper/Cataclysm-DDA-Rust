@@ -1,0 +1,15 @@
+/target/
+/world/
+/worlds/
+/replays/
+/backups/
+*.db
+*.db-shm
+*.db-wal
+*.key
+*.pem
+*.p12
+endpoint-address.json
+*.cddar
+*.replay.zst
+.DS_Store
