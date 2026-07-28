@@ -518,6 +518,24 @@ on multiple same-tick attacks. Zero is rejected at spawn, snapshot, corpse,
 and selected-content boundaries so the authoritative action loop cannot fail
 to make progress.
 
+Protocol 76 advances to schema 54, CanonicalStateV52, and CanonicalEventsV15.
+Items now own an ordered bounded collection of detachable magazine wells, each
+identified by its canonical inherited `pocket_data` index and optional source
+ID. Installed magazines keep stable item IDs in every well; validation, state
+hashing, snapshots, SQLite recovery, and portable replay traverse them all.
+Reload commands select a concrete well index and the authoritative result event
+echoes that index; stale or nonexistent indices fail closed. Powered tools name
+the exact well supplying energy, tool-charge debit is deterministic across
+ordered wells, and disassembly atomically detaches every installed magazine.
+The server normalizes all compatible strict wells instead of assuming a single
+battery slot, while the Bevy client selects the first compatible canonical well
+until the generic server-driven interaction UI lands. Built-in gun ammunition
+temporarily retains the explicit `None` reload target pending item-backed
+ammunition pockets.
+Because this changes Postcard layouts, databases below schema 54 that contain
+snapshots or journal batches are rejected before mutation; metadata-only older
+databases may still use the existing backed-up SQL migration path.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -778,10 +796,10 @@ is commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05` in
 `docs/parity-ledger.json` is the machine-readable implementation DAG. Its gate
 binds the ledger to the current protocol, persistence schema, replay format,
 and baseline while rejecting missing Rust paths, duplicate priorities, unknown
-dependencies, and cycles. The leaf `cdda-conformance` crate runs one versioned
-scenario and its checked-in semantic/hash expectations through direct headless
-simulation, per-tick snapshot restoration, SQLite recovery, and portable
-replay verification.
+dependencies, and cycles. The leaf `cdda-conformance` crate runs versioned
+item-flow and indexed multi-well scenarios plus checked-in semantic/hash
+expectations through direct headless simulation, per-tick snapshot restoration,
+SQLite recovery, and portable replay verification.
 
 ## License
 

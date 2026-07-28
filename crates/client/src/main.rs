@@ -123,6 +123,7 @@ enum ClientAction {
     },
     Reload {
         ammunition_item: ItemId,
+        magazine_well_index: Option<u16>,
     },
     Sleep,
     Wake,
@@ -1033,8 +1034,14 @@ async fn run_game_session(
                     Some(ClientAction::ShootCreature { target }) => {
                         Some(CommandKind::ShootCreature { target })
                     }
-                    Some(ClientAction::Reload { ammunition_item }) => {
-                        Some(CommandKind::Reload { ammunition_item })
+                    Some(ClientAction::Reload {
+                        ammunition_item,
+                        magazine_well_index,
+                    }) => {
+                        Some(CommandKind::Reload {
+                            ammunition_item,
+                            magazine_well_index,
+                        })
                     }
                     Some(ClientAction::Sleep) => Some(CommandKind::Sleep),
                     Some(ClientAction::Wake) => Some(CommandKind::Wake),
@@ -2207,9 +2214,9 @@ fn client_construction_components_available(
                     item.type_id == component.type_id
                         && !protected.contains(&item.id)
                         && item
-                            .magazine_well
-                            .as_ref()
-                            .is_none_or(|well| well.installed_magazine.is_none())
+                            .magazine_wells
+                            .iter()
+                            .all(|well| well.installed_magazine.is_none())
                 })
                 .fold(0_u32, |total, item| {
                     let units = if count_by_charges {
@@ -2235,9 +2242,9 @@ fn client_construction_components_available(
             item.type_id == selected.type_id
                 && !protected.contains(&item.id)
                 && item
-                    .magazine_well
-                    .as_ref()
-                    .is_none_or(|well| well.installed_magazine.is_none())
+                    .magazine_wells
+                    .iter()
+                    .all(|well| well.installed_magazine.is_none())
         }) {
             let units = if count_by_charges {
                 u32::try_from(item.charges).unwrap_or(0)
@@ -2427,9 +2434,9 @@ fn can_craft_recipe(
                     item.type_id == component.type_id
                         && !protected.contains(&item.id)
                         && item
-                            .magazine_well
-                            .as_ref()
-                            .is_none_or(|well| well.installed_magazine.is_none())
+                            .magazine_wells
+                            .iter()
+                            .all(|well| well.installed_magazine.is_none())
                 })
                 .fold(0_u32, |total, item| {
                     let units = if count_by_charges {
@@ -2455,9 +2462,9 @@ fn can_craft_recipe(
             item.type_id == selected.type_id
                 && !protected.contains(&item.id)
                 && item
-                    .magazine_well
-                    .as_ref()
-                    .is_none_or(|well| well.installed_magazine.is_none())
+                    .magazine_wells
+                    .iter()
+                    .all(|well| well.installed_magazine.is_none())
         }) {
             let units = if count_by_charges {
                 u32::try_from(item.charges).unwrap_or(0)
@@ -2757,7 +2764,7 @@ fn item_menu_entries(
                             weapon.ammunition_remaining < weapon.ammunition_capacity
                                 && item.ammunition_type == weapon.ammunition_type
                                 && item.charges > 0
-                        }) || wielded.magazine_well.as_ref().is_some_and(|well| {
+                        }) || wielded.magazine_wells.iter().any(|well| {
                             item.id != wielded.id
                                 && item.magazine_capacity > 0
                                 && well
@@ -2781,8 +2788,9 @@ fn item_menu_entries(
                 item.powered_tool.as_ref().is_some_and(|powered| {
                     powered.active
                         || item
-                            .magazine_well
-                            .as_ref()
+                            .magazine_wells
+                            .iter()
+                            .find(|well| well.pocket_index == powered.power_pocket_index)
                             .and_then(|well| well.installed_magazine.as_deref())
                             .is_some_and(|magazine| {
                                 magazine.charges >= i32::from(powered.activation_charges)
@@ -2860,11 +2868,12 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
             item.magazine_capacity,
             residual_power_suffix(item.residual_energy_millijoules)
         ))
-    } else if let Some(installed) = item
-        .magazine_well
-        .as_ref()
-        .and_then(|well| well.installed_magazine.as_deref())
-    {
+    } else if let Some(installed) = item.powered_tool.as_ref().and_then(|powered| {
+        item.magazine_wells
+            .iter()
+            .find(|well| well.pocket_index == powered.power_pocket_index)
+            .and_then(|well| well.installed_magazine.as_deref())
+    }) {
         Some(format!(
             " [power {}{}]",
             installed.charges,
@@ -2890,11 +2899,13 @@ fn residual_power_suffix(residual_energy_millijoules: u32) -> String {
 }
 
 fn item_tool_charges(item: &ItemSnapshot) -> i32 {
-    item.magazine_well.as_ref().map_or(item.charges, |well| {
-        well.installed_magazine
-            .as_deref()
-            .map_or(0, |magazine| magazine.charges)
-    })
+    if item.magazine_wells.is_empty() {
+        return item.charges;
+    }
+    item.magazine_wells
+        .iter()
+        .filter_map(|well| well.installed_magazine.as_deref())
+        .fold(0, |total, magazine| total.saturating_add(magazine.charges))
 }
 
 fn client_action_for_item_menu(
@@ -2906,9 +2917,32 @@ fn client_action_for_item_menu(
         ItemMenuAction::PickUp => ClientAction::PickUp { item_id },
         ItemMenuAction::Drop => ClientAction::Drop { item_id },
         ItemMenuAction::Wield => ClientAction::Wield { item_id },
-        ItemMenuAction::Reload => ClientAction::Reload {
-            ammunition_item: item_id,
-        },
+        ItemMenuAction::Reload => {
+            let actor = &snapshot?.controlled_actor;
+            let ammunition = actor.inventory.iter().find(|item| item.id == item_id)?;
+            let wielded = actor
+                .wielded
+                .and_then(|wielded| actor.inventory.iter().find(|item| item.id == wielded))?;
+            let magazine_well_index = if wielded.ranged_weapon.is_some() {
+                None
+            } else {
+                Some(
+                    wielded
+                        .magazine_wells
+                        .iter()
+                        .find(|well| {
+                            well.compatible_magazine_type_ids
+                                .binary_search(&ammunition.type_id)
+                                .is_ok()
+                        })?
+                        .pocket_index,
+                )
+            };
+            ClientAction::Reload {
+                ammunition_item: item_id,
+                magazine_well_index,
+            }
+        }
         ItemMenuAction::Consume => ClientAction::Consume { item_id },
         ItemMenuAction::Activate => ClientAction::Activate { item_id },
         ItemMenuAction::Read => ClientAction::Read {
@@ -3963,6 +3997,7 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::ItemMissing => "item is missing",
         CommandRejection::ItemNotHere => "item is not here",
         CommandRejection::ItemNotOwned => "item is not carried",
+        CommandRejection::PocketMissing => "the selected item pocket is unavailable",
         CommandRejection::InventoryFull => "inventory is full",
         CommandRejection::ItemNotConsumable => "item cannot be consumed",
         CommandRejection::ItemNotActivatable => "item cannot be activated",
@@ -4753,7 +4788,7 @@ mod tests {
                 ranged_weapon,
                 component_provenance: None,
                 magazine_capacity: 0,
-                magazine_well: None,
+                magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
@@ -4851,20 +4886,31 @@ mod tests {
         let mut tool = item(6, "", "", None);
         tool.type_id = String::from("flashlight");
         tool.charges = 0;
-        tool.magazine_well = Some(cdda_protocol::MagazineWellSnapshotV1 {
-            compatible_magazine_type_ids: vec![String::from("medium_battery")],
-            installed_magazine: None,
-        });
+        tool.magazine_wells = vec![
+            cdda_protocol::MagazineWellSnapshotV1 {
+                pocket_index: 1,
+                pocket_id: String::from("AUXILIARY"),
+                compatible_magazine_type_ids: vec![String::from("heavy_battery")],
+                installed_magazine: None,
+            },
+            cdda_protocol::MagazineWellSnapshotV1 {
+                pocket_index: 4,
+                pocket_id: String::from("POWER"),
+                compatible_magazine_type_ids: vec![String::from("medium_battery")],
+                installed_magazine: None,
+            },
+        ];
         let mut battery = item(7, "battery", "", None);
         battery.type_id = String::from("medium_battery");
         battery.charges = 3;
         battery.magazine_capacity = 5;
         let mut incompatible_battery = item(8, "battery", "", None);
         incompatible_battery.type_id = String::from("heavy_battery");
+        incompatible_battery.charges = 9;
         incompatible_battery.magazine_capacity = 10;
         let mut battery_snapshot = snapshot;
         battery_snapshot.controlled_actor.inventory =
-            vec![tool.clone(), battery.clone(), incompatible_battery];
+            vec![tool.clone(), battery.clone(), incompatible_battery.clone()];
         battery_snapshot.controlled_actor.wielded = Some(tool.id);
         battery_snapshot.ground_items.clear();
         assert_eq!(
@@ -4872,16 +4918,33 @@ mod tests {
                 .into_iter()
                 .map(|entry| entry.item_id)
                 .collect::<Vec<_>>(),
-            vec![battery.id]
+            vec![battery.id, incompatible_battery.id]
         );
+        assert!(matches!(
+            client_action_for_item_menu(
+                ItemMenuAction::Reload,
+                incompatible_battery.id,
+                Some(&battery_snapshot),
+            ),
+            Some(ClientAction::Reload {
+                ammunition_item,
+                magazine_well_index: Some(1),
+            }) if ammunition_item == incompatible_battery.id
+        ));
         assert!(item_menu_label(&battery, None).contains("3/5"));
         battery.residual_energy_millijoules = 998_440;
         assert!(item_menu_label(&battery, None).contains("+ 998440 mJ"));
 
-        tool.magazine_well
-            .as_mut()
+        tool.magazine_wells
+            .iter_mut()
+            .find(|well| well.pocket_index == 4)
             .expect("flashlight well exists")
             .installed_magazine = Some(Box::new(battery));
+        tool.magazine_wells
+            .iter_mut()
+            .find(|well| well.pocket_index == 1)
+            .expect("auxiliary well exists")
+            .installed_magazine = Some(Box::new(incompatible_battery));
         tool.powered_tool = Some(cdda_protocol::PoweredToolStateV1 {
             inactive_type_id: String::from("flashlight"),
             active_type_id: String::from("flashlight_on"),
@@ -4889,8 +4952,11 @@ mod tests {
             power_draw_milliwatts: 1_560,
             light_emission: 300,
             dims_with_charge: true,
+            power_pocket_index: 4,
             active: false,
         });
+        assert!(item_menu_label(&tool, None).contains("[power 3 + 998440 mJ]"));
+        assert!(!item_menu_label(&tool, None).contains("[power 9"));
         battery_snapshot.controlled_actor.inventory = vec![tool.clone()];
         assert_eq!(
             item_menu_entries(
@@ -4905,8 +4971,9 @@ mod tests {
             .collect::<Vec<_>>(),
             vec![tool.id]
         );
-        tool.magazine_well
-            .as_mut()
+        tool.magazine_wells
+            .iter_mut()
+            .find(|well| well.pocket_index == 4)
             .and_then(|well| well.installed_magazine.as_deref_mut())
             .expect("battery is installed")
             .charges = 0;
@@ -4992,7 +5059,7 @@ mod tests {
             ranged_weapon: None,
             component_provenance: None,
             magazine_capacity: 0,
-            magazine_well: None,
+            magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
@@ -5667,7 +5734,7 @@ mod tests {
             }),
             component_provenance: None,
             magazine_capacity: 0,
-            magazine_well: None,
+            magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,

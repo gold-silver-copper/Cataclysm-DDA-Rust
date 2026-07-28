@@ -17,8 +17,8 @@ use cdda_sim::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const SCENARIO_FORMAT_VERSION: u16 = 1;
-pub const OBSERVATION_FORMAT_VERSION: u16 = 1;
+pub const SCENARIO_FORMAT_VERSION: u16 = 2;
+pub const OBSERVATION_FORMAT_VERSION: u16 = 2;
 const MAX_ALIASES: usize = 512;
 const MAX_ALIAS_BYTES: usize = 64;
 const MAX_CHUNKS: usize = 121;
@@ -69,7 +69,7 @@ pub struct ScenarioItemV1 {
     pub ammunition_type: String,
     pub ranged_weapon: Option<RangedWeaponSnapshot>,
     pub magazine_capacity: u32,
-    pub compatible_magazine_type_ids: Vec<String>,
+    pub magazine_wells: Vec<MagazineWellPrototypeV1>,
     pub residual_energy_millijoules: u32,
     pub powered_tool: Option<PoweredToolStateV1>,
 }
@@ -93,11 +93,24 @@ pub enum ScenarioStepV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub enum ScenarioCommandV1 {
-    Move { dx: i8, dy: i8 },
-    PickUp { item: String },
-    Wield { item: String },
+    Move {
+        dx: i8,
+        dy: i8,
+    },
+    PickUp {
+        item: String,
+    },
+    Wield {
+        item: String,
+    },
     Unwield,
-    Drop { item: String },
+    Drop {
+        item: String,
+    },
+    Reload {
+        ammunition: String,
+        magazine_well_index: Option<u16>,
+    },
     Wait,
 }
 
@@ -510,11 +523,7 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
     let mut item_specs = scenario.ground_items.iter().collect::<Vec<_>>();
     item_specs.sort_by(|left, right| left.alias.cmp(&right.alias));
     for item in item_specs {
-        let magazine_well =
-            (!item.compatible_magazine_type_ids.is_empty()).then(|| MagazineWellPrototypeV1 {
-                compatible_magazine_type_ids: item.compatible_magazine_type_ids.clone(),
-            });
-        let id = world.spawn_ground_item_with_powered_storage(
+        let id = world.spawn_ground_item_with_powered_magazine_wells(
             ItemSpawn {
                 position: item.position,
                 type_id: item.type_id.clone(),
@@ -527,7 +536,7 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
                 ranged_weapon: item.ranged_weapon.clone(),
             },
             item.magazine_capacity,
-            magazine_well,
+            item.magazine_wells.clone(),
             item.residual_energy_millijoules,
             item.powered_tool.clone(),
         )?;
@@ -562,6 +571,13 @@ fn resolve_command(
         ScenarioCommandV1::Unwield => CommandKind::Unwield,
         ScenarioCommandV1::Drop { item } => CommandKind::Drop {
             item_id: item_id(item)?,
+        },
+        ScenarioCommandV1::Reload {
+            ammunition,
+            magazine_well_index,
+        } => CommandKind::Reload {
+            ammunition_item: item_id(ammunition)?,
+            magazine_well_index: *magazine_well_index,
         },
         ScenarioCommandV1::Wait => CommandKind::Wait,
     })
@@ -756,7 +772,7 @@ fn scenario_event_trace_hash(
 ) -> Result<[u8; 32], ConformanceError> {
     let encoded = postcard::to_stdvec(event_batches)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"CddaScenarioEventsV1\0");
+    hasher.update(b"CddaScenarioEventsV2\0");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -795,7 +811,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
-                compatible_magazine_type_ids: Vec::new(),
+                magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             }],
@@ -830,14 +846,14 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x21, 0x2c, 0x99, 0xd3, 0xf3, 0x2f, 0x1b, 0xb5, 0xfc, 0x78, 0x86, 0x7c, 0x59,
-                    0x28, 0x19, 0x0b, 0x96, 0xa6, 0x64, 0x94, 0x8f, 0xc8, 0x52, 0x5f, 0x3e, 0xd3,
-                    0x6b, 0xf1, 0xa7, 0x8e, 0x80, 0xef,
+                    0x19, 0x71, 0x1e, 0x5a, 0xdf, 0x45, 0x5e, 0x7e, 0x0d, 0x7b, 0x35, 0x19, 0x09,
+                    0x30, 0xc2, 0x66, 0xd2, 0xc1, 0xf7, 0x14, 0xe1, 0x4b, 0x7f, 0x08, 0x78, 0xab,
+                    0xb0, 0x52, 0x7d, 0xda, 0x41, 0xc9,
                 ],
                 event_trace_hash: [
-                    0x83, 0x36, 0x47, 0x08, 0x61, 0x80, 0x69, 0x7c, 0xe4, 0xe3, 0xda, 0xc6, 0xbc,
-                    0x18, 0x77, 0xd5, 0xb9, 0x7a, 0x50, 0xee, 0x2c, 0xfd, 0x0f, 0x70, 0xf8, 0x93,
-                    0x05, 0x04, 0xec, 0x58, 0x60, 0x78,
+                    0x0f, 0x91, 0xe8, 0x6c, 0x2c, 0x5f, 0x0d, 0xdf, 0x88, 0xa7, 0x44, 0xef, 0xc5,
+                    0x84, 0xe5, 0xf0, 0x2b, 0xe5, 0x63, 0x7b, 0x1b, 0xb8, 0x6e, 0xe4, 0x22, 0x54,
+                    0xbe, 0xc3, 0x28, 0x05, 0x51, 0x17,
                 ],
                 actors: vec![ScenarioActorExpectationV1 {
                     actor: String::from("survivor"),
@@ -871,6 +887,182 @@ mod tests {
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
             "rock"
+        );
+    }
+
+    #[test]
+    fn indexed_multi_well_reload_is_identical_across_sqlite_and_portable_replay() {
+        let position = WorldPosition { x: 1, y: 1, z: 0 };
+        let item = |alias: &str,
+                    type_id: &str,
+                    charges: i32,
+                    ammunition_type: &str,
+                    magazine_capacity: u32,
+                    magazine_wells: Vec<MagazineWellPrototypeV1>,
+                    powered_tool: Option<PoweredToolStateV1>| ScenarioItemV1 {
+            alias: alias.to_owned(),
+            position,
+            type_id: type_id.to_owned(),
+            charges,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: ammunition_type.to_owned(),
+            ranged_weapon: None,
+            magazine_capacity,
+            magazine_wells,
+            residual_energy_millijoules: 0,
+            powered_tool,
+        };
+        let commands = [
+            ScenarioCommandV1::PickUp {
+                item: String::from("tool"),
+            },
+            ScenarioCommandV1::PickUp {
+                item: String::from("primary"),
+            },
+            ScenarioCommandV1::PickUp {
+                item: String::from("auxiliary"),
+            },
+            ScenarioCommandV1::Wield {
+                item: String::from("tool"),
+            },
+            ScenarioCommandV1::Reload {
+                ammunition: String::from("auxiliary"),
+                magazine_well_index: Some(4),
+            },
+            ScenarioCommandV1::Reload {
+                ammunition: String::from("primary"),
+                magazine_well_index: Some(1),
+            },
+        ];
+        let mut steps = Vec::new();
+        for command in commands {
+            steps.push(ScenarioStepV1::Command {
+                actor: String::from("survivor"),
+                command,
+            });
+            steps.push(ScenarioStepV1::Advance { ticks: 25 });
+        }
+        let scenario = ScenarioV1 {
+            format_version: SCENARIO_FORMAT_VERSION,
+            protocol_version: cdda_protocol::PROTOCOL_VERSION,
+            persistence_schema_version: SCHEMA_VERSION,
+            replay_format_version: REPLAY_FORMAT_VERSION,
+            baseline_commit: String::from(cdda_protocol::BASELINE_COMMIT),
+            world_namespace: 901,
+            world_seed: [10; 32],
+            content_manifest_hash: [8; 32],
+            enabled_mods: vec![String::from("dda")],
+            chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+            actors: vec![ScenarioActorV1 {
+                alias: String::from("survivor"),
+                position,
+                connected: true,
+                stats: CharacterCreationStatsV1::default(),
+            }],
+            ground_items: vec![
+                item(
+                    "tool",
+                    "dual_tool",
+                    0,
+                    "",
+                    0,
+                    vec![
+                        MagazineWellPrototypeV1 {
+                            pocket_index: 1,
+                            pocket_id: String::from("PRIMARY"),
+                            compatible_magazine_type_ids: vec![String::from("light_battery")],
+                        },
+                        MagazineWellPrototypeV1 {
+                            pocket_index: 4,
+                            pocket_id: String::from("AUXILIARY"),
+                            compatible_magazine_type_ids: vec![String::from("heavy_battery")],
+                        },
+                    ],
+                    Some(PoweredToolStateV1 {
+                        inactive_type_id: String::from("dual_tool"),
+                        active_type_id: String::from("dual_tool_on"),
+                        activation_charges: 1,
+                        power_draw_milliwatts: 1_000,
+                        light_emission: 4,
+                        dims_with_charge: false,
+                        power_pocket_index: 1,
+                        active: false,
+                    }),
+                ),
+                item(
+                    "primary",
+                    "light_battery",
+                    3,
+                    "battery",
+                    10,
+                    Vec::new(),
+                    None,
+                ),
+                item(
+                    "auxiliary",
+                    "heavy_battery",
+                    4,
+                    "battery",
+                    10,
+                    Vec::new(),
+                    None,
+                ),
+            ],
+            steps,
+            expected: ScenarioExpectationV1 {
+                final_tick: SimTick(0),
+                final_state_hash: [0; 32],
+                event_trace_hash: [0; 32],
+                actors: vec![ScenarioActorExpectationV1 {
+                    actor: String::from("survivor"),
+                    position,
+                    connected: true,
+                    inventory: vec![String::from("tool")],
+                    wielded: Some(String::from("tool")),
+                }],
+                ground_items: Vec::new(),
+                event_batches: None,
+            },
+        };
+        let direct = run_scenario(&scenario, ScenarioMode::Direct)
+            .expect("multi-well scenario should run directly");
+        for mode in [
+            ScenarioMode::SnapshotEachTick,
+            ScenarioMode::SqliteRecovery,
+            ScenarioMode::PortableReplay,
+        ] {
+            assert_eq!(
+                run_scenario(&scenario, mode).expect("multi-well scenario should replay"),
+                direct,
+                "{mode} must preserve indexed nested items"
+            );
+        }
+        let tool = direct
+            .final_snapshot
+            .actors
+            .first()
+            .and_then(|actor| actor.inventory.first())
+            .expect("tool should remain wielded");
+        assert_eq!(
+            tool.magazine_wells
+                .iter()
+                .map(|well| {
+                    (
+                        well.pocket_index,
+                        well.pocket_id.as_str(),
+                        well.installed_magazine
+                            .as_deref()
+                            .map(|magazine| (magazine.type_id.as_str(), magazine.charges)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (1, "PRIMARY", Some(("light_battery", 3))),
+                (4, "AUXILIARY", Some(("heavy_battery", 4))),
+            ]
         );
     }
 

@@ -15,23 +15,33 @@ persistent iroh identity, recovery, and audit
 guarantees while accelerating toward generalized subsystem parity. The active
 machine-readable milestone is item containment: inherited pocket definitions
 are retained losslessly and strict magazine/well admission is generalized
-before the canonical multi-pocket ownership migration.
+through the canonical multi-well ownership migration. Item-backed ammunition
+and general container contents are the next containment boundary.
 
 ## Runnable behavior
 
 - A limited multiplayer foundation slice is runnable; it is not a CDDA-complete
   gameplay release.
 - The versioned `cdda-conformance` scenario DSL has checked-in final-state and
-  semantic expectations and proves the same item pickup/wield/drop/disconnect
-  flow through direct simulation, per-tick snapshot restore, SQLite recovery,
-  and portable replay. `docs/parity-ledger.json` supplies an executable,
+  semantic expectations and proves both basic item flow and explicit indexed
+  multi-well reloads through direct simulation, per-tick snapshot restore,
+  SQLite recovery, and portable replay. `docs/parity-ledger.json` supplies an executable,
   version-bound, acyclic dependency DAG for generalized subsystem work.
 - The ITEM loader preserves every inherited `pocket_data` object and source
   index without claiming unsupported runtime behavior. Strict MAGAZINE and
   MAGAZINE_WELL projections retain explicit pocket indices/IDs, reject extra
   behavior, and generalize the server's storage admission beyond a
-  battery-only helper. Five reversible detachable-tool definitions now use
+  battery-only helper. Six reversible detachable-tool definitions now use
   modeled unload-before-disassembly instead of the prior empty-charge gate.
+- Protocol 76/schema 54/CanonicalStateV52/CanonicalEventsV15 replace the
+  single optional runtime well with up to 16 ordered wells carrying canonical
+  pocket indices and source IDs. Reload requests and events identify the exact
+  well; powered tools identify their energy well; all installed stable IDs are
+  validated, hashed, restored, recovered, and replayed; and disassembly
+  detaches every installed magazine. A two-well simulation proves independent
+  reloads, missing-pocket rejection, nested identity, and snapshot restoration.
+  Pre-54 databases with serialized world state reject before mutation because
+  backwards Postcard migration is deliberately unsupported.
 - The Rust 1.97.1 workspace builds on macOS. The native Bevy 0.19 client and
   standalone Bevy-free server use iroh 1.0.3.
 - Protocol 75 advances to schema 53/CanonicalStateV51 while retaining
@@ -938,7 +948,7 @@ Run on Apple-silicon macOS on 2026-07-28:
   MONSTER field-support classifications; all 1,374 `volume` and 284
   `attack_cost` occurrences are now marked loader-implemented.
 - `cargo xtask astronomy-table-check` — passed for all 364 pinned Boston days.
-- `cargo test --workspace --all-targets --all-features` — passed, 257 tests
+- `cargo test --workspace --all-targets --all-features` — passed, 260 tests
   including real loopback iroh enrollment/gameplay/authoritative crafting,
   charged-tool bucket debit, resupply timing/capacity, offline
   interruption/resume/cancel, mandatory/optional/zero-learning proficiency
@@ -982,6 +992,12 @@ Run on Apple-silicon macOS on 2026-07-28:
   selected-content range validation, exact hit/miss charging, signed debt and
   banked multi-attack behavior, private hash/snapshot/corpse/revival retention,
   and schema-53 SQLite/portable-replay equivalence,
+  plus Protocol 76's bounded ordered magazine wells, canonical pocket
+  identity, explicit reload selection/result events, exact powered-tool pocket,
+  all-well disassembly detach, multi-well nested stable-ID restoration,
+  active-tool auxiliary reload with power-pocket exclusion,
+  CanonicalStateV52/CanonicalEventsV15, and schema-54 SQLite/portable-replay
+  equivalence,
   deterministic legacy byproduct capacity/cancel/order validation, and
   mid-craft recovery/replay, plus forged-book-payload normalization and
   interrupted/offline book-study recovery/replay. Exact-prerequisite terrain
@@ -991,7 +1007,8 @@ Run on Apple-silicon macOS on 2026-07-28:
   validation, compatible reload and exact swap identity, installed-energy tool
   debit, incompatible atomic rejection, unload-before-disassembly, cancel
   anti-duplication, hostile loaded-activity and duplicate-ID rejection, client
-  battery selection, and exact SQLite recovery/portable replay. New coverage proves forged
+  exact-pocket battery selection and power display, and exact SQLite
+  recovery/portable replay. New coverage proves forged
   disassembly bodies are replaced, out-of-range item damage rejects, exact
   target/wield/condition state survives cancel, damage interruption and resume
   are deterministic,
@@ -1674,6 +1691,12 @@ Run on Apple-silicon macOS on 2026-07-28:
   low-cost attacks. Loader precedence, selected-content bounds,
   CanonicalStateV51, schema-53 recovery, corpse revival, and portable replay
   are covered without changing CanonicalEventsV14 or public creature DTOs.
+- Protocol 76 replaces the runtime's single optional magazine well with a
+  bounded ordered collection keyed by canonical pocket index and optional
+  source ID. Exact-pocket reload, powered draw, stable nested IDs, multi-well
+  disassembly, CanonicalStateV52/CanonicalEventsV15, schema-54 recovery, and
+  portable replay are covered. Item-backed loose ammunition and general
+  container contents remain the next containment boundary.
 
 ## Next tasks
 

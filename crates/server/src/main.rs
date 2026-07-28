@@ -14,9 +14,9 @@ use cdda_content::{
     SkillRegistry, TerrainDefinition, TerrainRegistry,
 };
 use cdda_persistence::{
-    AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1, PreparedReplayArchive,
-    REPLAY_ARCHIVE_INTERVAL_SECONDS, ReplayArchiveCursor, ReplayBundleV1, SCHEMA_VERSION,
-    SnapshotObjectV1, WorldStore,
+    AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1,
+    MIN_RECOVERABLE_SCHEMA_VERSION, PreparedReplayArchive, REPLAY_ARCHIVE_INTERVAL_SECONDS,
+    ReplayArchiveCursor, ReplayBundleV1, SCHEMA_VERSION, SnapshotObjectV1, WorldStore,
 };
 use cdda_protocol::{
     ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, BASELINE_COMMIT,
@@ -794,7 +794,7 @@ fn open_world(
             .get("flashlight")
             .ok_or("pinned default content has no starter flashlight")?;
         let (flashlight_capacity, flashlight_well) = runtime_magazine_storage(flashlight, items)?;
-        world.spawn_ground_item_with_powered_storage(
+        world.spawn_ground_item_with_powered_magazine_wells(
             ItemSpawn {
                 position: spawn_position,
                 type_id: flashlight.id.clone(),
@@ -815,7 +815,7 @@ fn open_world(
             .get("medium_battery_cell")
             .ok_or("pinned default content has no starter medium battery")?;
         let (battery_capacity, battery_well) = runtime_magazine_storage(medium_battery, items)?;
-        world.spawn_ground_item_with_magazine_storage(
+        world.spawn_ground_item_with_magazine_wells(
             ItemSpawn {
                 position: spawn_position,
                 type_id: medium_battery.id.clone(),
@@ -1720,7 +1720,7 @@ fn build_disassembly_catalog(
                 && !result.subtypes.contains("GUN")
                 && !result.tool_ammunition.is_empty()
                 && result.default_charges() == 0
-                && runtime_magazine_storage(result, items)?.1.is_none(),
+                && runtime_magazine_storage(result, items)?.1.is_empty(),
             components,
             tools,
             qualities,
@@ -1844,7 +1844,7 @@ fn craft_item_prototype_with_ammunition(
     ammunition_type: String,
     items: &ItemRegistry,
 ) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
-    let (magazine_capacity, magazine_well) = runtime_magazine_storage(item, items)?;
+    let (magazine_capacity, magazine_wells) = runtime_magazine_storage(item, items)?;
     Ok(CraftItemPrototypeV1 {
         type_id: item.id.clone(),
         charges,
@@ -1855,7 +1855,7 @@ fn craft_item_prototype_with_ammunition(
         ammunition_type,
         ranged_weapon: None,
         magazine_capacity,
-        magazine_well,
+        magazine_wells,
         residual_energy_millijoules: 0,
         powered_tool: runtime_powered_tool(item, items)?,
     })
@@ -1864,63 +1864,87 @@ fn craft_item_prototype_with_ammunition(
 fn runtime_magazine_storage(
     item: &ItemDefinition,
     items: &ItemRegistry,
-) -> Result<(u32, Option<MagazineWellPrototypeV1>), Box<dyn std::error::Error>> {
+) -> Result<(u32, Vec<MagazineWellPrototypeV1>), Box<dyn std::error::Error>> {
     if let Some(magazine) = item.strict_magazine() {
-        return Ok((magazine.capacity, None));
+        return Ok((magazine.capacity, Vec::new()));
     }
     if let Some(projection) = strict_detachable_battery_light(item, items)? {
         return Ok((
             0,
-            Some(MagazineWellPrototypeV1 {
+            vec![MagazineWellPrototypeV1 {
+                pocket_index: projection.pocket_index,
+                pocket_id: projection.pocket_id,
                 compatible_magazine_type_ids: projection.compatible_magazine_type_ids,
-            }),
+            }],
         ));
     }
-    if let Some(well) = strict_detachable_magazine_well(item, items) {
-        return Ok((0, Some(well)));
+    let wells = strict_detachable_magazine_wells(item, items);
+    if !wells.is_empty() {
+        return Ok((0, wells));
     }
-    Ok((0, None))
+    Ok((0, Vec::new()))
 }
 
+#[cfg(test)]
 fn strict_detachable_magazine_well(
     item: &ItemDefinition,
     items: &ItemRegistry,
 ) -> Option<MagazineWellPrototypeV1> {
-    let [pocket] = item.pockets.as_slice() else {
+    let wells = strict_detachable_magazine_wells(item, items);
+    let [well] = wells.as_slice() else {
         return None;
     };
-    let [well] = item.magazine_wells.as_slice() else {
-        return None;
-    };
-    if !pocket.strict_magazine_well()
-        || pocket.pocket_index != well.pocket_index
+    Some(well.clone())
+}
+
+fn strict_detachable_magazine_wells(
+    item: &ItemDefinition,
+    items: &ItemRegistry,
+) -> Vec<MagazineWellPrototypeV1> {
+    if item.magazine_wells.is_empty()
         || !item.integral_magazines.is_empty()
         || item.magazine_capacity != 0
         || item.subtypes.contains("GUN")
         || item.subtypes.contains("MAGAZINE")
         || item.tool_ammunition.len() != 1
     {
-        return None;
+        return Vec::new();
     }
-    let ammunition_type = item.tool_ammunition.first()?;
-    let compatible = items.compatible_magazines(well);
-    if compatible.is_empty()
-        || (!well.default_magazine.is_empty()
-            && !compatible
-                .iter()
-                .any(|type_id| *type_id == well.default_magazine))
-        || compatible.iter().any(|type_id| {
-            items
-                .get(type_id)
-                .and_then(ItemDefinition::strict_magazine)
-                .is_none_or(|magazine| magazine.ammunition_type != *ammunition_type)
-        })
-    {
-        return None;
+    let Some(ammunition_type) = item.tool_ammunition.first() else {
+        return Vec::new();
+    };
+    let mut normalized = Vec::with_capacity(item.magazine_wells.len());
+    for well in &item.magazine_wells {
+        let Some(pocket) = item
+            .pockets
+            .iter()
+            .find(|pocket| pocket.pocket_index == well.pocket_index)
+        else {
+            return Vec::new();
+        };
+        let compatible = items.compatible_magazines(well);
+        if !pocket.strict_magazine_well()
+            || compatible.is_empty()
+            || (!well.default_magazine.is_empty()
+                && !compatible
+                    .iter()
+                    .any(|type_id| *type_id == well.default_magazine))
+            || compatible.iter().any(|type_id| {
+                items
+                    .get(type_id)
+                    .and_then(ItemDefinition::strict_magazine)
+                    .is_none_or(|magazine| magazine.ammunition_type != *ammunition_type)
+            })
+        {
+            return Vec::new();
+        }
+        normalized.push(MagazineWellPrototypeV1 {
+            pocket_index: well.pocket_index,
+            pocket_id: well.pocket_id.clone(),
+            compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
+        });
     }
-    Some(MagazineWellPrototypeV1 {
-        compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
-    })
+    normalized
 }
 
 fn runtime_powered_tool(
@@ -1933,6 +1957,8 @@ fn runtime_powered_tool(
 #[derive(Debug, Eq, PartialEq)]
 struct DetachableBatteryLightProjection {
     powered_tool: PoweredToolStateV1,
+    pocket_index: u16,
+    pocket_id: String,
     compatible_magazine_type_ids: Vec<String>,
 }
 
@@ -2041,8 +2067,11 @@ fn strict_detachable_battery_light(
             power_draw_milliwatts: power_draw_milliwatts.expect("positive draw was checked"),
             light_emission: light_emission.expect("positive light was checked"),
             dims_with_charge: active.flags.contains("CHARGEDIM"),
+            power_pocket_index: well.pocket_index,
             active: item.id == active.id,
         },
+        pocket_index: well.pocket_index,
+        pocket_id: well.pocket_id.clone(),
         compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
     }))
 }
@@ -3095,7 +3124,7 @@ fn verify_restored_world_identity(
         || provenance.baseline_commit != BASELINE_COMMIT
         || provenance.protocol_version == 0
         || provenance.protocol_version > PROTOCOL_VERSION
-        || provenance.schema_version <= 0
+        || provenance.schema_version < MIN_RECOVERABLE_SCHEMA_VERSION
         || provenance.schema_version > SCHEMA_VERSION
         || &provenance.content != expected_content
         || provenance.server_endpoint_id != expected_endpoint_id
@@ -3270,7 +3299,7 @@ fn verify_backup_generation_header(
         || manifest.baseline_commit != BASELINE_COMMIT
         || manifest.protocol_version == 0
         || manifest.protocol_version > PROTOCOL_VERSION
-        || manifest.schema_version <= 0
+        || manifest.schema_version < MIN_RECOVERABLE_SCHEMA_VERSION
         || manifest.schema_version > SCHEMA_VERSION
         || &manifest.content != expected_content
         || manifest.server_endpoint_id != expected_endpoint_id
@@ -4510,6 +4539,16 @@ mod tests {
             })
             .map(|(item_type_id, _)| item_type_id)
             .collect::<Vec<_>>();
+        let generalized_multi_well_targets = disassembly
+            .iter()
+            .filter(|(item_type_id, recipe)| {
+                !recipe.requires_empty_charges
+                    && items.get(item_type_id).is_some_and(|item| {
+                        strict_detachable_magazine_wells(item, &items).len() > 1
+                    })
+            })
+            .map(|(item_type_id, _)| item_type_id)
+            .collect::<Vec<_>>();
         assert_eq!(
             disassembly
                 .iter()
@@ -4528,7 +4567,7 @@ mod tests {
                 ("wearable_light", false),
             ]
         );
-        assert_eq!(empty_charge_targets.len(), 68);
+        assert_eq!(empty_charge_targets.len(), 67);
         assert_eq!(
             generalized_detachable_targets,
             [
@@ -4536,9 +4575,11 @@ mod tests {
                 "cordless_drill",
                 "elec_chainsaw_off",
                 "elec_hairtrimmer",
+                "mask_gas",
                 "soldering_iron_portable",
             ]
         );
+        assert_eq!(generalized_multi_well_targets, Vec::<&str>::new());
         assert_eq!(
             empty_charge_targets.len() + generalized_detachable_targets.len(),
             73,
@@ -4557,7 +4598,8 @@ mod tests {
         .expect("flashlight storage should normalize");
         assert_eq!(capacity, 0);
         assert_eq!(
-            well.expect("flashlight should have a canonical battery well")
+            well.first()
+                .expect("flashlight should have a canonical battery well")
                 .compatible_magazine_type_ids,
             ["medium_battery_cell"]
         );
@@ -4575,6 +4617,7 @@ mod tests {
                 power_draw_milliwatts: 1_560,
                 light_emission: 300,
                 dims_with_charge: true,
+                power_pocket_index: 0,
                 active: false,
             }
         );
@@ -4586,6 +4629,8 @@ mod tests {
         )
         .expect("high-power diving light storage should normalize")
         .1
+        .into_iter()
+        .next()
         .expect("high-power diving light should have a magazine well");
         assert_eq!(
             high_power_well.compatible_magazine_type_ids,
@@ -4599,7 +4644,7 @@ mod tests {
                 &items,
             )
             .expect("light battery storage should normalize"),
-            (16, None)
+            (16, Vec::new())
         );
         assert!(
             runtime_powered_tool(
@@ -4627,6 +4672,7 @@ mod tests {
                 power_draw_milliwatts: 3_000,
                 light_emission: 450,
                 dims_with_charge: true,
+                power_pocket_index: 0,
                 active: false,
             }
         );
@@ -4646,6 +4692,7 @@ mod tests {
                 power_draw_milliwatts: 1_000,
                 light_emission: 4,
                 dims_with_charge: true,
+                power_pocket_index: 0,
                 active: false,
             }
         );
@@ -4665,8 +4712,8 @@ mod tests {
         assert_eq!(
             wearable_recipe
                 .output
-                .magazine_well
-                .as_ref()
+                .magazine_wells
+                .first()
                 .expect("crafted wearable light should retain its well")
                 .compatible_magazine_type_ids,
             ["medium_battery_cell"]
@@ -4679,7 +4726,7 @@ mod tests {
         )
         .expect("medium battery storage should normalize");
         assert_eq!(capacity, 56);
-        assert!(well.is_none());
+        assert!(well.is_empty());
         assert_eq!(
             disassembly
                 .get("cordage_36")
@@ -5294,39 +5341,12 @@ mod tests {
         )
         .expect("legacy manifest should write");
         let legacy_restored_world = directory.join("legacy-restored-world");
-        assert_eq!(
+        assert!(
             restore_backup_generation(&legacy_generation, &legacy_restored_world, &content)
-                .expect("a verified older generation should restore"),
-            legacy_manifest
+                .is_err(),
+            "a backup with an incompatible Postcard schema must fail before restore"
         );
-        verify_restored_world_identity(
-            &legacy_restored_world,
-            &content,
-            secret_key_bytes,
-            &endpoint,
-        )
-        .expect("older restore provenance should verify before migration");
-        let migrated = WorldStore::open(legacy_restored_world.join("world.db"))
-            .expect("restored older database should migrate after verified restore");
-        drop(migrated);
-        let pre_migration_directory = legacy_restored_world.join("pre-migration-backups");
-        let pre_migration_generations = fs::read_dir(&pre_migration_directory)
-            .expect("pre-migration directory should list")
-            .map(|entry| entry.expect("pre-migration generation should read").path())
-            .collect::<Vec<_>>();
-        assert_eq!(pre_migration_generations.len(), 1);
-        assert_eq!(
-            fs::read(pre_migration_generations[0].join("server-identity.key"))
-                .expect("pre-migration identity should read"),
-            secret_key_bytes
-        );
-        verify_restored_world_identity(
-            &legacy_restored_world,
-            &content,
-            secret_key_bytes,
-            &endpoint,
-        )
-        .expect("historical provenance should remain valid after migration");
+        assert!(!legacy_restored_world.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

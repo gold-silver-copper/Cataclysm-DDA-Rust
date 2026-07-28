@@ -20,7 +20,10 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 53;
+pub const SCHEMA_VERSION: i64 = 54;
+/// Old Postcard snapshots and journals cannot be decoded after the Protocol 76
+/// item-containment layout change. Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 54;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -728,6 +731,11 @@ impl WorldStore {
         store.configure()?;
         if let Some(existing_schema) = existing_schema_version(&store.connection)? {
             if existing_schema > SCHEMA_VERSION {
+                return Err(StoreError::UnsupportedSchema(existing_schema));
+            }
+            if existing_schema < MIN_RECOVERABLE_SCHEMA_VERSION
+                && serialized_world_state_present(&store.connection)?
+            {
                 return Err(StoreError::UnsupportedSchema(existing_schema));
             }
             if existing_schema < SCHEMA_VERSION {
@@ -1484,6 +1492,12 @@ impl WorldStore {
             .execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?1)",
                 [52_i64],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?1)",
+                [53_i64],
             )
             .map_err(StoreError::Sqlite)?;
         transaction
@@ -5111,6 +5125,35 @@ fn existing_schema_version(connection: &Connection) -> Result<Option<i64>, Store
         .map_err(StoreError::Sqlite)
 }
 
+fn serialized_world_state_present(connection: &Connection) -> Result<bool, StoreError> {
+    for (table, query) in [
+        (
+            "snapshots",
+            "SELECT EXISTS(SELECT 1 FROM snapshots LIMIT 1)",
+        ),
+        (
+            "journal_batches",
+            "SELECT EXISTS(SELECT 1 FROM journal_batches LIMIT 1)",
+        ),
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if exists
+            && connection
+                .query_row(query, [], |row| row.get(0))
+                .map_err(StoreError::Sqlite)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn create_pre_migration_backup(
     source: &Connection,
     database_path: &Path,
@@ -6810,6 +6853,47 @@ mod tests {
     }
 
     #[test]
+    fn breaking_schema_rejects_old_serialized_world_state_before_mutation() {
+        let path = test_database_path();
+        let mut store = WorldStore::open(&path).expect("current database should open");
+        store
+            .initialize_world(54, [54; 32])
+            .expect("world should initialize");
+        store
+            .write_snapshot(0, &WorldState::new(54, [54; 32]))
+            .expect("snapshot should write");
+        drop(store);
+
+        let connection = Connection::open(&path).expect("fixture database should open");
+        connection
+            .execute(
+                "DELETE FROM schema_migrations WHERE version = ?1",
+                [SCHEMA_VERSION],
+            )
+            .expect("fixture should expose the previous schema marker");
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("fixture WAL should checkpoint");
+        drop(connection);
+
+        assert!(matches!(
+            WorldStore::open(&path),
+            Err(StoreError::UnsupportedSchema(53))
+        ));
+        let connection = Connection::open(&path).expect("rejected database should remain intact");
+        assert_eq!(
+            existing_schema_version(&connection).expect("schema should remain readable"),
+            Some(53)
+        );
+        assert!(
+            serialized_world_state_present(&connection)
+                .expect("serialized state should remain present")
+        );
+        drop(connection);
+        remove_database(&path);
+    }
+
+    #[test]
     fn on_disk_migration_publishes_verified_private_backup_first() {
         let directory = std::env::temp_dir().join(format!(
             "cdda-rust-migration-{}-{:016x}",
@@ -7063,7 +7147,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
-                magazine_well: None,
+                magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -7080,7 +7164,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
-                    magazine_well: None,
+                    magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -7316,6 +7400,8 @@ mod tests {
                 },
                 0,
                 Some(MagazineWellPrototypeV1 {
+                    pocket_index: 0,
+                    pocket_id: String::new(),
                     compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
                 }),
                 0,
@@ -7326,6 +7412,7 @@ mod tests {
                     power_draw_milliwatts: 1_560,
                     light_emission: 300,
                     dims_with_charge: true,
+                    power_pocket_index: 0,
                     active: false,
                 }),
             )
@@ -7360,6 +7447,7 @@ mod tests {
             CommandKind::Wield { item_id: tool_id },
             CommandKind::Reload {
                 ammunition_item: battery_id,
+                magazine_well_index: Some(0),
             },
             CommandKind::Activate { item_id: tool_id },
         ]
@@ -7387,7 +7475,7 @@ mod tests {
             .inventory
             .iter()
             .find(|item| item.id == tool_id)
-            .and_then(|item| item.magazine_well.as_ref())
+            .and_then(|item| item.magazine_wells.first())
             .and_then(|well| well.installed_magazine.as_deref())
             .map(|battery| {
                 (
@@ -7428,7 +7516,7 @@ mod tests {
             .inventory
             .iter()
             .find(|item| item.id == tool_id)
-            .and_then(|item| item.magazine_well.as_ref())
+            .and_then(|item| item.magazine_wells.first())
             .and_then(|well| well.installed_magazine.as_deref())
             .map(|battery| {
                 (
@@ -7459,7 +7547,7 @@ mod tests {
             .inventory
             .iter()
             .find(|item| item.id == tool_id)
-            .and_then(|item| item.magazine_well.as_ref())
+            .and_then(|item| item.magazine_wells.first())
             .and_then(|well| well.installed_magazine.as_deref())
             .map(|battery| {
                 (
@@ -10529,7 +10617,7 @@ mod tests {
                 ammunition_type: String::from("test_ammo"),
                 ranged_weapon: None,
                 magazine_capacity: 0,
-                magazine_well: None,
+                magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             }),
@@ -10547,7 +10635,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
-                    magazine_well: None,
+                    magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -10750,7 +10838,7 @@ mod tests {
                 ammunition_type: String::from("battery"),
                 ranged_weapon: None,
                 magazine_capacity: 0,
-                magazine_well: None,
+                magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             }),
@@ -10768,7 +10856,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
-                    magazine_well: None,
+                    magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },

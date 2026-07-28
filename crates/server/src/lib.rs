@@ -4509,8 +4509,9 @@ fn item_powered_light_emission(item: &cdda_protocol::ItemSnapshot) -> u16 {
         return 0;
     };
     let Some(magazine) = item
-        .magazine_well
-        .as_ref()
+        .magazine_wells
+        .iter()
+        .find(|well| well.pocket_index == powered.power_pocket_index)
         .and_then(|well| well.installed_magazine.as_deref())
     else {
         return 0;
@@ -5179,7 +5180,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
-                magazine_well: None,
+                magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -5232,7 +5233,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
-                    magazine_well: None,
+                    magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -5366,7 +5367,7 @@ mod tests {
             ammunition_type: String::from("test_ammo"),
             ranged_weapon: None,
             magazine_capacity: 0,
-            magazine_well: None,
+            magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         });
@@ -6383,7 +6384,9 @@ mod tests {
             ranged_weapon: None,
             component_provenance: None,
             magazine_capacity: 0,
-            magazine_well: Some(cdda_protocol::MagazineWellSnapshotV1 {
+            magazine_wells: vec![cdda_protocol::MagazineWellSnapshotV1 {
+                pocket_index: 0,
+                pocket_id: String::new(),
                 compatible_magazine_type_ids: vec![String::from("light_minus_battery_cell")],
                 installed_magazine: Some(Box::new(cdda_protocol::ItemSnapshot {
                     id: cdda_protocol::ItemId::new(31, 111),
@@ -6398,12 +6401,12 @@ mod tests {
                     ranged_weapon: None,
                     component_provenance: None,
                     magazine_capacity: 2,
-                    magazine_well: None,
+                    magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
                 })),
-            }),
+            }],
             residual_energy_millijoules: 0,
             powered_tool: Some(cdda_protocol::PoweredToolStateV1 {
                 inactive_type_id: String::from("wizard_cane_cheap"),
@@ -6412,6 +6415,7 @@ mod tests {
                 power_draw_milliwatts: 1_000,
                 light_emission: 4,
                 dims_with_charge: true,
+                power_pocket_index: 0,
                 active: true,
             }),
             creature_corpse: None,
@@ -6490,7 +6494,9 @@ mod tests {
                 ranged_weapon: None,
                 component_provenance: None,
                 magazine_capacity: 0,
-                magazine_well: Some(cdda_protocol::MagazineWellSnapshotV1 {
+                magazine_wells: vec![cdda_protocol::MagazineWellSnapshotV1 {
+                    pocket_index: 0,
+                    pocket_id: String::new(),
                     compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
                     installed_magazine: Some(Box::new(cdda_protocol::ItemSnapshot {
                         id: cdda_protocol::ItemId::new(31, 101),
@@ -6505,12 +6511,12 @@ mod tests {
                         ranged_weapon: None,
                         component_provenance: None,
                         magazine_capacity: 56,
-                        magazine_well: None,
+                        magazine_wells: Vec::new(),
                         residual_energy_millijoules: 998_440,
                         powered_tool: None,
                         creature_corpse: None,
                     })),
-                }),
+                }],
                 residual_energy_millijoules: 0,
                 powered_tool: Some(cdda_protocol::PoweredToolStateV1 {
                     inactive_type_id: String::from("flashlight"),
@@ -6519,6 +6525,7 @@ mod tests {
                     power_draw_milliwatts: 1_560,
                     light_emission: 300,
                     dims_with_charge: true,
+                    power_pocket_index: 0,
                     active: true,
                 }),
                 creature_corpse: None,
@@ -8178,6 +8185,7 @@ mod tests {
                 client_tick: ammunition_picked_up.tick,
                 kind: CommandKind::Reload {
                     ammunition_item: ranged_ammunition,
+                    magazine_well_index: None,
                 },
             }),
         )
