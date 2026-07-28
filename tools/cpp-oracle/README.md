@@ -6,20 +6,26 @@ versioned scenario, verifies the checkout commit and Git tree, exports that
 exact commit into ignored `target/cpp-oracle/`, adds the oracle-only Catch test,
 builds a minimal `cata_test` from the upstream test main, its fake-message
 support, and the adapter, then compares strict JSON output with the checked
-observation.
+observation. An exclusive cross-process file lock spans preparation and
+execution, and every execution separately exports the pinned `data/` tree into
+its self-cleaning runtime directory.
 
 On macOS the upstream headless build requires Homebrew's wide-character
 ncurses package (`brew install ncurses`). The runner puts that package's
 `pkg-config` directory ahead of Apple's narrow system ncurses automatically.
 
-The original `../Cataclysm-DDA` checkout is only read. C++ objects, the exported
-tree, test user data, and observations remain under the Rust workspace's
-ignored `target/`. No C++ code or library is linked into the Rust client,
-server, simulation, or protocol crates.
+The original `../Cataclysm-DDA` checkout is only read. C++ objects and the
+exported tree remain under the Rust workspace's ignored `target/`; bounded
+observation and test-user data live in one self-cleaning runtime directory. No
+C++ code or library is linked into the Rust client, server, simulation, or
+protocol crates.
 
 The initial kernel calls upstream `item_pocket::can_contain` for items shorter
 than, equal to, and longer than a fixed container maximum. This is a bounded
 bootstrap, not a general C++ RPC service: adding a kernel requires a new
 versioned scenario/observation shape and explicit C++ adapter code. The first
 build compiles upstream's headless core and can take several minutes; subsequent
-runs reuse the commit-and-adapter-keyed binary.
+runs reuse it only when a strict cache record matches the commit, tree, adapter,
+and BLAKE3 executable digest. Any mismatch deletes the export and rebuilds it
+from the pinned Git archive. Runtime-loaded JSON is never reused from that
+build cache.

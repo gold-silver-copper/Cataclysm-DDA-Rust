@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -8,6 +8,7 @@ use cdda_protocol::BASELINE_COMMIT;
 use serde::{Deserialize, Serialize};
 
 const ORACLE_FORMAT_VERSION: u16 = 1;
+const CACHE_FORMAT_VERSION: u16 = 1;
 const UPSTREAM_TREE: &str = "210f31db2e8b2f0caed1809f1a66781859f9d129";
 const KERNEL: &str = "item_pocket_max_length_v1";
 const MAX_JSON_BYTES: u64 = 1024 * 1024;
@@ -58,6 +59,26 @@ struct PocketCaseObservationV1 {
     reason: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OracleCacheV1 {
+    format_version: u16,
+    baseline_commit: String,
+    upstream_tree: String,
+    adapter_hash: String,
+    binary_hash: String,
+}
+
+struct OracleRunArtifacts {
+    root: PathBuf,
+}
+
+impl Drop for OracleRunArtifacts {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if arguments.len() > 2 {
         return Err(
@@ -68,6 +89,15 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
         .parent()
         .and_then(Path::parent)
         .ok_or("tools crate is not nested beneath the workspace")?;
+    let oracle_root = workspace.join("target/cpp-oracle");
+    fs::create_dir_all(&oracle_root)?;
+    let oracle_lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(oracle_root.join(".lock"))?;
+    oracle_lock.lock()?;
     let scenario_path = arguments
         .first()
         .map(PathBuf::from)
@@ -80,7 +110,7 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
     validate_upstream(&upstream)?;
 
     let binary = prepare_binary(workspace, &upstream)?;
-    let observation = run_binary(workspace, &binary)?;
+    let observation = run_binary(workspace, &upstream, &binary)?;
     compare(&scenario, &observation)?;
 
     println!(
@@ -232,9 +262,7 @@ fn prepare_binary(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let root = workspace.join("target/cpp-oracle").join(BASELINE_COMMIT);
     let binary = root.join("tests/cata_test");
-    let export_stamp = root.join(".rust-cpp-oracle-export");
-    let adapter_stamp = root.join(".rust-cpp-oracle-adapter");
-    let export_identity = format!("{BASELINE_COMMIT}\n{UPSTREAM_TREE}");
+    let cache_path = root.join(".rust-cpp-oracle-cache.json");
     let adapter_hash = blake3::hash(
         [ADAPTER_SOURCE.as_bytes(), ADAPTER_MAKEFILE.as_bytes()]
             .concat()
@@ -242,23 +270,14 @@ fn prepare_binary(
     )
     .to_hex()
     .to_string();
-    let reusable_export =
-        fs::read_to_string(&export_stamp).is_ok_and(|contents| contents.trim() == export_identity);
-    if !reusable_export {
-        if root.exists() {
-            fs::remove_dir_all(&root)?;
-        }
-        fs::create_dir_all(&root)?;
-        export_upstream(upstream, &root)?;
-        let mut stamp_file = fs::File::create(&export_stamp)?;
-        writeln!(stamp_file, "{export_identity}")?;
-        stamp_file.sync_all()?;
-    }
-    let adapter_current =
-        fs::read_to_string(&adapter_stamp).is_ok_and(|contents| contents.trim() == adapter_hash);
-    if binary.is_file() && adapter_current {
+    if reusable_binary(&cache_path, &binary, &adapter_hash)? {
         return Ok(binary);
     }
+    if root.exists() {
+        fs::remove_dir_all(&root)?;
+    }
+    fs::create_dir_all(&root)?;
+    export_upstream(upstream, &root)?;
     fs::write(
         root.join("tests/rust_cpp_oracle_item_pocket_test.cpp"),
         ADAPTER_SOURCE,
@@ -298,10 +317,62 @@ fn prepare_binary(
         )
         .into());
     }
-    let mut stamp_file = fs::File::create(adapter_stamp)?;
-    writeln!(stamp_file, "{adapter_hash}")?;
+    let cache = OracleCacheV1 {
+        format_version: CACHE_FORMAT_VERSION,
+        baseline_commit: BASELINE_COMMIT.to_owned(),
+        upstream_tree: UPSTREAM_TREE.to_owned(),
+        adapter_hash,
+        binary_hash: blake3_file(&binary)?,
+    };
+    let mut stamp_file = fs::File::create(cache_path)?;
+    serde_json::to_writer(&mut stamp_file, &cache)?;
+    writeln!(stamp_file)?;
     stamp_file.sync_all()?;
     Ok(binary)
+}
+
+fn reusable_binary(
+    cache_path: &Path,
+    binary: &Path,
+    expected_adapter_hash: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if !binary.is_file() || !cache_path.is_file() {
+        return Ok(false);
+    }
+    let cache_bytes = match read_bounded(cache_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(false),
+    };
+    let cache = match serde_json::from_slice::<OracleCacheV1>(&cache_bytes) {
+        Ok(cache) => cache,
+        Err(_) => return Ok(false),
+    };
+    if cache.format_version != CACHE_FORMAT_VERSION
+        || cache.baseline_commit != BASELINE_COMMIT
+        || cache.upstream_tree != UPSTREAM_TREE
+        || cache.adapter_hash != expected_adapter_hash
+        || cache.binary_hash.parse::<blake3::Hash>().is_err()
+    {
+        return Ok(false);
+    }
+    Ok(blake3_file(binary)? == cache.binary_hash)
+}
+
+fn blake3_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let mut file = fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(format!("cache executable is not a regular file: {}", path.display()).into());
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn macos_ncurses_pkg_config_path() -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -347,12 +418,22 @@ fn macos_ncurses_pkg_config_path() -> Result<Option<String>, Box<dyn std::error:
 }
 
 fn export_upstream(upstream: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut archive = Command::new("git")
+    export_upstream_paths(upstream, destination, &[])
+}
+
+fn export_upstream_paths(
+    upstream: &Path,
+    destination: &Path,
+    paths: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut archive_command = Command::new("git");
+    archive_command
         .arg("-C")
         .arg(upstream)
         .args(["archive", "--format=tar", BASELINE_COMMIT])
-        .stdout(Stdio::piped())
-        .spawn()?;
+        .args(paths)
+        .stdout(Stdio::piped());
+    let mut archive = archive_command.spawn()?;
     let archive_stdout = archive.stdout.take().ok_or("git archive has no stdout")?;
     let extract_status = Command::new("tar")
         .args(["-xf", "-", "-C"])
@@ -371,21 +452,21 @@ fn export_upstream(upstream: &Path, destination: &Path) -> Result<(), Box<dyn st
 
 fn run_binary(
     workspace: &Path,
+    upstream: &Path,
     binary: &Path,
 ) -> Result<OracleObservationV1, Box<dyn std::error::Error>> {
-    let process = std::process::id();
-    let output_path = workspace.join(format!("target/cpp-oracle/observation-{process}.json"));
-    let user_dir = workspace.join(format!("target/cpp-oracle/test-user-{process}"));
-    if output_path.exists() {
-        fs::remove_file(&output_path)?;
+    cleanup_legacy_run_artifacts(workspace)?;
+    let run_root = workspace.join("target/cpp-oracle/runtime");
+    if run_root.exists() {
+        fs::remove_dir_all(&run_root)?;
     }
-    if user_dir.exists() {
-        fs::remove_dir_all(&user_dir)?;
-    }
-    let upstream_root = binary
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("C++ oracle binary is outside its exported upstream root")?;
+    fs::create_dir_all(&run_root)?;
+    let _artifacts = OracleRunArtifacts {
+        root: run_root.clone(),
+    };
+    let output_path = run_root.join("observation.json");
+    let user_dir = run_root.join("user");
+    export_upstream_paths(upstream, &run_root, &["data"])?;
     let status = Command::new(binary)
         .arg("rust_cpp_oracle_item_pocket_max_length")
         .args(["--rng-seed", "1", "--order", "lex", "--drop-world"])
@@ -394,7 +475,7 @@ fn run_binary(
         .env("CDDA_RUST_CPP_ORACLE_OUTPUT", &output_path)
         .env("LANGUAGE", "en")
         .env("LC_ALL", "C")
-        .current_dir(upstream_root)
+        .current_dir(&run_root)
         .status()?;
     if !status.success() {
         return Err(format!("pinned C++ oracle execution failed with status {status}").into());
@@ -404,6 +485,41 @@ fn run_binary(
         .map_err(|error| format!("C++ oracle emitted invalid observation JSON: {error}"))?;
     validate_observation(&observation)?;
     Ok(observation)
+}
+
+fn cleanup_legacy_run_artifacts(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace.join("target/cpp-oracle");
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let observation = name
+            .strip_prefix("observation-")
+            .and_then(|suffix| suffix.strip_suffix(".json"));
+        let test_user = name.strip_prefix("test-user-");
+        if observation.is_some_and(|process| {
+            !process.is_empty() && process.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            let file_type = entry.file_type()?;
+            if file_type.is_file() || file_type.is_symlink() {
+                fs::remove_file(entry.path())?;
+            }
+        } else if test_user.is_some_and(|process| {
+            !process.is_empty() && process.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                fs::remove_dir_all(entry.path())?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compare(
@@ -422,23 +538,93 @@ fn compare(
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
-    if !metadata.is_file() || metadata.len() > MAX_JSON_BYTES {
+    let file = fs::File::open(path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    if !file.metadata()?.is_file() {
         return Err(format!("JSON input {} is absent or exceeds 1 MiB", path.display()).into());
     }
-    Ok(fs::read(path)?)
+    read_bounded_from(file, MAX_JSON_BYTES).map_err(|error| {
+        format!(
+            "JSON input {} is absent or exceeds 1 MiB: {error}",
+            path.display()
+        )
+        .into()
+    })
+}
+
+fn read_bounded_from(
+    reader: impl Read,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |length| length > maximum_bytes) {
+        return Err("input exceeds its byte limit".into());
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+
+    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
     fn checked_scenario() -> OracleScenarioV1 {
         serde_json::from_str(include_str!(
             "../../../docs/oracles/item-pocket-max-length-v1.json"
         ))
         .expect("checked oracle scenario should decode")
+    }
+
+    #[test]
+    fn bounded_reader_enforces_the_limit_while_reading() {
+        assert_eq!(
+            read_bounded_from(std::io::Cursor::new(b"1234"), 4)
+                .expect("input at the limit should read"),
+            b"1234"
+        );
+        assert!(read_bounded_from(std::io::Cursor::new(b"12345"), 4).is_err());
+    }
+
+    #[test]
+    fn cached_binary_is_reused_only_while_its_digest_matches() {
+        let unique = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "cdda-rust-cpp-oracle-cache-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("temporary cache should create");
+        let binary = root.join("cata_test");
+        let cache_path = root.join("cache.json");
+        let adapter_hash = "adapter";
+        fs::write(&binary, b"exact binary").expect("binary fixture should write");
+        let cache = OracleCacheV1 {
+            format_version: CACHE_FORMAT_VERSION,
+            baseline_commit: BASELINE_COMMIT.to_owned(),
+            upstream_tree: UPSTREAM_TREE.to_owned(),
+            adapter_hash: adapter_hash.to_owned(),
+            binary_hash: blake3_file(&binary).expect("binary fixture should hash"),
+        };
+        fs::write(
+            &cache_path,
+            serde_json::to_vec(&cache).expect("cache fixture should encode"),
+        )
+        .expect("cache fixture should write");
+        assert!(
+            reusable_binary(&cache_path, &binary, adapter_hash)
+                .expect("matching cache should validate")
+        );
+        fs::write(&binary, b"polluted binary").expect("binary fixture should mutate");
+        assert!(
+            !reusable_binary(&cache_path, &binary, adapter_hash)
+                .expect("mismatched cache should validate as unusable")
+        );
+        fs::remove_dir_all(root).expect("temporary cache should clean up");
     }
 
     #[test]

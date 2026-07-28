@@ -772,7 +772,8 @@ cargo xtask content-inventory-check
 Run the development-only pinned C++ differential oracle separately. Its first
 run exports the exact upstream Git commit into ignored `target/`, compiles the
 headless upstream core, and can take several minutes; later runs reuse the
-baseline-and-adapter-keyed build.
+build only after its baseline, tree, adapter, and executable digest validate.
+Any cache mismatch discards the export and rebuilds from the pinned archive.
 On macOS this command requires Homebrew `ncurses` because the upstream headless
 core uses its wide-character API.
 
@@ -784,7 +785,9 @@ The initial strict scenario exercises real upstream
 `item_pocket::can_contain` maximum-length behavior at the shorter, equal, and
 longer boundaries. The runner rejects unknown JSON fields, mismatched format or
 baseline versions, the wrong upstream Git tree, and any observation drift. It
-never modifies `../Cataclysm-DDA` and does not link C++ into shipped Rust code.
+enforces byte bounds while reading, serializes concurrent invocations, freshly
+exports pinned runtime data, removes temporary run data after every result,
+never modifies `../Cataclysm-DDA`, and does not link C++ into shipped Rust code.
 See `tools/cpp-oracle/README.md` for the bounded bootstrap design and current
 limitations.
 

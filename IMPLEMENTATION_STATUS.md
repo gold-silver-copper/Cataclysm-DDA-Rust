@@ -32,9 +32,13 @@ and general container contents are the next containment boundary.
   real `item_pocket::can_contain` behavior through a minimal oracle-only
   `cata_test`. Its strict version-1 JSON scenario records shorter, equal, and
   longer maximum-length boundaries and rejects unknown fields or any exact
-  observation drift. The initial upstream core build is intentionally not part
-  of the fast workspace test gate, and further kernels still need explicit
-  adapters.
+  observation drift. Reads enforce their byte cap, each runtime directory is
+  self-cleaning, and reusable binaries require exact cache identity plus a
+  matching BLAKE3 digest or the export is rebuilt. One cross-process exclusive
+  lock covers build and execution, while runtime `data/` is freshly exported
+  from the pinned commit on every run. The initial upstream core build is
+  intentionally not part of the fast workspace test gate, and further kernels
+  still need explicit adapters.
 - The ITEM loader preserves every inherited `pocket_data` object and source
   index without claiming unsupported runtime behavior. Strict MAGAZINE and
   MAGAZINE_WELL projections retain explicit pocket indices/IDs, reject extra
@@ -956,7 +960,12 @@ Run on Apple-silicon macOS on 2026-07-28:
   MONSTER field-support classifications; all 1,374 `volume` and 284
   `attack_cost` occurrences are now marked loader-implemented.
 - `cargo xtask astronomy-table-check` — passed for all 364 pinned Boston days.
-- `cargo test --workspace --all-targets --all-features` — passed, 260 tests
+- `cargo xtask cpp-oracle-check` — passed against the exact pinned C++ commit
+  and tree: three strict `item_pocket::can_contain` maximum-length cases, eight
+  upstream Catch assertions, exact version-1 JSON observation equality, a cold
+  rebuild, digest-checked warm reuse, fresh runtime-data export, artifact
+  cleanup, and two serialized concurrent invocations.
+- `cargo test --workspace --all-targets --all-features` — passed, 265 tests
   including real loopback iroh enrollment/gameplay/authoritative crafting,
   charged-tool bucket debit, resupply timing/capacity, offline
   interruption/resume/cancel, mandatory/optional/zero-learning proficiency
