@@ -1,0 +1,47 @@
+{
+  "format_version": 1,
+  "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+  "upstream_tree": "210f31db2e8b2f0caed1809f1a66781859f9d129",
+  "kernel": "item_pocket_max_length_v1",
+  "expected_observation": {
+    "format_version": 1,
+    "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+    "upstream_tree": "210f31db2e8b2f0caed1809f1a66781859f9d129",
+    "kernel": "item_pocket_max_length_v1",
+    "pocket": {
+      "pocket_type": "CONTAINER",
+      "max_item_length_mm": 250,
+      "volume_capacity_ml": 10000,
+      "weight_capacity_g": 10000
+    },
+    "cases": [
+      {
+        "case_id": "shorter",
+        "item_id": "test_screwdriver",
+        "item_length_mm": 150,
+        "success": true,
+        "contain_code": 0,
+        "contain_code_name": "success",
+        "reason": ""
+      },
+      {
+        "case_id": "equal",
+        "item_id": "test_sonic_screwdriver",
+        "item_length_mm": 250,
+        "success": true,
+        "contain_code": 0,
+        "contain_code_name": "success",
+        "reason": ""
+      },
+      {
+        "case_id": "longer",
+        "item_id": "test_clumsy_sword",
+        "item_length_mm": 1000,
+        "success": false,
+        "contain_code": 4,
+        "contain_code_name": "err_too_big",
+        "reason": "item is too long"
+      }
+    ]
+  }
+}

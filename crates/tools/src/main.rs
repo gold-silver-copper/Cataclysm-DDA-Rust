@@ -19,6 +19,8 @@ use cdda_protocol::{
 use iroh::EndpointId;
 use serde::Deserialize;
 
+mod cpp_oracle;
+
 #[derive(Deserialize)]
 struct Metadata {
     packages: Vec<Package>,
@@ -94,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match command.as_deref() {
         Some("verify-dependency-boundaries") => verify_dependency_boundaries(),
         Some("parity-ledger-check") => parity_ledger_check(),
+        Some("cpp-oracle-check") => cpp_oracle::check(std::env::args().skip(2).collect()),
         Some("astronomy-table-check") => astronomy_table_check(),
         Some("account-create") => create_account(std::env::args().skip(2).collect()),
         Some("account-recover") => recover_account(std::env::args().skip(2).collect()),
@@ -107,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-verify") => replay_verify(std::env::args().skip(2).collect()),
         Some(other) => Err(format!("unknown xtask command: {other}").into()),
         None => Err(
-            "usage: cargo xtask <verify-dependency-boundaries|parity-ledger-check|astronomy-table-check|account-create ...|account-recover ...|content-import ...|content-validate ...|content-inventory ...|content-inventory-check ...|replay-export ...|replay-verify ...>"
+            "usage: cargo xtask <verify-dependency-boundaries|parity-ledger-check|cpp-oracle-check ...|astronomy-table-check|account-create ...|account-recover ...|content-import ...|content-validate ...|content-inventory ...|content-inventory-check ...|replay-export ...|replay-verify ...>"
                 .into(),
         ),
     }

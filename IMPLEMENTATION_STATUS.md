@@ -27,6 +27,14 @@ and general container contents are the next containment boundary.
   multi-well reloads through direct simulation, per-tick snapshot restore,
   SQLite recovery, and portable replay. `docs/parity-ledger.json` supplies an executable,
   version-bound, acyclic dependency DAG for generalized subsystem work.
+- A development-only C++ differential-oracle command verifies the exact pinned
+  upstream commit and Git tree, exports it into ignored `target/`, and invokes
+  real `item_pocket::can_contain` behavior through a minimal oracle-only
+  `cata_test`. Its strict version-1 JSON scenario records shorter, equal, and
+  longer maximum-length boundaries and rejects unknown fields or any exact
+  observation drift. The initial upstream core build is intentionally not part
+  of the fast workspace test gate, and further kernels still need explicit
+  adapters.
 - The ITEM loader preserves every inherited `pocket_data` object and source
   index without claiming unsupported runtime behavior. Strict MAGAZINE and
   MAGAZINE_WELL projections retain explicit pocket indices/IDs, reject extra

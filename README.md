@@ -769,6 +769,25 @@ cargo xtask content-validate
 cargo xtask content-inventory-check
 ```
 
+Run the development-only pinned C++ differential oracle separately. Its first
+run exports the exact upstream Git commit into ignored `target/`, compiles the
+headless upstream core, and can take several minutes; later runs reuse the
+baseline-and-adapter-keyed build.
+On macOS this command requires Homebrew `ncurses` because the upstream headless
+core uses its wide-character API.
+
+```sh
+cargo xtask cpp-oracle-check
+```
+
+The initial strict scenario exercises real upstream
+`item_pocket::can_contain` maximum-length behavior at the shorter, equal, and
+longer boundaries. The runner rejects unknown JSON fields, mismatched format or
+baseline versions, the wrong upstream Git tree, and any observation drift. It
+never modifies `../Cataclysm-DDA` and does not link C++ into shipped Rust code.
+See `tools/cpp-oracle/README.md` for the bounded bootstrap design and current
+limitations.
+
 Export a renderer-independent replay from a stopped or copied world database,
 then verify its content identity and deterministic final state without starting
 the server or graphical client:
@@ -800,6 +819,8 @@ dependencies, and cycles. The leaf `cdda-conformance` crate runs versioned
 item-flow and indexed multi-well scenarios plus checked-in semantic/hash
 expectations through direct headless simulation, per-tick snapshot restoration,
 SQLite recovery, and portable replay verification.
+The separate C++ oracle provides the first real-upstream item-pocket kernel;
+additional kernels still require explicit versioned adapters.
 
 ## License
 

@@ -22,13 +22,13 @@
     {
       "id": "cpp-differential-oracle",
       "title": "Pinned headless C++ differential oracle",
-      "state": "planned",
+      "state": "in_progress",
       "priority": 1,
       "depends_on": ["conformance-foundation"],
-      "upstream_sources": ["../Cataclysm-DDA/tests/cata_catch.h", "../Cataclysm-DDA/src/game.cpp"],
-      "rust_paths": ["crates/conformance/src/lib.rs"],
-      "scenario_families": ["movement-kernel", "item-pocket-kernel", "combat-kernel"],
-      "differential_oracle": "planned",
+      "upstream_sources": ["../Cataclysm-DDA/tests/cata_catch.h", "../Cataclysm-DDA/tests/test_main.cpp", "../Cataclysm-DDA/tests/fake_messages.cpp", "../Cataclysm-DDA/src/item_pocket.cpp", "../Cataclysm-DDA/src/item_pocket.h"],
+      "rust_paths": ["crates/tools/src/cpp_oracle.rs", "tools/cpp-oracle/item_pocket_oracle_test.cpp", "docs/oracles/item-pocket-max-length-v1.json"],
+      "scenario_families": ["item-pocket-max-length", "movement-kernel", "combat-kernel"],
+      "differential_oracle": "active",
       "multiplayer_adaptation": "Compares normalized deterministic kernels; server authority, connection state, and persistent time are reported as explicit Rust adaptations.",
       "unlocks": ["generated characterization corpora", "pinned semantic drift detection"]
     },
