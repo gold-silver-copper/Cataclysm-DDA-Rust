@@ -4877,6 +4877,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             actor_id: event_actor,
             ..
         }
+        | WorldEventKind::AmmunitionLoadedIntoPocket {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::ActorFellAsleep {
             actor_id: event_actor,
             ..
@@ -5180,6 +5184,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -5233,6 +5238,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -5367,6 +5373,7 @@ mod tests {
             ammunition_type: String::from("test_ammo"),
             ranged_weapon: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -6384,6 +6391,7 @@ mod tests {
             ranged_weapon: None,
             component_provenance: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: vec![cdda_protocol::MagazineWellSnapshotV1 {
                 pocket_index: 0,
                 pocket_id: String::new(),
@@ -6401,6 +6409,7 @@ mod tests {
                     ranged_weapon: None,
                     component_provenance: None,
                     magazine_capacity: 2,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -6494,6 +6503,7 @@ mod tests {
                 ranged_weapon: None,
                 component_provenance: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: vec![cdda_protocol::MagazineWellSnapshotV1 {
                     pocket_index: 0,
                     pocket_id: String::new(),
@@ -6511,6 +6521,7 @@ mod tests {
                         ranged_weapon: None,
                         component_provenance: None,
                         magazine_capacity: 56,
+                        integral_magazines: Vec::new(),
                         magazine_wells: Vec::new(),
                         residual_energy_millijoules: 998_440,
                         powered_tool: None,
@@ -8185,7 +8196,7 @@ mod tests {
                 client_tick: ammunition_picked_up.tick,
                 kind: CommandKind::Reload {
                     ammunition_item: ranged_ammunition,
-                    magazine_well_index: None,
+                    target_pocket_index: None,
                 },
             }),
         )

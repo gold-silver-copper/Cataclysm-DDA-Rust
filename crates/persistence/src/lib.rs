@@ -20,10 +20,10 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 54;
-/// Old Postcard snapshots and journals cannot be decoded after the Protocol 76
-/// item-containment layout change. Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 54;
+pub const SCHEMA_VERSION: i64 = 55;
+/// Old Postcard snapshots and journals cannot be decoded after the Protocol 77
+/// item-backed ammunition layout change. Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 55;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -7147,6 +7147,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -7164,6 +7165,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -7447,7 +7449,7 @@ mod tests {
             CommandKind::Wield { item_id: tool_id },
             CommandKind::Reload {
                 ammunition_item: battery_id,
-                magazine_well_index: Some(0),
+                target_pocket_index: Some(0),
             },
             CommandKind::Activate { item_id: tool_id },
         ]
@@ -10617,6 +10619,7 @@ mod tests {
                 ammunition_type: String::from("test_ammo"),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -10635,6 +10638,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -10838,6 +10842,7 @@ mod tests {
                 ammunition_type: String::from("battery"),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -10856,6 +10861,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,

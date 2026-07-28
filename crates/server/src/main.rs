@@ -26,11 +26,11 @@ use cdda_protocol::{
     CraftQualityRequirementV1, CraftRecipeV1, CraftSkillRequirementV1, CraftToolRequirementV1,
     CreatureCorpsePrototypeV1, CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1,
     DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1,
-    FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN, LocalTileCoord, MAX_ACTOR_BASE_STAT,
-    MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES,
-    MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION,
-    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1,
-    TerrainTileSnapshot, adjusted_book_study_time_moves,
+    FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN, IntegralMagazinePocketPrototypeV1,
+    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS,
+    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL,
+    MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1, RangedWeaponSnapshot, SimTick,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, adjusted_book_study_time_moves,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -814,21 +814,45 @@ fn open_world(
         let medium_battery = items
             .get("medium_battery_cell")
             .ok_or("pinned default content has no starter medium battery")?;
-        let (battery_capacity, battery_well) = runtime_magazine_storage(medium_battery, items)?;
-        world.spawn_ground_item_with_magazine_wells(
+        let battery_ammunition = items
+            .get("battery")
+            .ok_or("pinned default content has no loose battery ammunition")?;
+        let (_, battery_wells) = runtime_magazine_storage(medium_battery, items)?;
+        let battery_integral_magazines = runtime_integral_magazines(medium_battery);
+        let starter_battery_pocket = battery_integral_magazines
+            .first()
+            .ok_or("pinned starter medium battery has no strict magazine pocket")?;
+        let starter_battery_pocket_index = starter_battery_pocket.pocket_index;
+        let starter_battery_charges = i32::try_from(starter_battery_pocket.capacity)?;
+        world.spawn_ground_item_with_preloaded_item_backed_magazines(
             ItemSpawn {
                 position: spawn_position,
                 type_id: medium_battery.id.clone(),
-                charges: i32::try_from(battery_capacity)?,
+                charges: 0,
                 melee_damage_milli: medium_battery.melee_damage_milli()?,
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
-                ammunition_type: single_ammunition_type(medium_battery)?,
+                ammunition_type: String::new(),
                 ranged_weapon: None,
             },
-            battery_capacity,
-            battery_well,
+            battery_integral_magazines,
+            battery_wells,
+            None,
+            vec![(
+                starter_battery_pocket_index,
+                ItemSpawn {
+                    position: spawn_position,
+                    type_id: battery_ammunition.id.clone(),
+                    charges: starter_battery_charges,
+                    melee_damage_milli: battery_ammunition.melee_damage_milli()?,
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: single_ammunition_type(battery_ammunition)?,
+                    ranged_weapon: None,
+                },
+            )],
         )?;
         let revolver = items
             .get("model_10_revolver")
@@ -1845,6 +1869,12 @@ fn craft_item_prototype_with_ammunition(
     items: &ItemRegistry,
 ) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
     let (magazine_capacity, magazine_wells) = runtime_magazine_storage(item, items)?;
+    let integral_magazines = runtime_integral_magazines(item);
+    let ammunition_type = if integral_magazines.is_empty() {
+        ammunition_type
+    } else {
+        String::new()
+    };
     Ok(CraftItemPrototypeV1 {
         type_id: item.id.clone(),
         charges,
@@ -1855,6 +1885,7 @@ fn craft_item_prototype_with_ammunition(
         ammunition_type,
         ranged_weapon: None,
         magazine_capacity,
+        integral_magazines,
         magazine_wells,
         residual_energy_millijoules: 0,
         powered_tool: runtime_powered_tool(item, items)?,
@@ -1865,8 +1896,8 @@ fn runtime_magazine_storage(
     item: &ItemDefinition,
     items: &ItemRegistry,
 ) -> Result<(u32, Vec<MagazineWellPrototypeV1>), Box<dyn std::error::Error>> {
-    if let Some(magazine) = item.strict_magazine() {
-        return Ok((magazine.capacity, Vec::new()));
+    if item.strict_magazine().is_some() {
+        return Ok((0, Vec::new()));
     }
     if let Some(projection) = strict_detachable_battery_light(item, items)? {
         return Ok((
@@ -1883,6 +1914,20 @@ fn runtime_magazine_storage(
         return Ok((0, wells));
     }
     Ok((0, Vec::new()))
+}
+
+fn runtime_integral_magazines(item: &ItemDefinition) -> Vec<IntegralMagazinePocketPrototypeV1> {
+    item.strict_magazine()
+        .into_iter()
+        .map(|magazine| IntegralMagazinePocketPrototypeV1 {
+            pocket_index: magazine.pocket_index,
+            pocket_id: magazine.pocket_id,
+            ammunition_type: magazine.ammunition_type,
+            capacity: magazine.capacity,
+            reloadable: !item.flags.contains("NO_RELOAD"),
+            unloadable: !item.flags.contains("NO_UNLOAD"),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -4278,9 +4323,12 @@ mod tests {
                 .expect("strict smash-item profile should validate");
         }
         for bash in furniture_bashes {
+            let furniture_id = bash.furniture_id.clone();
             bash_validation
                 .register_furniture_bash_type(bash)
-                .expect("admitted furniture bash should validate");
+                .unwrap_or_else(|error| {
+                    panic!("admitted furniture bash {furniture_id} should validate: {error}")
+                });
         }
         let bash_snapshot = bash_validation.snapshot();
         let bash_snapshot_bytes = postcard::to_stdvec(&bash_snapshot)
@@ -4644,7 +4692,22 @@ mod tests {
                 &items,
             )
             .expect("light battery storage should normalize"),
-            (16, Vec::new())
+            (0, Vec::new())
+        );
+        assert_eq!(
+            runtime_integral_magazines(
+                items
+                    .get("light_battery_cell")
+                    .expect("light battery should exist")
+            ),
+            [IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                ammunition_type: String::from("battery"),
+                capacity: 16,
+                reloadable: false,
+                unloadable: false,
+            }]
         );
         assert!(
             runtime_powered_tool(
@@ -4725,8 +4788,23 @@ mod tests {
             &items,
         )
         .expect("medium battery storage should normalize");
-        assert_eq!(capacity, 56);
+        assert_eq!(capacity, 0);
         assert!(well.is_empty());
+        assert_eq!(
+            runtime_integral_magazines(
+                items
+                    .get("medium_battery_cell")
+                    .expect("medium battery should exist")
+            ),
+            [IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                ammunition_type: String::from("battery"),
+                capacity: 56,
+                reloadable: false,
+                unloadable: false,
+            }]
+        );
         assert_eq!(
             disassembly
                 .get("cordage_36")

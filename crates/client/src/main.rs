@@ -23,11 +23,11 @@ use cdda_protocol::{
     CharacterRequest, CharacterSummary, ChatMessage, ChatRejection, ClientCommand,
     ClientDatagramV1, ClientHello, CommandKind, CommandRejection, ContentIdentity, ControlMessage,
     CreatureId, ENROLL_ALPN, EnrollmentRejection, GAME_ALPN, GameplayRejection,
-    HeldMovementInputV1, HorizontalDirection, ItemId, ItemSnapshot, MAX_CHARACTER_CREATION_STAT,
-    MAX_CHARACTERS_PER_ACCOUNT, MAX_CHAT_BYTES, MAX_DATAGRAM_SIZE, MAX_REPORT_BYTES,
-    MAX_REPORT_CHARACTERS, MIN_CHARACTER_CREATION_STAT, PROTOCOL_VERSION, PlayerReport,
-    REQUIRED_DATAGRAM_SIZE, ReplicationSnapshotV1, ReportReason, ReportRejection, ReportResponse,
-    SkyPhase, WorldEvent, WorldEventKind, encode_client_datagram,
+    HeldMovementInputV1, HorizontalDirection, IntegralMagazinePocketSnapshotV1, ItemId,
+    ItemSnapshot, MAX_CHARACTER_CREATION_STAT, MAX_CHARACTERS_PER_ACCOUNT, MAX_CHAT_BYTES,
+    MAX_DATAGRAM_SIZE, MAX_REPORT_BYTES, MAX_REPORT_CHARACTERS, MIN_CHARACTER_CREATION_STAT,
+    PROTOCOL_VERSION, PlayerReport, REQUIRED_DATAGRAM_SIZE, ReplicationSnapshotV1, ReportReason,
+    ReportRejection, ReportResponse, SkyPhase, WorldEvent, WorldEventKind, encode_client_datagram,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, endpoint::presets};
 
@@ -123,7 +123,7 @@ enum ClientAction {
     },
     Reload {
         ammunition_item: ItemId,
-        magazine_well_index: Option<u16>,
+        target_pocket_index: Option<u16>,
     },
     Sleep,
     Wake,
@@ -1036,11 +1036,11 @@ async fn run_game_session(
                     }
                     Some(ClientAction::Reload {
                         ammunition_item,
-                        magazine_well_index,
+                        target_pocket_index,
                     }) => {
                         Some(CommandKind::Reload {
                             ammunition_item,
-                            magazine_well_index,
+                            target_pocket_index,
                         })
                     }
                     Some(ClientAction::Sleep) => Some(CommandKind::Sleep),
@@ -2217,6 +2217,10 @@ fn client_construction_components_available(
                             .magazine_wells
                             .iter()
                             .all(|well| well.installed_magazine.is_none())
+                        && item
+                            .integral_magazines
+                            .iter()
+                            .all(|pocket| pocket.loaded_ammunition.is_none())
                 })
                 .fold(0_u32, |total, item| {
                     let units = if count_by_charges {
@@ -2245,6 +2249,10 @@ fn client_construction_components_available(
                     .magazine_wells
                     .iter()
                     .all(|well| well.installed_magazine.is_none())
+                && item
+                    .integral_magazines
+                    .iter()
+                    .all(|pocket| pocket.loaded_ammunition.is_none())
         }) {
             let units = if count_by_charges {
                 u32::try_from(item.charges).unwrap_or(0)
@@ -2437,6 +2445,10 @@ fn can_craft_recipe(
                             .magazine_wells
                             .iter()
                             .all(|well| well.installed_magazine.is_none())
+                        && item
+                            .integral_magazines
+                            .iter()
+                            .all(|pocket| pocket.loaded_ammunition.is_none())
                 })
                 .fold(0_u32, |total, item| {
                     let units = if count_by_charges {
@@ -2465,6 +2477,10 @@ fn can_craft_recipe(
                     .magazine_wells
                     .iter()
                     .all(|well| well.installed_magazine.is_none())
+                && item
+                    .integral_magazines
+                    .iter()
+                    .all(|pocket| pocket.loaded_ammunition.is_none())
         }) {
             let units = if count_by_charges {
                 u32::try_from(item.charges).unwrap_or(0)
@@ -2706,6 +2722,13 @@ fn can_disassemble_item(
     if target.damage > cdda_protocol::MAX_ITEM_DAMAGE_LEVEL {
         return false;
     }
+    if target
+        .integral_magazines
+        .iter()
+        .any(|pocket| pocket.loaded_ammunition.is_some())
+    {
+        return false;
+    }
     let Some(recipe) =
         recipes.strict_disassembly_recipe_for_result(&target.type_id, items, ammunition)
     else {
@@ -2738,114 +2761,127 @@ fn item_menu_entries(
     recipes: Option<&ContentRecipes>,
 ) -> Vec<ItemMenuEntry> {
     let actor = &snapshot.controlled_actor;
-    let items = match action {
-        ItemMenuAction::PickUp => snapshot
-            .ground_items
-            .iter()
-            .filter(|ground| ground.position == actor.position)
-            .map(|ground| &ground.item)
-            .collect::<Vec<_>>(),
-        ItemMenuAction::Drop => actor.inventory.iter().collect(),
-        ItemMenuAction::Wield => actor
-            .inventory
-            .iter()
-            .filter(|item| Some(item.id) != actor.wielded)
-            .collect(),
-        ItemMenuAction::Reload => {
-            let wielded = actor
-                .wielded
-                .and_then(|item_id| actor.inventory.iter().find(|item| item.id == item_id));
-            actor
+    let items =
+        match action {
+            ItemMenuAction::PickUp => snapshot
+                .ground_items
+                .iter()
+                .filter(|ground| ground.position == actor.position)
+                .map(|ground| &ground.item)
+                .collect::<Vec<_>>(),
+            ItemMenuAction::Drop => actor.inventory.iter().collect(),
+            ItemMenuAction::Wield => actor
+                .inventory
+                .iter()
+                .filter(|item| Some(item.id) != actor.wielded)
+                .collect(),
+            ItemMenuAction::Reload => {
+                let wielded = actor
+                    .wielded
+                    .and_then(|item_id| actor.inventory.iter().find(|item| item.id == item_id));
+                actor
+                    .inventory
+                    .iter()
+                    .filter(|item| {
+                        wielded.is_some_and(|wielded| {
+                            wielded.ranged_weapon.as_ref().is_some_and(|weapon| {
+                                weapon.ammunition_remaining < weapon.ammunition_capacity
+                                    && item.ammunition_type == weapon.ammunition_type
+                                    && item.charges > 0
+                            }) || wielded.magazine_wells.iter().any(|well| {
+                                item.id != wielded.id
+                                    && (item.magazine_capacity > 0
+                                        || !item.integral_magazines.is_empty())
+                                    && well
+                                        .compatible_magazine_type_ids
+                                        .binary_search(&item.type_id)
+                                        .is_ok()
+                            }) || wielded.integral_magazines.iter().any(|pocket| {
+                                item.id != wielded.id
+                                    && pocket.reloadable
+                                    && item.ammunition_type == pocket.ammunition_type
+                                    && item.charges > 0
+                                    && integral_pocket_has_free_charge_slot(pocket)
+                                    && pocket.loaded_ammunition.as_deref().is_none_or(
+                                        |ammunition| same_item_stack_state(ammunition, item),
+                                    )
+                            })
+                        })
+                    })
+                    .collect()
+            }
+            ItemMenuAction::Consume => actor
+                .inventory
+                .iter()
+                .filter(|item| !item.comestible_type.is_empty())
+                .collect(),
+            ItemMenuAction::Activate => actor
                 .inventory
                 .iter()
                 .filter(|item| {
-                    wielded.is_some_and(|wielded| {
-                        wielded.ranged_weapon.as_ref().is_some_and(|weapon| {
-                            weapon.ammunition_remaining < weapon.ammunition_capacity
-                                && item.ammunition_type == weapon.ammunition_type
-                                && item.charges > 0
-                        }) || wielded.magazine_wells.iter().any(|well| {
-                            item.id != wielded.id
-                                && item.magazine_capacity > 0
-                                && well
-                                    .compatible_magazine_type_ids
-                                    .binary_search(&item.type_id)
-                                    .is_ok()
-                        })
-                    })
-                })
-                .collect()
-        }
-        ItemMenuAction::Consume => actor
-            .inventory
-            .iter()
-            .filter(|item| !item.comestible_type.is_empty())
-            .collect(),
-        ItemMenuAction::Activate => actor
-            .inventory
-            .iter()
-            .filter(|item| {
-                item.powered_tool.as_ref().is_some_and(|powered| {
-                    powered.active
-                        || item
-                            .magazine_wells
-                            .iter()
-                            .find(|well| well.pocket_index == powered.power_pocket_index)
-                            .and_then(|well| well.installed_magazine.as_deref())
-                            .is_some_and(|magazine| {
-                                magazine.charges >= i32::from(powered.activation_charges)
-                            })
-                })
-            })
-            .collect(),
-        ItemMenuAction::Read => actor
-            .inventory
-            .iter()
-            .filter(|item| {
-                snapshot.detail_vision_available
-                    && content.is_some_and(|content| {
-                        content.0.get(&item.type_id).is_some_and(|definition| {
-                            let theory = actor
-                                .skills
+                    item.powered_tool.as_ref().is_some_and(|powered| {
+                        powered.active
+                            || item
+                                .magazine_wells
                                 .iter()
-                                .find(|skill| skill.skill_id == definition.book_skill)
-                                .map_or(0, |skill| skill.theoretical_level);
-                            definition.subtypes.contains("BOOK")
-                                && !definition.book_skill.is_empty()
-                                && definition.book_time_moves > 0
-                                && definition.book_required_level >= 0
-                                && definition.book_max_level > definition.book_required_level
-                                && theory
-                                    >= u8::try_from(definition.book_required_level)
-                                        .unwrap_or(u8::MAX)
-                                && theory
-                                    < u8::try_from(definition.book_max_level).unwrap_or_default()
-                        })
+                                .find(|well| well.pocket_index == powered.power_pocket_index)
+                                .and_then(|well| well.installed_magazine.as_deref())
+                                .is_some_and(|magazine| {
+                                    item_stored_ammunition_charges(magazine)
+                                        >= i32::from(powered.activation_charges)
+                                })
                     })
-            })
-            .collect(),
-        ItemMenuAction::Disassemble => actor
-            .inventory
-            .iter()
-            .filter(|item| {
-                snapshot.detail_vision_available
-                    && item.damage <= cdda_protocol::MAX_ITEM_DAMAGE_LEVEL
-                    && content.is_some_and(|content| {
-                        ammunition.is_some_and(|ammunition| {
-                            recipes.is_some_and(|recipes| {
-                                can_disassemble_item(
-                                    snapshot,
-                                    &recipes.0,
-                                    &content.0,
-                                    &ammunition.0,
-                                    item,
-                                )
+                })
+                .collect(),
+            ItemMenuAction::Read => actor
+                .inventory
+                .iter()
+                .filter(|item| {
+                    snapshot.detail_vision_available
+                        && content.is_some_and(|content| {
+                            content.0.get(&item.type_id).is_some_and(|definition| {
+                                let theory = actor
+                                    .skills
+                                    .iter()
+                                    .find(|skill| skill.skill_id == definition.book_skill)
+                                    .map_or(0, |skill| skill.theoretical_level);
+                                definition.subtypes.contains("BOOK")
+                                    && !definition.book_skill.is_empty()
+                                    && definition.book_time_moves > 0
+                                    && definition.book_required_level >= 0
+                                    && definition.book_max_level > definition.book_required_level
+                                    && theory
+                                        >= u8::try_from(definition.book_required_level)
+                                            .unwrap_or(u8::MAX)
+                                    && theory
+                                        < u8::try_from(definition.book_max_level)
+                                            .unwrap_or_default()
                             })
                         })
-                    })
-            })
-            .collect(),
-    };
+                })
+                .collect(),
+            ItemMenuAction::Disassemble => actor
+                .inventory
+                .iter()
+                .filter(|item| {
+                    snapshot.detail_vision_available
+                        && item.damage <= cdda_protocol::MAX_ITEM_DAMAGE_LEVEL
+                        && content.is_some_and(|content| {
+                            ammunition.is_some_and(|ammunition| {
+                                recipes.is_some_and(|recipes| {
+                                    can_disassemble_item(
+                                        snapshot,
+                                        &recipes.0,
+                                        &content.0,
+                                        &ammunition.0,
+                                        item,
+                                    )
+                                })
+                            })
+                        })
+                })
+                .collect(),
+        };
     let mut entries = items
         .into_iter()
         .map(|item| ItemMenuEntry {
@@ -2861,7 +2897,27 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
     let name = content
         .and_then(|content| content.0.get(&item.type_id))
         .map_or(item.type_id.as_str(), |definition| definition.name.as_str());
-    let charges = if item.magazine_capacity > 0 {
+    let charges = if !item.integral_magazines.is_empty() {
+        Some(format!(
+            " [{}]",
+            item.integral_magazines
+                .iter()
+                .map(|pocket| format!(
+                    "p{} {}/{} {}{}",
+                    pocket.pocket_index,
+                    pocket
+                        .loaded_ammunition
+                        .as_deref()
+                        .map(|ammunition| ammunition.charges)
+                        .unwrap_or(0),
+                    pocket.capacity,
+                    pocket.ammunition_type,
+                    residual_power_suffix(pocket.residual_energy_millijoules)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    } else if item.magazine_capacity > 0 {
         Some(format!(
             " {}/{}{}",
             item.charges,
@@ -2876,8 +2932,8 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
     }) {
         Some(format!(
             " [power {}{}]",
-            installed.charges,
-            residual_power_suffix(installed.residual_energy_millijoules)
+            item_stored_ammunition_charges(installed),
+            residual_power_suffix(item_residual_power_millijoules(installed))
         ))
     } else {
         (item.charges > 1).then(|| format!(" x{}", item.charges))
@@ -2900,12 +2956,66 @@ fn residual_power_suffix(residual_energy_millijoules: u32) -> String {
 
 fn item_tool_charges(item: &ItemSnapshot) -> i32 {
     if item.magazine_wells.is_empty() {
-        return item.charges;
+        return item_stored_ammunition_charges(item);
     }
     item.magazine_wells
         .iter()
         .filter_map(|well| well.installed_magazine.as_deref())
-        .fold(0, |total, magazine| total.saturating_add(magazine.charges))
+        .fold(0, |total, magazine| {
+            total.saturating_add(item_stored_ammunition_charges(magazine))
+        })
+}
+
+fn item_stored_ammunition_charges(item: &ItemSnapshot) -> i32 {
+    if item.integral_magazines.is_empty() {
+        item.charges
+    } else {
+        item.integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .fold(0_i32, |total, ammunition| {
+                total.saturating_add(ammunition.charges)
+            })
+    }
+}
+
+fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
+    left.type_id == right.type_id
+        && left.damage == right.damage
+        && left.melee_damage_milli == right.melee_damage_milli
+        && left.calories == right.calories
+        && left.quench == right.quench
+        && left.comestible_type == right.comestible_type
+        && left.ammunition_type == right.ammunition_type
+        && left.ranged_weapon == right.ranged_weapon
+        && left.component_provenance == right.component_provenance
+        && left.magazine_capacity == right.magazine_capacity
+        && left.integral_magazines == right.integral_magazines
+        && left.magazine_wells == right.magazine_wells
+        && left.residual_energy_millijoules == right.residual_energy_millijoules
+        && left.powered_tool == right.powered_tool
+        && left.creature_corpse == right.creature_corpse
+}
+
+fn item_residual_power_millijoules(item: &ItemSnapshot) -> u32 {
+    if item.integral_magazines.is_empty() {
+        item.residual_energy_millijoules
+    } else {
+        item.integral_magazines.iter().fold(0_u32, |total, pocket| {
+            total.saturating_add(pocket.residual_energy_millijoules)
+        })
+    }
+}
+
+fn integral_pocket_has_free_charge_slot(pocket: &IntegralMagazinePocketSnapshotV1) -> bool {
+    let loaded = pocket
+        .loaded_ammunition
+        .as_deref()
+        .map(|ammunition| ammunition.charges)
+        .unwrap_or(0);
+    u32::try_from(loaded).is_ok_and(|loaded| {
+        loaded.saturating_add(u32::from(pocket.residual_energy_millijoules > 0)) < pocket.capacity
+    })
 }
 
 fn client_action_for_item_menu(
@@ -2923,8 +3033,18 @@ fn client_action_for_item_menu(
             let wielded = actor
                 .wielded
                 .and_then(|wielded| actor.inventory.iter().find(|item| item.id == wielded))?;
-            let magazine_well_index = if wielded.ranged_weapon.is_some() {
+            let target_pocket_index = if wielded.ranged_weapon.is_some() {
                 None
+            } else if let Some(pocket) = wielded.integral_magazines.iter().find(|pocket| {
+                pocket.reloadable
+                    && ammunition.ammunition_type == pocket.ammunition_type
+                    && integral_pocket_has_free_charge_slot(pocket)
+                    && pocket
+                        .loaded_ammunition
+                        .as_deref()
+                        .is_none_or(|loaded| same_item_stack_state(loaded, ammunition))
+            }) {
+                Some(pocket.pocket_index)
             } else {
                 Some(
                     wielded
@@ -2940,7 +3060,7 @@ fn client_action_for_item_menu(
             };
             ClientAction::Reload {
                 ammunition_item: item_id,
-                magazine_well_index,
+                target_pocket_index,
             }
         }
         ItemMenuAction::Consume => ClientAction::Consume { item_id },
@@ -3876,6 +3996,14 @@ fn event_message(event: &WorldEvent) -> String {
                 ""
             }
         ),
+        WorldEventKind::AmmunitionLoadedIntoPocket {
+            loaded,
+            pocket_ammunition,
+            pocket_index,
+            ..
+        } => format!(
+            "Loaded {loaded} charge(s) into pocket {pocket_index}; {pocket_ammunition} now loaded."
+        ),
         WorldEventKind::PoweredToolChanged {
             active,
             reason,
@@ -4012,6 +4140,7 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::NoClearShot => "no clear shot",
         CommandRejection::WeaponFull => "weapon is already full",
         CommandRejection::IncompatibleAmmunition => "ammunition is incompatible",
+        CommandRejection::PocketNotReloadable => "that pocket cannot be reloaded",
         CommandRejection::ActorSleeping => "your character is sleeping",
         CommandRejection::ActorAwake => "your character is already awake",
         CommandRejection::NotTired => "your character is not tired enough to sleep",
@@ -4788,6 +4917,7 @@ mod tests {
                 ranged_weapon,
                 component_provenance: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -4928,7 +5058,7 @@ mod tests {
             ),
             Some(ClientAction::Reload {
                 ammunition_item,
-                magazine_well_index: Some(1),
+                target_pocket_index: Some(1),
             }) if ammunition_item == incompatible_battery.id
         ));
         assert!(item_menu_label(&battery, None).contains("3/5"));
@@ -5059,6 +5189,7 @@ mod tests {
             ranged_weapon: None,
             component_provenance: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -5734,6 +5865,7 @@ mod tests {
             }),
             component_provenance: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,

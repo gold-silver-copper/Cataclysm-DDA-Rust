@@ -15,8 +15,8 @@ persistent iroh identity, recovery, and audit
 guarantees while accelerating toward generalized subsystem parity. The active
 machine-readable milestone is item containment: inherited pocket definitions
 are retained losslessly and strict magazine/well admission is generalized
-through the canonical multi-well ownership migration. Item-backed ammunition
-and general container contents are the next containment boundary.
+through ordered detachable wells and strict item-backed integral magazine
+pockets. General container contents are the next containment boundary.
 
 ## Runnable behavior
 
@@ -45,6 +45,22 @@ and general container contents are the next containment boundary.
   behavior, and generalize the server's storage admission beyond a
   battery-only helper. Six reversible detachable-tool definitions now use
   modeled unload-before-disassembly instead of the prior empty-charge gate.
+- Protocol 77/schema 55/CanonicalStateV53/CanonicalEventsV16 add strict
+  item-backed integral MAGAZINE pockets to Protocol 76's ordered detachable
+  wells. Whole-stack reload preserves the source ID; partial transfer into an
+  empty pocket allocates one nested ID; compatible merges retain the existing
+  nested ID, while differing retained stack state rejects without data loss.
+  Fractional energy occupies one capacity slot. Capacity, category, source
+  pocket index/ID, and pinned
+  `NO_RELOAD`/`NO_UNLOAD` access are canonical. Newly normalized magazines have
+  zero outer charges, batteries derive power from nested `battery` items, and
+  fractional energy remains with that pocket. Validation bounds recursion,
+  rejects aggregate-plus-contained ammunition, traverses all nested IDs, and
+  prevents loaded integral magazines from entering disassembly.
+  Direct execution, snapshot restore, SQLite recovery, and portable replay
+  agree on partial-split state and events. The starter medium cell is preloaded
+  with a stable battery-ammunition child. Pre-55 serialized state rejects before
+  mutation.
 - Protocol 76/schema 54/CanonicalStateV52/CanonicalEventsV15 replace the
   single optional runtime well with up to 16 ordered wells carrying canonical
   pocket indices and source IDs. Reload requests and events identify the exact
@@ -965,7 +981,7 @@ Run on Apple-silicon macOS on 2026-07-28:
   upstream Catch assertions, exact version-1 JSON observation equality, a cold
   rebuild, digest-checked warm reuse, fresh runtime-data export, artifact
   cleanup, and two serialized concurrent invocations.
-- `cargo test --workspace --all-targets --all-features` — passed, 265 tests
+- `cargo test --workspace --all-targets --all-features` — passed, 270 tests
   including real loopback iroh enrollment/gameplay/authoritative crafting,
   charged-tool bucket debit, resupply timing/capacity, offline
   interruption/resume/cancel, mandatory/optional/zero-learning proficiency
@@ -1015,6 +1031,11 @@ Run on Apple-silicon macOS on 2026-07-28:
   active-tool auxiliary reload with power-pocket exclusion,
   CanonicalStateV52/CanonicalEventsV15, and schema-54 SQLite/portable-replay
   equivalence,
+  plus Protocol 77's ordered strict integral MAGAZINE pockets, item-backed
+  whole/split/merge reload identities, pinned reload/unload access, nested
+  battery debit/residual energy, recursive snapshot/ID validation,
+  CanonicalStateV53/CanonicalEventsV16, and schema-55 direct/snapshot/SQLite/
+  portable-replay equivalence,
   deterministic legacy byproduct capacity/cancel/order validation, and
   mid-craft recovery/replay, plus forged-book-payload normalization and
   interrupted/offline book-study recovery/replay. Exact-prerequisite terrain
@@ -1712,8 +1733,13 @@ Run on Apple-silicon macOS on 2026-07-28:
   bounded ordered collection keyed by canonical pocket index and optional
   source ID. Exact-pocket reload, powered draw, stable nested IDs, multi-well
   disassembly, CanonicalStateV52/CanonicalEventsV15, schema-54 recovery, and
-  portable replay are covered. Item-backed loose ammunition and general
-  container contents remain the next containment boundary.
+  portable replay are covered.
+- Protocol 77 adds strict integral magazine pockets with stable contained ammo,
+  exact whole/split/merge ID semantics, pinned reload/unload access, nested
+  battery power and residual energy, recursive validation, a preloaded pinned
+  starter cell, CanonicalStateV53/CanonicalEventsV16, schema-55 recovery, and
+  direct/snapshot/SQLite/portable-replay conformance. General container
+  contents remain the next containment boundary.
 
 ## Next tasks
 

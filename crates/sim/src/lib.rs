@@ -16,22 +16,23 @@ use cdda_protocol::{
     DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason,
     DisassemblyRecipeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
     FurnitureTileSnapshot, GroundItemSnapshot, HeldInputSequence, HeldMovementUpdateSource,
-    HeldMovementUpdateV1, HorizontalDirection, ItemComponentSnapshotV1, ItemId, ItemSnapshot,
+    HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
+    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemId, ItemSnapshot,
     LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
     MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
     MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
     MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
     MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
-    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_MAGAZINE_WELLS,
-    MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
-    MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
-    MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
-    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
-    PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
-    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, SimTick,
-    SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
-    TerrainTileSnapshot, WakeReason, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
-    adjusted_book_study_time_moves,
+    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL,
+    MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
+    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
+    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
+    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
+    MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot, PoweredToolStateV1,
+    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
+    RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
+    WorldEventKind, WorldPosition, WorldSnapshotV1, adjusted_book_study_time_moves,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -942,6 +943,13 @@ fn validate_furniture_bash_type(
 }
 
 fn validate_item_snapshot(snapshot: &ItemSnapshot) -> Result<(), SimError> {
+    validate_item_snapshot_at(snapshot, 0)
+}
+
+fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<(), SimError> {
+    if depth > MAX_ITEM_COMPONENT_DEPTH {
+        return Err(SimError::InvalidItem);
+    }
     if snapshot.id.counter() == 0
         || snapshot.damage > MAX_ITEM_DAMAGE_LEVEL
         || snapshot.melee_damage_milli.len() > 32
@@ -974,6 +982,12 @@ fn validate_item_snapshot(snapshot: &ItemSnapshot) -> Result<(), SimError> {
                 || !snapshot.ammunition_type.is_empty()
                 || snapshot.ranged_weapon.is_some()
         })
+        || (!snapshot.integral_magazines.is_empty() && {
+            snapshot.charges != 0
+                || snapshot.magazine_capacity != 0
+                || !snapshot.ammunition_type.is_empty()
+                || snapshot.ranged_weapon.is_some()
+        })
         || snapshot
             .ranged_weapon
             .as_ref()
@@ -983,7 +997,16 @@ fn validate_item_snapshot(snapshot: &ItemSnapshot) -> Result<(), SimError> {
     }
     validate_item_type_id(&snapshot.type_id)?;
     validate_component_provenance(&snapshot.component_provenance)?;
-    validate_magazine_well_snapshots(&snapshot.magazine_wells)?;
+    validate_integral_magazine_snapshots(&snapshot.integral_magazines, depth)?;
+    validate_magazine_well_snapshots(&snapshot.magazine_wells, depth)?;
+    if snapshot.integral_magazines.iter().any(|magazine| {
+        snapshot
+            .magazine_wells
+            .iter()
+            .any(|well| well.pocket_index == magazine.pocket_index)
+    }) {
+        return Err(SimError::InvalidItem);
+    }
     if let Some(powered) = &snapshot.powered_tool
         && (!snapshot
             .magazine_wells
@@ -1005,6 +1028,7 @@ fn validate_item_snapshot(snapshot: &ItemSnapshot) -> Result<(), SimError> {
             || snapshot.ranged_weapon.is_some()
             || snapshot.component_provenance.is_some()
             || snapshot.magazine_capacity != 0
+            || !snapshot.integral_magazines.is_empty()
             || !snapshot.magazine_wells.is_empty()
             || snapshot.residual_energy_millijoules != 0
             || snapshot.powered_tool.is_some()
@@ -1034,6 +1058,13 @@ fn validate_creature_corpse_context(
         .filter_map(|well| well.installed_magazine.as_deref())
     {
         validate_creature_corpse_context(installed, tick, field_types)?;
+    }
+    for ammunition in item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+    {
+        validate_creature_corpse_context(ammunition, tick, field_types)?;
     }
     Ok(())
 }
@@ -1071,7 +1102,104 @@ fn validate_magazine_well_prototype(well: &MagazineWellPrototypeV1) -> Result<()
     Ok(())
 }
 
-fn validate_magazine_well_snapshot(well: &MagazineWellSnapshotV1) -> Result<(), SimError> {
+fn validate_integral_magazine_prototype(
+    pocket: &IntegralMagazinePocketPrototypeV1,
+) -> Result<(), SimError> {
+    if pocket.pocket_id.len() > 512
+        || pocket.pocket_id.chars().any(char::is_control)
+        || pocket.capacity == 0
+        || pocket.capacity > i32::MAX as u32
+        || validate_item_type_id(&pocket.ammunition_type).is_err()
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn validate_integral_magazine_snapshot(
+    pocket: &IntegralMagazinePocketSnapshotV1,
+    depth: usize,
+) -> Result<(), SimError> {
+    validate_integral_magazine_prototype(&IntegralMagazinePocketPrototypeV1 {
+        pocket_index: pocket.pocket_index,
+        pocket_id: pocket.pocket_id.clone(),
+        ammunition_type: pocket.ammunition_type.clone(),
+        capacity: pocket.capacity,
+        reloadable: pocket.reloadable,
+        unloadable: pocket.unloadable,
+    })?;
+    if pocket.residual_energy_millijoules != 0
+        && (pocket.ammunition_type != "battery"
+            || pocket.residual_energy_millijoules >= MILLIJOULES_PER_BATTERY_CHARGE
+            || pocket.loaded_ammunition.is_none())
+    {
+        return Err(SimError::InvalidItem);
+    }
+    if let Some(ammunition) = &pocket.loaded_ammunition
+        && (ammunition.ammunition_type != pocket.ammunition_type
+            || ammunition.charges < 0
+            || (ammunition.charges == 0 && pocket.residual_energy_millijoules == 0)
+            || !u32::try_from(ammunition.charges).is_ok_and(|charges| {
+                charges <= pocket.capacity
+                    && (pocket.residual_energy_millijoules == 0 || charges < pocket.capacity)
+            })
+            || !ammunition.comestible_type.is_empty()
+            || ammunition.ranged_weapon.is_some()
+            || ammunition.component_provenance.is_some()
+            || ammunition.magazine_capacity != 0
+            || !ammunition.integral_magazines.is_empty()
+            || !ammunition.magazine_wells.is_empty()
+            || ammunition.residual_energy_millijoules != 0
+            || ammunition.powered_tool.is_some()
+            || ammunition.creature_corpse.is_some()
+            || if ammunition.charges > 0 {
+                validate_item_snapshot_at(ammunition, depth + 1).is_err()
+            } else {
+                let mut materialized = (**ammunition).clone();
+                materialized.charges = 1;
+                validate_item_snapshot_at(&materialized, depth + 1).is_err()
+            })
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn validate_integral_magazine_prototypes(
+    pockets: &[IntegralMagazinePocketPrototypeV1],
+) -> Result<(), SimError> {
+    if pockets.len() > MAX_ITEM_INTEGRAL_MAGAZINES
+        || pockets
+            .windows(2)
+            .any(|pair| pair[0].pocket_index >= pair[1].pocket_index)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    pockets
+        .iter()
+        .try_for_each(validate_integral_magazine_prototype)
+}
+
+fn validate_integral_magazine_snapshots(
+    pockets: &[IntegralMagazinePocketSnapshotV1],
+    depth: usize,
+) -> Result<(), SimError> {
+    if pockets.len() > MAX_ITEM_INTEGRAL_MAGAZINES
+        || pockets
+            .windows(2)
+            .any(|pair| pair[0].pocket_index >= pair[1].pocket_index)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    pockets
+        .iter()
+        .try_for_each(|pocket| validate_integral_magazine_snapshot(pocket, depth))
+}
+
+fn validate_magazine_well_snapshot(
+    well: &MagazineWellSnapshotV1,
+    depth: usize,
+) -> Result<(), SimError> {
     validate_magazine_well_prototype(&MagazineWellPrototypeV1 {
         pocket_index: well.pocket_index,
         pocket_id: well.pocket_id.clone(),
@@ -1082,9 +1210,9 @@ fn validate_magazine_well_snapshot(well: &MagazineWellSnapshotV1) -> Result<(), 
             .compatible_magazine_type_ids
             .binary_search(&installed.type_id)
             .is_err()
-            || installed.magazine_capacity == 0
+            || (installed.magazine_capacity == 0 && installed.integral_magazines.is_empty())
             || !installed.magazine_wells.is_empty()
-            || validate_item_snapshot(installed).is_err())
+            || validate_item_snapshot_at(installed, depth + 1).is_err())
     {
         return Err(SimError::InvalidItem);
     }
@@ -1102,7 +1230,10 @@ fn validate_magazine_well_prototypes(wells: &[MagazineWellPrototypeV1]) -> Resul
     wells.iter().try_for_each(validate_magazine_well_prototype)
 }
 
-fn validate_magazine_well_snapshots(wells: &[MagazineWellSnapshotV1]) -> Result<(), SimError> {
+fn validate_magazine_well_snapshots(
+    wells: &[MagazineWellSnapshotV1],
+    depth: usize,
+) -> Result<(), SimError> {
     if wells.len() > MAX_ITEM_MAGAZINE_WELLS
         || wells
             .windows(2)
@@ -1110,11 +1241,18 @@ fn validate_magazine_well_snapshots(wells: &[MagazineWellSnapshotV1]) -> Result<
     {
         return Err(SimError::InvalidItem);
     }
-    wells.iter().try_for_each(validate_magazine_well_snapshot)
+    wells
+        .iter()
+        .try_for_each(|well| validate_magazine_well_snapshot(well, depth))
 }
 
 fn item_snapshot_contains_id(item: &ItemSnapshot, item_id: ItemId) -> bool {
     item.id == item_id
+        || item
+            .integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .any(|ammunition| item_snapshot_contains_id(ammunition, item_id))
         || item
             .magazine_wells
             .iter()
@@ -1135,6 +1273,13 @@ fn register_stable_item_ids(
         return Err(SimError::InvalidSnapshot);
     }
     *maximum_counter = (*maximum_counter).max(item.id.counter());
+    for ammunition in item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+    {
+        register_stable_item_ids(ammunition, world_namespace, item_ids, maximum_counter)?;
+    }
     for installed in item
         .magazine_wells
         .iter()
@@ -1200,6 +1345,12 @@ fn validate_item_component(
                 || !component.ammunition_type.is_empty()
                 || component.ranged_weapon.is_some()
         })
+        || (!component.integral_magazines.is_empty() && {
+            component.charges != 0
+                || component.magazine_capacity != 0
+                || !component.ammunition_type.is_empty()
+                || component.ranged_weapon.is_some()
+        })
         || component
             .ranged_weapon
             .as_ref()
@@ -1208,7 +1359,16 @@ fn validate_item_component(
         return Err(SimError::InvalidItem);
     }
     validate_item_type_id(&component.type_id)?;
+    validate_integral_magazine_prototypes(&component.integral_magazines)?;
     validate_magazine_well_prototypes(&component.magazine_wells)?;
+    if component.integral_magazines.iter().any(|magazine| {
+        component
+            .magazine_wells
+            .iter()
+            .any(|well| well.pocket_index == magazine.pocket_index)
+    }) {
+        return Err(SimError::InvalidItem);
+    }
     if let Some(powered) = &component.powered_tool
         && (!component
             .magazine_wells
@@ -1249,6 +1409,7 @@ fn component_state_matches_prototype(
         && state.ammunition_type == prototype.ammunition_type
         && state.ranged_weapon == prototype.ranged_weapon
         && state.magazine_capacity == prototype.magazine_capacity
+        && state.integral_magazines == prototype.integral_magazines
         && state.magazine_wells == prototype.magazine_wells
         && state.residual_energy_millijoules == prototype.residual_energy_millijoules
         && state.powered_tool == prototype.powered_tool
@@ -1518,6 +1679,12 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
                 || !item.ammunition_type.is_empty()
                 || item.ranged_weapon.is_some()
         })
+        || (!item.integral_magazines.is_empty() && {
+            item.charges != 0
+                || item.magazine_capacity != 0
+                || !item.ammunition_type.is_empty()
+                || item.ranged_weapon.is_some()
+        })
         || item
             .ranged_weapon
             .as_ref()
@@ -1525,7 +1692,16 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
     {
         return Err(SimError::InvalidCraft);
     }
+    validate_integral_magazine_prototypes(&item.integral_magazines)
+        .map_err(|_| SimError::InvalidCraft)?;
     validate_magazine_well_prototypes(&item.magazine_wells).map_err(|_| SimError::InvalidCraft)?;
+    if item.integral_magazines.iter().any(|magazine| {
+        item.magazine_wells
+            .iter()
+            .any(|well| well.pocket_index == magazine.pocket_index)
+    }) {
+        return Err(SimError::InvalidCraft);
+    }
     if let Some(powered) = &item.powered_tool
         && (!item
             .magazine_wells
@@ -1868,6 +2044,11 @@ fn validate_disassembly_activity(
             .magazine_wells
             .iter()
             .any(|well| well.installed_magazine.is_some())
+        || activity
+            .target_item
+            .integral_magazines
+            .iter()
+            .any(|pocket| pocket.loaded_ammunition.is_some())
         || !match (
             &activity.target_item.ranged_weapon,
             &activity.recipe.unload_charges_as,
@@ -2471,6 +2652,7 @@ struct ItemInstance {
     ranged_weapon: Option<RangedWeaponSnapshot>,
     component_provenance: Option<Vec<ItemComponentSnapshotV1>>,
     magazine_capacity: u32,
+    integral_magazines: Vec<IntegralMagazinePocketSnapshotV1>,
     magazine_wells: Vec<MagazineWellSnapshotV1>,
     residual_energy_millijoules: u32,
     powered_tool: Option<PoweredToolStateV1>,
@@ -2478,14 +2660,33 @@ struct ItemInstance {
 }
 
 impl ItemInstance {
+    fn integral_ammunition_charges(&self) -> i32 {
+        self.integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .fold(0_i32, |total, ammunition| {
+                total.saturating_add(ammunition.charges)
+            })
+    }
+
+    fn stored_ammunition_charges(&self) -> i32 {
+        if self.integral_magazines.is_empty() {
+            self.charges
+        } else {
+            self.integral_ammunition_charges()
+        }
+    }
+
     fn available_tool_charges(&self) -> i32 {
         if self.magazine_wells.is_empty() {
-            return self.charges;
+            return self.stored_ammunition_charges();
         }
         self.magazine_wells
             .iter()
             .filter_map(|well| well.installed_magazine.as_deref())
-            .fold(0, |total, magazine| total.saturating_add(magazine.charges))
+            .fold(0, |total, magazine| {
+                total.saturating_add(snapshot_stored_ammunition_charges(magazine))
+            })
     }
 
     fn debit_tool_charges(&mut self, charges: i32) -> Result<i32, SimError> {
@@ -2493,12 +2694,16 @@ impl ItemInstance {
             return Err(SimError::InvalidItem);
         }
         if self.magazine_wells.is_empty() {
-            self.charges = self
-                .charges
-                .checked_sub(charges)
-                .filter(|remaining| *remaining >= 0)
-                .ok_or(SimError::InvalidItem)?;
-            return Ok(self.charges);
+            if self.integral_magazines.is_empty() {
+                self.charges = self
+                    .charges
+                    .checked_sub(charges)
+                    .filter(|remaining| *remaining >= 0)
+                    .ok_or(SimError::InvalidItem)?;
+            } else {
+                debit_integral_magazine_charges(&mut self.integral_magazines, charges)?;
+            }
+            return Ok(self.stored_ammunition_charges());
         }
         if self.available_tool_charges() < charges {
             return Err(SimError::InvalidItem);
@@ -2509,8 +2714,8 @@ impl ItemInstance {
             .iter_mut()
             .filter_map(|well| well.installed_magazine.as_deref_mut())
         {
-            let debit = required.min(magazine.charges);
-            magazine.charges -= debit;
+            let debit = required.min(snapshot_stored_ammunition_charges(magazine));
+            debit_snapshot_ammunition_charges(magazine, debit)?;
             required -= debit;
             if required == 0 {
                 break;
@@ -2541,10 +2746,22 @@ impl ItemInstance {
         let Some(magazine) = self.power_magazine() else {
             return Ok(0);
         };
-        let charges = u64::try_from(magazine.charges).map_err(|_| SimError::InvalidItem)?;
+        let charges = u64::try_from(snapshot_stored_ammunition_charges(magazine))
+            .map_err(|_| SimError::InvalidItem)?;
+        let residual = if magazine.integral_magazines.is_empty() {
+            magazine.residual_energy_millijoules
+        } else {
+            magazine
+                .integral_magazines
+                .iter()
+                .try_fold(0_u32, |total, pocket| {
+                    total.checked_add(pocket.residual_energy_millijoules)
+                })
+                .ok_or(SimError::NumericOverflow)?
+        };
         charges
             .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
-            .and_then(|energy| energy.checked_add(u64::from(magazine.residual_energy_millijoules)))
+            .and_then(|energy| energy.checked_add(u64::from(residual)))
             .ok_or(SimError::NumericOverflow)
     }
 
@@ -2559,7 +2776,7 @@ impl ItemInstance {
             powered.light_emission,
             powered.dims_with_charge,
             self.available_power_energy_millijoules()?,
-            magazine.magazine_capacity,
+            snapshot_ammunition_capacity(magazine),
         ))
     }
 
@@ -2568,13 +2785,10 @@ impl ItemInstance {
             return Ok(false);
         };
         let charges = i32::from(charges);
-        if magazine.charges < charges {
+        if snapshot_stored_ammunition_charges(magazine) < charges {
             return Ok(false);
         }
-        magazine.charges = magazine
-            .charges
-            .checked_sub(charges)
-            .ok_or(SimError::NumericOverflow)?;
+        debit_snapshot_ammunition_charges(magazine, charges)?;
         Ok(true)
     }
 
@@ -2582,6 +2796,63 @@ impl ItemInstance {
         let Some(magazine) = self.power_magazine_mut() else {
             return Ok(false);
         };
+        if !magazine.integral_magazines.is_empty() {
+            let available =
+                magazine
+                    .integral_magazines
+                    .iter()
+                    .try_fold(0_u64, |total, pocket| {
+                        let charges = pocket
+                            .loaded_ammunition
+                            .as_deref()
+                            .map(|ammunition| ammunition.charges)
+                            .unwrap_or(0);
+                        u64::try_from(charges)
+                            .map_err(|_| SimError::InvalidItem)?
+                            .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                            .and_then(|energy| {
+                                energy.checked_add(u64::from(pocket.residual_energy_millijoules))
+                            })
+                            .and_then(|energy| total.checked_add(energy))
+                            .ok_or(SimError::NumericOverflow)
+                    })?;
+            let mut remaining = u64::from(millijoules);
+            if available < remaining {
+                return Ok(false);
+            }
+            for pocket in &mut magazine.integral_magazines {
+                let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() else {
+                    continue;
+                };
+                let pocket_energy = u64::try_from(ammunition.charges)
+                    .map_err(|_| SimError::InvalidItem)?
+                    .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                    .and_then(|energy| {
+                        energy.checked_add(u64::from(pocket.residual_energy_millijoules))
+                    })
+                    .ok_or(SimError::NumericOverflow)?;
+                let consumed = pocket_energy.min(remaining);
+                let retained = pocket_energy
+                    .checked_sub(consumed)
+                    .ok_or(SimError::NumericOverflow)?;
+                ammunition.charges =
+                    i32::try_from(retained / u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                        .map_err(|_| SimError::NumericOverflow)?;
+                pocket.residual_energy_millijoules =
+                    u32::try_from(retained % u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                        .map_err(|_| SimError::NumericOverflow)?;
+                remaining = remaining
+                    .checked_sub(consumed)
+                    .ok_or(SimError::NumericOverflow)?;
+                if retained == 0 {
+                    pocket.loaded_ammunition = None;
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+            return Ok(true);
+        }
         let available = u64::try_from(magazine.charges)
             .map_err(|_| SimError::InvalidItem)?
             .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
@@ -2633,6 +2904,7 @@ impl ItemInstance {
             ranged_weapon: self.ranged_weapon.clone(),
             component_provenance: self.component_provenance.clone(),
             magazine_capacity: self.magazine_capacity,
+            integral_magazines: self.integral_magazines.clone(),
             magazine_wells: self.magazine_wells.clone(),
             residual_energy_millijoules: self.residual_energy_millijoules,
             powered_tool: self.powered_tool.clone(),
@@ -2655,11 +2927,103 @@ impl ItemInstance {
             ranged_weapon: snapshot.ranged_weapon.clone(),
             component_provenance: snapshot.component_provenance.clone(),
             magazine_capacity: snapshot.magazine_capacity,
+            integral_magazines: snapshot.integral_magazines.clone(),
             magazine_wells: snapshot.magazine_wells.clone(),
             residual_energy_millijoules: snapshot.residual_energy_millijoules,
             powered_tool: snapshot.powered_tool.clone(),
             creature_corpse: snapshot.creature_corpse.clone(),
         })
+    }
+}
+
+fn snapshot_stored_ammunition_charges(item: &ItemSnapshot) -> i32 {
+    if item.integral_magazines.is_empty() {
+        item.charges
+    } else {
+        item.integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .fold(0_i32, |total, ammunition| {
+                total.saturating_add(ammunition.charges)
+            })
+    }
+}
+
+fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
+    left.type_id == right.type_id
+        && left.damage == right.damage
+        && left.melee_damage_milli == right.melee_damage_milli
+        && left.calories == right.calories
+        && left.quench == right.quench
+        && left.comestible_type == right.comestible_type
+        && left.ammunition_type == right.ammunition_type
+        && left.ranged_weapon == right.ranged_weapon
+        && left.component_provenance == right.component_provenance
+        && left.magazine_capacity == right.magazine_capacity
+        && left.integral_magazines == right.integral_magazines
+        && left.magazine_wells == right.magazine_wells
+        && left.residual_energy_millijoules == right.residual_energy_millijoules
+        && left.powered_tool == right.powered_tool
+        && left.creature_corpse == right.creature_corpse
+}
+
+fn snapshot_ammunition_capacity(item: &ItemSnapshot) -> u32 {
+    if item.integral_magazines.is_empty() {
+        item.magazine_capacity
+    } else {
+        item.integral_magazines
+            .iter()
+            .fold(0_u32, |total, pocket| total.saturating_add(pocket.capacity))
+    }
+}
+
+fn debit_integral_magazine_charges(
+    pockets: &mut [IntegralMagazinePocketSnapshotV1],
+    charges: i32,
+) -> Result<(), SimError> {
+    if charges < 0 {
+        return Err(SimError::InvalidItem);
+    }
+    let available = pockets
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+        .fold(0_i32, |total, ammunition| {
+            total.saturating_add(ammunition.charges)
+        });
+    if available < charges {
+        return Err(SimError::InvalidItem);
+    }
+    let mut required = charges;
+    for pocket in pockets {
+        let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() else {
+            continue;
+        };
+        let debit = required.min(ammunition.charges);
+        ammunition.charges -= debit;
+        required -= debit;
+        if ammunition.charges == 0 && pocket.residual_energy_millijoules == 0 {
+            pocket.loaded_ammunition = None;
+        }
+        if required == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn debit_snapshot_ammunition_charges(
+    item: &mut ItemSnapshot,
+    charges: i32,
+) -> Result<(), SimError> {
+    if item.integral_magazines.is_empty() {
+        item.charges = item
+            .charges
+            .checked_sub(charges)
+            .filter(|remaining| *remaining >= 0)
+            .ok_or(SimError::InvalidItem)?;
+        Ok(())
+    } else {
+        debit_integral_magazine_charges(&mut item.integral_magazines, charges)
     }
 }
 
@@ -2677,6 +3041,20 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
         ranged_weapon: prototype.ranged_weapon.clone(),
         component_provenance: None,
         magazine_capacity: prototype.magazine_capacity,
+        integral_magazines: prototype
+            .integral_magazines
+            .iter()
+            .map(|pocket| IntegralMagazinePocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: pocket.ammunition_type.clone(),
+                capacity: pocket.capacity,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                loaded_ammunition: None,
+                residual_energy_millijoules: 0,
+            })
+            .collect(),
         magazine_wells: prototype
             .magazine_wells
             .iter()
@@ -2707,6 +3085,20 @@ fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemI
         ranged_weapon: component.ranged_weapon.clone(),
         component_provenance: component.component_provenance.clone(),
         magazine_capacity: component.magazine_capacity,
+        integral_magazines: component
+            .integral_magazines
+            .iter()
+            .map(|pocket| IntegralMagazinePocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: pocket.ammunition_type.clone(),
+                capacity: pocket.capacity,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                loaded_ammunition: None,
+                residual_energy_millijoules: 0,
+            })
+            .collect(),
         magazine_wells: component
             .magazine_wells
             .iter()
@@ -2734,6 +3126,7 @@ fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftI
         ammunition_type: component.ammunition_type.clone(),
         ranged_weapon: component.ranged_weapon.clone(),
         magazine_capacity: component.magazine_capacity,
+        integral_magazines: component.integral_magazines.clone(),
         magazine_wells: component.magazine_wells.clone(),
         residual_energy_millijoules: component.residual_energy_millijoules,
         powered_tool: component.powered_tool.clone(),
@@ -2759,6 +3152,19 @@ fn component_from_consumed(
         recoverable,
         component_provenance: consumed.item.component_provenance.clone(),
         magazine_capacity: consumed.item.magazine_capacity,
+        integral_magazines: consumed
+            .item
+            .integral_magazines
+            .iter()
+            .map(|pocket| IntegralMagazinePocketPrototypeV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: pocket.ammunition_type.clone(),
+                capacity: pocket.capacity,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+            })
+            .collect(),
         magazine_wells: consumed
             .item
             .magazine_wells
@@ -2793,6 +3199,11 @@ fn craft_output_component_provenance(
             .magazine_wells
             .iter()
             .any(|well| well.installed_magazine.is_some())
+            || consumed
+                .item
+                .integral_magazines
+                .iter()
+                .any(|pocket| pocket.loaded_ammunition.is_some())
     }) {
         return Err(SimError::InvalidCraft);
     }
@@ -3521,6 +3932,10 @@ fn plan_component_groups(
                         .magazine_wells
                         .iter()
                         .all(|well| well.installed_magazine.is_none())
+                    && item
+                        .integral_magazines
+                        .iter()
+                        .all(|pocket| pocket.loaded_ammunition.is_none())
             }) {
                 let units = if alternative.count_by_charges {
                     u64::try_from(item.charges).unwrap_or(0)
@@ -3550,6 +3965,10 @@ fn plan_component_groups(
                     .magazine_wells
                     .iter()
                     .all(|well| well.installed_magazine.is_none())
+                && item
+                    .integral_magazines
+                    .iter()
+                    .all(|pocket| pocket.loaded_ammunition.is_none())
         }) {
             if remaining == 0 {
                 break;
@@ -3820,6 +4239,15 @@ pub struct ItemSpawn {
     pub ranged_weapon: Option<RangedWeaponSnapshot>,
 }
 
+struct ItemMagazineStorageSpawn {
+    magazine_capacity: u32,
+    integral_magazines: Vec<IntegralMagazinePocketPrototypeV1>,
+    magazine_wells: Vec<MagazineWellPrototypeV1>,
+    residual_energy_millijoules: u32,
+    powered_tool: Option<PoweredToolStateV1>,
+    preloaded_ammunition: Vec<(u16, ItemSpawn)>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct GroundItem {
     item: ItemInstance,
@@ -3856,7 +4284,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV15");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV16");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4167,6 +4595,79 @@ impl WorldState {
         residual_energy_millijoules: u32,
         powered_tool: Option<PoweredToolStateV1>,
     ) -> Result<ItemId, SimError> {
+        self.spawn_ground_item_with_all_magazine_pockets(
+            spawn,
+            ItemMagazineStorageSpawn {
+                magazine_capacity,
+                integral_magazines: Vec::new(),
+                magazine_wells,
+                residual_energy_millijoules,
+                powered_tool,
+                preloaded_ammunition: Vec::new(),
+            },
+        )
+    }
+
+    /// Spawns an item with canonical empty integral magazines and detachable
+    /// wells. Nested ammunition receives its own stable ID only through an
+    /// authoritative reload command.
+    pub fn spawn_ground_item_with_item_backed_magazines(
+        &mut self,
+        spawn: ItemSpawn,
+        integral_magazines: Vec<IntegralMagazinePocketPrototypeV1>,
+        magazine_wells: Vec<MagazineWellPrototypeV1>,
+        powered_tool: Option<PoweredToolStateV1>,
+    ) -> Result<ItemId, SimError> {
+        self.spawn_ground_item_with_all_magazine_pockets(
+            spawn,
+            ItemMagazineStorageSpawn {
+                magazine_capacity: 0,
+                integral_magazines,
+                magazine_wells,
+                residual_energy_millijoules: 0,
+                powered_tool,
+                preloaded_ammunition: Vec::new(),
+            },
+        )
+    }
+
+    /// Spawns a canonical item-backed magazine with explicitly materialized
+    /// ammunition children. This is for content/world generation, including
+    /// pinned `NO_RELOAD` cells; player transfers must use `Reload`.
+    pub fn spawn_ground_item_with_preloaded_item_backed_magazines(
+        &mut self,
+        spawn: ItemSpawn,
+        integral_magazines: Vec<IntegralMagazinePocketPrototypeV1>,
+        magazine_wells: Vec<MagazineWellPrototypeV1>,
+        powered_tool: Option<PoweredToolStateV1>,
+        preloaded_ammunition: Vec<(u16, ItemSpawn)>,
+    ) -> Result<ItemId, SimError> {
+        self.spawn_ground_item_with_all_magazine_pockets(
+            spawn,
+            ItemMagazineStorageSpawn {
+                magazine_capacity: 0,
+                integral_magazines,
+                magazine_wells,
+                residual_energy_millijoules: 0,
+                powered_tool,
+                preloaded_ammunition,
+            },
+        )
+    }
+
+    fn spawn_ground_item_with_all_magazine_pockets(
+        &mut self,
+        spawn: ItemSpawn,
+        storage: ItemMagazineStorageSpawn,
+    ) -> Result<ItemId, SimError> {
+        let ItemMagazineStorageSpawn {
+            magazine_capacity,
+            integral_magazines,
+            magazine_wells,
+            residual_energy_millijoules,
+            powered_tool,
+            preloaded_ammunition,
+        } = storage;
         validate_item_type_id(&spawn.type_id)?;
         if spawn.comestible_type.len() > 32
             || spawn.comestible_type.chars().any(char::is_control)
@@ -4194,6 +4695,13 @@ impl WorldState {
                     || !spawn.ammunition_type.is_empty()
                     || spawn.ranged_weapon.is_some()
             })
+            || (!integral_magazines.is_empty() && {
+                spawn.charges != 0
+                    || magazine_capacity != 0
+                    || !spawn.ammunition_type.is_empty()
+                    || spawn.ranged_weapon.is_some()
+                    || residual_energy_millijoules != 0
+            })
             || spawn
                 .ranged_weapon
                 .as_ref()
@@ -4201,7 +4709,55 @@ impl WorldState {
         {
             return Err(SimError::InvalidItem);
         }
+        validate_integral_magazine_prototypes(&integral_magazines)?;
         validate_magazine_well_prototypes(&magazine_wells)?;
+        if integral_magazines.iter().any(|magazine| {
+            magazine_wells
+                .iter()
+                .any(|well| well.pocket_index == magazine.pocket_index)
+        }) {
+            return Err(SimError::InvalidItem);
+        }
+        let mut preloaded = BTreeMap::new();
+        for (pocket_index, ammunition) in preloaded_ammunition {
+            let Some(pocket) = integral_magazines
+                .iter()
+                .find(|pocket| pocket.pocket_index == pocket_index)
+            else {
+                return Err(SimError::InvalidItem);
+            };
+            if ammunition.position != spawn.position
+                || ammunition.charges <= 0
+                || ammunition.ammunition_type != pocket.ammunition_type
+                || ammunition.charges > i32::try_from(pocket.capacity).unwrap_or(i32::MAX)
+                || !ammunition.comestible_type.is_empty()
+                || ammunition.ranged_weapon.is_some()
+                || preloaded.contains_key(&pocket_index)
+            {
+                return Err(SimError::InvalidItem);
+            }
+            let snapshot = ItemSnapshot {
+                id: ItemId::new(self.world_namespace, 1),
+                type_id: ammunition.type_id,
+                charges: ammunition.charges,
+                damage: 0,
+                melee_damage_milli: ammunition.melee_damage_milli,
+                calories: ammunition.calories,
+                quench: ammunition.quench,
+                comestible_type: ammunition.comestible_type,
+                ammunition_type: ammunition.ammunition_type,
+                ranged_weapon: None,
+                component_provenance: None,
+                magazine_capacity: 0,
+                integral_magazines: Vec::new(),
+                magazine_wells: Vec::new(),
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+                creature_corpse: None,
+            };
+            validate_item_snapshot(&snapshot)?;
+            preloaded.insert(pocket_index, snapshot);
+        }
         if let Some(powered) = &powered_tool
             && (!magazine_wells
                 .iter()
@@ -4214,7 +4770,34 @@ impl WorldState {
         if !self.is_passable(spawn.position) {
             return Err(SimError::SpawnBlocked);
         }
+        let required_ids = u64::try_from(preloaded.len())
+            .map_err(|_| SimError::NumericOverflow)?
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        if self.allocator.remaining() < required_ids {
+            return Err(SimError::IdReservationExhausted);
+        }
         let id = self.allocator.allocate_item()?;
+        let mut integral_magazine_snapshots = Vec::with_capacity(integral_magazines.len());
+        for pocket in integral_magazines {
+            let loaded_ammunition =
+                if let Some(mut snapshot) = preloaded.remove(&pocket.pocket_index) {
+                    snapshot.id = self.allocator.allocate_item()?;
+                    Some(Box::new(snapshot))
+                } else {
+                    None
+                };
+            integral_magazine_snapshots.push(IntegralMagazinePocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id,
+                ammunition_type: pocket.ammunition_type,
+                capacity: pocket.capacity,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                loaded_ammunition,
+                residual_energy_millijoules: 0,
+            });
+        }
         self.ground_items.insert(
             id,
             GroundItem {
@@ -4231,6 +4814,7 @@ impl WorldState {
                     ranged_weapon: spawn.ranged_weapon,
                     component_provenance: None,
                     magazine_capacity,
+                    integral_magazines: integral_magazine_snapshots,
                     magazine_wells: magazine_wells
                         .into_iter()
                         .map(|well| MagazineWellSnapshotV1 {
@@ -6002,12 +6586,12 @@ impl WorldState {
             }
             CommandKind::Reload {
                 ammunition_item,
-                magazine_well_index,
+                target_pocket_index,
             } => self.apply_reload(
                 actor_id,
                 sequence,
                 ammunition_item,
-                magazine_well_index,
+                target_pocket_index,
                 events,
             ),
             CommandKind::Wield { item_id } => {
@@ -6428,7 +7012,7 @@ impl WorldState {
         actor_id: ActorId,
         sequence: CommandSequence,
         ammunition_item: ItemId,
-        magazine_well_index: Option<u16>,
+        target_pocket_index: Option<u16>,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
@@ -6439,21 +7023,37 @@ impl WorldState {
         let Some(weapon) = actor.inventory.get(&weapon_id) else {
             return Err(SimError::UnknownItem);
         };
-        if weapon.ranged_weapon.is_none() && !weapon.magazine_wells.is_empty() {
-            let Some(magazine_well_index) = magazine_well_index else {
+        if weapon.ranged_weapon.is_none()
+            && (!weapon.magazine_wells.is_empty() || !weapon.integral_magazines.is_empty())
+        {
+            let Some(target_pocket_index) = target_pocket_index else {
                 events.push(self.rejection(actor_id, sequence, CommandRejection::PocketMissing)?);
                 return Ok(());
             };
+            if weapon
+                .integral_magazines
+                .iter()
+                .any(|pocket| pocket.pocket_index == target_pocket_index)
+            {
+                return self.apply_integral_magazine_reload(
+                    actor_id,
+                    sequence,
+                    weapon_id,
+                    target_pocket_index,
+                    ammunition_item,
+                    events,
+                );
+            }
             return self.apply_magazine_reload(
                 actor_id,
                 sequence,
                 weapon_id,
-                magazine_well_index,
+                target_pocket_index,
                 ammunition_item,
                 events,
             );
         }
-        if magazine_well_index.is_some() {
+        if target_pocket_index.is_some() {
             events.push(self.rejection(actor_id, sequence, CommandRejection::PocketMissing)?);
             return Ok(());
         }
@@ -6521,6 +7121,152 @@ impl WorldState {
         Ok(())
     }
 
+    fn apply_integral_magazine_reload(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        pocket_index: u16,
+        ammunition_item: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(pocket) = actor.inventory.get(&item_id).and_then(|item| {
+            item.integral_magazines
+                .iter()
+                .find(|pocket| pocket.pocket_index == pocket_index)
+        }) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::PocketMissing)?);
+            return Ok(());
+        };
+        let Some(source) = actor.inventory.get(&ammunition_item) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        let existing = pocket.loaded_ammunition.as_deref();
+        if !pocket.reloadable {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::PocketNotReloadable,
+            )?);
+            return Ok(());
+        }
+        if ammunition_item == item_id
+            || source.charges <= 0
+            || source.ammunition_type != pocket.ammunition_type
+            || !source.comestible_type.is_empty()
+            || source.ranged_weapon.is_some()
+            || source.component_provenance.is_some()
+            || source.magazine_capacity != 0
+            || !source.integral_magazines.is_empty()
+            || !source.magazine_wells.is_empty()
+            || source.residual_energy_millijoules != 0
+            || source.powered_tool.is_some()
+            || source.creature_corpse.is_some()
+            || existing.is_some_and(|loaded| !same_item_stack_state(loaded, &source.snapshot()))
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        }
+        let existing_charges = existing
+            .map(|loaded| u32::try_from(loaded.charges))
+            .transpose()
+            .map_err(|_| SimError::InvalidItem)?
+            .unwrap_or(0);
+        let occupied_charge_slots = existing_charges
+            .checked_add(u32::from(pocket.residual_energy_millijoules > 0))
+            .ok_or(SimError::NumericOverflow)?;
+        let available_capacity = pocket
+            .capacity
+            .checked_sub(occupied_charge_slots)
+            .ok_or(SimError::InvalidItem)?;
+        if available_capacity == 0 {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::WeaponFull)?);
+            return Ok(());
+        }
+        let source_charges = u32::try_from(source.charges).map_err(|_| SimError::InvalidItem)?;
+        let loaded = available_capacity.min(source_charges);
+        let source_charges_remaining = source_charges
+            .checked_sub(loaded)
+            .ok_or(SimError::NumericOverflow)?;
+        let split_id = if existing.is_none() && source_charges_remaining > 0 {
+            if !self.allocator.can_allocate() {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::StableIdsUnavailable,
+                )?);
+                return Ok(());
+            }
+            Some(self.allocator.allocate_item()?)
+        } else {
+            None
+        };
+
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let mut source = actor
+            .inventory
+            .remove(&ammunition_item)
+            .ok_or(SimError::UnknownItem)?;
+        source.charges =
+            i32::try_from(source_charges_remaining).map_err(|_| SimError::NumericOverflow)?;
+        let pocket = actor
+            .inventory
+            .get_mut(&item_id)
+            .and_then(|item| {
+                item.integral_magazines
+                    .iter_mut()
+                    .find(|pocket| pocket.pocket_index == pocket_index)
+            })
+            .ok_or(SimError::UnknownItem)?;
+        let nested_ammunition = if let Some(existing) = pocket.loaded_ammunition.as_deref_mut() {
+            existing.charges = existing
+                .charges
+                .checked_add(i32::try_from(loaded).map_err(|_| SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+            existing.id
+        } else if source_charges_remaining == 0 {
+            let nested_id = source.id;
+            let mut nested = source.snapshot();
+            nested.charges = i32::try_from(loaded).map_err(|_| SimError::NumericOverflow)?;
+            pocket.loaded_ammunition = Some(Box::new(nested));
+            nested_id
+        } else {
+            let nested_id = split_id.ok_or(SimError::InvalidItem)?;
+            let mut nested = source.snapshot();
+            nested.id = nested_id;
+            nested.charges = i32::try_from(loaded).map_err(|_| SimError::NumericOverflow)?;
+            pocket.loaded_ammunition = Some(Box::new(nested));
+            nested_id
+        };
+        if source_charges_remaining > 0 {
+            actor.inventory.insert(ammunition_item, source);
+        }
+        let pocket_ammunition = existing_charges
+            .checked_add(loaded)
+            .ok_or(SimError::NumericOverflow)?;
+        events.push(self.make_event(WorldEventKind::AmmunitionLoadedIntoPocket {
+            actor_id,
+            item: item_id,
+            pocket_index,
+            source_ammunition: ammunition_item,
+            nested_ammunition,
+            loaded,
+            pocket_ammunition,
+            source_charges_remaining:
+                i32::try_from(source_charges_remaining).map_err(|_| SimError::NumericOverflow)?,
+        })?);
+        Ok(())
+    }
+
     fn apply_magazine_reload(
         &mut self,
         actor_id: ActorId,
@@ -6560,7 +7306,7 @@ impl WorldState {
                 .compatible_magazine_type_ids
                 .binary_search(&magazine.type_id)
                 .is_err()
-            || magazine.magazine_capacity == 0
+            || (magazine.magazine_capacity == 0 && magazine.integral_magazines.is_empty())
             || !magazine.magazine_wells.is_empty()
             || magazine.ranged_weapon.is_some()
         {
@@ -6580,7 +7326,7 @@ impl WorldState {
             .inventory
             .remove(&magazine_id)
             .ok_or(SimError::UnknownItem)?;
-        let charges = magazine.charges;
+        let charges = magazine.stored_ammunition_charges();
         let ejected = actor
             .inventory
             .get_mut(&tool_id)
@@ -7088,6 +7834,7 @@ impl WorldState {
         if weapon.damage > 1
             || weapon.ranged_weapon.is_some()
             || weapon.magazine_capacity != 0
+            || !weapon.integral_magazines.is_empty()
             || !weapon.magazine_wells.is_empty()
             || weapon.residual_energy_millijoules != 0
             || weapon.powered_tool.is_some()
@@ -7439,6 +8186,7 @@ impl WorldState {
                     ranged_weapon: None,
                     component_provenance: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -10098,6 +10846,18 @@ impl WorldState {
             )?);
             return Ok(());
         }
+        if target
+            .integral_magazines
+            .iter()
+            .any(|pocket| pocket.loaded_ammunition.is_some())
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        }
         if recipe.requires_empty_charges && (target.ranged_weapon.is_some() || target.charges != 0)
         {
             events.push(self.rejection(
@@ -11940,7 +12700,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV52");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV53");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -12211,6 +12971,7 @@ mod tests {
             component_provenance: None,
             ranged_weapon: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: vec![MagazineWellSnapshotV1 {
                 pocket_index: 0,
                 pocket_id: String::new(),
@@ -12231,6 +12992,7 @@ mod tests {
                     ranged_weapon: None,
                     component_provenance: None,
                     magazine_capacity: 2,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -12321,6 +13083,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -12397,6 +13160,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -12415,6 +13179,7 @@ mod tests {
                     recoverable: true,
                     component_provenance: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -13096,6 +13861,7 @@ mod tests {
             ammunition_type: String::from("test_ammo"),
             ranged_weapon: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -13373,6 +14139,7 @@ mod tests {
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -14124,6 +14891,7 @@ mod tests {
             recoverable: true,
             component_provenance: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -14183,6 +14951,7 @@ mod tests {
             recoverable: true,
             component_provenance: Some(vec![nested]),
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -14207,6 +14976,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -14308,6 +15078,7 @@ mod tests {
             recoverable: true,
             component_provenance: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
@@ -15085,7 +15856,7 @@ mod tests {
         assert_ne!(
             before_hash,
             replay.canonical_hash().expect("changed world should hash"),
-            "clumsy attack capability must participate in CanonicalStateV52"
+            "clumsy attack capability must participate in CanonicalStateV53"
         );
         replay = world.clone();
 
@@ -15542,7 +16313,7 @@ mod tests {
         assert_ne!(
             goal_hash,
             no_goal.canonical_hash().expect("no-goal state should hash"),
-            "last-seen intent must participate in CanonicalStateV52"
+            "last-seen intent must participate in CanonicalStateV53"
         );
         let mut wrong_z_snapshot = world.snapshot();
         wrong_z_snapshot
@@ -16130,6 +16901,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -16454,6 +17226,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -16584,6 +17357,7 @@ mod tests {
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
+                integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
@@ -17793,7 +18567,7 @@ mod tests {
         assert_ne!(
             before,
             changed.canonical_hash().expect("changed state should hash"),
-            "monster melee_skill and dodge must participate in CanonicalStateV52"
+            "monster melee_skill and dodge must participate in CanonicalStateV53"
         );
     }
 
@@ -18399,6 +19173,7 @@ mod tests {
             ranged_weapon: None,
             component_provenance: None,
             magazine_capacity: 0,
+            integral_magazines: Vec::new(),
             magazine_wells: vec![MagazineWellSnapshotV1 {
                 pocket_index: 0,
                 pocket_id: String::new(),
@@ -18416,6 +19191,7 @@ mod tests {
                     ranged_weapon: None,
                     component_provenance: None,
                     magazine_capacity: 56,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -18740,7 +19516,7 @@ mod tests {
         assert_ne!(
             tiny_world.canonical_hash().expect("tiny world hashes"),
             medium_hash,
-            "base size must participate in CanonicalStateV52"
+            "base size must participate in CanonicalStateV53"
         );
         let restored = WorldState::from_snapshot(&tiny_world.snapshot())
             .expect("private monster size should restore");
@@ -18855,7 +19631,7 @@ mod tests {
         assert_ne!(
             world.canonical_hash().expect("immobile world should hash"),
             mobile_hash,
-            "immobility must participate in CanonicalStateV52"
+            "immobility must participate in CanonicalStateV53"
         );
         assert!(
             WorldState::from_snapshot(&world.snapshot())
@@ -18965,7 +19741,7 @@ mod tests {
         assert_ne!(
             attacker.canonical_hash().expect("attacker world hashes"),
             pacifist_hash,
-            "pacifism must participate in CanonicalStateV52"
+            "pacifism must participate in CanonicalStateV53"
         );
         assert!(
             WorldState::from_snapshot(&world.snapshot())
@@ -19018,7 +19794,7 @@ mod tests {
         assert_ne!(
             slow.canonical_hash().expect("slow world hashes"),
             fast.canonical_hash().expect("fast world hashes"),
-            "attack cost must participate in CanonicalStateV52"
+            "attack cost must participate in CanonicalStateV53"
         );
         assert_eq!(
             WorldState::from_snapshot(&fast.snapshot())
@@ -19974,6 +20750,7 @@ mod tests {
                     ranged_weapon: None,
                     component_provenance: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
@@ -21320,6 +22097,564 @@ mod tests {
     }
 
     #[test]
+    fn invalid_preloaded_ammunition_does_not_consume_stable_ids() {
+        let (mut world, _actor, _other) = world_with_two_actors();
+        let next_before = world.allocator.next;
+        let position = WorldPosition { x: 1, y: 1, z: 0 };
+        let result = world.spawn_ground_item_with_preloaded_item_backed_magazines(
+            ItemSpawn {
+                position,
+                type_id: String::from("sealed_cell"),
+                charges: 0,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            },
+            vec![IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                ammunition_type: String::from("battery"),
+                capacity: 10,
+                reloadable: false,
+                unloadable: false,
+            }],
+            Vec::new(),
+            None,
+            vec![(
+                0,
+                ItemSpawn {
+                    position,
+                    type_id: String::new(),
+                    charges: 10,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::from("battery"),
+                    ranged_weapon: None,
+                },
+            )],
+        );
+        assert!(matches!(result, Err(SimError::InvalidItem)));
+        assert_eq!(world.allocator.next, next_before);
+        assert!(world.ground_items.is_empty());
+    }
+
+    #[test]
+    fn integral_magazine_reload_preserves_whole_ids_and_allocates_partial_split_ids() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor);
+        let position = world.actor_snapshot(actor).expect("actor exists").position;
+        let spawn_magazine = |world: &mut WorldState, type_id: &str, capacity, reloadable| {
+            world
+                .spawn_ground_item_with_item_backed_magazines(
+                    ItemSpawn {
+                        position,
+                        type_id: type_id.to_owned(),
+                        charges: 0,
+                        melee_damage_milli: BTreeMap::new(),
+                        calories: 0,
+                        quench: 0,
+                        comestible_type: String::new(),
+                        ammunition_type: String::new(),
+                        ranged_weapon: None,
+                    },
+                    vec![IntegralMagazinePocketPrototypeV1 {
+                        pocket_index: 3,
+                        pocket_id: String::from("PRIMARY"),
+                        ammunition_type: String::from("battery"),
+                        capacity,
+                        reloadable,
+                        unloadable: true,
+                    }],
+                    Vec::new(),
+                    None,
+                )
+                .expect("integral magazine should spawn")
+        };
+        let sealed_magazine = spawn_magazine(&mut world, "sealed_cell", 6, false);
+        let partial_magazine = spawn_magazine(&mut world, "small_cell", 6, true);
+        let whole_magazine = spawn_magazine(&mut world, "large_cell", 20, true);
+        let ammunition = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("battery"),
+                charges: 10,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::from("battery"),
+                ranged_weapon: None,
+            })
+            .expect("loose ammunition should spawn");
+        for (offset, item_id) in [
+            sealed_magazine,
+            partial_magazine,
+            whole_magazine,
+            ammunition,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence(u64::try_from(offset + 1).expect("small sequence")),
+                    client_tick: world.tick(),
+                    kind: CommandKind::PickUp { item_id },
+                }])
+                .expect("item should be picked up");
+        }
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(5),
+                client_tick: world.tick(),
+                kind: CommandKind::Wield {
+                    item_id: sealed_magazine,
+                },
+            }])
+            .expect("sealed magazine should be wielded");
+        let sealed = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(6),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: ammunition,
+                    target_pocket_index: Some(3),
+                },
+            }])
+            .expect("sealed reload should reject cleanly");
+        assert!(sealed.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::PocketNotReloadable,
+                ..
+            }
+        )));
+        let actor_after_rejection = world.actor_snapshot(actor).expect("actor should remain");
+        assert_eq!(
+            actor_after_rejection
+                .inventory
+                .iter()
+                .find(|item| item.id == ammunition)
+                .expect("source ammunition should remain")
+                .charges,
+            10
+        );
+        assert!(
+            actor_after_rejection
+                .inventory
+                .iter()
+                .find(|item| item.id == sealed_magazine)
+                .expect("sealed magazine should remain")
+                .integral_magazines[0]
+                .loaded_ammunition
+                .is_none()
+        );
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(7),
+                client_tick: world.tick(),
+                kind: CommandKind::Wield {
+                    item_id: partial_magazine,
+                },
+            }])
+            .expect("partial magazine should be wielded");
+        let partial = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(8),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: ammunition,
+                    target_pocket_index: Some(3),
+                },
+            }])
+            .expect("partial reload should succeed");
+        let split_id = partial
+            .events
+            .iter()
+            .find_map(|event| match event.kind {
+                WorldEventKind::AmmunitionLoadedIntoPocket {
+                    source_ammunition,
+                    nested_ammunition,
+                    loaded: 6,
+                    pocket_ammunition: 6,
+                    source_charges_remaining: 4,
+                    ..
+                } if source_ammunition == ammunition => Some(nested_ammunition),
+                _ => None,
+            })
+            .expect("partial reload should report its nested identity");
+        assert_ne!(split_id, ammunition);
+
+        world
+            .actors
+            .get_mut(&actor)
+            .and_then(|actor| actor.inventory.get_mut(&ammunition))
+            .expect("source ammunition should remain")
+            .damage = 1;
+        let incompatible_merge = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(9),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: ammunition,
+                    target_pocket_index: Some(3),
+                },
+            }])
+            .expect("differing stack state should reject cleanly");
+        assert!(incompatible_merge.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::IncompatibleAmmunition,
+                ..
+            }
+        )));
+        {
+            let actor_state = world.actors.get_mut(&actor).expect("actor should remain");
+            actor_state
+                .inventory
+                .get_mut(&ammunition)
+                .expect("source ammunition should remain")
+                .damage = 0;
+            let pocket = &mut actor_state
+                .inventory
+                .get_mut(&partial_magazine)
+                .expect("partial magazine should remain")
+                .integral_magazines[0];
+            pocket
+                .loaded_ammunition
+                .as_deref_mut()
+                .expect("nested ammunition should remain")
+                .charges = 5;
+            pocket.residual_energy_millijoules = 1;
+        }
+        let next_id_before_residual_rejection = world.allocator.next;
+        let residual_full = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(10),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: ammunition,
+                    target_pocket_index: Some(3),
+                },
+            }])
+            .expect("fractionally full pocket should reject cleanly");
+        assert!(residual_full.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::WeaponFull,
+                ..
+            }
+        )));
+        assert_eq!(world.allocator.next, next_id_before_residual_rejection);
+
+        world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(11),
+                client_tick: world.tick(),
+                kind: CommandKind::Wield {
+                    item_id: whole_magazine,
+                },
+            }])
+            .expect("whole magazine should be wielded");
+        let whole = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(12),
+                client_tick: world.tick(),
+                kind: CommandKind::Reload {
+                    ammunition_item: ammunition,
+                    target_pocket_index: Some(3),
+                },
+            }])
+            .expect("whole-stack reload should succeed");
+        assert!(whole.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::AmmunitionLoadedIntoPocket {
+                source_ammunition,
+                nested_ammunition,
+                loaded: 4,
+                pocket_ammunition: 4,
+                source_charges_remaining: 0,
+                ..
+            } if source_ammunition == ammunition && nested_ammunition == ammunition
+        )));
+        let actor_snapshot = world.actor_snapshot(actor).expect("actor should remain");
+        assert!(
+            !actor_snapshot
+                .inventory
+                .iter()
+                .any(|item| item.id == ammunition)
+        );
+        let partial = actor_snapshot
+            .inventory
+            .iter()
+            .find(|item| item.id == partial_magazine)
+            .expect("partial magazine should remain");
+        assert_eq!(
+            partial.integral_magazines[0]
+                .loaded_ammunition
+                .as_deref()
+                .expect("split ammunition should be nested")
+                .id,
+            split_id
+        );
+        let whole = actor_snapshot
+            .inventory
+            .iter()
+            .find(|item| item.id == whole_magazine)
+            .expect("whole magazine should remain");
+        assert_eq!(
+            whole.integral_magazines[0]
+                .loaded_ammunition
+                .as_deref()
+                .expect("whole ammunition should be nested")
+                .id,
+            ammunition
+        );
+        let mut disassembly = test_disassembly_recipe(100, 0, Vec::new());
+        disassembly.target_type_id = String::from("small_cell");
+        let rejected_disassembly = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(13),
+                client_tick: world.tick(),
+                kind: CommandKind::Disassemble {
+                    item_id: partial_magazine,
+                    item_type_id: String::from("small_cell"),
+                    recipe: Some(Box::new(disassembly)),
+                },
+            }])
+            .expect("loaded item-backed magazine disassembly should reject cleanly");
+        assert!(rejected_disassembly.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::DisassemblyUnavailable,
+                ..
+            }
+        )));
+        assert!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor should remain")
+                .inventory
+                .iter()
+                .find(|item| item.id == partial_magazine)
+                .expect("rejected target should remain")
+                .integral_magazines[0]
+                .loaded_ammunition
+                .is_some()
+        );
+        let snapshot = world.snapshot();
+        for item in &snapshot.actors[0].inventory {
+            assert!(
+                validate_item_snapshot(item).is_ok(),
+                "invalid item after reload: {item:#?}"
+            );
+        }
+        let restored = WorldState::from_snapshot(&snapshot).expect("nested state should restore");
+        assert_eq!(
+            world.canonical_hash().expect("world should hash"),
+            restored
+                .canonical_hash()
+                .expect("restored world should hash")
+        );
+
+        let mut duplicate = snapshot;
+        let inventory = &mut duplicate.actors[0].inventory;
+        let partial_index = inventory
+            .iter()
+            .position(|item| item.id == partial_magazine)
+            .expect("partial magazine should be present");
+        inventory[partial_index].integral_magazines[0]
+            .loaded_ammunition
+            .as_deref_mut()
+            .expect("nested ammunition should exist")
+            .id = whole_magazine;
+        assert!(matches!(
+            WorldState::from_snapshot(&duplicate),
+            Err(SimError::InvalidSnapshot)
+        ));
+    }
+
+    #[test]
+    fn item_backed_battery_powers_a_detachable_tool_and_retains_fractional_energy() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor);
+        let position = world.actor_snapshot(actor).expect("actor exists").position;
+        let tool = world
+            .spawn_ground_item_with_powered_magazine_wells(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("test_light"),
+                    charges: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                },
+                0,
+                vec![MagazineWellPrototypeV1 {
+                    pocket_index: 1,
+                    pocket_id: String::from("POWER"),
+                    compatible_magazine_type_ids: vec![String::from("test_cell")],
+                }],
+                0,
+                Some(PoweredToolStateV1 {
+                    inactive_type_id: String::from("test_light"),
+                    active_type_id: String::from("test_light_on"),
+                    activation_charges: 1,
+                    power_draw_milliwatts: 1_000,
+                    light_emission: 4,
+                    dims_with_charge: false,
+                    power_pocket_index: 1,
+                    active: false,
+                }),
+            )
+            .expect("powered tool should spawn");
+        let cell = world
+            .spawn_ground_item_with_item_backed_magazines(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("test_cell"),
+                    charges: 0,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                },
+                vec![
+                    IntegralMagazinePocketPrototypeV1 {
+                        pocket_index: 0,
+                        pocket_id: String::from("PRIMARY"),
+                        ammunition_type: String::from("battery"),
+                        capacity: 1,
+                        reloadable: true,
+                        unloadable: true,
+                    },
+                    IntegralMagazinePocketPrototypeV1 {
+                        pocket_index: 2,
+                        pocket_id: String::from("RESERVE"),
+                        ammunition_type: String::from("battery"),
+                        capacity: 1,
+                        reloadable: true,
+                        unloadable: true,
+                    },
+                ],
+                Vec::new(),
+                None,
+            )
+            .expect("cell should spawn");
+        let ammunition = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("battery"),
+                charges: 2,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::from("battery"),
+                ranged_weapon: None,
+            })
+            .expect("battery ammunition should spawn");
+        let commands = [
+            CommandKind::PickUp { item_id: tool },
+            CommandKind::PickUp { item_id: cell },
+            CommandKind::PickUp {
+                item_id: ammunition,
+            },
+            CommandKind::Wield { item_id: cell },
+            CommandKind::Reload {
+                ammunition_item: ammunition,
+                target_pocket_index: Some(0),
+            },
+            CommandKind::Reload {
+                ammunition_item: ammunition,
+                target_pocket_index: Some(2),
+            },
+            CommandKind::Wield { item_id: tool },
+            CommandKind::Reload {
+                ammunition_item: cell,
+                target_pocket_index: Some(1),
+            },
+            CommandKind::Activate { item_id: tool },
+        ];
+        let mut last = None;
+        for (offset, kind) in commands.into_iter().enumerate() {
+            last = Some(
+                world
+                    .advance_tick(vec![ClientCommand {
+                        actor_id: actor,
+                        sequence: CommandSequence(
+                            u64::try_from(offset + 1).expect("small sequence"),
+                        ),
+                        client_tick: world.tick(),
+                        kind,
+                    }])
+                    .expect("battery command should resolve"),
+            );
+        }
+        let last = last.expect("commands should produce an outcome");
+        assert!(last.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::PoweredToolChanged {
+                item_id,
+                active: true,
+                reason: PoweredToolTransitionReason::Activated,
+                available_energy_millijoules: 1_000_000,
+                ..
+            } if item_id == tool
+        )));
+        for _ in 0..SimTick::HZ {
+            world
+                .advance_tick(Vec::new())
+                .expect("active tool should consume continuous power");
+        }
+        let tool = world
+            .actor_snapshot(actor)
+            .expect("actor should remain")
+            .inventory
+            .into_iter()
+            .find(|item| item.id == tool)
+            .expect("tool should remain");
+        let installed = tool.magazine_wells[0]
+            .installed_magazine
+            .as_deref()
+            .expect("cell should be installed");
+        assert!(installed.integral_magazines[0].loaded_ammunition.is_none());
+        let pocket = &installed.integral_magazines[1];
+        assert_eq!(
+            pocket
+                .loaded_ammunition
+                .as_deref()
+                .expect("depleted stack identity should remain with residual energy")
+                .charges,
+            0
+        );
+        assert_eq!(pocket.residual_energy_millijoules, 999_000);
+        WorldState::from_snapshot(&world.snapshot())
+            .expect("fractional nested battery state should restore");
+    }
+
+    #[test]
     fn two_detachable_wells_reload_by_canonical_pocket_and_restore_nested_ids() {
         let (mut world, actor, _other) = world_with_two_actors();
         make_actor_act_each_tick(&mut world, actor);
@@ -21409,7 +22744,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: primary,
-                    magazine_well_index: Some(2),
+                    target_pocket_index: Some(2),
                 },
             }])
             .expect("missing pocket should reject");
@@ -21427,7 +22762,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: primary,
-                    magazine_well_index: Some(1),
+                    target_pocket_index: Some(1),
                 },
             }])
             .expect("active power-pocket reload should reject");
@@ -21445,7 +22780,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: auxiliary,
-                    magazine_well_index: Some(4),
+                    target_pocket_index: Some(4),
                 },
             }])
             .expect("an auxiliary well should reload while the tool is active");
@@ -21473,7 +22808,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: primary,
-                    magazine_well_index: Some(1),
+                    target_pocket_index: Some(1),
                 },
             }])
             .expect("inactive power pocket should reload");
@@ -21666,7 +23001,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: incompatible,
-                    magazine_well_index: Some(0),
+                    target_pocket_index: Some(0),
                 },
             }])
             .expect("incompatible reload should resolve atomically");
@@ -21693,7 +23028,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: first_battery,
-                    magazine_well_index: Some(0),
+                    target_pocket_index: Some(0),
                 },
             }])
             .expect("first battery should install");
@@ -21704,7 +23039,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: second_battery,
-                    magazine_well_index: Some(0),
+                    target_pocket_index: Some(0),
                 },
             }])
             .expect("second battery should swap in");
@@ -21927,7 +23262,7 @@ mod tests {
             },
             CommandKind::Reload {
                 ammunition_item: battery,
-                magazine_well_index: Some(0),
+                target_pocket_index: Some(0),
             },
         ]
         .into_iter()
@@ -22035,7 +23370,7 @@ mod tests {
                 client_tick: world.tick(),
                 kind: CommandKind::Reload {
                     ammunition_item: battery,
-                    magazine_well_index: Some(0),
+                    target_pocket_index: Some(0),
                 },
             }])
             .expect("active reload should resolve");
@@ -22335,7 +23670,7 @@ mod tests {
             CommandKind::ShootCreature { target },
             CommandKind::Reload {
                 ammunition_item: compatible,
-                magazine_well_index: None,
+                target_pocket_index: None,
             },
         ];
         let mut reload_events = Vec::new();
@@ -22383,7 +23718,7 @@ mod tests {
             CommandKind::ShootCreature { target },
             CommandKind::Reload {
                 ammunition_item: incompatible,
-                magazine_well_index: None,
+                target_pocket_index: None,
             },
         ]
         .into_iter()
@@ -22794,7 +24129,7 @@ mod tests {
             changed_stats
                 .canonical_hash()
                 .expect("changed base stats hash"),
-            "all canonical base stats must participate in CanonicalStateV52"
+            "all canonical base stats must participate in CanonicalStateV53"
         );
         let mut invalid_profile = setup_snapshot.clone();
         invalid_profile.smash_item_types[0].attack_time_moves = 0;
@@ -22811,7 +24146,7 @@ mod tests {
             changed_accuracy_world
                 .canonical_hash()
                 .expect("changed accuracy state hashes"),
-            "strict weapon to-hit must participate in CanonicalStateV52"
+            "strict weapon to-hit must participate in CanonicalStateV53"
         );
         let mut unsupported =
             WorldState::from_snapshot(&setup_snapshot).expect("unsupported setup restores");
@@ -23056,6 +24391,7 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
+                    integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,

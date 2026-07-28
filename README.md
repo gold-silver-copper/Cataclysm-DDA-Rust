@@ -536,6 +536,27 @@ Because this changes Postcard layouts, databases below schema 54 that contain
 snapshots or journal batches are rejected before mutation; metadata-only older
 databases may still use the existing backed-up SQL migration path.
 
+Protocol 77 advances to schema 55, CanonicalStateV53, and CanonicalEventsV16.
+Strict integral `MAGAZINE` pockets now own stable nested ammunition items;
+outer magazine charges are zero in newly normalized pinned content. Exact-pocket
+reload transfers a whole stack without changing its ID, allocates one new ID
+for a partial split into an empty pocket, and merges compatible stacks without
+creating a redundant object. Merge compatibility includes every retained
+non-identity/non-charge field, so distinct item state cannot disappear into an
+existing stack. Fractional battery energy occupies one capacity slot. Capacity,
+ammunition category, inherited pocket
+index/ID, and `NO_RELOAD`/`NO_UNLOAD` access are canonical. Recursive
+validation bounds containment depth, rejects aggregate-plus-item-backed state,
+and traverses nested IDs through hashing, snapshots, SQLite recovery, portable
+replay, pickup/drop, detachable installation, crafting, and disassembly gates;
+loaded integral magazines reject disassembly until explicit unloading exists.
+The starter medium cell is generated preloaded with a stable `battery` child,
+so it remains usable without violating its pinned `NO_RELOAD` flag. A
+renderer-independent conformance scenario proves partial-split identity across
+direct execution, per-tick restore, SQLite recovery, and portable replay.
+Databases below schema 55 that contain serialized state are rejected before
+mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -546,8 +567,9 @@ valid providers for these legacy recipes because pinned CDDA applies their
 multiplier only to the still-unsupported step-recipe model. Charged qualities
 require their pinned per-use charge threshold on each provider without spending
 that energy merely for qualification. The cabin supplies a stick, small knife,
-hammer, frozen toaster pastry, charged toaster, empty flashlight, full medium
-battery, and pistol manual so the implemented paths are immediately playable.
+hammer, frozen toaster pastry, charged toaster, empty flashlight, a medium
+battery cell containing its stable battery-ammunition child, and pistol manual
+so the implemented paths are immediately playable.
 Pinned skill IDs, practical/theoretical levels, raw practice experience,
 skill-gated autolearning, and one practice unit per nominal crafting second are
 canonical, persistent, replayable, and visible in the HUD. The selected 234

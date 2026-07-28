@@ -42,9 +42,13 @@ selector-only MAGAZINE_WELL shapes; any extra behavior remains fail-closed and
 the complete field remains explicitly unsupported. Runtime storage is no longer
 selected by a battery-only magazine helper, and five additional reversible
 detachable-tool targets can atomically detach their modeled magazine before
-disassembly. This does not yet imply canonical multiple-pocket ownership,
-item-backed ammunition, general containers, grids, UPS, or arbitrary power
-parity.
+disassembly. Strict single-category MAGAZINE definitions now project their
+canonical pocket index/ID, capacity, ammunition category, and inherited
+`NO_RELOAD`/`NO_UNLOAD` access into item-backed runtime storage. Whole and
+partial authoritative reloads retain or allocate nested stable IDs explicitly,
+and detachable battery cells derive their energy from contained `battery`
+items. This does not yet imply general CONTAINER pockets, speedloaders,
+casings/ejection behavior, grids, UPS, or arbitrary power parity.
 Inherited `power_draw` quantities normalize W/kW/mW to exact integer
 milliwatts, while inherited `light` and `revert_to` remain
 strict scalar projections. A deliberately narrow transform projection accepts
