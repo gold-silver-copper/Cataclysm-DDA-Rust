@@ -2032,6 +2032,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cdda-conformance"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cdda-persistence",
+ "cdda-protocol",
+ "cdda-sim",
+ "postcard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cdda-content"
 version = "0.1.0"
 dependencies = [

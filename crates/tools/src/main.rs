@@ -10,8 +10,12 @@ use cdda_content::{
     ContentManifest, ModCatalog, PINNED_UPSTREAM_COMMIT, ProvenanceEntry, REQUIRED_CONTENT_ROOTS,
     SchemaInventory,
 };
-use cdda_persistence::{ENROLLMENT_LIFETIME_SECONDS, ReplayBundleV1, WorldStore};
-use cdda_protocol::{AccountId, AccountRole, BASELINE_COMMIT, ContentIdentity, EndpointIdentity};
+use cdda_persistence::{
+    ENROLLMENT_LIFETIME_SECONDS, REPLAY_FORMAT_VERSION, ReplayBundleV1, SCHEMA_VERSION, WorldStore,
+};
+use cdda_protocol::{
+    AccountId, AccountRole, BASELINE_COMMIT, ContentIdentity, EndpointIdentity, PROTOCOL_VERSION,
+};
 use iroh::EndpointId;
 use serde::Deserialize;
 
@@ -39,10 +43,57 @@ struct Node {
     dependencies: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParityLedger {
+    format_version: u16,
+    baseline_commit: String,
+    protocol_version: u16,
+    persistence_schema_version: i64,
+    replay_format_version: u16,
+    active_milestone: String,
+    milestones: Vec<ParityMilestone>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParityMilestone {
+    id: String,
+    title: String,
+    state: ParityState,
+    priority: u16,
+    depends_on: Vec<String>,
+    upstream_sources: Vec<String>,
+    rust_paths: Vec<String>,
+    scenario_families: Vec<String>,
+    differential_oracle: DifferentialState,
+    multiplayer_adaptation: String,
+    unlocks: Vec<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ParityState {
+    Complete,
+    InProgress,
+    Planned,
+    Pending,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DifferentialState {
+    Verified,
+    Active,
+    Planned,
+    NotApplicable,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = std::env::args().nth(1);
     match command.as_deref() {
         Some("verify-dependency-boundaries") => verify_dependency_boundaries(),
+        Some("parity-ledger-check") => parity_ledger_check(),
         Some("astronomy-table-check") => astronomy_table_check(),
         Some("account-create") => create_account(std::env::args().skip(2).collect()),
         Some("account-recover") => recover_account(std::env::args().skip(2).collect()),
@@ -56,10 +107,205 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-verify") => replay_verify(std::env::args().skip(2).collect()),
         Some(other) => Err(format!("unknown xtask command: {other}").into()),
         None => Err(
-            "usage: cargo xtask <verify-dependency-boundaries|astronomy-table-check|account-create ...|account-recover ...|content-import ...|content-validate ...|content-inventory ...|content-inventory-check ...|replay-export ...|replay-verify ...>"
+            "usage: cargo xtask <verify-dependency-boundaries|parity-ledger-check|astronomy-table-check|account-create ...|account-recover ...|content-import ...|content-validate ...|content-inventory ...|content-inventory-check ...|replay-export ...|replay-verify ...>"
                 .into(),
         ),
     }
+}
+
+fn parity_ledger_check() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("tools crate is not nested beneath the workspace")?;
+    let ledger_path = workspace.join("docs/parity-ledger.json");
+    let ledger: ParityLedger = serde_json::from_slice(&fs::read(&ledger_path)?)?;
+    validate_parity_ledger(&ledger, workspace)?;
+    println!(
+        "parity ledger verified: {} milestones, active {}",
+        ledger.milestones.len(),
+        ledger.active_milestone
+    );
+    Ok(())
+}
+
+fn validate_parity_ledger(
+    ledger: &ParityLedger,
+    workspace: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if ledger.format_version != 1 {
+        return Err("unsupported parity ledger format version".into());
+    }
+    if ledger.baseline_commit != BASELINE_COMMIT
+        || ledger.protocol_version != PROTOCOL_VERSION
+        || ledger.persistence_schema_version != SCHEMA_VERSION
+        || ledger.replay_format_version != REPLAY_FORMAT_VERSION
+    {
+        return Err("parity ledger version gates do not match the runtime".into());
+    }
+    if ledger.milestones.is_empty() {
+        return Err("parity ledger must contain milestones".into());
+    }
+
+    let mut by_id = BTreeMap::new();
+    let mut priorities = BTreeSet::new();
+    let upstream_root = workspace.join("../Cataclysm-DDA");
+    let canonical_upstream_root = upstream_root
+        .is_dir()
+        .then(|| fs::canonicalize(&upstream_root))
+        .transpose()?;
+    if canonical_upstream_root.is_some() {
+        let output = Command::new("git")
+            .args(["-C", "../Cataclysm-DDA", "rev-parse", "HEAD"])
+            .current_dir(workspace)
+            .output()?;
+        if !output.status.success()
+            || String::from_utf8(output.stdout)?.trim() != ledger.baseline_commit
+        {
+            return Err("available upstream checkout is not at the ledger baseline".into());
+        }
+    }
+    for milestone in &ledger.milestones {
+        if milestone.id.is_empty()
+            || milestone.title.is_empty()
+            || milestone.multiplayer_adaptation.is_empty()
+            || milestone.upstream_sources.is_empty()
+            || milestone.rust_paths.is_empty()
+            || milestone.unlocks.is_empty()
+        {
+            return Err(format!("milestone {} has an empty required field", milestone.id).into());
+        }
+        if by_id.insert(milestone.id.as_str(), milestone).is_some() {
+            return Err(format!("duplicate milestone ID: {}", milestone.id).into());
+        }
+        if !priorities.insert(milestone.priority) {
+            return Err(format!("duplicate milestone priority: {}", milestone.priority).into());
+        }
+        for path in &milestone.rust_paths {
+            if path.starts_with('/') || path.contains("..") || !workspace.join(path).exists() {
+                return Err(format!(
+                    "milestone {} references missing or nonlocal Rust path {path}",
+                    milestone.id
+                )
+                .into());
+            }
+        }
+        if milestone.upstream_sources.iter().any(|source| {
+            source
+                .strip_prefix("../Cataclysm-DDA/")
+                .is_none_or(|relative| {
+                    relative.is_empty()
+                        || Path::new(relative)
+                            .components()
+                            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                })
+        }) {
+            return Err(format!(
+                "milestone {} has an unpinned upstream source path",
+                milestone.id
+            )
+            .into());
+        }
+        if let Some(root) = &canonical_upstream_root {
+            for source in &milestone.upstream_sources {
+                let canonical_source =
+                    fs::canonicalize(workspace.join(source)).map_err(|error| {
+                        format!(
+                            "milestone {} references missing upstream source {source}: {error}",
+                            milestone.id
+                        )
+                    })?;
+                if !canonical_source.starts_with(root) || !canonical_source.is_file() {
+                    return Err(format!(
+                        "milestone {} upstream source escapes the pinned checkout: {source}",
+                        milestone.id
+                    )
+                    .into());
+                }
+            }
+        }
+        if matches!(milestone.state, ParityState::Complete)
+            && (milestone.scenario_families.is_empty()
+                || !matches!(
+                    milestone.differential_oracle,
+                    DifferentialState::Verified | DifferentialState::NotApplicable
+                ))
+        {
+            return Err(format!(
+                "completed milestone {} lacks scenarios or oracle disposition",
+                milestone.id
+            )
+            .into());
+        }
+    }
+
+    let active = by_id
+        .get(ledger.active_milestone.as_str())
+        .ok_or("active milestone is absent from the ledger")?;
+    if active.state != ParityState::InProgress {
+        return Err("active milestone must be in_progress".into());
+    }
+    for milestone in &ledger.milestones {
+        if milestone.state == ParityState::Complete
+            && milestone.depends_on.iter().any(|dependency| {
+                by_id
+                    .get(dependency.as_str())
+                    .is_none_or(|dependency| dependency.state != ParityState::Complete)
+            })
+        {
+            return Err(format!(
+                "completed milestone {} has an incomplete prerequisite",
+                milestone.id
+            )
+            .into());
+        }
+    }
+
+    let mut indegree = BTreeMap::<&str, usize>::new();
+    let mut dependents = BTreeMap::<&str, Vec<&str>>::new();
+    for milestone in &ledger.milestones {
+        indegree.insert(milestone.id.as_str(), milestone.depends_on.len());
+        let mut unique_dependencies = BTreeSet::new();
+        for dependency in &milestone.depends_on {
+            if dependency == &milestone.id
+                || !unique_dependencies.insert(dependency.as_str())
+                || !by_id.contains_key(dependency.as_str())
+            {
+                return Err(format!(
+                    "milestone {} has an invalid dependency {dependency}",
+                    milestone.id
+                )
+                .into());
+            }
+            dependents
+                .entry(dependency.as_str())
+                .or_default()
+                .push(milestone.id.as_str());
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(*id))
+        .collect::<Vec<_>>();
+    let mut visited = 0_usize;
+    while let Some(id) = ready.pop() {
+        visited += 1;
+        for dependent in dependents.get(id).into_iter().flatten() {
+            let count = indegree
+                .get_mut(dependent)
+                .ok_or("parity ledger dependency index is inconsistent")?;
+            *count = count
+                .checked_sub(1)
+                .ok_or("parity ledger dependency count underflow")?;
+            if *count == 0 {
+                ready.push(dependent);
+            }
+        }
+    }
+    if visited != ledger.milestones.len() {
+        return Err("parity milestone dependency graph contains a cycle".into());
+    }
+    Ok(())
 }
 
 fn astronomy_table_check() -> Result<(), Box<dyn std::error::Error>> {
@@ -628,5 +874,54 @@ fn verify_dependency_boundaries() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         Err(violations.join("\n").into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("tools crate should be nested beneath the workspace")
+    }
+
+    fn ledger() -> ParityLedger {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/parity-ledger.json"
+        )))
+        .expect("committed parity ledger should decode")
+    }
+
+    #[test]
+    fn parity_ledger_rejects_unknown_fields() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/parity-ledger.json"
+        )))
+        .expect("committed parity ledger should decode as JSON");
+        value
+            .as_object_mut()
+            .expect("parity ledger should be an object")
+            .insert(String::from("protcol_version"), serde_json::json!(75));
+        assert!(serde_json::from_value::<ParityLedger>(value).is_err());
+    }
+
+    #[test]
+    fn completed_milestone_requires_completed_dependencies() {
+        let mut ledger = ledger();
+        ledger.active_milestone = String::from("conformance-foundation");
+        let item = ledger
+            .milestones
+            .iter_mut()
+            .find(|milestone| milestone.id == "item-containment")
+            .expect("item milestone should exist");
+        item.state = ParityState::Complete;
+        item.differential_oracle = DifferentialState::NotApplicable;
+        let result = validate_parity_ledger(&ledger, workspace());
+        assert!(result.is_err_and(|error| error.to_string().contains("incomplete prerequisite")));
     }
 }

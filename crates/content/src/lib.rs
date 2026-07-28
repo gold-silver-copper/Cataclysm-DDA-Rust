@@ -23,7 +23,10 @@ pub use field::{
     FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry, FieldTypeRegistryError,
 };
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
-pub use item::{ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError};
+pub use item::{
+    ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, PocketDefinition,
+    PocketTypeDefinition, StrictMagazineDefinition,
+};
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
 pub use proficiency::{
     PROFICIENCY_MULTIPLIER_SCALE, ProficiencyDefinition, ProficiencyRegistry,

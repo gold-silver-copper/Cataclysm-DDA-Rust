@@ -1,0 +1,21 @@
+[package]
+name = "cdda-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+blake3.workspace = true
+cdda-persistence = { path = "../persistence" }
+cdda-protocol = { path = "../protocol" }
+cdda-sim = { path = "../sim" }
+postcard.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

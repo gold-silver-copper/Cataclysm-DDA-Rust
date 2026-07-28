@@ -118,6 +118,11 @@ pub struct ItemDefinition {
     /// Legacy/static capacity for MAGAZINE definitions. Modern integral
     /// magazine capacities are also derived from `pocket_data` below.
     pub magazine_capacity: i32,
+    /// Every inherited `pocket_data` entry in source order. The raw field map
+    /// is retained losslessly so admission code can distinguish a strict
+    /// supported pocket from one containing behavior that Rust does not yet
+    /// interpret.
+    pub pockets: Vec<PocketDefinition>,
     /// Strictly parsed MAGAZINE_WELL projections from inherited `pocket_data`.
     /// The full pocket field remains explicitly unsupported until general
     /// containment semantics are implemented.
@@ -165,9 +170,84 @@ pub struct DamageDefinition {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MagazineWellDefinition {
+    pub pocket_index: u16,
+    pub pocket_id: String,
     pub default_magazine: String,
     pub item_restrictions: BTreeSet<String>,
     pub flag_restrictions: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PocketTypeDefinition {
+    Container,
+    Magazine,
+    MagazineWell,
+    Mod,
+    Corpse,
+    Software,
+    EFileStorage,
+    Cable,
+    Migration,
+    Ebook,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PocketDefinition {
+    pub pocket_index: u16,
+    pub pocket_type: PocketTypeDefinition,
+    pub pocket_id: String,
+    pub ammo_restrictions: BTreeMap<String, i32>,
+    pub item_restrictions: BTreeSet<String>,
+    pub flag_restrictions: BTreeSet<String>,
+    pub default_magazine: String,
+    pub raw_fields: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMagazineDefinition {
+    pub pocket_index: u16,
+    pub pocket_id: String,
+    pub ammunition_type: String,
+    pub capacity: u32,
+}
+
+impl PocketDefinition {
+    /// A strict integral magazine has no behavior beyond ammunition category
+    /// and capacity. Other preserved fields keep the pocket fail-closed.
+    #[must_use]
+    pub fn strict_integral_magazine(&self) -> Option<&BTreeMap<String, i32>> {
+        const FIELDS: &[&str] = &["ammo_restriction", "id", "pocket_type", "rigid"];
+        (self.pocket_type == PocketTypeDefinition::Magazine
+            && !self.ammo_restrictions.is_empty()
+            && self
+                .raw_fields
+                .keys()
+                .all(|field| FIELDS.contains(&field.as_str()))
+            && self.raw_fields.get("rigid").is_none_or(Value::is_boolean))
+        .then_some(&self.ammo_restrictions)
+    }
+
+    /// A strict detachable well only selects compatible magazine definitions.
+    /// Capacity, sealing, holster, overflow, and other pocket behavior remain
+    /// unavailable until their interpreters exist.
+    #[must_use]
+    pub fn strict_magazine_well(&self) -> bool {
+        const FIELDS: &[&str] = &[
+            "default_magazine",
+            "flag_restriction",
+            "id",
+            "item_restriction",
+            "pocket_type",
+        ];
+        self.pocket_type == PocketTypeDefinition::MagazineWell
+            && (!self.item_restrictions.is_empty()
+                || !self.flag_restrictions.is_empty()
+                || !self.default_magazine.is_empty())
+            && self
+                .raw_fields
+                .keys()
+                .all(|field| FIELDS.contains(&field.as_str()))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -301,6 +381,34 @@ impl ItemRegistry {
 }
 
 impl ItemDefinition {
+    /// Returns the generalized runtime shape for a concrete, single-pocket
+    /// magazine. Multiple ammunition categories and pockets with extra
+    /// behavior remain unavailable rather than being projected lossily.
+    #[must_use]
+    pub fn strict_magazine(&self) -> Option<StrictMagazineDefinition> {
+        let [pocket] = self.pockets.as_slice() else {
+            return None;
+        };
+        let restrictions = pocket.strict_integral_magazine()?;
+        let mut restrictions = restrictions.iter();
+        let (ammunition_type, capacity) = restrictions.next()?;
+        if restrictions.next().is_some() {
+            return None;
+        }
+        let capacity = u32::try_from(*capacity).ok()?;
+        (self.subtypes.contains("MAGAZINE")
+            && self.ammo_types.len() == 1
+            && self.ammo_types.contains(ammunition_type.as_str())
+            && self.magazine_capacity == i32::try_from(capacity).ok()?
+            && capacity > 0)
+            .then(|| StrictMagazineDefinition {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: ammunition_type.clone(),
+                capacity,
+            })
+    }
+
     pub fn melee_damage_milli(&self) -> Result<BTreeMap<String, i32>, ItemRegistryError> {
         self.melee_damage
             .iter()
@@ -628,86 +736,156 @@ fn apply_power_pocket_projections(
     let pockets = value
         .as_array()
         .ok_or_else(|| invalid_field(source, "pocket_data"))?;
-    let mut magazine_wells = Vec::new();
-    let mut integral_magazines = Vec::new();
-    for value in pockets {
+    let mut normalized_pockets = Vec::with_capacity(pockets.len());
+    for (index, value) in pockets.iter().enumerate() {
         let pocket = value
             .as_object()
             .ok_or_else(|| invalid_field(source, "pocket_data"))?;
-        match pocket
-            .get("pocket_type")
-            .and_then(Value::as_str)
-            .unwrap_or("CONTAINER")
-        {
-            "MAGAZINE_WELL" => {
-                let item_restriction_value = pocket.get("item_restriction");
-                let first_item_restriction = item_restriction_value
-                    .and_then(Value::as_array)
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let item_restrictions = item_restriction_value
-                    .map(|value| string_set(value, source, "pocket_data"))
-                    .transpose()?
-                    .unwrap_or_default();
-                let flag_restrictions = pocket
-                    .get("flag_restriction")
-                    .map(|value| string_set(value, source, "pocket_data"))
-                    .transpose()?
-                    .unwrap_or_default();
-                let mut default_magazine = pocket
-                    .get("default_magazine")
-                    .map(|value| {
-                        value
-                            .as_str()
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned)
-                            .ok_or_else(|| invalid_field(source, "pocket_data"))
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-                if let Some(first) = first_item_restriction {
-                    default_magazine = first;
-                }
+        let pocket_index =
+            u16::try_from(index).map_err(|_| invalid_field(source, "pocket_data"))?;
+        normalized_pockets.push(parse_pocket_definition(pocket, pocket_index, source)?);
+    }
+    let mut magazine_wells = Vec::new();
+    let mut integral_magazines = Vec::new();
+    for pocket in &normalized_pockets {
+        match pocket.pocket_type {
+            PocketTypeDefinition::MagazineWell => {
                 magazine_wells.push(MagazineWellDefinition {
-                    default_magazine,
-                    item_restrictions,
-                    flag_restrictions,
+                    pocket_index: pocket.pocket_index,
+                    pocket_id: pocket.pocket_id.clone(),
+                    default_magazine: pocket.default_magazine.clone(),
+                    item_restrictions: pocket.item_restrictions.clone(),
+                    flag_restrictions: pocket.flag_restrictions.clone(),
                 });
             }
-            "MAGAZINE" => {
-                let Some(restrictions) = pocket.get("ammo_restriction") else {
-                    continue;
-                };
-                let restrictions = restrictions
-                    .as_object()
-                    .ok_or_else(|| invalid_field(source, "pocket_data"))?
-                    .iter()
-                    .map(|(ammunition_type, capacity)| {
-                        let capacity = i32::try_from(
-                            capacity
-                                .as_i64()
-                                .filter(|capacity| *capacity > 0)
-                                .ok_or_else(|| invalid_field(source, "pocket_data"))?,
-                        )
-                        .map_err(|_| invalid_field(source, "pocket_data"))?;
-                        if ammunition_type.is_empty() {
-                            return Err(invalid_field(source, "pocket_data"));
-                        }
-                        Ok((ammunition_type.clone(), capacity))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, ItemRegistryError>>()?;
-                if restrictions.is_empty() {
-                    return Err(invalid_field(source, "pocket_data"));
-                }
-                integral_magazines.push(restrictions);
+            PocketTypeDefinition::Magazine if !pocket.ammo_restrictions.is_empty() => {
+                integral_magazines.push(pocket.ammo_restrictions.clone());
             }
-            _ => {}
+            _ => (),
         }
     }
+    item.pockets = normalized_pockets;
     item.magazine_wells = magazine_wells;
     item.integral_magazines = integral_magazines;
     Ok(())
+}
+
+fn parse_pocket_definition(
+    pocket: &Map<String, Value>,
+    pocket_index: u16,
+    source: &str,
+) -> Result<PocketDefinition, ItemRegistryError> {
+    let pocket_type = match pocket
+        .get("pocket_type")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| invalid_field(source, "pocket_data"))
+        })
+        .transpose()?
+        .unwrap_or("CONTAINER")
+    {
+        "CONTAINER" => PocketTypeDefinition::Container,
+        "MAGAZINE" => PocketTypeDefinition::Magazine,
+        "MAGAZINE_WELL" => PocketTypeDefinition::MagazineWell,
+        "MOD" => PocketTypeDefinition::Mod,
+        "CORPSE" => PocketTypeDefinition::Corpse,
+        "SOFTWARE" => PocketTypeDefinition::Software,
+        "E_FILE_STORAGE" => PocketTypeDefinition::EFileStorage,
+        "CABLE" => PocketTypeDefinition::Cable,
+        "MIGRATION" => PocketTypeDefinition::Migration,
+        "EBOOK" => PocketTypeDefinition::Ebook,
+        _ => return Err(invalid_field(source, "pocket_data")),
+    };
+    let ammo_restrictions = pocket
+        .get("ammo_restriction")
+        .map(|value| parse_ammo_restrictions(value, source))
+        .transpose()?
+        .unwrap_or_default();
+    let item_restriction_value = pocket.get("item_restriction");
+    let item_restrictions = item_restriction_value
+        .map(|value| string_set(value, source, "pocket_data"))
+        .transpose()?
+        .unwrap_or_default();
+    if item_restriction_value.is_some() && item_restrictions.is_empty() {
+        return Err(invalid_field(source, "pocket_data"));
+    }
+    let flag_restriction_value = pocket.get("flag_restriction");
+    let flag_restrictions = flag_restriction_value
+        .map(|value| string_set(value, source, "pocket_data"))
+        .transpose()?
+        .unwrap_or_default();
+    if flag_restriction_value.is_some() && flag_restrictions.is_empty() {
+        return Err(invalid_field(source, "pocket_data"));
+    }
+    let pocket_id = optional_nonempty_pocket_string(pocket, "id", source)?;
+    let mut default_magazine = optional_nonempty_pocket_string(pocket, "default_magazine", source)?;
+    if let Some(first) = item_restriction_value
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+        .and_then(Value::as_str)
+    {
+        default_magazine = first.to_owned();
+    }
+    Ok(PocketDefinition {
+        pocket_index,
+        pocket_type,
+        pocket_id,
+        ammo_restrictions,
+        item_restrictions,
+        flag_restrictions,
+        default_magazine,
+        raw_fields: pocket
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+    })
+}
+
+fn parse_ammo_restrictions(
+    value: &Value,
+    source: &str,
+) -> Result<BTreeMap<String, i32>, ItemRegistryError> {
+    let restrictions = value
+        .as_object()
+        .ok_or_else(|| invalid_field(source, "pocket_data"))?
+        .iter()
+        .map(|(ammunition_type, capacity)| {
+            let capacity = i32::try_from(
+                capacity
+                    .as_i64()
+                    .filter(|capacity| *capacity > 0)
+                    .ok_or_else(|| invalid_field(source, "pocket_data"))?,
+            )
+            .map_err(|_| invalid_field(source, "pocket_data"))?;
+            if ammunition_type.is_empty() {
+                return Err(invalid_field(source, "pocket_data"));
+            }
+            Ok((ammunition_type.clone(), capacity))
+        })
+        .collect::<Result<BTreeMap<_, _>, ItemRegistryError>>()?;
+    if restrictions.is_empty() {
+        return Err(invalid_field(source, "pocket_data"));
+    }
+    Ok(restrictions)
+}
+
+fn optional_nonempty_pocket_string(
+    pocket: &Map<String, Value>,
+    field: &str,
+    source: &str,
+) -> Result<String, ItemRegistryError> {
+    pocket
+        .get(field)
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_field(source, "pocket_data"))
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 fn apply_transform_action_projection(
@@ -2119,6 +2297,22 @@ mod tests {
         );
 
         assert_eq!(items["test_inherited_tool"].magazine_wells.len(), 1);
+        assert_eq!(items["test_inherited_tool"].pockets.len(), 1);
+        assert_eq!(
+            items["test_inherited_tool"].pockets[0].pocket_type,
+            PocketTypeDefinition::MagazineWell
+        );
+        assert!(items["test_inherited_tool"].pockets[0].strict_magazine_well());
+        assert_eq!(
+            items["test_inherited_tool"].pockets[0]
+                .raw_fields
+                .get("flag_restriction"),
+            Some(&serde_json::json!(["BATTERY_MEDIUM"]))
+        );
+        assert_eq!(
+            items["test_inherited_tool"].magazine_wells[0].pocket_index,
+            0
+        );
         assert_eq!(
             items["test_inherited_tool"].magazine_wells[0].default_magazine,
             "test_medium_battery"
@@ -2132,6 +2326,19 @@ mod tests {
         assert_eq!(
             items["test_medium_battery"].integral_magazines,
             [BTreeMap::from([(String::from("battery"), 56)])]
+        );
+        assert_eq!(
+            items["test_medium_battery"].pockets[0].strict_integral_magazine(),
+            Some(&BTreeMap::from([(String::from("battery"), 56)]))
+        );
+        assert_eq!(
+            items["test_medium_battery"].strict_magazine(),
+            Some(StrictMagazineDefinition {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                ammunition_type: String::from("battery"),
+                capacity: 56,
+            })
         );
         assert!(
             !items["test_medium_battery"]
@@ -2155,6 +2362,42 @@ mod tests {
         assert_eq!(
             registry.compatible_magazines(inherited_well),
             ["test_medium_battery"]
+        );
+    }
+
+    #[test]
+    fn pocket_shape_is_preserved_while_unsupported_runtime_behavior_stays_closed() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let magazine = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_sealed_magazine",
+            "subtypes": ["MAGAZINE"],
+            "name": "sealed magazine",
+            "ammo_type": "test_ammo",
+            "capacity": 10,
+            "pocket_data": [{
+                "id": "main",
+                "pocket_type": "MAGAZINE",
+                "ammo_restriction": {"test_ammo": 10},
+                "watertight": true,
+                "moves": 75
+            }]
+        }));
+        assert!(load_one(&magazine, &mut items, &mut abstracts).expect("shape should load"));
+        let pocket = &items["test_sealed_magazine"].pockets[0];
+        assert_eq!(pocket.pocket_index, 0);
+        assert_eq!(pocket.pocket_id, "main");
+        assert_eq!(
+            pocket.raw_fields.get("watertight"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(pocket.raw_fields.get("moves"), Some(&serde_json::json!(75)));
+        assert_eq!(pocket.strict_integral_magazine(), None);
+        assert!(
+            items["test_sealed_magazine"]
+                .unsupported_fields
+                .contains("pocket_data")
         );
     }
 

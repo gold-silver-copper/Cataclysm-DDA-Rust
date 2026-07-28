@@ -1829,7 +1829,7 @@ fn craft_item_prototype(
 }
 
 fn default_instance_charges(item: &ItemDefinition) -> i32 {
-    if strict_battery_magazine_capacity(item).is_some() {
+    if item.strict_magazine().is_some() {
         0
     } else if item.subtypes.contains("TOOL") && !item.tool_ammunition.is_empty() {
         item.default_charges()
@@ -1865,8 +1865,8 @@ fn runtime_magazine_storage(
     item: &ItemDefinition,
     items: &ItemRegistry,
 ) -> Result<(u32, Option<MagazineWellPrototypeV1>), Box<dyn std::error::Error>> {
-    if let Some(capacity) = strict_battery_magazine_capacity(item) {
-        return Ok((capacity, None));
+    if let Some(magazine) = item.strict_magazine() {
+        return Ok((magazine.capacity, None));
     }
     if let Some(projection) = strict_detachable_battery_light(item, items)? {
         return Ok((
@@ -1876,7 +1876,51 @@ fn runtime_magazine_storage(
             }),
         ));
     }
+    if let Some(well) = strict_detachable_magazine_well(item, items) {
+        return Ok((0, Some(well)));
+    }
     Ok((0, None))
+}
+
+fn strict_detachable_magazine_well(
+    item: &ItemDefinition,
+    items: &ItemRegistry,
+) -> Option<MagazineWellPrototypeV1> {
+    let [pocket] = item.pockets.as_slice() else {
+        return None;
+    };
+    let [well] = item.magazine_wells.as_slice() else {
+        return None;
+    };
+    if !pocket.strict_magazine_well()
+        || pocket.pocket_index != well.pocket_index
+        || !item.integral_magazines.is_empty()
+        || item.magazine_capacity != 0
+        || item.subtypes.contains("GUN")
+        || item.subtypes.contains("MAGAZINE")
+        || item.tool_ammunition.len() != 1
+    {
+        return None;
+    }
+    let ammunition_type = item.tool_ammunition.first()?;
+    let compatible = items.compatible_magazines(well);
+    if compatible.is_empty()
+        || (!well.default_magazine.is_empty()
+            && !compatible
+                .iter()
+                .any(|type_id| *type_id == well.default_magazine))
+        || compatible.iter().any(|type_id| {
+            items
+                .get(type_id)
+                .and_then(ItemDefinition::strict_magazine)
+                .is_none_or(|magazine| magazine.ammunition_type != *ammunition_type)
+        })
+    {
+        return None;
+    }
+    Some(MagazineWellPrototypeV1 {
+        compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
+    })
 }
 
 fn runtime_powered_tool(
@@ -1893,19 +1937,9 @@ struct DetachableBatteryLightProjection {
 }
 
 fn strict_battery_magazine_capacity(item: &ItemDefinition) -> Option<u32> {
-    let [restriction] = item.integral_magazines.as_slice() else {
-        return None;
-    };
-    let &capacity = restriction.get("battery")?;
-    if restriction.len() != 1
-        || !item.subtypes.contains("MAGAZINE")
-        || item.ammo_types != BTreeSet::from([String::from("battery")])
-        || item.magazine_capacity != capacity
-        || capacity <= 0
-    {
-        return None;
-    }
-    u32::try_from(capacity).ok()
+    item.strict_magazine()
+        .filter(|magazine| magazine.ammunition_type == "battery")
+        .map(|magazine| magazine.capacity)
 }
 
 fn strict_detachable_battery_light(
@@ -4463,6 +4497,19 @@ mod tests {
             .filter(|(_, recipe)| recipe.requires_empty_charges)
             .map(|(item_type_id, _)| item_type_id)
             .collect::<Vec<_>>();
+        let generalized_detachable_targets = disassembly
+            .iter()
+            .filter(|(item_type_id, recipe)| {
+                !recipe.requires_empty_charges
+                    && items.get(item_type_id).is_some_and(|item| {
+                        strict_detachable_magazine_well(item, &items).is_some()
+                            && strict_detachable_battery_light(item, &items)
+                                .expect("power projection should remain valid")
+                                .is_none()
+                    })
+            })
+            .map(|(item_type_id, _)| item_type_id)
+            .collect::<Vec<_>>();
         assert_eq!(
             disassembly
                 .iter()
@@ -4481,7 +4528,22 @@ mod tests {
                 ("wearable_light", false),
             ]
         );
-        assert_eq!(empty_charge_targets.len(), 73);
+        assert_eq!(empty_charge_targets.len(), 68);
+        assert_eq!(
+            generalized_detachable_targets,
+            [
+                "circsaw_off",
+                "cordless_drill",
+                "elec_chainsaw_off",
+                "elec_hairtrimmer",
+                "soldering_iron_portable",
+            ]
+        );
+        assert_eq!(
+            empty_charge_targets.len() + generalized_detachable_targets.len(),
+            73,
+            "the generalized wells must replace, not discard, empty-charge admission"
+        );
         assert_eq!(disassembly.len(), 1_227);
         let flashlight_disassembly = disassembly
             .get("flashlight")

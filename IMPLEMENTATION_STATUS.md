@@ -12,12 +12,26 @@ sound-driven monster-pursuit, terrain-door-opening, deterministic
 obstacle-routing, route-planned bashing, broad safe furniture-bashing, and final
 wooden-door-frame slices plus initial player-controlled smashing: close
 persistent iroh identity, recovery, and audit
-guarantees while expanding CDDA subsystem parity in verified slices.
+guarantees while accelerating toward generalized subsystem parity. The active
+machine-readable milestone is item containment: inherited pocket definitions
+are retained losslessly and strict magazine/well admission is generalized
+before the canonical multi-pocket ownership migration.
 
 ## Runnable behavior
 
 - A limited multiplayer foundation slice is runnable; it is not a CDDA-complete
   gameplay release.
+- The versioned `cdda-conformance` scenario DSL has checked-in final-state and
+  semantic expectations and proves the same item pickup/wield/drop/disconnect
+  flow through direct simulation, per-tick snapshot restore, SQLite recovery,
+  and portable replay. `docs/parity-ledger.json` supplies an executable,
+  version-bound, acyclic dependency DAG for generalized subsystem work.
+- The ITEM loader preserves every inherited `pocket_data` object and source
+  index without claiming unsupported runtime behavior. Strict MAGAZINE and
+  MAGAZINE_WELL projections retain explicit pocket indices/IDs, reject extra
+  behavior, and generalize the server's storage admission beyond a
+  battery-only helper. Five reversible detachable-tool definitions now use
+  modeled unload-before-disassembly instead of the prior empty-charge gate.
 - The Rust 1.97.1 workspace builds on macOS. The native Bevy 0.19 client and
   standalone Bevy-free server use iroh 1.0.3.
 - Protocol 75 advances to schema 53/CanonicalStateV51 while retaining
@@ -904,7 +918,7 @@ guarantees while expanding CDDA subsystem parity in verified slices.
 
 ## Latest verification
 
-Run on Apple-silicon macOS on 2026-07-27:
+Run on Apple-silicon macOS on 2026-07-28:
 
 - `cargo fmt --all -- --check` — passed.
 - `cargo check --workspace --all-targets --all-features` — passed.
@@ -914,6 +928,8 @@ Run on Apple-silicon macOS on 2026-07-27:
   passed.
 - `cargo xtask verify-dependency-boundaries` — passed; Bevy remains
   client-only.
+- `cargo xtask parity-ledger-check` — passed for 13 version-bound milestones;
+  active milestone `item-containment`, all Rust paths and DAG edges valid.
 - `cargo xtask content-validate` — passed for all 7,992 tracked files and
   manifest hash
   `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
@@ -922,7 +938,7 @@ Run on Apple-silicon macOS on 2026-07-27:
   MONSTER field-support classifications; all 1,374 `volume` and 284
   `attack_cost` occurrences are now marked loader-implemented.
 - `cargo xtask astronomy-table-check` — passed for all 364 pinned Boston days.
-- `cargo test --workspace --all-targets --all-features` — passed, 250 tests
+- `cargo test --workspace --all-targets --all-features` — passed, 257 tests
   including real loopback iroh enrollment/gameplay/authoritative crafting,
   charged-tool bucket debit, resupply timing/capacity, offline
   interruption/resume/cancel, mandatory/optional/zero-learning proficiency

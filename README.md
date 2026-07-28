@@ -745,6 +745,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 cargo xtask verify-dependency-boundaries
+cargo xtask parity-ledger-check
 cargo xtask astronomy-table-check
 cargo xtask content-validate
 cargo xtask content-inventory-check
@@ -773,6 +774,14 @@ See `IMPLEMENTATION_STATUS.md` for current runnable behavior and
 `PORTING_MATRIX.md` for behavioral parity status. The fixed upstream reference
 is commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05` in
 `../Cataclysm-DDA/`.
+
+`docs/parity-ledger.json` is the machine-readable implementation DAG. Its gate
+binds the ledger to the current protocol, persistence schema, replay format,
+and baseline while rejecting missing Rust paths, duplicate priorities, unknown
+dependencies, and cycles. The leaf `cdda-conformance` crate runs one versioned
+scenario and its checked-in semantic/hash expectations through direct headless
+simulation, per-tick snapshot restoration, SQLite recovery, and portable
+replay verification.
 
 ## License
 

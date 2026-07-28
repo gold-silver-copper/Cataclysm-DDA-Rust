@@ -35,12 +35,16 @@ and quench fields feed the first authoritative consumption/needs loop; they do
 not yet imply complete CDDA digestion, spoilage, health, or pocket semantics.
 The 392 observed `tool_ammo` occurrences now resolve as an inherited scalar/list
 set, and all 82 observed static `capacity` fields resolve as inherited bounded
-integers. Strict derived projections read MAGAZINE and MAGAZINE_WELL records
-from inherited `pocket_data` while the complete field remains explicitly
-unsupported. The projection finds 160 non-gun single-well battery tools; the
-first admitted runtime pair is exactly `flashlight` plus
-`medium_battery_cell`. This narrow admission does not imply general pocket,
-battery, grid, UPS, or detachable-magazine parity.
+integers. The loader now preserves every inherited `pocket_data` object, source
+index, optional source ID, type, restrictions, default magazine, and raw field
+map. Strict derived projections admit only single-category MAGAZINE and
+selector-only MAGAZINE_WELL shapes; any extra behavior remains fail-closed and
+the complete field remains explicitly unsupported. Runtime storage is no longer
+selected by a battery-only magazine helper, and five additional reversible
+detachable-tool targets can atomically detach their modeled magazine before
+disassembly. This does not yet imply canonical multiple-pocket ownership,
+item-backed ammunition, general containers, grids, UPS, or arbitrary power
+parity.
 Inherited `power_draw` quantities normalize W/kW/mW to exact integer
 milliwatts, while inherited `light` and `revert_to` remain
 strict scalar projections. A deliberately narrow transform projection accepts
