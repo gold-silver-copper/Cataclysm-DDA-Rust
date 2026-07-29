@@ -4,8 +4,8 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Current checkpoint: this commit; green parent `98d413d` (`Add authoritative
-  start location selection`).
+- Current checkpoint: this commit; green parent `3d574b5` (`Add coordinate-owned
+  overmap routing`).
 - Active milestone: `mapgen-overmaps`.
 - Runtime: protocol 83, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 61, replay format 3, CanonicalStateV59, and
@@ -74,6 +74,12 @@ authoritative and retains deterministic multiplayer fallback.
 - The pinned C++ mapgen oracle characterizes all five OMT match modes, ordinary
   and linear mapgen routing/rotation, marker rotation, and static
   palette/nested phase ordering.
+- The pinned C++ item-group oracle now characterizes collection/distribution
+  RNG, count/charge ranges, raw/display damage, explicit variants, ammunition
+  dressing, bounded semantic-witness searches for randomized discard/spill
+  containment and the real `everyday_corpse` family, and inactive event
+  tickets. This is differential evidence only; unsupported runtime projections
+  remain fail-closed.
 - The only checked canonical hash change is the item-flow state root:
   `68cf369b8e35b9b2c7613d273436c0a202c723927113d629e9c1a34a9a56e0a1`
   under CanonicalStateV58 becomes
@@ -111,21 +117,19 @@ Local implementation gates are green: formatting; workspace all-target,
 all-feature check; strict Clippy; warning-free rustdoc; dependency boundaries;
 parity ledger; astronomy table; selected-content validation at the unchanged
 manifest hash `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
-content inventory; and all three pinned C++ differential oracles (17 mapgen, 34
-item-group, and 8 pocket assertions); and 331 workspace tests. Independent
-review found and the final tree fixes bounded-edge tick failure, unjournaled
-remote-start generation, out-of-layout snapshot admission, three OMT loader
-parity errors (reset definitions, non-inherited `uniform_terrain`, and
-string-only abstracts), resource-bound gaps, and heterogeneous origin bias. A
-fresh complete-diff rescan reported no remaining P0/P1 or lower-severity
-findings. Future hardening may index highly fragmented RLE identity lookup and
-add loader-local JSON byte caps before mutable content packages are admitted.
+content inventory; all three pinned C++ differential oracles; and 331 workspace
+tests. Independent review found two P1 portability defects (wall-clock holiday
+state and standard-library RNG/shuffle samples) plus two P2 fixture-adequacy
+gaps (container order and ammunition identity). All four are fixed; the final
+complete-diff rescan found no remaining P0-P3 issue. Existing nonblocking
+hardening opportunities remain indexed RLE identity lookup and loader-local
+JSON byte caps for future mutable content packages.
 
 ## Next dependency boundary
 
-Finish this checkpoint first. The next parity increment must inventory and
-implement the coherent item-group modifier/contained-item family needed by the
-pinned `field` closure, with C++ characterization and all four recovery modes,
-before replacing the runnable LMOE population with the real default field
-layer. Forest/city/road/river/special placement begins only after that base
-layer is exact and green.
+Finish this characterization checkpoint first. Then implement the coherent
+item-group modifier/contained-item family needed by the pinned `field` closure,
+using the checked oracle and all four recovery modes before replacing the
+runnable LMOE population with the real default field layer.
+Forest/city/road/river/special placement begins only after that base layer is
+exact and green.

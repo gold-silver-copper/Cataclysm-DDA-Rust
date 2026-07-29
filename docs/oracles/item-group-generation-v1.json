@@ -39,6 +39,75 @@
       "expected_trace": ["child_conditional", "child_always", "root_last"],
       "actual_trace": ["child_conditional", "child_always", "root_last"],
       "downstream_draw_matches": true
-    }
+    },
+    "modifiers": {
+      "damageable_raw_damage": 1000,
+      "damageable_damage_level": 2,
+      "undamageable_raw_damage": 0,
+      "explicit_variant": "flag_shirt",
+      "detachable_magazine_present": true,
+      "detachable_magazine_type": "glockmag_10",
+      "detachable_ammunition_type": "9mm",
+      "detachable_ammo_remaining": 10,
+      "detachable_remaining_capacity": 0,
+      "integral_ammo_remaining": 20,
+      "integral_ammunition_type": "match",
+      "integral_remaining_capacity": 0
+    },
+    "containers": [
+      {
+        "case_id": "discard",
+        "seed_search_limit": 100000,
+        "valid_shapes": true,
+        "minimum_top_level": 1,
+        "maximum_top_level": 1,
+        "minimum_contents": 2,
+        "maximum_contents": 2,
+        "content_orders": [
+          "test_nuclear_carafe,test_pants_fur",
+          "test_nuclear_carafe,test_utility_belt",
+          "test_pants_fur,test_nuclear_carafe",
+          "test_pants_fur,test_utility_belt",
+          "test_utility_belt,test_nuclear_carafe",
+          "test_utility_belt,test_pants_fur"
+        ],
+        "outside_types": []
+      },
+      {
+        "case_id": "spill",
+        "seed_search_limit": 100000,
+        "valid_shapes": true,
+        "minimum_top_level": 2,
+        "maximum_top_level": 2,
+        "minimum_contents": 2,
+        "maximum_contents": 2,
+        "content_orders": [
+          "test_nuclear_carafe,test_pants_fur",
+          "test_nuclear_carafe,test_utility_belt",
+          "test_pants_fur,test_nuclear_carafe",
+          "test_pants_fur,test_utility_belt",
+          "test_utility_belt,test_nuclear_carafe",
+          "test_utility_belt,test_pants_fur"
+        ],
+        "outside_types": ["test_nuclear_carafe", "test_pants_fur", "test_utility_belt"]
+      }
+    ],
+    "everyday_corpse": {
+      "seed_search_limit": 100000,
+      "valid_shapes": true,
+      "wrapper_types": ["corpse_child_calm", "corpse_generic_female", "corpse_generic_male"],
+      "wrapper_raw_damage": [4000],
+      "wrapper_damage_levels": [5],
+      "multiple_content_counts": true,
+      "observed_pristine_content": true,
+      "observed_damage_four_content": true
+    },
+    "nonholiday_event_types": ["test_rock"],
+    "event_distribution": [
+      { "ticket": 1, "selected": "none" },
+      { "ticket": 3, "selected": "none" },
+      { "ticket": 4, "selected": "ordinary" },
+      { "ticket": 5, "selected": "ordinary" }
+    ]
   }
 }

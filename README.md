@@ -936,10 +936,14 @@ The pocket scenario exercises real upstream `item_pocket::can_contain`
 maximum-length behavior at the shorter, equal, and longer boundaries. The
 item-group scenario covers ordered collection RNG consumption, distribution
 interval boundaries, fixed/ranged count and charges, zero-to-one clamping, and
-nested groups sharing the same RNG stream. The mapgen scenario verifies exact,
-type, subtype, prefix, and contains matching; rotatable and linear OMT
-orientation; point rotation; and static palette/nested phase ordering. The
-runner rejects unknown JSON
+nested groups sharing the same RNG stream. It also characterizes raw versus
+display damage, explicit variants, integral and detachable ammunition dressing,
+shuffled container insertion with discard/spill overflow, the real
+`everyday_corpse` wrapper family, nonholiday collection filtering, and inactive
+event entries retaining distribution tickets while producing no item. The
+mapgen scenario verifies exact, type, subtype, prefix, and contains matching;
+rotatable and linear OMT orientation; point rotation; and static palette/nested
+phase ordering. The runner rejects unknown JSON
 fields, mismatched format or
 baseline versions, the wrong upstream Git tree, and any observation drift. It
 enforces byte bounds while reading, serializes concurrent invocations, freshly

@@ -1,5 +1,9 @@
+#include <algorithm>
+#include <ctime>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
+#include <list>
 #include <map>
 #include <memory>
 #include <set>
@@ -12,7 +16,9 @@
 #include "cata_catch.h"
 #include "item.h"
 #include "item_group.h"
+#include "itype.h"
 #include "json.h"
+#include "options.h"
 #include "rng.h"
 #include "type_id.h"
 
@@ -26,8 +32,9 @@ constexpr unsigned int maximum_seed_search = 100000;
 class trace_spawn final : public Item_spawn_data
 {
     public:
-        trace_spawn( std::string label, int probability, std::vector<std::string> &trace )
-            : Item_spawn_data( probability, "Rust item-group oracle trace leaf" )
+        trace_spawn( std::string label, int probability, std::vector<std::string> &trace,
+                     holiday event = holiday::none )
+            : Item_spawn_data( probability, "Rust item-group oracle trace leaf", event )
             , label_( std::move( label ) )
             , trace_( trace )
         {
@@ -135,6 +142,21 @@ std::vector<std::string> distribution_trace( unsigned int seed )
     return trace;
 }
 
+std::vector<std::string> event_distribution_trace( unsigned int seed )
+{
+    std::vector<std::string> trace;
+    Item_group group( Item_group::G_DISTRIBUTION, 100, 0, 0,
+                      "Rust item-group event distribution oracle" );
+    group.add_entry( std::make_unique<trace_spawn>(
+                         "inactive_event", 3, trace, holiday::christmas ) );
+    group.add_entry( std::make_unique<trace_spawn>( "ordinary", 2, trace ) );
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    group.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    return trace;
+}
+
 std::vector<std::string> nested_trace( unsigned int seed, int probability,
                                       int &downstream_draw )
 {
@@ -204,6 +226,171 @@ void write_trace( JsonOut &json, const std::vector<std::string> &trace )
     json.end_array();
 }
 
+void write_strings( JsonOut &json, const std::set<std::string> &values )
+{
+    json.start_array();
+    for( const std::string &value : values ) {
+        json.write( value );
+    }
+    json.end_array();
+}
+
+class scoped_option_override
+{
+    public:
+        scoped_option_override( const std::string &option, const std::string &value ) :
+            option_( option ), old_value_( get_options().get_option( option ).getValue( true ) )
+        {
+            get_options().get_option( option_ ).setValue( value );
+        }
+
+        scoped_option_override( const scoped_option_override & ) = delete;
+        scoped_option_override &operator=( const scoped_option_override & ) = delete;
+
+        ~scoped_option_override()
+        {
+            get_options().get_option( option_ ).setValue( old_value_ );
+        }
+
+    private:
+        std::string option_;
+        std::string old_value_;
+};
+
+class scoped_holiday_override
+{
+    public:
+        explicit scoped_holiday_override( std::time_t time )
+            : holiday_( get_holiday_from_time( time, true ) )
+        {
+        }
+
+        scoped_holiday_override( const scoped_holiday_override & ) = delete;
+        scoped_holiday_override &operator=( const scoped_holiday_override & ) = delete;
+
+        ~scoped_holiday_override()
+        {
+            static_cast<void>( get_holiday_from_time( 0, true ) );
+        }
+
+        holiday value() const
+        {
+            return holiday_;
+        }
+
+    private:
+        holiday holiday_;
+};
+
+struct container_observation {
+    std::string case_id;
+    int seed_search_limit = 0;
+    bool valid_shapes = true;
+    int minimum_top_level = std::numeric_limits<int>::max();
+    int maximum_top_level = 0;
+    int minimum_contents = std::numeric_limits<int>::max();
+    int maximum_contents = 0;
+    std::set<std::string> content_orders;
+    std::set<std::string> outside_types;
+};
+
+container_observation observe_container_group( const std::string &case_id,
+        const item_group_id &group_id )
+{
+    container_observation observation;
+    observation.case_id = case_id;
+    observation.seed_search_limit = maximum_seed_search;
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( static_cast<unsigned int>( seed ) );
+        const item_group::ItemList items = item_group::items_from( group_id );
+        observation.minimum_top_level = std::min( observation.minimum_top_level,
+                                        static_cast<int>( items.size() ) );
+        observation.maximum_top_level = std::max( observation.maximum_top_level,
+                                        static_cast<int>( items.size() ) );
+        const item *container = nullptr;
+        for( const item &candidate : items ) {
+            if( candidate.typeId() == itype_id( "test_balloon" ) ) {
+                if( container != nullptr ) {
+                    observation.valid_shapes = false;
+                    break;
+                }
+                container = &candidate;
+            } else {
+                observation.outside_types.insert( candidate.typeId().str() );
+            }
+        }
+        if( !observation.valid_shapes || container == nullptr ) {
+            observation.valid_shapes = false;
+            break;
+        }
+        const std::list<const item *> contents = container->all_items_top();
+        observation.minimum_contents = std::min( observation.minimum_contents,
+                                       static_cast<int>( contents.size() ) );
+        observation.maximum_contents = std::max( observation.maximum_contents,
+                                       static_cast<int>( contents.size() ) );
+        std::string order;
+        for( const item *content : contents ) {
+            if( !order.empty() ) {
+                order += ",";
+            }
+            order += content->typeId().str();
+        }
+        observation.content_orders.insert( order );
+        const bool outside_complete = case_id == "discard" || observation.outside_types.size() == 3;
+        if( observation.content_orders.size() == 6 && outside_complete ) {
+            break;
+        }
+    }
+    return observation;
+}
+
+struct corpse_observation {
+    int seed_search_limit = 0;
+    bool valid_shapes = true;
+    std::set<std::string> wrapper_types;
+    std::set<int> wrapper_raw_damage;
+    std::set<int> wrapper_damage_levels;
+    std::set<int> content_counts;
+    bool observed_pristine_content = false;
+    bool observed_damage_four_content = false;
+};
+
+corpse_observation observe_everyday_corpses()
+{
+    corpse_observation observation;
+    observation.seed_search_limit = maximum_seed_search;
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( static_cast<unsigned int>( seed ) );
+        const item_group::ItemList items = item_group::items_from( item_group_id( "everyday_corpse" ) );
+        if( items.size() != 1 ) {
+            observation.valid_shapes = false;
+            break;
+        }
+        const item &corpse = items.front();
+        observation.wrapper_types.insert( corpse.typeId().str() );
+        observation.wrapper_raw_damage.insert( corpse.damage() );
+        observation.wrapper_damage_levels.insert( corpse.damage_level() );
+        const std::list<const item *> contents = corpse.all_items_top();
+        if( contents.empty() ) {
+            observation.valid_shapes = false;
+            break;
+        }
+        observation.content_counts.insert( static_cast<int>( contents.size() ) );
+        for( const item *content : contents ) {
+            observation.observed_pristine_content = observation.observed_pristine_content ||
+                    ( content->damage() == 0 && content->damage_level() == 0 );
+            observation.observed_damage_four_content = observation.observed_damage_four_content ||
+                    ( content->damage() == 4 * itype::damage_scale && content->damage_level() == 5 );
+        }
+        if( observation.wrapper_types.size() == 3 && observation.wrapper_raw_damage.size() == 1 &&
+            observation.wrapper_damage_levels.size() == 1 && observation.content_counts.size() > 1 &&
+            observation.observed_pristine_content && observation.observed_damage_four_content ) {
+            break;
+        }
+    }
+    return observation;
+}
+
 } // namespace
 
 TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
@@ -268,6 +455,63 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     int nested_actual_downstream = -1;
     const std::vector<std::string> nested_actual = nested_trace(
                 nested_seed, branch_probability, nested_actual_downstream );
+
+    Item_modifier damaged;
+    damaged.damage = { itype::damage_scale, itype::damage_scale };
+    item damageable( itype_id( "glock_19" ) );
+    item undamageable( itype_id( "rock" ) );
+    rng_set_engine_seed( 1 );
+    damaged.modify( damageable, "Rust item-group damageable modifier oracle" );
+    rng_set_engine_seed( 1 );
+    damaged.modify( undamageable, "Rust item-group undamageable modifier oracle" );
+
+    Item_modifier variant_modifier;
+    variant_modifier.variant = "flag_shirt";
+    item variant_item( itype_id( "tshirt" ) );
+    rng_set_engine_seed( 1 );
+    variant_modifier.modify( variant_item, "Rust item-group variant modifier oracle" );
+    REQUIRE( variant_item.has_itype_variant() );
+
+    Item_modifier dressed;
+    dressed.with_ammo = 100;
+    dressed.with_magazine = 100;
+    item dressed_gun( itype_id( "glock_19" ) );
+    rng_set_engine_seed( 1 );
+    dressed.modify( dressed_gun, "Rust item-group detachable dressing oracle" );
+    const item *dressed_magazine = dressed_gun.magazine_current();
+    item dressed_integral_tool( itype_id( "matches" ) );
+    rng_set_engine_seed( 1 );
+    dressed.modify( dressed_integral_tool, "Rust item-group integral dressing oracle" );
+
+    const container_observation discarded = observe_container_group(
+                "discard", item_group_id( "test_truncating_to_container" ) );
+    const container_observation spilled = observe_container_group(
+                "spill", item_group_id( "test_spilling_from_container" ) );
+    const corpse_observation corpses = observe_everyday_corpses();
+
+    std::set<std::string> event_types;
+    std::vector<std::pair<int, std::string>> event_distribution_results;
+    {
+        // 2021-02-28 or 2021-03-01 in supported host timezones, both outside
+        // all pinned holiday windows. Priming the function's cache is necessary because
+        // item-group event checks call get_holiday_from_time() with no argument.
+        scoped_holiday_override nonholiday( 1614574800L );
+        scoped_option_override event_spawns( "EVENT_SPAWNS", "items" );
+        REQUIRE( nonholiday.value() == holiday::none );
+        REQUIRE( get_holiday_from_time() == holiday::none );
+        const item_group::ItemList event_items = item_group::items_from(
+                    item_group_id( "test_event_item_spawn" ) );
+        for( const item &event_item : event_items ) {
+            event_types.insert( event_item.typeId().str() );
+        }
+        for( const int ticket : { 1, 3, 4, 5 } ) {
+            const unsigned int seed = seed_for_first_draw( 1, 5, ticket );
+            const std::vector<std::string> trace = event_distribution_trace( seed );
+            REQUIRE( trace.size() <= 1 );
+            event_distribution_results.emplace_back(
+                ticket, trace.empty() ? "none" : trace.front() );
+        }
+    }
 
     std::ofstream output( output_path, std::ios::out | std::ios::trunc );
     REQUIRE( output.is_open() );
@@ -368,6 +612,78 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "downstream_draw_matches",
                      nested_expected_downstream == nested_actual_downstream );
         json.end_object();
+
+        json.member( "modifiers" );
+        json.start_object();
+        json.member( "damageable_raw_damage", damageable.damage() );
+        json.member( "damageable_damage_level", damageable.damage_level() );
+        json.member( "undamageable_raw_damage", undamageable.damage() );
+        json.member( "explicit_variant", variant_item.itype_variant().id );
+        json.member( "detachable_magazine_present", dressed_magazine != nullptr );
+        json.member( "detachable_magazine_type",
+                     dressed_magazine == nullptr ? "" : dressed_magazine->typeId().str() );
+        json.member( "detachable_ammunition_type", dressed_gun.ammo_current().str() );
+        json.member( "detachable_ammo_remaining", dressed_gun.ammo_remaining() );
+        json.member( "detachable_remaining_capacity", dressed_gun.remaining_ammo_capacity() );
+        json.member( "integral_ammo_remaining", dressed_integral_tool.ammo_remaining() );
+        json.member( "integral_ammunition_type", dressed_integral_tool.ammo_current().str() );
+        json.member( "integral_remaining_capacity", dressed_integral_tool.remaining_ammo_capacity() );
+        json.end_object();
+
+        json.member( "containers" );
+        json.start_array();
+        for( const container_observation *observation : { &discarded, &spilled } ) {
+            json.start_object();
+            json.member( "case_id", observation->case_id );
+            json.member( "seed_search_limit", observation->seed_search_limit );
+            json.member( "valid_shapes", observation->valid_shapes );
+            json.member( "minimum_top_level", observation->minimum_top_level );
+            json.member( "maximum_top_level", observation->maximum_top_level );
+            json.member( "minimum_contents", observation->minimum_contents );
+            json.member( "maximum_contents", observation->maximum_contents );
+            json.member( "content_orders" );
+            write_strings( json, observation->content_orders );
+            json.member( "outside_types" );
+            write_strings( json, observation->outside_types );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "everyday_corpse" );
+        json.start_object();
+        json.member( "seed_search_limit", corpses.seed_search_limit );
+        json.member( "valid_shapes", corpses.valid_shapes );
+        json.member( "wrapper_types" );
+        write_strings( json, corpses.wrapper_types );
+        json.member( "wrapper_raw_damage" );
+        json.start_array();
+        for( const int damage : corpses.wrapper_raw_damage ) {
+            json.write( damage );
+        }
+        json.end_array();
+        json.member( "wrapper_damage_levels" );
+        json.start_array();
+        for( const int level : corpses.wrapper_damage_levels ) {
+            json.write( level );
+        }
+        json.end_array();
+        json.member( "multiple_content_counts", corpses.content_counts.size() > 1 );
+        json.member( "observed_pristine_content", corpses.observed_pristine_content );
+        json.member( "observed_damage_four_content", corpses.observed_damage_four_content );
+        json.end_object();
+
+        json.member( "nonholiday_event_types" );
+        write_strings( json, event_types );
+
+        json.member( "event_distribution" );
+        json.start_array();
+        for( const auto &[ticket, selected] : event_distribution_results ) {
+            json.start_object();
+            json.member( "ticket", ticket );
+            json.member( "selected", selected );
+            json.end_object();
+        }
+        json.end_array();
         json.end_object();
     }
     output.close();

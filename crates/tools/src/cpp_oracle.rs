@@ -97,6 +97,11 @@ struct ItemGroupOracleObservationV1 {
     counts: Vec<ItemGroupRangeObservationV1>,
     charges: Vec<ItemGroupRangeObservationV1>,
     nested: ItemGroupNestedObservationV1,
+    modifiers: ItemGroupModifierObservationV1,
+    containers: Vec<ItemGroupContainerObservationV1>,
+    everyday_corpse: ItemGroupCorpseObservationV1,
+    nonholiday_event_types: Vec<String>,
+    event_distribution: Vec<ItemGroupDistributionObservationV1>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -133,6 +138,50 @@ struct ItemGroupNestedObservationV1 {
     expected_trace: Vec<String>,
     actual_trace: Vec<String>,
     downstream_draw_matches: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupModifierObservationV1 {
+    damageable_raw_damage: i32,
+    damageable_damage_level: i32,
+    undamageable_raw_damage: i32,
+    explicit_variant: String,
+    detachable_magazine_present: bool,
+    detachable_magazine_type: String,
+    detachable_ammunition_type: String,
+    detachable_ammo_remaining: i32,
+    detachable_remaining_capacity: i32,
+    integral_ammo_remaining: i32,
+    integral_ammunition_type: String,
+    integral_remaining_capacity: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupContainerObservationV1 {
+    case_id: String,
+    seed_search_limit: u32,
+    valid_shapes: bool,
+    minimum_top_level: u16,
+    maximum_top_level: u16,
+    minimum_contents: u16,
+    maximum_contents: u16,
+    content_orders: Vec<String>,
+    outside_types: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupCorpseObservationV1 {
+    seed_search_limit: u32,
+    valid_shapes: bool,
+    wrapper_types: Vec<String>,
+    wrapper_raw_damage: Vec<i32>,
+    wrapper_damage_levels: Vec<i32>,
+    multiple_content_counts: bool,
+    observed_pristine_content: bool,
+    observed_damage_four_content: bool,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -489,6 +538,86 @@ fn validate_item_group_observation(
         || observation.nested.actual_trace != nested_trace
     {
         return Err("item-group nested observation does not preserve the shared RNG stream".into());
+    }
+    if observation.modifiers.damageable_raw_damage != 1_000
+        || observation.modifiers.damageable_damage_level != 2
+        || observation.modifiers.undamageable_raw_damage != 0
+        || observation.modifiers.explicit_variant != "flag_shirt"
+        || !observation.modifiers.detachable_magazine_present
+        || observation.modifiers.detachable_magazine_type != "glockmag_10"
+        || observation.modifiers.detachable_ammunition_type != "9mm"
+        || observation.modifiers.detachable_ammo_remaining != 10
+        || observation.modifiers.detachable_remaining_capacity != 0
+        || observation.modifiers.integral_ammo_remaining != 20
+        || observation.modifiers.integral_ammunition_type != "match"
+        || observation.modifiers.integral_remaining_capacity != 0
+    {
+        return Err("item-group modifier characterization is incomplete".into());
+    }
+    let expected_containers = [
+        ("discard", 1, 1, Vec::<String>::new()),
+        (
+            "spill",
+            2,
+            2,
+            vec![
+                String::from("test_nuclear_carafe"),
+                String::from("test_pants_fur"),
+                String::from("test_utility_belt"),
+            ],
+        ),
+    ];
+    let expected_content_orders = [
+        "test_nuclear_carafe,test_pants_fur",
+        "test_nuclear_carafe,test_utility_belt",
+        "test_pants_fur,test_nuclear_carafe",
+        "test_pants_fur,test_utility_belt",
+        "test_utility_belt,test_nuclear_carafe",
+        "test_utility_belt,test_pants_fur",
+    ];
+    if observation.containers.len() != expected_containers.len()
+        || observation.containers.iter().zip(expected_containers).any(
+            |(actual, (case_id, minimum_top_level, maximum_top_level, outside_types))| {
+                actual.case_id != case_id
+                    || actual.seed_search_limit != 100_000
+                    || !actual.valid_shapes
+                    || actual.minimum_top_level != minimum_top_level
+                    || actual.maximum_top_level != maximum_top_level
+                    || actual.minimum_contents != 2
+                    || actual.maximum_contents != 2
+                    || actual.content_orders != expected_content_orders
+                    || actual.outside_types != outside_types
+            },
+        )
+    {
+        return Err("item-group container overflow characterization is incomplete".into());
+    }
+    if observation.everyday_corpse.seed_search_limit != 100_000
+        || !observation.everyday_corpse.valid_shapes
+        || observation.everyday_corpse.wrapper_types
+            != [
+                "corpse_child_calm",
+                "corpse_generic_female",
+                "corpse_generic_male",
+            ]
+        || observation.everyday_corpse.wrapper_raw_damage != [4_000]
+        || observation.everyday_corpse.wrapper_damage_levels != [5]
+        || !observation.everyday_corpse.multiple_content_counts
+        || !observation.everyday_corpse.observed_pristine_content
+        || !observation.everyday_corpse.observed_damage_four_content
+        || observation.nonholiday_event_types != ["test_rock"]
+    {
+        return Err("item-group corpse or event characterization is incomplete".into());
+    }
+    let event_distribution = [(1, "none"), (3, "none"), (4, "ordinary"), (5, "ordinary")];
+    if observation.event_distribution.len() != event_distribution.len()
+        || observation
+            .event_distribution
+            .iter()
+            .zip(event_distribution)
+            .any(|(actual, expected)| actual.ticket != expected.0 || actual.selected != expected.1)
+    {
+        return Err("inactive event entries do not preserve distribution ticket weight".into());
     }
     Ok(())
 }
