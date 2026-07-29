@@ -1,6 +1,7 @@
 //! Renderer-independent canonical simulation state.
 
 mod mapgen;
+mod overmap;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -5584,6 +5585,28 @@ impl WorldState {
     ) -> Result<ActorId, SimError> {
         if !base_stats.is_valid() {
             return Err(SimError::InvalidCharacterCreation);
+        }
+        if let Some(omt_order) = overmap::start_location_omt_order(
+            self.world_seed,
+            self.allocator.next(),
+            self.worldgen.as_ref(),
+            &self.chunks,
+        )? {
+            for omt in omt_order {
+                for y in 0..mapgen::OMT_TILE_WIDTH {
+                    for x in 0..mapgen::OMT_TILE_WIDTH {
+                        let position = mapgen::omt_tile_position(omt, x, y)?;
+                        if self.is_passable(position)
+                            && self.actor_at(position).is_none()
+                            && self.creature_at(position).is_none()
+                        {
+                            return self
+                                .spawn_actor_with_base_stats(position, connected, base_stats);
+                        }
+                    }
+                }
+            }
+            return Err(SimError::NoSpawnLocation);
         }
         let mut chunk_coords: Vec<_> = self.chunks.keys().copied().collect();
         chunk_coords.sort_by_key(|coord| (*coord != (ChunkCoord { x: 0, y: 0, z: 0 }), *coord));
@@ -13864,7 +13887,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV57");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV58");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -14019,7 +14042,13 @@ mod tests {
         }
         WorldgenCatalogV1 {
             generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
-            default_omt_id: String::from("field_test"),
+            default_omt: cdda_protocol::WorldgenOmtIdentityV1 {
+                full_id: String::from("field_test"),
+                type_id: String::from("field_test"),
+                subtype_id: String::from("field_test"),
+                generator_id: String::from("field_test"),
+            },
+            start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),
             regional_terrain: Vec::new(),
@@ -28324,7 +28353,8 @@ mod tests {
                 .worldgen
                 .as_ref()
                 .expect("worldgen catalog should persist")
-                .default_omt_id,
+                .default_omt
+                .generator_id,
             "field_test"
         );
         let restored =
@@ -28339,6 +28369,79 @@ mod tests {
         assert_eq!(
             restored.canonical_hash().expect("restored hash"),
             world.canonical_hash().expect("original hash")
+        );
+    }
+
+    #[test]
+    fn start_location_selects_an_omt_and_replays_multiplayer_fallback_order() {
+        let mut catalog = test_worldgen_catalog(test_terrain("t_start_floor"), None);
+        catalog.start_location = Some(cdda_protocol::WorldgenStartLocationV1 {
+            start_location_id: String::from("sloc_field_test"),
+            targets: vec![cdda_protocol::WorldgenStartTargetV1 {
+                omt: String::from("field_test"),
+                match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
+            }],
+        });
+        let mut world = WorldState::new(67, [29; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_worldgen(catalog)
+            .expect("start worldgen should configure");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("initial OMT cells should generate");
+
+        let expected_first = overmap::start_location_omt_order(
+            world.world_seed,
+            world.allocator.next(),
+            world.worldgen.as_ref(),
+            &world.chunks,
+        )
+        .expect("selector should run")
+        .expect("start selector should be configured")[0];
+        assert_eq!(expected_first, (ChunkCoord { x: 0, y: 0, z: 0 }));
+        let first = world
+            .spawn_actor_first_available(true)
+            .expect("first survivor should spawn");
+        let first_position = world
+            .actor_snapshot(first)
+            .expect("first survivor should exist")
+            .position;
+        assert_eq!(
+            ChunkCoord {
+                x: first_position.x.div_euclid(mapgen::OMT_TILE_WIDTH as i32),
+                y: first_position.y.div_euclid(mapgen::OMT_TILE_WIDTH as i32),
+                z: first_position.z,
+            },
+            expected_first
+        );
+
+        let snapshot = world.snapshot();
+        let mut restored = WorldState::from_snapshot(&snapshot).expect("world should restore");
+        let second = world
+            .spawn_actor_first_available(true)
+            .expect("second survivor should use another free tile");
+        let restored_second = restored
+            .spawn_actor_first_available(true)
+            .expect("restored selector should make the same choice");
+        assert_eq!(second, restored_second);
+        assert_eq!(
+            world
+                .actor_snapshot(second)
+                .expect("second survivor should exist")
+                .position,
+            restored
+                .actor_snapshot(restored_second)
+                .expect("restored second survivor should exist")
+                .position
+        );
+        assert_eq!(
+            world.canonical_hash().expect("live world should hash"),
+            restored
+                .canonical_hash()
+                .expect("restored world should hash")
         );
     }
 

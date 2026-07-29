@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 81;
+pub const PROTOCOL_VERSION: u16 = 82;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -96,6 +96,7 @@ pub const MAX_WORLDGEN_TEMPLATES: usize = 512;
 pub const MAX_WORLDGEN_CELL_CHOICES: usize = 32;
 pub const MAX_WORLDGEN_WEIGHTED_CELL_TARGETS: usize = 1_048_576;
 pub const MAX_WORLDGEN_ID_BYTES: usize = 512;
+pub const MAX_WORLDGEN_START_TARGETS: usize = 256;
 
 const fn default_true() -> bool {
     true
@@ -2422,12 +2423,52 @@ pub struct WorldgenOmtGeneratorV1 {
     pub templates: Vec<WorldgenTemplateV1>,
 }
 
+/// The three upstream identities used by `is_ot_match`, plus the normalized
+/// local-map generator selected for this terrain. For an ordinary rotatable
+/// `lmoe_north`, these are `lmoe_north`, `lmoe`, `lmoe`, and `lmoe`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenOmtIdentityV1 {
+    pub full_id: String,
+    pub type_id: String,
+    pub subtype_id: String,
+    pub generator_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenOmtMatchTypeV1 {
+    Exact,
+    Type,
+    Subtype,
+    Prefix,
+    Contains,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenStartTargetV1 {
+    pub omt: String,
+    pub match_type: WorldgenOmtMatchTypeV1,
+}
+
+/// One city-independent, parameter-free, map-preparation-free starting
+/// location admitted by the current runtime. Target order remains source order
+/// because upstream chooses one target uniformly before searching terrain.
+/// While coordinates share one bootstrap identity, every retained target must
+/// match that identity so no deterministic character sequence can dead-end.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenStartLocationV1 {
+    pub start_location_id: String,
+    pub targets: Vec<WorldgenStartTargetV1>,
+}
+
 /// Immutable deterministic generation definitions retained by one world.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenCatalogV1 {
     pub generator_version: u16,
-    /// Must name exactly one entry in `omt_generators`.
-    pub default_omt_id: String,
+    /// Bootstrap identity repeated until the real overmap population engine
+    /// supplies coordinate-owned identities. Its generator must exist below.
+    pub default_omt: WorldgenOmtIdentityV1,
+    /// Server-authoritative spawn selector for new characters.
+    pub start_location: Option<WorldgenStartLocationV1>,
     /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
     pub terrain_prototypes: Vec<TerrainTileSnapshot>,
     pub furniture_prototypes: Vec<FurnitureTileSnapshot>,
@@ -2622,7 +2663,8 @@ pub struct WorldSnapshotV1 {
     pub furniture_bash_types: Vec<FurnitureBashTypeV1>,
     /// Item-type-ID-sorted strict player-smashing profiles.
     pub smash_item_types: Vec<SmashItemTypeV1>,
-    /// Immutable normalized mapgen definitions plus the default OMT identity.
+    /// Immutable normalized mapgen definitions plus the bootstrap OMT identity
+    /// and server-authoritative start selector.
     /// Generated four-submap cells live in `chunks`; the catalog is retained
     /// so recovery never rereads mutable external content.
     pub worldgen: Option<WorldgenCatalogV1>,
@@ -4037,6 +4079,50 @@ fn valid_worldgen_id(value: &str) -> bool {
         && value.chars().all(|character| !character.is_control())
 }
 
+/// Pinned `is_ot_match` semantics over a normalized overmap-terrain identity.
+#[must_use]
+pub fn worldgen_omt_matches(
+    target: &str,
+    match_type: WorldgenOmtMatchTypeV1,
+    identity: &WorldgenOmtIdentityV1,
+) -> bool {
+    match match_type {
+        WorldgenOmtMatchTypeV1::Exact => target == identity.full_id,
+        WorldgenOmtMatchTypeV1::Type => target == identity.type_id,
+        WorldgenOmtMatchTypeV1::Subtype => target == identity.subtype_id,
+        WorldgenOmtMatchTypeV1::Prefix => {
+            identity.full_id.starts_with(target)
+                && (identity.full_id.len() == target.len()
+                    || identity.full_id.as_bytes().get(target.len()) == Some(&b'_'))
+        }
+        WorldgenOmtMatchTypeV1::Contains => identity.full_id.contains(target),
+    }
+}
+
+fn valid_worldgen_omt_identity(identity: &WorldgenOmtIdentityV1) -> bool {
+    valid_worldgen_id(&identity.full_id)
+        && valid_worldgen_id(&identity.type_id)
+        && valid_worldgen_id(&identity.subtype_id)
+        && valid_worldgen_id(&identity.generator_id)
+}
+
+fn valid_worldgen_start_location(
+    start: &WorldgenStartLocationV1,
+    default_omt: &WorldgenOmtIdentityV1,
+) -> bool {
+    valid_worldgen_id(&start.start_location_id)
+        && !start.targets.is_empty()
+        && start.targets.len() <= MAX_WORLDGEN_START_TARGETS
+        && start
+            .targets
+            .iter()
+            .all(|target| valid_worldgen_id(&target.omt))
+        && start
+            .targets
+            .iter()
+            .all(|target| worldgen_omt_matches(target.omt.as_str(), target.match_type, default_omt))
+}
+
 fn checked_positive_weight_sum(weights: impl IntoIterator<Item = u32>) -> bool {
     weights
         .into_iter()
@@ -4112,7 +4198,11 @@ fn valid_worldgen_cell_shape(cell: &WorldgenCellV1, catalog: &WorldgenCatalogV1)
 #[must_use]
 pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
     if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V1
-        || !valid_worldgen_id(&catalog.default_omt_id)
+        || !valid_worldgen_omt_identity(&catalog.default_omt)
+        || catalog
+            .start_location
+            .as_ref()
+            .is_some_and(|start| !valid_worldgen_start_location(start, &catalog.default_omt))
         || catalog.terrain_prototypes.is_empty()
         || catalog.terrain_prototypes.len() > MAX_WORLDGEN_TERRAIN_PROTOTYPES
         || catalog.furniture_prototypes.len() > MAX_WORLDGEN_FURNITURE_PROTOTYPES
@@ -4218,7 +4308,12 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
 
     catalog
         .omt_generators
-        .binary_search_by(|generator| generator.omt_id.as_str().cmp(&catalog.default_omt_id))
+        .binary_search_by(|generator| {
+            generator
+                .omt_id
+                .as_str()
+                .cmp(&catalog.default_omt.generator_id)
+        })
         .is_ok()
 }
 
@@ -5675,7 +5770,19 @@ mod tests {
         });
         WorldgenCatalogV1 {
             generator_version: WORLDGEN_GENERATOR_VERSION_V1,
-            default_omt_id: String::from("field"),
+            default_omt: WorldgenOmtIdentityV1 {
+                full_id: String::from("field_north"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field"),
+            },
+            start_location: Some(WorldgenStartLocationV1 {
+                start_location_id: String::from("sloc_field"),
+                targets: vec![WorldgenStartTargetV1 {
+                    omt: String::from("field"),
+                    match_type: WorldgenOmtMatchTypeV1::Type,
+                }],
+            }),
             terrain_prototypes: vec![
                 worldgen_test_terrain("t_floor"),
                 worldgen_test_terrain("t_grass"),
@@ -5752,7 +5859,28 @@ mod tests {
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
         let mut invalid = worldgen_test_catalog();
-        invalid.default_omt_id = String::from("missing");
+        invalid.default_omt.generator_id = String::from("missing");
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid
+            .start_location
+            .as_mut()
+            .expect("fixture has a start location")
+            .targets[0]
+            .omt = String::from("forest");
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid
+            .start_location
+            .as_mut()
+            .expect("fixture has a start location")
+            .targets
+            .push(WorldgenStartTargetV1 {
+                omt: String::from("forest"),
+                match_type: WorldgenOmtMatchTypeV1::Type,
+            });
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
         let mut invalid = worldgen_test_catalog();
@@ -5836,6 +5964,68 @@ mod tests {
         second.weight = 1;
         template_overflow.omt_generators[0].templates.push(second);
         assert!(!worldgen_catalog_shape_is_valid(&template_overflow));
+    }
+
+    #[test]
+    fn overmap_terrain_matching_preserves_every_pinned_mode() {
+        let ordinary = WorldgenOmtIdentityV1 {
+            full_id: String::from("forest_thick_north"),
+            type_id: String::from("forest_thick"),
+            subtype_id: String::from("forest_thick"),
+            generator_id: String::from("forest_thick"),
+        };
+        assert!(worldgen_omt_matches(
+            "forest_thick_north",
+            WorldgenOmtMatchTypeV1::Exact,
+            &ordinary
+        ));
+        assert!(!worldgen_omt_matches(
+            "forest_thick",
+            WorldgenOmtMatchTypeV1::Exact,
+            &ordinary
+        ));
+        assert!(worldgen_omt_matches(
+            "forest_thick",
+            WorldgenOmtMatchTypeV1::Type,
+            &ordinary
+        ));
+        assert!(worldgen_omt_matches(
+            "forest",
+            WorldgenOmtMatchTypeV1::Prefix,
+            &ordinary
+        ));
+        assert!(!worldgen_omt_matches(
+            "fores",
+            WorldgenOmtMatchTypeV1::Prefix,
+            &ordinary
+        ));
+        assert!(worldgen_omt_matches(
+            "thick_n",
+            WorldgenOmtMatchTypeV1::Contains,
+            &ordinary
+        ));
+
+        let linear = WorldgenOmtIdentityV1 {
+            full_id: String::from("road_ne"),
+            type_id: String::from("road"),
+            subtype_id: String::from("road_curved"),
+            generator_id: String::from("road_curved"),
+        };
+        assert!(worldgen_omt_matches(
+            "road",
+            WorldgenOmtMatchTypeV1::Type,
+            &linear
+        ));
+        assert!(worldgen_omt_matches(
+            "road_curved",
+            WorldgenOmtMatchTypeV1::Subtype,
+            &linear
+        ));
+        assert!(!worldgen_omt_matches(
+            "road_straight",
+            WorldgenOmtMatchTypeV1::Subtype,
+            &linear
+        ));
     }
 
     fn item_group_chain(nodes: usize) -> ItemGroupDefinitionV1 {

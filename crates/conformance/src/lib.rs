@@ -12,6 +12,7 @@ use cdda_protocol::{
     ContentIdentity, IntegralMagazinePocketPrototypeV1, ItemGroupDefinitionV1, ItemId,
     MagazineWellPrototypeV1, PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1,
     TerrainBashTypeV1, TerrainTileSnapshot, WorldEvent, WorldPosition, WorldSnapshotV1,
+    WorldgenCatalogV1, worldgen_catalog_is_valid,
 };
 use cdda_sim::{
     Chunk, ID_RESERVATION_SIZE, ItemSpawn, ReservedIdBlock, SimError, WorldState,
@@ -22,8 +23,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use cdda_protocol::WorldEventKind;
 
-pub const SCENARIO_FORMAT_VERSION: u16 = 6;
-pub const OBSERVATION_FORMAT_VERSION: u16 = 5;
+pub const SCENARIO_FORMAT_VERSION: u16 = 7;
+pub const OBSERVATION_FORMAT_VERSION: u16 = 6;
 const MAX_ALIASES: usize = 512;
 const MAX_ALIAS_BYTES: usize = 64;
 const MAX_CHUNKS: usize = 121;
@@ -48,6 +49,7 @@ pub struct ScenarioV1 {
     pub item_groups: Vec<ItemGroupDefinitionV1>,
     pub terrain_bash_types: Vec<TerrainBashTypeV1>,
     pub smash_item_types: Vec<SmashItemTypeV1>,
+    pub worldgen: Option<WorldgenCatalogV1>,
     pub chunks: Vec<ChunkCoord>,
     pub terrain: Vec<ScenarioTerrainV1>,
     pub actors: Vec<ScenarioActorV1>,
@@ -67,9 +69,16 @@ pub struct ScenarioTerrainV1 {
 #[serde(deny_unknown_fields)]
 pub struct ScenarioActorV1 {
     pub alias: String,
-    pub position: WorldPosition,
+    pub spawn: ScenarioActorSpawnV1,
     pub connected: bool,
     pub stats: CharacterCreationStatsV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub enum ScenarioActorSpawnV1 {
+    At(WorldPosition),
+    StartLocation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -361,11 +370,33 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
             "enabled mods must be bounded, unique, and sorted",
         ));
     }
-    if scenario.chunks.is_empty() || scenario.chunks.len() > MAX_CHUNKS {
+    if scenario.chunks.len() > MAX_CHUNKS
+        || (scenario.worldgen.is_none() && scenario.chunks.is_empty())
+        || scenario.worldgen.as_ref().is_some_and(|worldgen| {
+            !scenario.chunks.is_empty()
+                || !scenario.terrain.is_empty()
+                || !scenario.ground_items.is_empty()
+                || !worldgen_catalog_is_valid(worldgen, &scenario.item_groups)
+        })
+    {
         return Err(ConformanceError::InvalidScenario("invalid chunk count"));
     }
     if scenario.actors.is_empty() || scenario.actors.len() > MAX_ACTORS {
         return Err(ConformanceError::InvalidScenario("invalid actor count"));
+    }
+    if scenario
+        .actors
+        .iter()
+        .any(|actor| matches!(&actor.spawn, ScenarioActorSpawnV1::StartLocation))
+        && scenario
+            .worldgen
+            .as_ref()
+            .and_then(|catalog| catalog.start_location.as_ref())
+            .is_none()
+    {
+        return Err(ConformanceError::InvalidScenario(
+            "start-location actor requires a worldgen start selector",
+        ));
     }
     if scenario.ground_items.len() > MAX_ITEMS
         || scenario.terrain.len() > MAX_TERRAIN_FIXTURES
@@ -546,35 +577,57 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
     for bash in &scenario.terrain_bash_types {
         world.register_terrain_bash_type(bash.clone())?;
     }
-    let mut chunks = BTreeMap::new();
-    for coord in &scenario.chunks {
-        if chunks.insert(*coord, Chunk::floor(*coord)).is_some() {
-            return Err(ConformanceError::InvalidScenario("duplicate chunk"));
+    if let Some(worldgen) = &scenario.worldgen {
+        world.configure_worldgen(worldgen.clone())?;
+        world.generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })?;
+    } else {
+        let mut chunks = BTreeMap::new();
+        for coord in &scenario.chunks {
+            if chunks.insert(*coord, Chunk::floor(*coord)).is_some() {
+                return Err(ConformanceError::InvalidScenario("duplicate chunk"));
+            }
         }
-    }
-    let mut terrain_positions = BTreeSet::new();
-    for fixture in &scenario.terrain {
-        let (coord, local) = fixture.position.chunk_and_local();
-        if !terrain_positions.insert(fixture.position) {
-            return Err(ConformanceError::InvalidScenario(
-                "duplicate terrain fixture",
-            ));
+        let mut terrain_positions = BTreeSet::new();
+        for fixture in &scenario.terrain {
+            let (coord, local) = fixture.position.chunk_and_local();
+            if !terrain_positions.insert(fixture.position) {
+                return Err(ConformanceError::InvalidScenario(
+                    "duplicate terrain fixture",
+                ));
+            }
+            chunks
+                .get_mut(&coord)
+                .ok_or(ConformanceError::InvalidScenario(
+                    "terrain fixture is outside declared chunks",
+                ))?
+                .set_terrain(local, fixture.terrain.clone())?;
         }
-        chunks
-            .get_mut(&coord)
-            .ok_or(ConformanceError::InvalidScenario(
-                "terrain fixture is outside declared chunks",
-            ))?
-            .set_terrain(local, fixture.terrain.clone())?;
-    }
-    for (_, chunk) in chunks {
-        world.insert_chunk(chunk);
+        for (_, chunk) in chunks {
+            world.insert_chunk(chunk);
+        }
     }
     let mut actors = BTreeMap::new();
     let mut actor_specs = scenario.actors.iter().collect::<Vec<_>>();
     actor_specs.sort_by(|left, right| left.alias.cmp(&right.alias));
     for actor in actor_specs {
-        let id = world.spawn_actor_with_base_stats(actor.position, actor.connected, actor.stats)?;
+        let id = match &actor.spawn {
+            ScenarioActorSpawnV1::At(position) => {
+                world.spawn_actor_with_base_stats(*position, actor.connected, actor.stats)?
+            }
+            ScenarioActorSpawnV1::StartLocation => {
+                if scenario
+                    .worldgen
+                    .as_ref()
+                    .and_then(|catalog| catalog.start_location.as_ref())
+                    .is_none()
+                {
+                    return Err(ConformanceError::InvalidScenario(
+                        "start-location actor requires a worldgen start selector",
+                    ));
+                }
+                world.spawn_actor_first_available_with_stats(actor.connected, actor.stats)?
+            }
+        };
         actors.insert(actor.alias.clone(), id);
     }
     let mut items = BTreeMap::new();
@@ -902,11 +955,12 @@ mod tests {
             item_groups: Vec::new(),
             terrain_bash_types: Vec::new(),
             smash_item_types: Vec::new(),
+            worldgen: None,
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
             terrain: Vec::new(),
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
-                position: WorldPosition { x: 1, y: 1, z: 0 },
+                spawn: ScenarioActorSpawnV1::At(WorldPosition { x: 1, y: 1, z: 0 }),
                 connected: true,
                 stats: CharacterCreationStatsV1::default(),
             }],
@@ -959,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x08, 0x8d, 0x6a, 0x39, 0x45, 0xe6, 0xf1, 0xe5, 0x9b, 0x39, 0x02, 0x1e, 0xa1,
-                    0xa4, 0x98, 0x6a, 0xd2, 0x2f, 0x49, 0x4e, 0x07, 0xc1, 0x8a, 0x21, 0xc5, 0x2f,
-                    0x2d, 0x9c, 0x28, 0x54, 0x0f, 0x8e,
+                    0x68, 0xcf, 0x36, 0x9b, 0x8e, 0x35, 0xb9, 0xb2, 0xc7, 0x61, 0x3d, 0x27, 0x34,
+                    0x36, 0xc0, 0xa2, 0x02, 0xc7, 0x23, 0x92, 0x71, 0x13, 0xd6, 0x29, 0xe9, 0xc1,
+                    0xa3, 0x4a, 0x9a, 0x56, 0xe0, 0xa1,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1001,6 +1055,129 @@ mod tests {
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
             "rock"
+        );
+    }
+
+    #[test]
+    fn start_location_spawns_are_identical_across_all_conformance_modes() {
+        let terrain = TerrainTileSnapshot {
+            terrain_id: String::from("t_lmoe_floor"),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        let cell = cdda_protocol::WorldgenCellV1 {
+            terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(0),
+                weight: 1,
+            }],
+            furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                target: cdda_protocol::WorldgenFurnitureTargetV1::None,
+                weight: 1,
+            }],
+            item_group: None,
+        };
+        let worldgen = WorldgenCatalogV1 {
+            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
+            default_omt: cdda_protocol::WorldgenOmtIdentityV1 {
+                full_id: String::from("lmoe_north"),
+                type_id: String::from("lmoe"),
+                subtype_id: String::from("lmoe"),
+                generator_id: String::from("lmoe"),
+            },
+            start_location: Some(cdda_protocol::WorldgenStartLocationV1 {
+                start_location_id: String::from("sloc_lmoe"),
+                targets: vec![cdda_protocol::WorldgenStartTargetV1 {
+                    omt: String::from("lmoe"),
+                    match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
+                }],
+            }),
+            terrain_prototypes: vec![terrain],
+            furniture_prototypes: Vec::new(),
+            regional_terrain: Vec::new(),
+            regional_furniture: Vec::new(),
+            omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
+                omt_id: String::from("lmoe"),
+                templates: vec![cdda_protocol::WorldgenTemplateV1 {
+                    weight: 1,
+                    cells: vec![cell; cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                }],
+            }],
+        };
+        let actor = |alias: &str| ScenarioActorV1 {
+            alias: alias.to_owned(),
+            spawn: ScenarioActorSpawnV1::StartLocation,
+            connected: true,
+            stats: CharacterCreationStatsV1::default(),
+        };
+        let scenario = ScenarioV1 {
+            format_version: SCENARIO_FORMAT_VERSION,
+            protocol_version: cdda_protocol::PROTOCOL_VERSION,
+            persistence_schema_version: SCHEMA_VERSION,
+            replay_format_version: REPLAY_FORMAT_VERSION,
+            baseline_commit: String::from(cdda_protocol::BASELINE_COMMIT),
+            world_namespace: 906,
+            world_seed: [31; 32],
+            content_manifest_hash: [32; 32],
+            enabled_mods: vec![String::from("dda")],
+            item_groups: Vec::new(),
+            terrain_bash_types: Vec::new(),
+            smash_item_types: Vec::new(),
+            worldgen: Some(worldgen),
+            chunks: Vec::new(),
+            terrain: Vec::new(),
+            actors: vec![actor("alpha"), actor("beta")],
+            ground_items: Vec::new(),
+            steps: vec![ScenarioStepV1::Advance { ticks: 1 }],
+            expected: ScenarioExpectationV1 {
+                final_tick: SimTick(0),
+                final_state_hash: [0; 32],
+                event_trace_hash: [0; 32],
+                actors: Vec::new(),
+                ground_items: Vec::new(),
+                event_batches: None,
+            },
+        };
+        let direct = run_scenario(&scenario, ScenarioMode::Direct)
+            .expect("start-location scenario should run directly");
+        for mode in [
+            ScenarioMode::SnapshotEachTick,
+            ScenarioMode::SqliteRecovery,
+            ScenarioMode::PortableReplay,
+        ] {
+            assert_eq!(
+                run_scenario(&scenario, mode).expect("start-location scenario should recover"),
+                direct,
+                "{mode} must preserve start selection"
+            );
+        }
+        assert_eq!(direct.final_snapshot.chunks.len(), 144);
+        assert_eq!(direct.final_snapshot.actors.len(), 2);
+        assert!(direct.final_snapshot.actors.iter().all(|actor| {
+            (0..cdda_protocol::WORLDGEN_OMT_SIZE as i32).contains(&actor.position.x)
+                && (0..cdda_protocol::WORLDGEN_OMT_SIZE as i32).contains(&actor.position.y)
+                && actor.position.z == 0
+        }));
+        assert_ne!(
+            direct.final_snapshot.actors[0].position,
+            direct.final_snapshot.actors[1].position
+        );
+        assert_eq!(
+            direct
+                .final_snapshot
+                .worldgen
+                .as_ref()
+                .and_then(|catalog| catalog.start_location.as_ref())
+                .map(|start| start.start_location_id.as_str()),
+            Some("sloc_lmoe")
         );
     }
 
@@ -1118,6 +1295,7 @@ mod tests {
                 attack_time_moves: 100,
                 melee_to_hit: 0,
             }],
+            worldgen: None,
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
             terrain: vec![ScenarioTerrainV1 {
                 position: wall_position,
@@ -1125,7 +1303,7 @@ mod tests {
             }],
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
-                position,
+                spawn: ScenarioActorSpawnV1::At(position),
                 connected: true,
                 stats: CharacterCreationStatsV1::default(),
             }],
@@ -1291,11 +1469,12 @@ mod tests {
             item_groups: Vec::new(),
             terrain_bash_types: Vec::new(),
             smash_item_types: Vec::new(),
+            worldgen: None,
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
             terrain: Vec::new(),
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
-                position,
+                spawn: ScenarioActorSpawnV1::At(position),
                 connected: true,
                 stats: CharacterCreationStatsV1::default(),
             }],
@@ -1444,11 +1623,12 @@ mod tests {
             item_groups: Vec::new(),
             terrain_bash_types: Vec::new(),
             smash_item_types: Vec::new(),
+            worldgen: None,
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
             terrain: Vec::new(),
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
-                position,
+                spawn: ScenarioActorSpawnV1::At(position),
                 connected: true,
                 stats: CharacterCreationStatsV1::default(),
             }],
@@ -1688,11 +1868,12 @@ mod tests {
                 item_groups: Vec::new(),
                 terrain_bash_types: Vec::new(),
                 smash_item_types: Vec::new(),
+                worldgen: None,
                 chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
                 terrain: Vec::new(),
                 actors: vec![ScenarioActorV1 {
                     alias: String::from("survivor"),
-                    position,
+                    spawn: ScenarioActorSpawnV1::At(position),
                     connected: true,
                     stats: CharacterCreationStatsV1::default(),
                 }],
@@ -1881,6 +2062,12 @@ mod tests {
         ));
         let mut invalid = item_flow_scenario();
         invalid.ground_items[0].alias = String::from("survivor");
+        assert!(matches!(
+            run_scenario(&invalid, ScenarioMode::Direct),
+            Err(ConformanceError::InvalidScenario(_))
+        ));
+        let mut invalid = item_flow_scenario();
+        invalid.actors[0].spawn = ScenarioActorSpawnV1::StartLocation;
         assert!(matches!(
             run_scenario(&invalid, ScenarioMode::Direct),
             Err(ConformanceError::InvalidScenario(_))

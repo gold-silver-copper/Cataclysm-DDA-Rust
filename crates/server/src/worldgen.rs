@@ -2,27 +2,84 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, MapgenIdChoice, MapgenRegistry,
-    StrictMapgenDefinition, TerrainRegistry,
+    OvermapTerrainMatchType, StartLocationDefinition, StrictMapgenDefinition, TerrainRegistry,
 };
 use cdda_protocol::{
     ItemGroupDefinitionV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurniturePrototypeTargetV1,
     WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1,
-    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenTemplateV1,
-    WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenRegionalFurnitureTableV1,
+    WorldgenRegionalTerrainTableV1, WorldgenStartLocationV1, WorldgenStartTargetV1,
+    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
     WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
     WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
 };
 
 use super::{furniture_tile, terrain_tile};
 
+/// The pinned LMOE special places `lmoe_north` at the surface. Until the
+/// coordinate-owned overmap population engine lands, every generated OMT uses
+/// this explicit identity and its normalized `lmoe` local-map generator.
+pub(super) fn lmoe_bootstrap_identity() -> WorldgenOmtIdentityV1 {
+    WorldgenOmtIdentityV1 {
+        full_id: String::from("lmoe_north"),
+        type_id: String::from("lmoe"),
+        subtype_id: String::from("lmoe"),
+        generator_id: String::from("lmoe"),
+    }
+}
+
+pub(super) struct RuntimeMapgenContent<'a> {
+    pub mapgen: &'a MapgenRegistry,
+    pub regions: &'a DefaultRegionTerrainFurnitureRegistry,
+    pub terrain: &'a TerrainRegistry,
+    pub furniture: &'a FurnitureRegistry,
+    pub item_groups: &'a [ItemGroupDefinitionV1],
+}
+
 pub(super) fn runtime_mapgen_worldgen(
     omt_id: &str,
-    mapgen: &MapgenRegistry,
-    regions: &DefaultRegionTerrainFurnitureRegistry,
-    terrain: &TerrainRegistry,
-    furniture: &FurnitureRegistry,
-    item_groups: &[ItemGroupDefinitionV1],
+    default_omt: WorldgenOmtIdentityV1,
+    start_location: &StartLocationDefinition,
+    content: RuntimeMapgenContent<'_>,
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
+    let RuntimeMapgenContent {
+        mapgen,
+        regions,
+        terrain,
+        furniture,
+        item_groups,
+    } = content;
+    if default_omt.generator_id != omt_id {
+        return Err(format!(
+            "default OMT generator {} does not match requested mapgen {omt_id}",
+            default_omt.generator_id
+        )
+        .into());
+    }
+    if !start_location.is_runtime_selectable_without_cities() {
+        return Err(format!(
+            "start location {} requires unsupported city, parameter, flag, or z-level semantics",
+            start_location.id
+        )
+        .into());
+    }
+    let start_location = WorldgenStartLocationV1 {
+        start_location_id: start_location.id.clone(),
+        targets: start_location
+            .targets
+            .iter()
+            .map(|target| WorldgenStartTargetV1 {
+                omt: target.overmap_terrain.clone(),
+                match_type: match target.match_type {
+                    OvermapTerrainMatchType::Exact => WorldgenOmtMatchTypeV1::Exact,
+                    OvermapTerrainMatchType::Type => WorldgenOmtMatchTypeV1::Type,
+                    OvermapTerrainMatchType::Subtype => WorldgenOmtMatchTypeV1::Subtype,
+                    OvermapTerrainMatchType::Prefix => WorldgenOmtMatchTypeV1::Prefix,
+                    OvermapTerrainMatchType::Contains => WorldgenOmtMatchTypeV1::Contains,
+                },
+            })
+            .collect(),
+    };
     let definitions = mapgen.get(omt_id).ok_or_else(|| {
         let reason = mapgen
             .unavailable_reports(omt_id)
@@ -179,7 +236,8 @@ pub(super) fn runtime_mapgen_worldgen(
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     let catalog = WorldgenCatalogV1 {
         generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
-        default_omt_id: omt_id.to_owned(),
+        default_omt,
+        start_location: Some(start_location),
         terrain_prototypes,
         furniture_prototypes,
         regional_terrain,

@@ -12,6 +12,7 @@ mod proficiency;
 mod recipe;
 mod region;
 mod skill;
+mod start_location;
 mod terrain;
 
 pub use bash::{
@@ -63,6 +64,13 @@ pub use region::{
     MAX_REGION_SUBSTITUTION_WEIGHT, RegionSubstitutionTable, WeightedRegionSubstitution,
 };
 pub use skill::{SkillDefinition, SkillRegistry, SkillRegistryError};
+pub use start_location::{
+    DEFAULT_START_LOCATION_MAX_Z, DEFAULT_START_LOCATION_MIN_Z, InclusiveI32Interval,
+    MAX_START_LOCATION_FLAGS, MAX_START_LOCATION_ID_BYTES, MAX_START_LOCATION_NAME_BYTES,
+    MAX_START_LOCATION_PARAMETER_BYTES, MAX_START_LOCATION_PARAMETERS, MAX_START_LOCATION_TARGETS,
+    MAX_START_LOCATIONS, OvermapTerrainMatchType, StartLocationDefinition, StartLocationRegistry,
+    StartLocationRegistryError, StartLocationTarget,
+};
 pub use terrain::{TerrainDefinition, TerrainRegistry, TerrainRegistryError};
 
 use std::collections::{BTreeMap, BTreeSet};

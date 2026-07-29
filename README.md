@@ -21,6 +21,8 @@ continues while disconnected, a pinned zombie that persistently hunts connected
 or disconnected characters, leaves its pinned blood field and a carryable
 corpse when killed, and can later revive from that corpse, a
 pinned JSON mapgen that creates persistent 24x24 overmap cells on demand,
+server-authoritative new-character placement through the pinned `sloc_lmoe`
+start definition,
 content-derived terrain and furniture state that participates in sight and
 per-character memory, and a first content-derived
 crafting loop. B opens the bounded recipe menu or resumes an interrupted
@@ -629,6 +631,24 @@ and referenced item-group closure are canonical and bounded. The ordinary
 `field` mapgen remains fail-closed because its corpse loot requires item damage
 and general container nesting that are not yet representable. Databases below
 schema 59 that contain serialized state are rejected before mutation.
+
+Protocol 82 advances to schema 60 and CanonicalStateV58 while retaining
+CanonicalEventsV18. The selected-content start-location registry finalizes
+inheritance, source-ordered terrain targets, city and z constraints, flags, and
+retained parameters. Exact, type, subtype, underscore-bounded prefix, and
+contains matching use the pinned overmap-terrain identities characterized by
+the C++ oracle. The current runtime admits only `sloc_lmoe`: city-independent,
+parameter-free, flag-free, and usable at z=0. Fresh worlds persist the explicit
+`lmoe_north` full identity plus its `lmoe` type/subtype/generator, and the server
+chooses the matching origin OMT for every new character while the identity is
+globally repeated, preserving access to the fixed starter loadout and encounter.
+It tries deterministically shuffled matching OMTs if that cell is occupied, a multiplayer
+adaptation exercised with two actors through direct, per-tick snapshot, SQLite,
+and portable-replay conformance (scenario format 7/observation format 6).
+Coordinate-owned overmap layouts, cities, specials, inside/outside start-tile
+rating, mapgen parameters, preparation flags, and spawn groups remain explicit
+later boundaries. Databases below schema 60 that contain serialized state are
+rejected before mutation.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned

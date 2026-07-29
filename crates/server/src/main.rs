@@ -14,9 +14,9 @@ use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, FieldTypeDefinition, FieldTypeRegistry,
     FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemGroupSubtype,
     ItemRegistry, MapgenRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
-    ProficiencyRegistry, RecipeRegistry, SkillRegistry, StrictItemGroupDefinition,
-    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind, TerrainDefinition,
-    TerrainRegistry,
+    ProficiencyRegistry, RecipeRegistry, SkillRegistry, StartLocationRegistry,
+    StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
+    TerrainDefinition, TerrainRegistry,
 };
 use cdda_persistence::{
     AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1,
@@ -62,7 +62,7 @@ use tracing_subscriber::EnvFilter;
 
 mod worldgen;
 
-use worldgen::runtime_mapgen_worldgen;
+use worldgen::{RuntimeMapgenContent, lmoe_bootstrap_identity, runtime_mapgen_worldgen};
 #[cfg(test)]
 use worldgen::{runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice};
 
@@ -91,6 +91,7 @@ struct RuntimeWorldContent<'a> {
     furniture: &'a FurnitureRegistry,
     regions: &'a DefaultRegionTerrainFurnitureRegistry,
     mapgen: &'a MapgenRegistry,
+    start_locations: &'a StartLocationRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -274,6 +275,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &furniture,
         &item_groups,
     )?;
+    let start_locations = StartLocationRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let skills =
         SkillRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let proficiencies = ProficiencyRegistry::load_selected(
@@ -347,6 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             furniture: &furniture,
             regions: &regions,
             mapgen: &mapgen,
+            start_locations: &start_locations,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -670,6 +678,7 @@ fn open_world(
     let furniture = content.furniture;
     let regions = content.regions;
     let mapgen = content.mapgen;
+    let start_locations = content.start_locations;
     let mut store = WorldStore::open(path)?;
     let metadata = match store.metadata_optional()? {
         Some(metadata) => metadata,
@@ -723,11 +732,17 @@ fn open_world(
     )?;
     let worldgen = runtime_mapgen_worldgen(
         "lmoe",
-        mapgen,
-        regions,
-        terrain,
-        furniture,
-        &item_group_catalog,
+        lmoe_bootstrap_identity(),
+        start_locations
+            .get("sloc_lmoe")
+            .ok_or("pinned default content is missing sloc_lmoe")?,
+        RuntimeMapgenContent {
+            mapgen,
+            regions,
+            terrain,
+            furniture,
+            item_groups: &item_group_catalog,
+        },
     )?;
     initial.register_item_group_catalog(item_group_catalog)?;
     for definition in terrain_bash_definitions {
@@ -4743,16 +4758,52 @@ mod tests {
             &item_groups,
         )
         .expect("strict mapgen should load");
+        let start_locations =
+            StartLocationRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("start locations should load");
         let wilderness = runtime_mapgen_worldgen(
             "lmoe",
-            &mapgen,
-            &regions,
-            &terrain,
-            &furniture,
-            &wall_catalog,
+            lmoe_bootstrap_identity(),
+            start_locations
+                .get("sloc_lmoe")
+                .expect("lmoe start location should load"),
+            RuntimeMapgenContent {
+                mapgen: &mapgen,
+                regions: &regions,
+                terrain: &terrain,
+                furniture: &furniture,
+                item_groups: &wall_catalog,
+            },
         )
         .expect("pinned surface mapgen should normalize");
-        assert_eq!(wilderness.default_omt_id, "lmoe");
+        assert_eq!(wilderness.default_omt.full_id, "lmoe_north");
+        assert_eq!(wilderness.default_omt.generator_id, "lmoe");
+        assert_eq!(
+            wilderness
+                .start_location
+                .as_ref()
+                .expect("start location should normalize")
+                .start_location_id,
+            "sloc_lmoe"
+        );
+        assert!(
+            runtime_mapgen_worldgen(
+                "lmoe",
+                lmoe_bootstrap_identity(),
+                start_locations
+                    .get("sloc_shelter_safe")
+                    .expect("parameterized shelter start should load"),
+                RuntimeMapgenContent {
+                    mapgen: &mapgen,
+                    regions: &regions,
+                    terrain: &terrain,
+                    furniture: &furniture,
+                    item_groups: &wall_catalog,
+                },
+            )
+            .is_err(),
+            "parameterized start locations must fail closed"
+        );
         assert_eq!(wilderness.omt_generators[0].templates.len(), 1);
         assert_eq!(wilderness.regional_terrain.len(), 1);
         assert_eq!(

@@ -6849,6 +6849,8 @@ mod tests {
         let persistence = persistence_host.handle();
         let host = SimulationHost::start(world).expect("simulation should start");
         let simulation = host.handle();
+        let (stop_acknowledger, acknowledger) =
+            start_test_acknowledger(host, CommittedEventHub::default());
         let content = ContentIdentity {
             baseline_commit: BASELINE_COMMIT.to_owned(),
             manifest_hash: [9; 32],
@@ -7516,6 +7518,10 @@ mod tests {
         administrator_client.close().await;
         created_account_client.close().await;
         server.close().await;
+        stop_acknowledger
+            .send(())
+            .expect("acknowledger should still be running");
+        let host = acknowledger.join().expect("acknowledger should join");
         assert_eq!(host.shutdown(), SimulationExit::Requested);
         persistence_host.shutdown();
         let store = WorldStore::open(&database_path).expect("audited store should reopen");
@@ -8635,6 +8641,8 @@ mod tests {
         };
         let sessions = SessionRegistry::default();
         let committed_events = CommittedEventHub::default();
+        let (stop_acknowledger, acknowledger) =
+            start_test_acknowledger(host, committed_events.clone());
         let (character_creator, _character_creation_requests) = character_creation_channel();
         let server = Endpoint::builder(presets::N0DisableRelay)
             .secret_key(SecretKey::generate())
@@ -8749,6 +8757,10 @@ mod tests {
         assert!(results.into_iter().all(|result| result.is_ok()));
         client.close().await;
         server.close().await;
+        stop_acknowledger
+            .send(())
+            .expect("acknowledger should still be running");
+        let host = acknowledger.join().expect("acknowledger should join");
         assert_eq!(host.shutdown(), SimulationExit::Requested);
         persistence_host.shutdown();
         remove_database(&database_path);

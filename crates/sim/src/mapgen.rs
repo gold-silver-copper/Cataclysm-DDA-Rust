@@ -13,7 +13,7 @@ use super::{
 };
 
 const OMT_SUBMAP_WIDTH: i32 = 2;
-const OMT_TILE_WIDTH: usize = (SUBMAP_SIZE as usize) * (OMT_SUBMAP_WIDTH as usize);
+pub(super) const OMT_TILE_WIDTH: usize = (SUBMAP_SIZE as usize) * (OMT_SUBMAP_WIDTH as usize);
 const OMT_TILE_COUNT: usize = OMT_TILE_WIDTH * OMT_TILE_WIDTH;
 
 pub(super) fn catalog_fits_one_id_reservation(
@@ -24,7 +24,7 @@ pub(super) fn catalog_fits_one_id_reservation(
     let Some(generator) = catalog
         .omt_generators
         .iter()
-        .find(|generator| generator.omt_id == catalog.default_omt_id)
+        .find(|generator| generator.omt_id == catalog.default_omt.generator_id)
     else {
         return false;
     };
@@ -142,6 +142,27 @@ pub(super) fn generated_cells_are_complete(
     true
 }
 
+pub(super) fn generated_omt_coords(
+    chunks: &std::collections::BTreeMap<ChunkCoord, Chunk>,
+) -> Result<Vec<ChunkCoord>, SimError> {
+    let mut cells = std::collections::BTreeSet::new();
+    for coord in chunks.keys().filter(|coord| coord.z == 0) {
+        let omt = ChunkCoord {
+            x: coord.x.div_euclid(OMT_SUBMAP_WIDTH),
+            y: coord.y.div_euclid(OMT_SUBMAP_WIDTH),
+            z: coord.z,
+        };
+        if omt_chunk_coords(omt)?
+            .iter()
+            .any(|sibling| !chunks.contains_key(sibling))
+        {
+            return Err(SimError::InvalidTerrain);
+        }
+        cells.insert(omt);
+    }
+    Ok(cells.into_iter().collect())
+}
+
 fn plan_omt_cell(
     world_seed: [u8; 32],
     catalog: &WorldgenCatalogV1,
@@ -151,7 +172,7 @@ fn plan_omt_cell(
     let generator = catalog
         .omt_generators
         .iter()
-        .find(|generator| generator.omt_id == catalog.default_omt_id)
+        .find(|generator| generator.omt_id == catalog.default_omt.generator_id)
         .ok_or(SimError::InvalidTerrain)?;
     let mut rng = coordinate_rng(
         world_seed,
@@ -461,7 +482,11 @@ fn omt_chunk_coords(omt: ChunkCoord) -> Result<[ChunkCoord; 4], SimError> {
     ])
 }
 
-fn omt_tile_position(omt: ChunkCoord, x: usize, y: usize) -> Result<WorldPosition, SimError> {
+pub(super) fn omt_tile_position(
+    omt: ChunkCoord,
+    x: usize,
+    y: usize,
+) -> Result<WorldPosition, SimError> {
     let x = i32::try_from(x).map_err(|_| SimError::NumericOverflow)?;
     let y = i32::try_from(y).map_err(|_| SimError::NumericOverflow)?;
     Ok(WorldPosition {

@@ -2809,3 +2809,50 @@ ordinary `field` definition is also unavailable to the server until its
 nesting. A development-only pinned C++ oracle locks OMT matching and rotation,
 point rotation, and static palette/nested phase order without entering the
 shipped Rust runtime.
+
+## Canonical start-location selection over explicit OMT identities
+
+Protocol 82 advances to schema 60 and CanonicalStateV58 while retaining
+CanonicalEventsV18. A canonical worldgen catalog no longer stores only a local
+mapgen ID: it stores the overmap terrain's full ID, base type ID, linear/mapgen
+subtype ID, and normalized local generator ID. This is the minimum immutable
+identity needed to implement pinned `is_ot_match` behavior without consulting
+process-local content after world creation. Exact compares the full ID; type and
+subtype compare their explicit identities; prefix requires either a full match
+or an underscore boundary; contains uses the full ID substring. The pinned C++
+mapgen oracle characterizes all five modes, including rotated and linear cases.
+
+The selected-content start-location registry is a strict semantic loader rather
+than a list of hand-picked starts. It finalizes forward and self inheritance in
+load order, retains source-ordered targets and string parameters, normalizes
+negative interval maxima to the pinned unbounded value, applies flag
+extension/deletion, and rejects unknown or excessive data. Definitions remain
+available even when the runtime cannot yet execute their constraints. Runtime
+normalization rejects any start requiring a city, excluding z=0, carrying
+mapgen parameters, or carrying placement/preparation flags. The current server
+therefore admits pinned `sloc_lmoe` and explicitly rejects shelter parameters,
+boarded/allow-outside behavior, and city-constrained starts.
+
+Target selection and actor placement are server-authoritative. A ChaCha8 stream
+is derived from world seed, generator version, the next stable actor counter,
+and start-location ID. It chooses one target in source order, then deterministically
+shuffles matching generated OMT coordinates. While the bootstrap repeats one
+identity everywhere, the origin OMT is moved to the front so new characters
+remain beside the fixed playable starter loadout and encounter. The first free
+passable tile in that order receives the character; subsequent matching OMTs
+are tried if a cell is full. Trying more than the first matching OMT is the
+multiplayer adaptation that keeps later joins possible without letting a client
+choose a location. The stable actor counter makes fallback order repeat after
+snapshot restore while keeping separate characters' choices independent.
+Two-character conformance requires identical direct, per-tick snapshot,
+SQLite, and portable-replay state and origin affinity.
+
+Every current coordinate still uses the explicit pinned `lmoe_north` bootstrap
+identity. This is not a generated overmap layout and must be replaced by
+coordinate-owned identities before admitting heterogeneous terrain starts.
+Within the selected OMT, current placement models passability and occupancy
+only. Upstream inside/outside caches, reachable-area rating, start-point zones,
+bashing/opening reachability, and NPC accommodation are not claimed; starts
+requesting their explicit flags remain fail closed. These boundaries avoid
+smuggling a hash-grid approximation into the later city/special/road/forest
+overmap population engine.
