@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 77;
+pub const PROTOCOL_VERSION: u16 = 78;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -875,6 +875,8 @@ pub struct MagazineWellPrototypeV1 {
     pub pocket_id: String,
     /// Concrete compatible MAGAZINE item type IDs in stable order.
     pub compatible_magazine_type_ids: Vec<String>,
+    /// False when the owning item carries pinned `NO_UNLOAD`.
+    pub unloadable: bool,
 }
 
 /// A canonical item-owned `MAGAZINE` pocket. The first runtime slice admits
@@ -1199,6 +1201,11 @@ pub enum CommandKind {
         /// `None` selects the temporary built-in ranged-ammunition store.
         target_pocket_index: Option<u16>,
     },
+    RemovePocketItem {
+        owner_item: ItemId,
+        pocket_index: u16,
+        contained_item: ItemId,
+    },
     Wield {
         item_id: ItemId,
     },
@@ -1301,6 +1308,8 @@ pub enum CommandRejection {
     WeaponFull,
     IncompatibleAmmunition,
     PocketNotReloadable,
+    PocketNotUnloadable,
+    PocketItemMissing,
     ActorSleeping,
     ActorAwake,
     NotTired,
@@ -1573,7 +1582,21 @@ pub enum WorldEventKind {
         nested_ammunition: ItemId,
         loaded: u32,
         pocket_ammunition: u32,
+        /// Fractional battery energy retained by the destination pocket after
+        /// this transfer. This is zero for non-battery ammunition.
+        pocket_residual_energy_millijoules: u32,
         source_charges_remaining: i32,
+        /// Fractional battery energy retained by the loose source stack. A
+        /// whole transfer moves this value into the destination pocket.
+        source_residual_energy_millijoules_remaining: u32,
+    },
+    PocketItemRemoved {
+        actor_id: ActorId,
+        owner_item: ItemId,
+        pocket_index: u16,
+        contained_item: ItemId,
+        charges: i32,
+        residual_energy_millijoules: u32,
     },
     PoweredToolChanged {
         actor_id: Option<ActorId>,
@@ -1877,7 +1900,9 @@ pub struct ItemSnapshot {
     /// own stable item identities.
     #[serde(default)]
     pub magazine_wells: Vec<MagazineWellSnapshotV1>,
-    /// Sub-charge battery energy retained after continuous draw. One integer
+    /// Sub-charge battery energy retained after continuous draw. This belongs
+    /// either to an aggregate magazine or to a loose battery-ammunition item;
+    /// integral storage retains it on the owning pocket instead. One integer
     /// battery charge is exactly one kilojoule.
     #[serde(default)]
     pub residual_energy_millijoules: u32,
@@ -1893,6 +1918,7 @@ pub struct MagazineWellSnapshotV1 {
     pub pocket_index: u16,
     pub pocket_id: String,
     pub compatible_magazine_type_ids: Vec<String>,
+    pub unloadable: bool,
     pub installed_magazine: Option<Box<ItemSnapshot>>,
 }
 
@@ -2851,6 +2877,17 @@ fn valid_client_command(command: &ClientCommand) -> bool {
         CommandKind::Activate { item_id } => {
             item_id.counter() > 0 && item_id.world_namespace() == command.actor_id.world_namespace()
         }
+        CommandKind::RemovePocketItem {
+            owner_item,
+            contained_item,
+            ..
+        } => {
+            owner_item.counter() > 0
+                && owner_item.world_namespace() == command.actor_id.world_namespace()
+                && contained_item.counter() > 0
+                && contained_item.world_namespace() == command.actor_id.world_namespace()
+                && owner_item != contained_item
+        }
         _ => true,
     }
 }
@@ -3189,6 +3226,7 @@ fn valid_disassembly_activity(activity: &DisassemblyActivitySnapshotV1, actor_id
             .integral_magazines
             .iter()
             .all(|pocket| pocket.loaded_ammunition.is_none())
+        && activity.target_item.residual_energy_millijoules == 0
         && match (
             &activity.target_item.ranged_weapon,
             &activity.recipe.unload_charges_as,
@@ -3276,6 +3314,7 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
                 pocket_index: well.pocket_index,
                 pocket_id: well.pocket_id.clone(),
                 compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                unloadable: well.unloadable,
                 installed_magazine: None,
             })
             .collect(),
@@ -3491,7 +3530,10 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
             .all(|character| !character.is_control())
         && (item.ammunition_type.is_empty()
             || item.charges > 0
-            || (item.magazine_capacity > 0 && item.charges >= 0))
+            || (item.magazine_capacity > 0 && item.charges >= 0)
+            || (item.ammunition_type == "battery"
+                && item.charges >= 0
+                && item.residual_energy_millijoules > 0))
         && (item.magazine_capacity == 0
             || (item.charges >= 0
                 && u32::try_from(item.charges)
@@ -3503,6 +3545,16 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
             || (item.magazine_capacity > 0
                 && u32::try_from(item.charges)
                     .is_ok_and(|charges| charges < item.magazine_capacity)
+                && item.residual_energy_millijoules < MILLIJOULES_PER_BATTERY_CHARGE)
+            || (item.magazine_capacity == 0
+                && item.ammunition_type == "battery"
+                && item.charges >= 0
+                && item.ranged_weapon.is_none()
+                && item.component_provenance.is_none()
+                && item.integral_magazines.is_empty()
+                && item.magazine_wells.is_empty()
+                && item.powered_tool.is_none()
+                && item.creature_corpse.is_none()
                 && item.residual_energy_millijoules < MILLIJOULES_PER_BATTERY_CHARGE))
         && (item.magazine_wells.is_empty() || {
             item.charges == 0
@@ -3687,6 +3739,7 @@ fn valid_magazine_well_snapshot(well: &MagazineWellSnapshotV1, depth: usize) -> 
         pocket_index: well.pocket_index,
         pocket_id: well.pocket_id.clone(),
         compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+        unloadable: well.unloadable,
     };
     valid_magazine_well_prototype(&prototype)
         && well.installed_magazine.as_ref().is_none_or(|installed| {
@@ -5489,6 +5542,7 @@ mod tests {
                 pocket_index: 3,
                 pocket_id: String::from("MAGAZINE_WELL"),
                 compatible_magazine_type_ids: vec![String::from("medium_battery")],
+                unloadable: true,
                 installed_magazine: Some(Box::new(magazine.clone())),
             }],
             residual_energy_millijoules: 0,
@@ -5502,6 +5556,7 @@ mod tests {
             pocket_index: 7,
             pocket_id: String::from("AUXILIARY"),
             compatible_magazine_type_ids: vec![String::from("large_battery")],
+            unloadable: true,
             installed_magazine: Some(Box::new(second_magazine.clone())),
         });
         assert!(valid_item_snapshot(&tool));
@@ -5528,6 +5583,7 @@ mod tests {
                 pocket_index,
                 pocket_id: String::new(),
                 compatible_magazine_type_ids: vec![String::from("large_battery")],
+                unloadable: true,
                 installed_magazine: None,
             });
         }
@@ -5612,6 +5668,15 @@ mod tests {
             powered_tool: None,
             creature_corpse: None,
         };
+        let mut loose_fractional_battery = ammunition.clone();
+        loose_fractional_battery.charges = 0;
+        loose_fractional_battery.residual_energy_millijoules = MILLIJOULES_PER_BATTERY_CHARGE - 1;
+        assert!(valid_item_snapshot(&loose_fractional_battery));
+        loose_fractional_battery.ammunition_type = String::from("9mm");
+        assert!(!valid_item_snapshot(&loose_fractional_battery));
+        loose_fractional_battery.ammunition_type = String::from("battery");
+        loose_fractional_battery.residual_energy_millijoules = MILLIJOULES_PER_BATTERY_CHARGE;
+        assert!(!valid_item_snapshot(&loose_fractional_battery));
         let mut magazine = ItemSnapshot {
             id: ItemId::new(1, 1),
             type_id: String::from("test_cell"),

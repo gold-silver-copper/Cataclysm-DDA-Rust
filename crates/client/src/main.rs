@@ -125,6 +125,11 @@ enum ClientAction {
         ammunition_item: ItemId,
         target_pocket_index: Option<u16>,
     },
+    RemovePocketItem {
+        owner_item: ItemId,
+        pocket_index: u16,
+        contained_item: ItemId,
+    },
     Sleep,
     Wake,
     Wait,
@@ -1043,6 +1048,15 @@ async fn run_game_session(
                             target_pocket_index,
                         })
                     }
+                    Some(ClientAction::RemovePocketItem {
+                        owner_item,
+                        pocket_index,
+                        contained_item,
+                    }) => Some(CommandKind::RemovePocketItem {
+                        owner_item,
+                        pocket_index,
+                        contained_item,
+                    }),
                     Some(ClientAction::Sleep) => Some(CommandKind::Sleep),
                     Some(ClientAction::Wake) => Some(CommandKind::Wake),
                     Some(ClientAction::Wait) => Some(CommandKind::Wait),
@@ -1731,6 +1745,20 @@ fn handle_item_menu(
         }
         return;
     }
+    if keys.just_pressed(KeyCode::KeyY) {
+        if snapshot.controlled_actor.craft_activity.is_some()
+            || snapshot.controlled_actor.read_activity.is_some()
+            || snapshot.controlled_actor.disassembly_activity.is_some()
+            || snapshot.controlled_actor.construction_activity.is_some()
+        {
+            game.notice = String::from("Finish or cancel the current activity first.");
+        } else if let Some(action) = first_pocket_item_removal(snapshot) {
+            let _send_result = game.actions.try_send(action);
+        } else {
+            game.notice = String::from("No carried pocket item can be removed.");
+        }
+        return;
+    }
     let action = if keys.just_pressed(KeyCode::KeyG) {
         Some(ItemMenuAction::PickUp)
     } else if keys.just_pressed(KeyCode::KeyQ) {
@@ -2212,6 +2240,7 @@ fn client_construction_components_available(
                 .iter()
                 .filter(|item| {
                     item.type_id == component.type_id
+                        && item.residual_energy_millijoules == 0
                         && !protected.contains(&item.id)
                         && item
                             .magazine_wells
@@ -2244,6 +2273,7 @@ fn client_construction_components_available(
         let mut remaining = selected.count;
         for item in snapshot.controlled_actor.inventory.iter().filter(|item| {
             item.type_id == selected.type_id
+                && item.residual_energy_millijoules == 0
                 && !protected.contains(&item.id)
                 && item
                     .magazine_wells
@@ -2440,6 +2470,7 @@ fn can_craft_recipe(
                 .iter()
                 .filter(|item| {
                     item.type_id == component.type_id
+                        && item.residual_energy_millijoules == 0
                         && !protected.contains(&item.id)
                         && item
                             .magazine_wells
@@ -2472,6 +2503,7 @@ fn can_craft_recipe(
         let mut remaining = selected.count;
         for item in snapshot.controlled_actor.inventory.iter().filter(|item| {
             item.type_id == selected.type_id
+                && item.residual_energy_millijoules == 0
                 && !protected.contains(&item.id)
                 && item
                     .magazine_wells
@@ -2719,7 +2751,9 @@ fn can_disassemble_item(
     ammunition: &AmmunitionRegistry,
     target: &ItemSnapshot,
 ) -> bool {
-    if target.damage > cdda_protocol::MAX_ITEM_DAMAGE_LEVEL {
+    if target.damage > cdda_protocol::MAX_ITEM_DAMAGE_LEVEL
+        || target.residual_energy_millijoules != 0
+    {
         return false;
     }
     if target
@@ -2788,6 +2822,7 @@ fn item_menu_entries(
                                 weapon.ammunition_remaining < weapon.ammunition_capacity
                                     && item.ammunition_type == weapon.ammunition_type
                                     && item.charges > 0
+                                    && item.residual_energy_millijoules == 0
                             }) || wielded.magazine_wells.iter().any(|well| {
                                 item.id != wielded.id
                                     && (item.magazine_capacity > 0
@@ -2800,7 +2835,7 @@ fn item_menu_entries(
                                 item.id != wielded.id
                                     && pocket.reloadable
                                     && item.ammunition_type == pocket.ammunition_type
-                                    && item.charges > 0
+                                    && (item.charges > 0 || item.residual_energy_millijoules > 0)
                                     && integral_pocket_has_free_charge_slot(pocket)
                                     && pocket.loaded_ammunition.as_deref().is_none_or(
                                         |ammunition| same_item_stack_state(ammunition, item),
@@ -3005,6 +3040,56 @@ fn item_residual_power_millijoules(item: &ItemSnapshot) -> u32 {
             total.saturating_add(pocket.residual_energy_millijoules)
         })
     }
+}
+
+fn first_pocket_item_removal(snapshot: &ReplicationSnapshotV1) -> Option<ClientAction> {
+    let actor = &snapshot.controlled_actor;
+    actor
+        .inventory
+        .iter()
+        .flat_map(|owner| {
+            let integral = owner.integral_magazines.iter().filter_map(|pocket| {
+                pocket
+                    .unloadable
+                    .then_some(pocket.loaded_ammunition.as_deref())
+                    .flatten()
+                    .map(|contained| {
+                        (
+                            owner.id,
+                            pocket.pocket_index,
+                            contained.id,
+                            ClientAction::RemovePocketItem {
+                                owner_item: owner.id,
+                                pocket_index: pocket.pocket_index,
+                                contained_item: contained.id,
+                            },
+                        )
+                    })
+            });
+            let wells = owner.magazine_wells.iter().filter_map(|well| {
+                let power_locked = owner.powered_tool.as_ref().is_some_and(|powered| {
+                    powered.active && powered.power_pocket_index == well.pocket_index
+                });
+                (well.unloadable && !power_locked)
+                    .then_some(well.installed_magazine.as_deref())
+                    .flatten()
+                    .map(|contained| {
+                        (
+                            owner.id,
+                            well.pocket_index,
+                            contained.id,
+                            ClientAction::RemovePocketItem {
+                                owner_item: owner.id,
+                                pocket_index: well.pocket_index,
+                                contained_item: contained.id,
+                            },
+                        )
+                    })
+            });
+            integral.chain(wells)
+        })
+        .min_by_key(|(owner, pocket, contained, _)| (*owner, *pocket, *contained))
+        .map(|(_, _, _, action)| action)
 }
 
 fn integral_pocket_has_free_charge_slot(pocket: &IntegralMagazinePocketSnapshotV1) -> bool {
@@ -4004,6 +4089,15 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!(
             "Loaded {loaded} charge(s) into pocket {pocket_index}; {pocket_ammunition} now loaded."
         ),
+        WorldEventKind::PocketItemRemoved {
+            pocket_index,
+            charges,
+            residual_energy_millijoules,
+            ..
+        } => format!(
+            "Removed a {charges}-charge item{} from pocket {pocket_index}.",
+            residual_power_suffix(*residual_energy_millijoules)
+        ),
         WorldEventKind::PoweredToolChanged {
             active,
             reason,
@@ -4141,6 +4235,8 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::WeaponFull => "weapon is already full",
         CommandRejection::IncompatibleAmmunition => "ammunition is incompatible",
         CommandRejection::PocketNotReloadable => "that pocket cannot be reloaded",
+        CommandRejection::PocketNotUnloadable => "that pocket cannot be unloaded",
+        CommandRejection::PocketItemMissing => "that item is not in the selected pocket",
         CommandRejection::ActorSleeping => "your character is sleeping",
         CommandRejection::ActorAwake => "your character is already awake",
         CommandRejection::NotTired => "your character is not tired enough to sleep",
@@ -4713,7 +4809,7 @@ fn gameplay_status(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; reload: U; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; reload: U; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5021,12 +5117,14 @@ mod tests {
                 pocket_index: 1,
                 pocket_id: String::from("AUXILIARY"),
                 compatible_magazine_type_ids: vec![String::from("heavy_battery")],
+                unloadable: true,
                 installed_magazine: None,
             },
             cdda_protocol::MagazineWellSnapshotV1 {
                 pocket_index: 4,
                 pocket_id: String::from("POWER"),
                 compatible_magazine_type_ids: vec![String::from("medium_battery")],
+                unloadable: true,
                 installed_magazine: None,
             },
         ];
@@ -5087,6 +5185,53 @@ mod tests {
         });
         assert!(item_menu_label(&tool, None).contains("[power 3 + 998440 mJ]"));
         assert!(!item_menu_label(&tool, None).contains("[power 9"));
+        battery_snapshot.controlled_actor.inventory = vec![tool.clone()];
+        assert!(matches!(
+            first_pocket_item_removal(&battery_snapshot),
+            Some(ClientAction::RemovePocketItem {
+                owner_item,
+                pocket_index: 1,
+                contained_item,
+            }) if owner_item == tool.id && contained_item == ItemId::new(1, 8)
+        ));
+        let mut policy_locked_tool = tool.clone();
+        policy_locked_tool
+            .powered_tool
+            .as_mut()
+            .expect("powered state should exist")
+            .active = true;
+        policy_locked_tool
+            .magazine_wells
+            .iter_mut()
+            .find(|well| well.pocket_index == 1)
+            .expect("auxiliary well should exist")
+            .unloadable = false;
+        battery_snapshot.controlled_actor.inventory = vec![policy_locked_tool];
+        assert!(first_pocket_item_removal(&battery_snapshot).is_none());
+
+        let mut integral_owner = item(9, "", "", None);
+        integral_owner.type_id = String::from("fractional_cell");
+        let mut fractional_ammunition = item(10, "battery", "", None);
+        fractional_ammunition.charges = 0;
+        integral_owner.integral_magazines = vec![cdda_protocol::IntegralMagazinePocketSnapshotV1 {
+            pocket_index: 2,
+            pocket_id: String::from("RESERVE"),
+            ammunition_type: String::from("battery"),
+            capacity: 1,
+            reloadable: true,
+            unloadable: true,
+            loaded_ammunition: Some(Box::new(fractional_ammunition)),
+            residual_energy_millijoules: 123_456,
+        }];
+        battery_snapshot.controlled_actor.inventory = vec![integral_owner.clone()];
+        assert!(matches!(
+            first_pocket_item_removal(&battery_snapshot),
+            Some(ClientAction::RemovePocketItem {
+                owner_item,
+                pocket_index: 2,
+                contained_item,
+            }) if owner_item == integral_owner.id && contained_item == ItemId::new(1, 10)
+        ));
         battery_snapshot.controlled_actor.inventory = vec![tool.clone()];
         assert_eq!(
             item_menu_entries(

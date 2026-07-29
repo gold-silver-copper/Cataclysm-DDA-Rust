@@ -1906,6 +1906,7 @@ fn runtime_magazine_storage(
                 pocket_index: projection.pocket_index,
                 pocket_id: projection.pocket_id,
                 compatible_magazine_type_ids: projection.compatible_magazine_type_ids,
+                unloadable: !item.flags.contains("NO_UNLOAD"),
             }],
         ));
     }
@@ -1987,6 +1988,7 @@ fn strict_detachable_magazine_wells(
             pocket_index: well.pocket_index,
             pocket_id: well.pocket_id.clone(),
             compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
+            unloadable: !item.flags.contains("NO_UNLOAD"),
         });
     }
     normalized

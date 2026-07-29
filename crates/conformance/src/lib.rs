@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use cdda_protocol::WorldEventKind;
 
-pub const SCENARIO_FORMAT_VERSION: u16 = 3;
-pub const OBSERVATION_FORMAT_VERSION: u16 = 2;
+pub const SCENARIO_FORMAT_VERSION: u16 = 4;
+pub const OBSERVATION_FORMAT_VERSION: u16 = 3;
 const MAX_ALIASES: usize = 512;
 const MAX_ALIAS_BYTES: usize = 64;
 const MAX_CHUNKS: usize = 121;
@@ -115,6 +115,11 @@ pub enum ScenarioCommandV1 {
     Reload {
         ammunition: String,
         target_pocket_index: Option<u16>,
+    },
+    RemovePocketItem {
+        owner_item: String,
+        pocket_index: u16,
+        contained_item: String,
     },
     Wait,
 }
@@ -599,6 +604,15 @@ fn resolve_command(
             ammunition_item: item_id(ammunition)?,
             target_pocket_index: *target_pocket_index,
         },
+        ScenarioCommandV1::RemovePocketItem {
+            owner_item,
+            pocket_index,
+            contained_item,
+        } => CommandKind::RemovePocketItem {
+            owner_item: item_id(owner_item)?,
+            pocket_index: *pocket_index,
+            contained_item: item_id(contained_item)?,
+        },
         ScenarioCommandV1::Wait => CommandKind::Wait,
     })
 }
@@ -792,7 +806,7 @@ fn scenario_event_trace_hash(
 ) -> Result<[u8; 32], ConformanceError> {
     let encoded = postcard::to_stdvec(event_batches)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"CddaScenarioEventsV3\0");
+    hasher.update(b"CddaScenarioEventsV4\0");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -867,14 +881,14 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xfa, 0x87, 0xbc, 0x22, 0xb2, 0x1b, 0x78, 0xe3, 0x3b, 0xd7, 0xf9, 0xc1, 0x57,
-                    0xbb, 0x49, 0x52, 0x4b, 0x30, 0x7c, 0x6a, 0xfb, 0x6d, 0x18, 0x38, 0x77, 0xa8,
-                    0x2f, 0xcc, 0x8a, 0x24, 0xb4, 0x59,
+                    0x71, 0x4d, 0x44, 0x8d, 0xda, 0x9a, 0x36, 0x0f, 0x26, 0xaf, 0xe7, 0x09, 0xbb,
+                    0xac, 0x8b, 0x3b, 0xe5, 0x18, 0xe3, 0x38, 0x6c, 0xa6, 0xee, 0x33, 0x8b, 0xb4,
+                    0x8f, 0x13, 0x88, 0xe6, 0xe0, 0xce,
                 ],
                 event_trace_hash: [
-                    0x77, 0xce, 0x38, 0x03, 0x98, 0x94, 0x6a, 0xf9, 0x1c, 0x55, 0x78, 0x58, 0x7a,
-                    0x93, 0x6e, 0x79, 0xa6, 0xdf, 0x15, 0x2f, 0xec, 0xab, 0x4d, 0x32, 0x55, 0x4f,
-                    0x50, 0x2c, 0x11, 0xb8, 0x18, 0xf5,
+                    0x7e, 0xd8, 0x14, 0x0b, 0xfd, 0x64, 0x35, 0x18, 0x0b, 0xc8, 0x94, 0xcb, 0x1d,
+                    0xc2, 0x85, 0x71, 0x2e, 0x83, 0x8c, 0xf5, 0x04, 0xb1, 0x77, 0x16, 0x14, 0x0c,
+                    0x78, 0x43, 0xba, 0xdb, 0x6f, 0xa3,
                 ],
                 actors: vec![ScenarioActorExpectationV1 {
                     actor: String::from("survivor"),
@@ -996,11 +1010,13 @@ mod tests {
                             pocket_index: 1,
                             pocket_id: String::from("PRIMARY"),
                             compatible_magazine_type_ids: vec![String::from("light_battery")],
+                            unloadable: true,
                         },
                         MagazineWellPrototypeV1 {
                             pocket_index: 4,
                             pocket_id: String::from("AUXILIARY"),
                             compatible_magazine_type_ids: vec![String::from("heavy_battery")],
+                            unloadable: true,
                         },
                     ],
                     Some(PoweredToolStateV1 {
@@ -1229,6 +1245,69 @@ mod tests {
                         source_charges_remaining: 4,
                         ..
                     }
+                )
+            })
+        }));
+
+        let mut round_trip = scenario;
+        round_trip
+            .ground_items
+            .iter_mut()
+            .find(|item| item.alias == "ammunition")
+            .expect("ammunition fixture should exist")
+            .charges = 6;
+        round_trip.steps.push(ScenarioStepV1::Command {
+            actor: String::from("survivor"),
+            command: ScenarioCommandV1::RemovePocketItem {
+                owner_item: String::from("cell"),
+                pocket_index: 3,
+                contained_item: String::from("ammunition"),
+            },
+        });
+        round_trip.steps.push(ScenarioStepV1::Advance { ticks: 25 });
+        let direct_round_trip = run_scenario(&round_trip, ScenarioMode::Direct)
+            .expect("whole-stack pocket round trip should run directly");
+        for mode in [
+            ScenarioMode::SnapshotEachTick,
+            ScenarioMode::SqliteRecovery,
+            ScenarioMode::PortableReplay,
+        ] {
+            assert_eq!(
+                run_scenario(&round_trip, mode).expect("pocket removal should replay"),
+                direct_round_trip,
+                "{mode} must preserve whole-stack removal identity"
+            );
+        }
+        let actor = direct_round_trip
+            .final_snapshot
+            .actors
+            .first()
+            .expect("round-trip actor should remain");
+        assert!(
+            actor
+                .inventory
+                .iter()
+                .find(|item| item.type_id == "test_cell")
+                .expect("round-trip cell should remain")
+                .integral_magazines[0]
+                .loaded_ammunition
+                .is_none()
+        );
+        let ammunition = actor
+            .inventory
+            .iter()
+            .find(|item| item.type_id == "battery")
+            .expect("whole stack should return to inventory");
+        assert_eq!(ammunition.charges, 6);
+        assert!(direct_round_trip.event_batches.iter().any(|batch| {
+            batch.events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    WorldEventKind::PocketItemRemoved {
+                        contained_item,
+                        charges: 6,
+                        ..
+                    } if contained_item == ammunition.id
                 )
             })
         }));

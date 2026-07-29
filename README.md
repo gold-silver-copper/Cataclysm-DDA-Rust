@@ -557,6 +557,22 @@ direct execution, per-tick restore, SQLite recovery, and portable replay.
 Databases below schema 55 that contain serialized state are rejected before
 mutation.
 
+Protocol 78 advances to schema 56, CanonicalStateV54, and CanonicalEventsV17.
+The server now accepts an explicit stable-ID `RemovePocketItem` command for
+item-backed integral magazines and detachable magazine wells. Successful
+removal returns the exact contained object to top-level inventory without
+allocating a replacement ID. Pinned `NO_UNLOAD`, stale contained identities,
+active power wells, and full inventories reject before mutation. Fractionally
+depleted battery ammunition becomes a valid loose item: its sub-charge energy
+follows the stable ammunition identity out of an integral pocket and moves back
+into that pocket on reload without rounding or loss. Charged fractional items
+cannot be silently consumed as crafting/construction components or disassembled.
+The Bevy client exposes deterministic removal with `Y`, while conformance
+scenario format 4 and observation format 3 prove whole-stack removal through
+direct execution, per-tick restore, SQLite recovery, and portable replay.
+Databases below schema 56 that contain serialized state are rejected before
+mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -841,9 +857,10 @@ is commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05` in
 binds the ledger to the current protocol, persistence schema, replay format,
 and baseline while rejecting missing Rust paths, duplicate priorities, unknown
 dependencies, and cycles. The leaf `cdda-conformance` crate runs versioned
-item-flow and indexed multi-well scenarios plus checked-in semantic/hash
-expectations through direct headless simulation, per-tick snapshot restoration,
-SQLite recovery, and portable replay verification.
+item-flow, indexed multi-well, and item-backed split/removal scenarios plus
+checked-in semantic/hash expectations through direct headless simulation,
+per-tick snapshot restoration, SQLite recovery, and portable replay
+verification.
 The separate C++ oracle provides the first real-upstream item-pocket kernel;
 additional kernels still require explicit versioned adapters.
 

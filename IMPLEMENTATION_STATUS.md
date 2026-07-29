@@ -45,6 +45,17 @@ pockets. General container contents are the next containment boundary.
   behavior, and generalize the server's storage admission beyond a
   battery-only helper. Six reversible detachable-tool definitions now use
   modeled unload-before-disassembly instead of the prior empty-charge gate.
+- Protocol 78/schema 56/CanonicalStateV54/CanonicalEventsV17 add explicit,
+  server-authoritative stable-ID removal from integral magazines and detachable
+  wells. Whole contained objects return to top-level inventory without ID
+  allocation; pinned `NO_UNLOAD`, stale IDs, active power wells, and inventory
+  capacity reject atomically. Fractional battery energy follows loose battery
+  ammunition through unload/reload without rounding or identity loss, and such
+  state is excluded from destructive component and disassembly paths. The
+  client selects the first removable canonical pocket with `Y`; conformance
+  scenario format 4/observation format 3 cover whole-stack removal through all
+  four execution/recovery modes. Pre-56 serialized state rejects before
+  mutation.
 - Protocol 77/schema 55/CanonicalStateV53/CanonicalEventsV16 add strict
   item-backed integral MAGAZINE pockets to Protocol 76's ordered detachable
   wells. Whole-stack reload preserves the source ID; partial transfer into an
@@ -1036,6 +1047,10 @@ Run on Apple-silicon macOS on 2026-07-28:
   battery debit/residual energy, recursive snapshot/ID validation,
   CanonicalStateV53/CanonicalEventsV16, and schema-55 direct/snapshot/SQLite/
   portable-replay equivalence,
+  plus Protocol 78's explicit stable-ID integral/well removal, fractional loose
+  battery unload/reload, atomic access/identity/capacity rejections,
+  CanonicalStateV54/CanonicalEventsV17, and schema-56 direct/snapshot/SQLite/
+  portable-replay equivalence,
   deterministic legacy byproduct capacity/cancel/order validation, and
   mid-craft recovery/replay, plus forged-book-payload normalization and
   interrupted/offline book-study recovery/replay. Exact-prerequisite terrain
@@ -1740,6 +1755,12 @@ Run on Apple-silicon macOS on 2026-07-28:
   starter cell, CanonicalStateV53/CanonicalEventsV16, schema-55 recovery, and
   direct/snapshot/SQLite/portable-replay conformance. General container
   contents remain the next containment boundary.
+- Protocol 78 adds explicit server-authoritative removal from integral and
+  detachable pockets, preserving contained IDs and fractional battery energy
+  across lossless unload/reload. Access, stale-ID, active-power, and capacity
+  failures are atomic; CanonicalStateV54/CanonicalEventsV17, schema-56 recovery,
+  and direct/snapshot/SQLite/portable-replay conformance cover the boundary.
+  General container contents remain the next containment boundary.
 
 ## Next tasks
 

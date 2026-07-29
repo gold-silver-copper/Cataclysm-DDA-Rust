@@ -47,8 +47,12 @@ canonical pocket index/ID, capacity, ammunition category, and inherited
 `NO_RELOAD`/`NO_UNLOAD` access into item-backed runtime storage. Whole and
 partial authoritative reloads retain or allocate nested stable IDs explicitly,
 and detachable battery cells derive their energy from contained `battery`
-items. This does not yet imply general CONTAINER pockets, speedloaders,
-casings/ejection behavior, grids, UPS, or arbitrary power parity.
+items. Explicit authoritative removal returns integral ammunition or detachable
+magazines to top-level inventory with the same stable ID; fractional battery
+energy follows its loose battery item and can round-trip without loss. Pinned
+`NO_UNLOAD`, stale contained IDs, active power wells, and full inventories fail
+closed before mutation. This does not yet imply general CONTAINER pockets,
+speedloaders, casings/ejection behavior, grids, UPS, or arbitrary power parity.
 Inherited `power_draw` quantities normalize W/kW/mW to exact integer
 milliwatts, while inherited `light` and `revert_to` remain
 strict scalar projections. A deliberately narrow transform projection accepts

@@ -20,10 +20,10 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 55;
-/// Old Postcard snapshots and journals cannot be decoded after the Protocol 77
-/// item-backed ammunition layout change. Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 55;
+pub const SCHEMA_VERSION: i64 = 56;
+/// Old Postcard snapshots and journals cannot be decoded after the Protocol 78
+/// pocket-access layout change. Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 56;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -7405,6 +7405,7 @@ mod tests {
                     pocket_index: 0,
                     pocket_id: String::new(),
                     compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+                    unloadable: true,
                 }),
                 0,
                 Some(PoweredToolStateV1 {
