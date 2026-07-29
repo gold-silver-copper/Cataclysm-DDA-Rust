@@ -4,13 +4,13 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `761962583d359c0992af3d6a4d1ec10c41a30905`
-  (`Preserve item group modifier phases`).
-- Checkpoint binding: the current protocol-domain extraction is a candidate
-  based on the exact verified implementation above; it is not yet a
-  green checkpoint and no later subsystem is in progress.
-- Active milestone: `regional-terrain-base`; active prerequisite:
-  `protocol-domain-modules` item-group ownership extraction.
+- Verified green commit: `de09724a27064d293041ce1cf4df5e458ac403a7`
+  (`Extract protocol item group domain`).
+- Checkpoint binding: this docs-only commit binds the reviewed implementation
+  above; no later subsystem is in progress.
+- Active milestone: `regional-terrain-base`; the
+  `protocol-domain-modules` milestone remains in progress with item-group
+  ownership complete.
 - Runtime: protocol 85, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 63, replay format 3, CanonicalStateV61, and
   CanonicalEventsV18.
@@ -181,36 +181,25 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Verified commit `761962583d359c0992af3d6a4d1ec10c41a30905` is green for formatting,
-strict all-target/all-feature Clippy, rustdoc with warnings denied, workspace
-all-target/all-feature check, and the full 338-test workspace suite plus
-doc-tests. Repository dependency-boundary, parity-ledger, weighted-runtime,
-astronomy, selected-content manifest, generated-inventory, and JSON syntax
-gates pass. The pinned default server loads all 7,621 item-group definitions
-and retains 521 admitted furniture bashes. The previous 539 included six
-degrading vehicle-part paths, one default-container path, three constructor-RNG
-paths, three constructor-state paths, and five temperature-state paths that are
-now explicitly rejected rather than projected.
-Real-C++ pocket, item-group, and mapgen oracles pass 8, 42, and 17 assertions
-respectively. The fixed upstream checkout
-is clean at `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, the two inventory support
-changes were audited. The only canonical hash change is the V60-to-V61 domain
-separator, while the structural-bash nail expectation changes from 6 to 4 for
-the corrected RNG phase detailed above. An independent reviewer audited the
-complete 20-file patch against `40f24489282c1f9c3aeeaf66b71142eab78be98e`,
-validated and resolved all findings, and found no remaining P0-P3 issue. The
-durable scoped record is
-`docs/reviews/protocol-85-item-modifier-presence.md`.
+Verified commit `de09724a27064d293041ce1cf4df5e458ac403a7` is green for the complete
+30-test protocol suite, formatting, strict all-target/all-feature Clippy,
+rustdoc with warnings denied, workspace all-target/all-feature check, the full
+338-test workspace suite, and doc-tests. Dependency-boundary, parity-ledger,
+weighted-runtime, astronomy, selected-content manifest, generated-inventory,
+JSON, and diff gates pass. The pinned default server still loads all 7,621
+item-group definitions and retains the audited 521 furniture bashes; runtime
+evidence remains four definitions and 44 weighted points.
 
-The protocol-domain candidate passes the complete 30-test protocol
-suite, formatting, strict all-target/all-feature Clippy, rustdoc with warnings
-denied, workspace all-target/all-feature check, the full 338-test workspace
-suite, and doc-tests. Dependency-boundary, parity-ledger, weighted-runtime,
-astronomy, selected-content manifest, generated-inventory, JSON, and diff gates
-pass. The 424-line moved evaluator/validation block is textually identical
-after normalizing only its required parent visibility, and the pinned C++
-pocket/item-group/mapgen oracles pass 8/42/17 assertions. It does not replace
-the verified commit above until independent review is complete.
+The 424-line evaluator/validation block, 94-line DTO block, and all five bounds
+are textually identical to the verified parent after normalizing only the
+required `pub(super)` closure-check visibility. Every formerly public item is
+re-exported at the same crate-root path. The pinned C++ pocket, item-group, and
+mapgen oracles pass 8, 42, and 17 assertions. The fixed upstream checkout is
+clean at `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
+`210f31db2e8b2f0caed1809f1a66781859f9d129`. An independent reviewer audited
+the exact five-file patch against `e58f03793bda51db257a0374b8905fe694767c01`,
+found no P0-P3 issue, and independently reproduced the gates. The durable
+scoped record is `docs/reviews/protocol-item-group-domain-extraction.md`.
 
 ## Next dependency boundary
 
@@ -242,5 +231,5 @@ Protocol 85/schema 63 is the fixed-zero modifier-presence batch. Batch the
 remaining item-state damage/variant representation with its persistence changes,
 and batch general containment separately; do not bump versions for mechanical
 module moves or unchanged encodings. The item-group protocol ownership
-prerequisite is implemented in this candidate and must be green and reviewed
-before that representation expands.
+prerequisite is now green and reviewed; the next representation increment must
+remain within the coherent field-closure family.
