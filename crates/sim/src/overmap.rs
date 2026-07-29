@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use cdda_protocol::{ChunkCoord, WorldgenCatalogV1, worldgen_omt_matches};
+use cdda_protocol::{
+    ChunkCoord, WorldgenCatalogV1, worldgen_omt_identity_at, worldgen_omt_matches,
+};
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 
@@ -38,14 +40,11 @@ pub(super) fn start_location_omt_order(
         .targets
         .get(target_index)
         .ok_or(SimError::InvalidTerrain)?;
-    if !worldgen_omt_matches(&target.omt, target.match_type, &catalog.default_omt) {
-        return Ok(Some(Vec::new()));
-    }
-
-    // The current bootstrap owns one explicit identity shared by every
-    // generated coordinate. This boundary is ready for coordinate-owned
-    // identities without changing target selection or actor placement.
     let mut cells = mapgen::generated_omt_coords(chunks)?;
+    cells.retain(|omt| {
+        worldgen_omt_identity_at(catalog, *omt)
+            .is_some_and(|identity| worldgen_omt_matches(&target.omt, target.match_type, identity))
+    });
     for upper in (1..cells.len()).rev() {
         let upper = u64::try_from(upper).map_err(|_| SimError::NumericOverflow)?;
         let chosen = usize::try_from(inclusive_rng_u64(&mut rng, 0, upper))
@@ -55,13 +54,13 @@ pub(super) fn start_location_omt_order(
             chosen,
         );
     }
-    // The bootstrap world still places its playable starter loadout and first
-    // encounter beside the origin. Keep that ordinary path intact while every
-    // generated OMT has the same temporary identity; randomized matching cells
-    // remain deterministic overflow capacity for multiplayer joins.
-    let origin = ChunkCoord { x: 0, y: 0, z: 0 };
-    if let Some(origin_index) = cells.iter().position(|cell| *cell == origin) {
-        cells.swap(0, origin_index);
+    // Preserve the playable bootstrap only for a uniform single-identity
+    // layout. Heterogeneous layouts retain the seeded upstream-style order.
+    if catalog.overmap.identities.len() == 1 {
+        let origin = ChunkCoord { x: 0, y: 0, z: 0 };
+        if let Some(origin_index) = cells.iter().position(|cell| *cell == origin) {
+            cells.swap(0, origin_index);
+        }
     }
     Ok(Some(cells))
 }

@@ -2856,3 +2856,53 @@ bashing/opening reachability, and NPC accommodation are not claimed; starts
 requesting their explicit flags remain fail closed. These boundaries avoid
 smuggling a hash-grid approximation into the later city/special/road/forest
 overmap population engine.
+
+## Bounded coordinate-owned overmap layout and identity routing
+
+Protocol 83 advances to worldgen algorithm 2, schema 61, and
+CanonicalStateV59 while retaining CanonicalEventsV18. The single repeated
+`default_omt` field is replaced by a canonical 180x180 layout with explicit
+origin, strictly z-sorted layers, full-ID-sorted identities, and canonical
+row-major RLE runs. Every layer expands to exactly 32,400 cells, z=0 is
+mandatory, every retained identity must be used, every generator must exist,
+and coordinates outside the retained region fail closed. The fixed size follows
+the pinned upstream overmap dimension; adjacent-overmap ownership is deferred
+rather than inferred from a hash grid.
+
+The selected-content OMT registry finalizes inheritance and load-order overlays
+while retaining unsupported field names. It derives ordinary north/east/south/
+west peers, the complete pinned 16-entry linear table, and nonrotating peers.
+Each identity carries full, type, subtype, generator, and clockwise quarter-turn
+rotation explicitly. Linear mapgen routing and inverse rotation follow the
+pinned `om_lines` table and are checked by the real C++ oracle.
+
+Local generation first resolves all source-phase template, terrain, furniture,
+item-group, and regional choices from the coordinate-owned generator stream.
+Only the completed terrain, furniture, and item placements rotate. This keeps
+RNG consumption independent of orientation and applies one coordinate transform
+to every generated layer. Start targets now filter the identities actually
+owned by generated coordinates. Every start flag, city constraint, parameter,
+and z=0 exclusion remains closed until its placement semantics exist.
+
+Runtime admission requires the entire initial active bubble to fit inside the
+layout and every possible start target to have a candidate in that durable
+bubble. Character creation does not generate terrain because its persistence
+transaction currently commits only the character spawn; remote-only starts
+therefore fail closed until worldgen mutations join that transaction. Uniform
+single-identity layouts keep origin affinity for the playable bootstrap, while
+heterogeneous layouts retain the seeded shuffle. Movement that would prefetch
+past the fixed boundary is rejected as blocked without aborting the tick.
+Snapshot restore cross-validates every complete 2x2 OMT against an owned layout
+coordinate and z-layer.
+
+The production layout intentionally repeats `lmoe_north` inside the new
+representation. Pinned regional settings identify `field` as the real z=0 base,
+but its named loot closure reaches `everyday_corpse` entries with the general
+`damage` modifier and later container behavior. Canonical items cannot yet
+represent that family, so strict startup tests preserve the rejection rather
+than deleting the rare group edge or its output. A heterogeneous synthetic
+layout proves coordinate dispatch, shared terrain/furniture/item rotation,
+matching-only authoritative character placement, snapshot stability, and
+atomic out-of-layout failure; the shared scenario proves direct, per-tick
+snapshot, SQLite, and portable-replay equivalence. Regional population replaces
+the LMOE fill only after the complete field dependency closure is supported.

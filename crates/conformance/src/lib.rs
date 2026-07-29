@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x68, 0xcf, 0x36, 0x9b, 0x8e, 0x35, 0xb9, 0xb2, 0xc7, 0x61, 0x3d, 0x27, 0x34,
-                    0x36, 0xc0, 0xa2, 0x02, 0xc7, 0x23, 0x92, 0x71, 0x13, 0xd6, 0x29, 0xe9, 0xc1,
-                    0xa3, 0x4a, 0x9a, 0x56, 0xe0, 0xa1,
+                    0xce, 0xd7, 0x7c, 0x1d, 0xd1, 0xcd, 0xaa, 0xb7, 0xb3, 0x0f, 0xbf, 0x20, 0x2a,
+                    0x15, 0xe0, 0xaa, 0xe5, 0x45, 0x48, 0xe5, 0xa4, 0xbe, 0xb1, 0x1b, 0x9b, 0x70,
+                    0x74, 0x17, 0xb6, 0xe9, 0x4e, 0x11,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1060,8 +1060,8 @@ mod tests {
 
     #[test]
     fn start_location_spawns_are_identical_across_all_conformance_modes() {
-        let terrain = TerrainTileSnapshot {
-            terrain_id: String::from("t_lmoe_floor"),
+        let terrain = |terrain_id: &str| TerrainTileSnapshot {
+            terrain_id: terrain_id.to_owned(),
             move_cost: 2,
             transparent: true,
             flat: true,
@@ -1074,9 +1074,9 @@ mod tests {
             close_transparent: None,
             close_flat: None,
         };
-        let cell = cdda_protocol::WorldgenCellV1 {
+        let cell = |prototype_index| cdda_protocol::WorldgenCellV1 {
             terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
-                target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(0),
+                target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(prototype_index),
                 weight: 1,
             }],
             furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
@@ -1086,12 +1086,46 @@ mod tests {
             item_group: None,
         };
         let worldgen = WorldgenCatalogV1 {
-            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
-            default_omt: cdda_protocol::WorldgenOmtIdentityV1 {
-                full_id: String::from("lmoe_north"),
-                type_id: String::from("lmoe"),
-                subtype_id: String::from("lmoe"),
-                generator_id: String::from("lmoe"),
+            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+            overmap: cdda_protocol::WorldgenOvermapLayoutV1 {
+                origin_x: -90,
+                origin_y: -90,
+                identities: vec![
+                    cdda_protocol::WorldgenOmtIdentityV1 {
+                        full_id: String::from("field"),
+                        type_id: String::from("field"),
+                        subtype_id: String::from("field"),
+                        generator_id: String::from("field"),
+                        rotation: 0,
+                    },
+                    cdda_protocol::WorldgenOmtIdentityV1 {
+                        full_id: String::from("lmoe_north"),
+                        type_id: String::from("lmoe"),
+                        subtype_id: String::from("lmoe"),
+                        generator_id: String::from("lmoe"),
+                        rotation: 0,
+                    },
+                ],
+                layers: vec![cdda_protocol::WorldgenOvermapLayerV1 {
+                    z: 0,
+                    runs: vec![
+                        cdda_protocol::WorldgenOvermapRunV1 {
+                            identity_index: 0,
+                            length: 90 * u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH) + 90,
+                        },
+                        cdda_protocol::WorldgenOvermapRunV1 {
+                            identity_index: 1,
+                            length: 1,
+                        },
+                        cdda_protocol::WorldgenOvermapRunV1 {
+                            identity_index: 0,
+                            length: u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH)
+                                * u32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT)
+                                - (90 * u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH) + 90)
+                                - 1,
+                        },
+                    ],
+                }],
             },
             start_location: Some(cdda_protocol::WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_lmoe"),
@@ -1100,17 +1134,26 @@ mod tests {
                     match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
                 }],
             }),
-            terrain_prototypes: vec![terrain],
+            terrain_prototypes: vec![terrain("t_field"), terrain("t_lmoe_floor")],
             furniture_prototypes: Vec::new(),
             regional_terrain: Vec::new(),
             regional_furniture: Vec::new(),
-            omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
-                omt_id: String::from("lmoe"),
-                templates: vec![cdda_protocol::WorldgenTemplateV1 {
-                    weight: 1,
-                    cells: vec![cell; cdda_protocol::WORLDGEN_CELLS_PER_OMT],
-                }],
-            }],
+            omt_generators: vec![
+                cdda_protocol::WorldgenOmtGeneratorV1 {
+                    omt_id: String::from("field"),
+                    templates: vec![cdda_protocol::WorldgenTemplateV1 {
+                        weight: 1,
+                        cells: vec![cell(0); cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                    }],
+                },
+                cdda_protocol::WorldgenOmtGeneratorV1 {
+                    omt_id: String::from("lmoe"),
+                    templates: vec![cdda_protocol::WorldgenTemplateV1 {
+                        weight: 1,
+                        cells: vec![cell(1); cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                    }],
+                },
+            ],
         };
         let actor = |alias: &str| ScenarioActorV1 {
             alias: alias.to_owned(),

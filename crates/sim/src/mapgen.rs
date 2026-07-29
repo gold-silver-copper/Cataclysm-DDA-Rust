@@ -3,7 +3,8 @@ use cdda_protocol::{
     ItemGroupSourceV1, WorldPosition, WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1,
     WorldgenFurnitureTargetV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
     WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
+    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_omt_identity_at,
+    worldgen_omt_matches, worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -21,13 +22,6 @@ pub(super) fn catalog_fits_one_id_reservation(
     item_groups: &[ItemGroupDefinitionV1],
     radius_submaps: i32,
 ) -> bool {
-    let Some(generator) = catalog
-        .omt_generators
-        .iter()
-        .find(|generator| generator.omt_id == catalog.default_omt.generator_id)
-    else {
-        return false;
-    };
     let Some(omt_cells_per_axis) = u64::try_from(radius_submaps)
         .ok()
         .and_then(|radius| radius.checked_add(1))
@@ -37,25 +31,68 @@ pub(super) fn catalog_fits_one_id_reservation(
     let Some(maximum_new_omts) = omt_cells_per_axis.checked_mul(omt_cells_per_axis) else {
         return false;
     };
-    generator.templates.iter().all(|template| {
-        let maximum_per_omt = template.cells.iter().try_fold(0_u64, |total, cell| {
-            let outputs = cell.item_group.as_ref().map_or(Some(0), |placement| {
-                item_group_source_max_outputs(
-                    &ItemGroupSourceV1::Group(placement.group_id.clone()),
-                    item_groups,
-                )
-            })?;
-            total.checked_add(outputs)
-        });
-        maximum_per_omt
-            .and_then(|maximum| maximum.checked_mul(maximum_new_omts))
-            .is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
+    catalog.omt_generators.iter().all(|generator| {
+        generator.templates.iter().all(|template| {
+            let maximum_per_omt = template.cells.iter().try_fold(0_u64, |total, cell| {
+                let outputs = cell.item_group.as_ref().map_or(Some(0), |placement| {
+                    item_group_source_max_outputs(
+                        &ItemGroupSourceV1::Group(placement.group_id.clone()),
+                        item_groups,
+                    )
+                })?;
+                total.checked_add(outputs)
+            });
+            maximum_per_omt
+                .and_then(|maximum| maximum.checked_mul(maximum_new_omts))
+                .is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
+        })
     })
 }
 
 pub(super) struct PlannedBubble {
     pub chunks: Vec<Chunk>,
     pub items: Vec<(WorldPosition, CraftItemPrototypeV1)>,
+}
+
+pub(super) fn catalog_initial_bubble_is_admissible(
+    catalog: &WorldgenCatalogV1,
+    center: ChunkCoord,
+    radius_submaps: i32,
+) -> bool {
+    let Some(minimum_submap_x) = center.x.checked_sub(radius_submaps) else {
+        return false;
+    };
+    let Some(maximum_submap_x) = center.x.checked_add(radius_submaps) else {
+        return false;
+    };
+    let Some(minimum_submap_y) = center.y.checked_sub(radius_submaps) else {
+        return false;
+    };
+    let Some(maximum_submap_y) = center.y.checked_add(radius_submaps) else {
+        return false;
+    };
+    let minimum_omt_x = minimum_submap_x.div_euclid(OMT_SUBMAP_WIDTH);
+    let maximum_omt_x = maximum_submap_x.div_euclid(OMT_SUBMAP_WIDTH);
+    let minimum_omt_y = minimum_submap_y.div_euclid(OMT_SUBMAP_WIDTH);
+    let maximum_omt_y = maximum_submap_y.div_euclid(OMT_SUBMAP_WIDTH);
+    let mut candidates = Vec::new();
+    for y in minimum_omt_y..=maximum_omt_y {
+        for x in minimum_omt_x..=maximum_omt_x {
+            let Some(identity) = worldgen_omt_identity_at(catalog, ChunkCoord { x, y, z: 0 })
+            else {
+                return false;
+            };
+            candidates.push(identity);
+        }
+    }
+    let Some(start) = catalog.start_location.as_ref() else {
+        return true;
+    };
+    start.targets.iter().all(|target| {
+        candidates
+            .iter()
+            .any(|identity| worldgen_omt_matches(&target.omt, target.match_type, identity))
+    })
 }
 
 pub(super) fn plan_active_bubble(
@@ -65,7 +102,7 @@ pub(super) fn plan_active_bubble(
     existing: &std::collections::BTreeMap<ChunkCoord, Chunk>,
     center: ChunkCoord,
     radius_submaps: i32,
-) -> Result<PlannedBubble, SimError> {
+) -> Result<Option<PlannedBubble>, SimError> {
     let minimum_submap_x = center
         .x
         .checked_sub(radius_submaps)
@@ -101,6 +138,9 @@ pub(super) fn plan_active_bubble(
                 y: omt_y,
                 z: center.z,
             };
+            if worldgen_omt_identity_at(catalog, omt).is_none() {
+                return Ok(None);
+            }
             let chunk_coords = omt_chunk_coords(omt)?;
             let present = chunk_coords
                 .iter()
@@ -120,18 +160,22 @@ pub(super) fn plan_active_bubble(
             }
         }
     }
-    Ok(planned)
+    Ok(Some(planned))
 }
 
-pub(super) fn generated_cells_are_complete(
+pub(super) fn generated_cells_match_layout(
+    catalog: &WorldgenCatalogV1,
     chunks: &std::collections::BTreeMap<ChunkCoord, Chunk>,
 ) -> bool {
-    for coord in chunks.keys().filter(|coord| coord.z == 0) {
+    for coord in chunks.keys() {
         let omt = ChunkCoord {
             x: coord.x.div_euclid(OMT_SUBMAP_WIDTH),
             y: coord.y.div_euclid(OMT_SUBMAP_WIDTH),
             z: coord.z,
         };
+        if !worldgen_overmap_contains(catalog, omt) {
+            return false;
+        }
         let Ok(cell) = omt_chunk_coords(omt) else {
             return false;
         };
@@ -169,10 +213,11 @@ fn plan_omt_cell(
     item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
     omt: ChunkCoord,
 ) -> Result<PlannedBubble, SimError> {
+    let identity = worldgen_omt_identity_at(catalog, omt).ok_or(SimError::InvalidTerrain)?;
     let generator = catalog
         .omt_generators
         .iter()
-        .find(|generator| generator.omt_id == catalog.default_omt.generator_id)
+        .find(|generator| generator.omt_id == identity.generator_id)
         .ok_or(SimError::InvalidTerrain)?;
     let mut rng = coordinate_rng(
         world_seed,
@@ -239,14 +284,63 @@ fn plan_omt_cell(
         {
             return Err(SimError::InvalidTerrain);
         }
-        let x = index % OMT_TILE_WIDTH;
-        let y = index / OMT_TILE_WIDTH;
+        let (x, y) = rotate_tile_xy(
+            index % OMT_TILE_WIDTH,
+            index / OMT_TILE_WIDTH,
+            identity.rotation,
+        )?;
         items.push((omt_tile_position(omt, x, y)?, prototype));
     }
+    let (terrain, furniture) = rotate_tiles(terrain, furniture, identity.rotation)?;
     Ok(PlannedBubble {
         chunks: chunks_from_tiles(omt, terrain, furniture)?.into(),
         items,
     })
+}
+
+fn rotate_tile_xy(x: usize, y: usize, rotation: u8) -> Result<(usize, usize), SimError> {
+    let edge = OMT_TILE_WIDTH - 1;
+    match rotation {
+        0 => Ok((x, y)),
+        1 => Ok((edge.checked_sub(y).ok_or(SimError::InvalidTerrain)?, x)),
+        2 => Ok((
+            edge.checked_sub(x).ok_or(SimError::InvalidTerrain)?,
+            edge.checked_sub(y).ok_or(SimError::InvalidTerrain)?,
+        )),
+        3 => Ok((y, edge.checked_sub(x).ok_or(SimError::InvalidTerrain)?)),
+        _ => Err(SimError::InvalidTerrain),
+    }
+}
+
+fn rotate_tiles(
+    terrain: Vec<cdda_protocol::TerrainTileSnapshot>,
+    furniture: Vec<Option<FurnitureTileSnapshot>>,
+    rotation: u8,
+) -> Result<
+    (
+        Vec<cdda_protocol::TerrainTileSnapshot>,
+        Vec<Option<FurnitureTileSnapshot>>,
+    ),
+    SimError,
+> {
+    if terrain.len() != OMT_TILE_COUNT || furniture.len() != OMT_TILE_COUNT {
+        return Err(SimError::InvalidTerrain);
+    }
+    if rotation == 0 {
+        return Ok((terrain, furniture));
+    }
+    let mut rotated_terrain = vec![terrain[0].clone(); OMT_TILE_COUNT];
+    let mut rotated_furniture = vec![None; OMT_TILE_COUNT];
+    for source_y in 0..OMT_TILE_WIDTH {
+        for source_x in 0..OMT_TILE_WIDTH {
+            let source = source_y * OMT_TILE_WIDTH + source_x;
+            let (target_x, target_y) = rotate_tile_xy(source_x, source_y, rotation)?;
+            let target = target_y * OMT_TILE_WIDTH + target_x;
+            rotated_terrain[target] = terrain[source].clone();
+            rotated_furniture[target] = furniture[source].clone();
+        }
+    }
+    Ok((rotated_terrain, rotated_furniture))
 }
 
 fn item_placement_succeeds(chance: u8, rng: &mut ChaCha8Rng) -> bool {
@@ -539,6 +633,18 @@ fn chunks_from_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clockwise_marker_rotation_matches_the_pinned_24_by_24_oracle() {
+        assert_eq!(rotate_tile_xy(2, 5, 0).expect("north"), (2, 5));
+        assert_eq!(rotate_tile_xy(2, 5, 1).expect("east"), (18, 2));
+        assert_eq!(rotate_tile_xy(2, 5, 2).expect("south"), (21, 18));
+        assert_eq!(rotate_tile_xy(2, 5, 3).expect("west"), (5, 21));
+        assert!(matches!(
+            rotate_tile_xy(2, 5, 4),
+            Err(SimError::InvalidTerrain)
+        ));
+    }
 
     #[test]
     fn weighted_singletons_consume_a_draw_but_fixed_singletons_do_not() {

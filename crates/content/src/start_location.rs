@@ -723,6 +723,14 @@ mod tests {
         assert_eq!(lmoe.targets[0].overmap_terrain, "lmoe");
         assert_eq!(lmoe.targets[0].match_type, OvermapTerrainMatchType::Type);
 
+        let field = registry
+            .get("sloc_field")
+            .expect("field start should exist");
+        assert!(!field.is_runtime_selectable_without_cities());
+        assert_eq!(field.flags, BTreeSet::from([String::from("ALLOW_OUTSIDE")]));
+        assert_eq!(field.targets.len(), 1);
+        assert_eq!(field.targets[0].overmap_terrain, "field");
+
         let shelter = registry
             .get("sloc_shelter_safe")
             .expect("evac shelter start should exist");

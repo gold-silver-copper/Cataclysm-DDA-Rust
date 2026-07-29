@@ -650,6 +650,38 @@ rating, mapgen parameters, preparation flags, and spawn groups remain explicit
 later boundaries. Databases below schema 60 that contain serialized state are
 rejected before mutation.
 
+Protocol 83 advances to worldgen algorithm 2, schema 61, and
+CanonicalStateV59 while retaining CanonicalEventsV18. Worlds now persist a
+bounded 180x180 coordinate-owned overmap layout as canonical z-sorted RLE
+layers over full/type/subtype/generator/rotation identities. Validation requires
+one exact surface layer, sorted and fully used identities, canonical runs,
+every referenced generator, and start targets that match a generated surface
+identity. Runtime admission additionally requires the complete initial bubble
+to fit and every possible start target to occur there. Coordinates outside the
+retained region fail closed; traversal into the prefetch boundary is an
+ordinary blocked command, not a simulation failure.
+
+The selected-content overmap-terrain registry finalizes inherited and
+load-order-overlaid definitions into ordinary four-way, all 16 linear, and
+nonrotating peers with the pinned mapgen subtype and clockwise rotation. Local
+mapgen dispatches from each coordinate's identity; terrain, furniture, and
+item choices retain source-phase RNG order and rotate only after completion.
+A heterogeneous fixture proves distinct adjacent generators, shared marker
+rotation, matching-only authoritative starts, atomic out-of-layout failure, and
+snapshot stability. Direct, per-tick snapshot, SQLite, and portable-replay
+conformance agree for a heterogeneous start layout. Character creation selects
+only already-generated durable OMTs, and restored snapshots reject complete
+cells outside the layout or on absent z-layers.
+
+The production layout deliberately remains filled with `lmoe_north` so the
+existing playable bootstrap stays exact to its admitted content. The real
+regional z=0 base is `field`, but its reachable loot closure enters
+`everyday_corpse.damage` and later general container semantics; strict runtime
+admission records and rejects that boundary instead of omitting rare results.
+Forest/city/road/river/special population and adjacent overmaps remain later
+work. Databases below schema 61 that contain serialized state are rejected
+before mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

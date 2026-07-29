@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 82;
+pub const PROTOCOL_VERSION: u16 = 83;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -80,7 +80,7 @@ pub const MAX_ITEM_GROUP_DEPTH: usize = 32;
 /// One item-group invocation cannot require more than one reserved ID block.
 pub const MAX_ITEM_GROUP_OUTPUTS: u64 = 4_096;
 /// Canonical implementation version for deterministic local-map generation.
-pub const WORLDGEN_GENERATOR_VERSION_V1: u16 = 1;
+pub const WORLDGEN_GENERATOR_VERSION_V2: u16 = 2;
 /// One overmap-terrain tile is exactly two 12x12 submaps on each axis.
 pub const WORLDGEN_SUBMAPS_PER_OMT_AXIS: usize = 2;
 pub const WORLDGEN_OMT_SIZE: usize = SUBMAP_SIZE as usize * WORLDGEN_SUBMAPS_PER_OMT_AXIS;
@@ -97,6 +97,13 @@ pub const MAX_WORLDGEN_CELL_CHOICES: usize = 32;
 pub const MAX_WORLDGEN_WEIGHTED_CELL_TARGETS: usize = 1_048_576;
 pub const MAX_WORLDGEN_ID_BYTES: usize = 512;
 pub const MAX_WORLDGEN_START_TARGETS: usize = 256;
+/// Pinned overmaps own 180x180 overmap-terrain coordinates per z-level.
+pub const WORLDGEN_OVERMAP_WIDTH: u16 = 180;
+pub const WORLDGEN_OVERMAP_HEIGHT: u16 = 180;
+pub const MAX_WORLDGEN_OMT_IDENTITIES: usize = 512;
+pub const MAX_WORLDGEN_OVERMAP_LAYERS: usize = 21;
+pub const MAX_WORLDGEN_OVERMAP_RUNS: usize =
+    WORLDGEN_OVERMAP_WIDTH as usize * WORLDGEN_OVERMAP_HEIGHT as usize;
 
 const fn default_true() -> bool {
     true
@@ -2432,6 +2439,34 @@ pub struct WorldgenOmtIdentityV1 {
     pub type_id: String,
     pub subtype_id: String,
     pub generator_id: String,
+    /// Pinned clockwise local-map quarter turns for this concrete OMT peer.
+    pub rotation: u8,
+}
+
+/// One canonical row-major run in a coordinate-owned overmap layer.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenOvermapRunV1 {
+    pub identity_index: u16,
+    pub length: u32,
+}
+
+/// One z-level of a pinned-size overmap. Runs expand to exactly 180x180 cells.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenOvermapLayerV1 {
+    pub z: i32,
+    pub runs: Vec<WorldgenOvermapRunV1>,
+}
+
+/// A bounded coordinate-owned overmap layout. Coordinates outside this region
+/// fail closed until adjacent-overmap generation is implemented.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenOvermapLayoutV1 {
+    pub origin_x: i32,
+    pub origin_y: i32,
+    /// Full-ID-sorted concrete identities referenced by compact run indices.
+    pub identities: Vec<WorldgenOmtIdentityV1>,
+    /// Strictly z-sorted layers, including z=0.
+    pub layers: Vec<WorldgenOvermapLayerV1>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2452,8 +2487,8 @@ pub struct WorldgenStartTargetV1 {
 /// One city-independent, parameter-free, map-preparation-free starting
 /// location admitted by the current runtime. Target order remains source order
 /// because upstream chooses one target uniformly before searching terrain.
-/// While coordinates share one bootstrap identity, every retained target must
-/// match that identity so no deterministic character sequence can dead-end.
+/// Runtime admission requires every retained target to match a coordinate in
+/// the durable initial bubble so character creation never generates terrain.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenStartLocationV1 {
     pub start_location_id: String,
@@ -2464,9 +2499,8 @@ pub struct WorldgenStartLocationV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenCatalogV1 {
     pub generator_version: u16,
-    /// Bootstrap identity repeated until the real overmap population engine
-    /// supplies coordinate-owned identities. Its generator must exist below.
-    pub default_omt: WorldgenOmtIdentityV1,
+    /// Immutable coordinate-owned terrain selection retained with the world.
+    pub overmap: WorldgenOvermapLayoutV1,
     /// Server-authoritative spawn selector for new characters.
     pub start_location: Option<WorldgenStartLocationV1>,
     /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
@@ -2663,8 +2697,8 @@ pub struct WorldSnapshotV1 {
     pub furniture_bash_types: Vec<FurnitureBashTypeV1>,
     /// Item-type-ID-sorted strict player-smashing profiles.
     pub smash_item_types: Vec<SmashItemTypeV1>,
-    /// Immutable normalized mapgen definitions plus the bootstrap OMT identity
-    /// and server-authoritative start selector.
+    /// Immutable coordinate-owned layout and normalized mapgen definitions,
+    /// plus the server-authoritative start selector.
     /// Generated four-submap cells live in `chunks`; the catalog is retained
     /// so recovery never rereads mutable external content.
     pub worldgen: Option<WorldgenCatalogV1>,
@@ -4104,11 +4138,13 @@ fn valid_worldgen_omt_identity(identity: &WorldgenOmtIdentityV1) -> bool {
         && valid_worldgen_id(&identity.type_id)
         && valid_worldgen_id(&identity.subtype_id)
         && valid_worldgen_id(&identity.generator_id)
+        && identity.rotation <= 3
 }
 
 fn valid_worldgen_start_location(
     start: &WorldgenStartLocationV1,
-    default_omt: &WorldgenOmtIdentityV1,
+    used_surface_identities: &BTreeSet<u16>,
+    identities: &[WorldgenOmtIdentityV1],
 ) -> bool {
     valid_worldgen_id(&start.start_location_id)
         && !start.targets.is_empty()
@@ -4117,10 +4153,119 @@ fn valid_worldgen_start_location(
             .targets
             .iter()
             .all(|target| valid_worldgen_id(&target.omt))
-        && start
-            .targets
-            .iter()
-            .all(|target| worldgen_omt_matches(target.omt.as_str(), target.match_type, default_omt))
+        && start.targets.iter().all(|target| {
+            used_surface_identities.iter().any(|index| {
+                identities.get(usize::from(*index)).is_some_and(|identity| {
+                    worldgen_omt_matches(target.omt.as_str(), target.match_type, identity)
+                })
+            })
+        })
+}
+
+fn valid_worldgen_overmap_layout(layout: &WorldgenOvermapLayoutV1) -> Option<BTreeSet<u16>> {
+    if layout.identities.is_empty()
+        || layout.identities.len() > MAX_WORLDGEN_OMT_IDENTITIES
+        || layout.layers.is_empty()
+        || layout.layers.len() > MAX_WORLDGEN_OVERMAP_LAYERS
+        || !layout.identities.iter().all(valid_worldgen_omt_identity)
+        || !layout
+            .identities
+            .windows(2)
+            .all(|pair| pair[0].full_id < pair[1].full_id)
+        || !layout.layers.windows(2).all(|pair| pair[0].z < pair[1].z)
+        || layout
+            .origin_x
+            .checked_add(i32::from(WORLDGEN_OVERMAP_WIDTH) - 1)
+            .is_none()
+        || layout
+            .origin_y
+            .checked_add(i32::from(WORLDGEN_OVERMAP_HEIGHT) - 1)
+            .is_none()
+    {
+        return None;
+    }
+    let expected_cells = u32::from(WORLDGEN_OVERMAP_WIDTH) * u32::from(WORLDGEN_OVERMAP_HEIGHT);
+    let mut surface_identities = None;
+    let mut all_used_identities = BTreeSet::new();
+    for layer in &layout.layers {
+        if layer.runs.is_empty() || layer.runs.len() > MAX_WORLDGEN_OVERMAP_RUNS {
+            return None;
+        }
+        let mut used = BTreeSet::new();
+        let mut total = 0_u32;
+        let mut previous = None;
+        for run in &layer.runs {
+            if run.length == 0
+                || usize::from(run.identity_index) >= layout.identities.len()
+                || previous == Some(run.identity_index)
+            {
+                return None;
+            }
+            total = total.checked_add(run.length)?;
+            used.insert(run.identity_index);
+            all_used_identities.insert(run.identity_index);
+            previous = Some(run.identity_index);
+        }
+        if total != expected_cells {
+            return None;
+        }
+        if layer.z == 0 {
+            surface_identities = Some(used);
+        }
+    }
+    (all_used_identities.len() == layout.identities.len()).then_some(())?;
+    surface_identities
+}
+
+fn worldgen_overmap_layer_and_cell(
+    catalog: &WorldgenCatalogV1,
+    omt: ChunkCoord,
+) -> Option<(&WorldgenOvermapLayerV1, u32)> {
+    let local_x = omt.x.checked_sub(catalog.overmap.origin_x)?;
+    let local_y = omt.y.checked_sub(catalog.overmap.origin_y)?;
+    if !(0..i32::from(WORLDGEN_OVERMAP_WIDTH)).contains(&local_x)
+        || !(0..i32::from(WORLDGEN_OVERMAP_HEIGHT)).contains(&local_y)
+    {
+        return None;
+    }
+    let layer = catalog
+        .overmap
+        .layers
+        .binary_search_by_key(&omt.z, |layer| layer.z)
+        .ok()
+        .and_then(|index| catalog.overmap.layers.get(index))?;
+    let cell = u32::try_from(local_y)
+        .ok()?
+        .checked_mul(u32::from(WORLDGEN_OVERMAP_WIDTH))?
+        .checked_add(u32::try_from(local_x).ok()?)?;
+    Some((layer, cell))
+}
+
+/// Reports whether one coordinate belongs to a retained overmap layer without
+/// scanning its RLE identity runs.
+#[must_use]
+pub fn worldgen_overmap_contains(catalog: &WorldgenCatalogV1, omt: ChunkCoord) -> bool {
+    worldgen_overmap_layer_and_cell(catalog, omt).is_some()
+}
+
+/// Returns the immutable OMT identity owned by one canonical coordinate.
+#[must_use]
+pub fn worldgen_omt_identity_at(
+    catalog: &WorldgenCatalogV1,
+    omt: ChunkCoord,
+) -> Option<&WorldgenOmtIdentityV1> {
+    let (layer, cell) = worldgen_overmap_layer_and_cell(catalog, omt)?;
+    let mut end = 0_u32;
+    for run in &layer.runs {
+        end = end.checked_add(run.length)?;
+        if cell < end {
+            return catalog
+                .overmap
+                .identities
+                .get(usize::from(run.identity_index));
+        }
+    }
+    None
 }
 
 fn checked_positive_weight_sum(weights: impl IntoIterator<Item = u32>) -> bool {
@@ -4197,12 +4342,17 @@ fn valid_worldgen_cell_shape(cell: &WorldgenCellV1, catalog: &WorldgenCatalogV1)
 /// Runtime admission should call [`worldgen_catalog_is_valid`] instead.
 #[must_use]
 pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
-    if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V1
-        || !valid_worldgen_omt_identity(&catalog.default_omt)
-        || catalog
-            .start_location
-            .as_ref()
-            .is_some_and(|start| !valid_worldgen_start_location(start, &catalog.default_omt))
+    let Some(used_surface_identities) = valid_worldgen_overmap_layout(&catalog.overmap) else {
+        return false;
+    };
+    if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V2
+        || catalog.start_location.as_ref().is_some_and(|start| {
+            !valid_worldgen_start_location(
+                start,
+                &used_surface_identities,
+                &catalog.overmap.identities,
+            )
+        })
         || catalog.terrain_prototypes.is_empty()
         || catalog.terrain_prototypes.len() > MAX_WORLDGEN_TERRAIN_PROTOTYPES
         || catalog.furniture_prototypes.len() > MAX_WORLDGEN_FURNITURE_PROTOTYPES
@@ -4306,15 +4456,12 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         }
     }
 
-    catalog
-        .omt_generators
-        .binary_search_by(|generator| {
-            generator
-                .omt_id
-                .as_str()
-                .cmp(&catalog.default_omt.generator_id)
-        })
-        .is_ok()
+    catalog.overmap.identities.iter().all(|identity| {
+        catalog
+            .omt_generators
+            .binary_search_by(|generator| generator.omt_id.as_str().cmp(&identity.generator_id))
+            .is_ok()
+    })
 }
 
 /// Validates a canonical worldgen catalog and all named item-group placement
@@ -5769,12 +5916,25 @@ mod tests {
             chance: 25,
         });
         WorldgenCatalogV1 {
-            generator_version: WORLDGEN_GENERATOR_VERSION_V1,
-            default_omt: WorldgenOmtIdentityV1 {
-                full_id: String::from("field_north"),
-                type_id: String::from("field"),
-                subtype_id: String::from("field"),
-                generator_id: String::from("field"),
+            generator_version: WORLDGEN_GENERATOR_VERSION_V2,
+            overmap: WorldgenOvermapLayoutV1 {
+                origin_x: -90,
+                origin_y: -90,
+                identities: vec![WorldgenOmtIdentityV1 {
+                    full_id: String::from("field"),
+                    type_id: String::from("field"),
+                    subtype_id: String::from("field"),
+                    generator_id: String::from("field"),
+                    rotation: 0,
+                }],
+                layers: vec![WorldgenOvermapLayerV1 {
+                    z: 0,
+                    runs: vec![WorldgenOvermapRunV1 {
+                        identity_index: 0,
+                        length: u32::from(WORLDGEN_OVERMAP_WIDTH)
+                            * u32::from(WORLDGEN_OVERMAP_HEIGHT),
+                    }],
+                }],
             },
             start_location: Some(WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_field"),
@@ -5847,6 +6007,77 @@ mod tests {
     }
 
     #[test]
+    fn coordinate_owned_overmap_layout_routes_exact_cells_and_fails_closed() {
+        let mut catalog = worldgen_test_catalog();
+        catalog.overmap.identities = vec![
+            WorldgenOmtIdentityV1 {
+                full_id: String::from("field_a"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field"),
+                rotation: 0,
+            },
+            WorldgenOmtIdentityV1 {
+                full_id: String::from("field_b"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field"),
+                rotation: 1,
+            },
+        ];
+        catalog.overmap.layers[0].runs = vec![
+            WorldgenOvermapRunV1 {
+                identity_index: 0,
+                length: 1,
+            },
+            WorldgenOvermapRunV1 {
+                identity_index: 1,
+                length: u32::from(WORLDGEN_OVERMAP_WIDTH) * u32::from(WORLDGEN_OVERMAP_HEIGHT) - 1,
+            },
+        ];
+        assert!(worldgen_catalog_shape_is_valid(&catalog));
+        assert_eq!(
+            worldgen_omt_identity_at(
+                &catalog,
+                ChunkCoord {
+                    x: -90,
+                    y: -90,
+                    z: 0,
+                },
+            )
+            .map(|identity| identity.full_id.as_str()),
+            Some("field_a")
+        );
+        assert_eq!(
+            worldgen_omt_identity_at(
+                &catalog,
+                ChunkCoord {
+                    x: -89,
+                    y: -90,
+                    z: 0,
+                },
+            )
+            .map(|identity| (identity.full_id.as_str(), identity.rotation)),
+            Some(("field_b", 1))
+        );
+        for outside in [
+            ChunkCoord {
+                x: -91,
+                y: -90,
+                z: 0,
+            },
+            ChunkCoord { x: 90, y: 89, z: 0 },
+            ChunkCoord {
+                x: -90,
+                y: -90,
+                z: 1,
+            },
+        ] {
+            assert!(worldgen_omt_identity_at(&catalog, outside).is_none());
+        }
+    }
+
+    #[test]
     fn worldgen_catalog_rejects_noncanonical_and_out_of_bounds_payloads() {
         let item_groups = worldgen_test_item_groups();
 
@@ -5859,7 +6090,33 @@ mod tests {
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
         let mut invalid = worldgen_test_catalog();
-        invalid.default_omt.generator_id = String::from("missing");
+        invalid.overmap.identities[0].generator_id = String::from("missing");
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.overmap.layers[0].runs[0].length -= 1;
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.overmap.layers[0].runs[0].length -= 1;
+        invalid.overmap.layers[0].runs.push(WorldgenOvermapRunV1 {
+            identity_index: 0,
+            length: 1,
+        });
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.overmap.layers[0].z = 1;
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.overmap.identities.push(WorldgenOmtIdentityV1 {
+            full_id: String::from("unused"),
+            type_id: String::from("unused"),
+            subtype_id: String::from("unused"),
+            generator_id: String::from("field"),
+            rotation: 0,
+        });
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
         let mut invalid = worldgen_test_catalog();
@@ -5973,6 +6230,7 @@ mod tests {
             type_id: String::from("forest_thick"),
             subtype_id: String::from("forest_thick"),
             generator_id: String::from("forest_thick"),
+            rotation: 0,
         };
         assert!(worldgen_omt_matches(
             "forest_thick_north",
@@ -6010,6 +6268,7 @@ mod tests {
             type_id: String::from("road"),
             subtype_id: String::from("road_curved"),
             generator_id: String::from("road_curved"),
+            rotation: 3,
         };
         assert!(worldgen_omt_matches(
             "road",

@@ -2,30 +2,50 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, MapgenIdChoice, MapgenRegistry,
-    OvermapTerrainMatchType, StartLocationDefinition, StrictMapgenDefinition, TerrainRegistry,
+    OvermapTerrainMatchType, OvermapTerrainRegistry, StartLocationDefinition,
+    StrictMapgenDefinition, TerrainRegistry,
 };
 use cdda_protocol::{
     ItemGroupDefinitionV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurniturePrototypeTargetV1,
     WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1,
-    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenRegionalFurnitureTableV1,
-    WorldgenRegionalTerrainTableV1, WorldgenStartLocationV1, WorldgenStartTargetV1,
-    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
+    WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1,
+    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
 };
 
 use super::{furniture_tile, terrain_tile};
 
-/// The pinned LMOE special places `lmoe_north` at the surface. Until the
-/// coordinate-owned overmap population engine lands, every generated OMT uses
-/// this explicit identity and its normalized `lmoe` local-map generator.
-pub(super) fn lmoe_bootstrap_identity() -> WorldgenOmtIdentityV1 {
-    WorldgenOmtIdentityV1 {
-        full_id: String::from("lmoe_north"),
-        type_id: String::from("lmoe"),
-        subtype_id: String::from("lmoe"),
-        generator_id: String::from("lmoe"),
-    }
+/// Retains the previously runnable LMOE bootstrap inside the new bounded,
+/// coordinate-owned representation. Real regional field population cannot be
+/// admitted until its complete item-group modifier closure is supported.
+pub(super) fn bootstrap_lmoe_overmap(
+    terrain: &OvermapTerrainRegistry,
+) -> Result<WorldgenOvermapLayoutV1, Box<dyn std::error::Error>> {
+    let lmoe = terrain
+        .get_identity("lmoe_north")
+        .ok_or("pinned overmap-terrain catalog is missing lmoe_north")?;
+    let identity = WorldgenOmtIdentityV1 {
+        full_id: lmoe.full_id.clone(),
+        type_id: lmoe.type_id.clone(),
+        subtype_id: lmoe.subtype_id.clone(),
+        generator_id: lmoe.generator_id.clone(),
+        rotation: lmoe.rotation,
+    };
+    Ok(WorldgenOvermapLayoutV1 {
+        origin_x: -90,
+        origin_y: -90,
+        identities: vec![identity],
+        layers: vec![WorldgenOvermapLayerV1 {
+            z: 0,
+            runs: vec![WorldgenOvermapRunV1 {
+                identity_index: 0,
+                length: u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH)
+                    * u32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT),
+            }],
+        }],
+    })
 }
 
 pub(super) struct RuntimeMapgenContent<'a> {
@@ -37,8 +57,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
 }
 
 pub(super) fn runtime_mapgen_worldgen(
-    omt_id: &str,
-    default_omt: WorldgenOmtIdentityV1,
+    overmap: WorldgenOvermapLayoutV1,
     start_location: &StartLocationDefinition,
     content: RuntimeMapgenContent<'_>,
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
@@ -49,13 +68,6 @@ pub(super) fn runtime_mapgen_worldgen(
         furniture,
         item_groups,
     } = content;
-    if default_omt.generator_id != omt_id {
-        return Err(format!(
-            "default OMT generator {} does not match requested mapgen {omt_id}",
-            default_omt.generator_id
-        )
-        .into());
-    }
     if !start_location.is_runtime_selectable_without_cities() {
         return Err(format!(
             "start location {} requires unsupported city, parameter, flag, or z-level semantics",
@@ -80,50 +92,63 @@ pub(super) fn runtime_mapgen_worldgen(
             })
             .collect(),
     };
-    let definitions = mapgen.get(omt_id).ok_or_else(|| {
-        let reason = mapgen
-            .unavailable_reports(omt_id)
-            .and_then(|reports| reports.first())
-            .and_then(|report| report.rejection_reason.as_deref())
-            .unwrap_or("no selected definition");
-        format!("pinned mapgen {omt_id} is unavailable: {reason}")
-    })?;
-    if definitions.is_empty() {
-        return Err(format!("pinned mapgen {omt_id} has no variants").into());
-    }
+    let generator_ids = overmap
+        .identities
+        .iter()
+        .map(|identity| identity.generator_id.clone())
+        .collect::<BTreeSet<_>>();
+    let definitions = generator_ids
+        .iter()
+        .map(|omt_id| {
+            let definitions = mapgen.get(omt_id).ok_or_else(|| {
+                let reason = mapgen
+                    .unavailable_reports(omt_id)
+                    .and_then(|reports| reports.first())
+                    .and_then(|report| report.rejection_reason.as_deref())
+                    .unwrap_or("no selected definition");
+                format!("pinned mapgen {omt_id} is unavailable: {reason}")
+            })?;
+            if definitions.is_empty() {
+                return Err(format!("pinned mapgen {omt_id} has no variants"));
+            }
+            Ok((omt_id.as_str(), definitions))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let mut terrain_ids = BTreeSet::new();
     let mut furniture_ids = BTreeSet::new();
     let mut regional_terrain_ids = BTreeSet::new();
     let mut regional_furniture_ids = BTreeSet::new();
-    for definition in definitions {
-        if matches!(definition.fill_terrain, Some(MapgenIdChoice::Weighted(_))) {
-            return Err(format!(
-                "mapgen {omt_id} uses a weighted one-time fill that worldgen v1 cannot encode"
-            )
-            .into());
-        }
-        for choice in definition
-            .fill_terrain
-            .iter()
-            .chain(definition.terrain.values().flatten())
-        {
-            collect_runtime_terrain_choice(
-                choice,
-                regions,
-                terrain,
-                &mut terrain_ids,
-                &mut regional_terrain_ids,
-            )?;
-        }
-        for choice in definition.furniture.values().flatten() {
-            collect_runtime_furniture_choice(
-                choice,
-                regions,
-                furniture,
-                &mut furniture_ids,
-                &mut regional_furniture_ids,
-            )?;
+    for (omt_id, variants) in &definitions {
+        for definition in *variants {
+            if matches!(definition.fill_terrain, Some(MapgenIdChoice::Weighted(_))) {
+                return Err(format!(
+                    "mapgen {omt_id} uses a weighted one-time fill that worldgen v2 cannot encode"
+                )
+                .into());
+            }
+            for choice in definition
+                .fill_terrain
+                .iter()
+                .chain(definition.terrain.values().flatten())
+            {
+                collect_runtime_terrain_choice(
+                    choice,
+                    regions,
+                    terrain,
+                    &mut terrain_ids,
+                    &mut regional_terrain_ids,
+                )?;
+            }
+            for choice in definition.furniture.values().flatten() {
+                collect_runtime_furniture_choice(
+                    choice,
+                    regions,
+                    furniture,
+                    &mut furniture_ids,
+                    &mut regional_furniture_ids,
+                )?;
+            }
         }
     }
 
@@ -182,7 +207,7 @@ pub(super) fn runtime_mapgen_worldgen(
                     .map(|choice| {
                         Ok(WorldgenWeightedPrototypeV1 {
                             prototype_index: *terrain_indices.get(&choice.id).ok_or(
-                                "worldgen v1 cannot encode recursive regional terrain choices",
+                                "worldgen v2 cannot encode recursive regional terrain choices",
                             )?,
                             weight: choice.weight,
                         })
@@ -208,7 +233,7 @@ pub(super) fn runtime_mapgen_worldgen(
                         } else {
                             WorldgenFurniturePrototypeTargetV1::Prototype(
                                 *furniture_indices.get(&choice.id).ok_or(
-                                    "worldgen v1 cannot encode recursive regional furniture choices",
+                                    "worldgen v2 cannot encode recursive regional furniture choices",
                                 )?,
                             )
                         };
@@ -222,33 +247,38 @@ pub(super) fn runtime_mapgen_worldgen(
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
 
-    let templates = definitions
+    let omt_generators = definitions
         .iter()
-        .map(|definition| {
-            runtime_mapgen_template(
-                definition,
-                &terrain_indices,
-                &furniture_indices,
-                &regional_terrain_indices,
-                &regional_furniture_indices,
-            )
+        .map(|(omt_id, definitions)| {
+            Ok(WorldgenOmtGeneratorV1 {
+                omt_id: (*omt_id).to_owned(),
+                templates: definitions
+                    .iter()
+                    .map(|definition| {
+                        runtime_mapgen_template(
+                            definition,
+                            &terrain_indices,
+                            &furniture_indices,
+                            &regional_terrain_indices,
+                            &regional_furniture_indices,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+            })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     let catalog = WorldgenCatalogV1 {
-        generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
-        default_omt,
+        generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        overmap,
         start_location: Some(start_location),
         terrain_prototypes,
         furniture_prototypes,
         regional_terrain,
         regional_furniture,
-        omt_generators: vec![WorldgenOmtGeneratorV1 {
-            omt_id: omt_id.to_owned(),
-            templates,
-        }],
+        omt_generators,
     };
     if !worldgen_catalog_is_valid(&catalog, item_groups) {
-        return Err(format!("pinned mapgen {omt_id} produced an invalid worldgen catalog").into());
+        return Err("pinned mapgens produced an invalid coordinate-owned worldgen catalog".into());
     }
     Ok(catalog)
 }
@@ -266,7 +296,7 @@ fn collect_runtime_terrain_choice(
             for replacement in &table.choices {
                 if regions.terrain_table(&replacement.id).is_some() {
                     return Err(format!(
-                        "worldgen v1 cannot encode recursive regional terrain {} -> {}",
+                        "worldgen v2 cannot encode recursive regional terrain {} -> {}",
                         id, replacement.id
                     )
                     .into());
@@ -305,7 +335,7 @@ fn collect_runtime_furniture_choice(
                 }
                 if regions.furniture_table(&replacement.id).is_some() {
                     return Err(format!(
-                        "worldgen v1 cannot encode recursive regional furniture {} -> {}",
+                        "worldgen v2 cannot encode recursive regional furniture {} -> {}",
                         id, replacement.id
                     )
                     .into());
@@ -417,7 +447,7 @@ pub(super) fn runtime_mapgen_terrain_choice(
         MapgenIdChoice::Weighted(entries) => {
             if entries.len() == 1 {
                 return Err(
-                    "worldgen v1 cannot retain a one-entry weighted terrain RNG phase".into(),
+                    "worldgen v2 cannot retain a one-entry weighted terrain RNG phase".into(),
                 );
             }
             entries
@@ -463,7 +493,7 @@ pub(super) fn runtime_mapgen_furniture_choice(
         MapgenIdChoice::Weighted(entries) => {
             if entries.len() == 1 {
                 return Err(
-                    "worldgen v1 cannot retain a one-entry weighted furniture RNG phase".into(),
+                    "worldgen v2 cannot retain a one-entry weighted furniture RNG phase".into(),
                 );
             }
             entries

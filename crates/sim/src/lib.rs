@@ -5041,6 +5041,11 @@ impl WorldState {
                 &item_groups,
                 ACTIVE_BUBBLE_RADIUS_SUBMAPS,
             )
+            || !mapgen::catalog_initial_bubble_is_admissible(
+                &catalog,
+                ChunkCoord { x: 0, y: 0, z: 0 },
+                ACTIVE_BUBBLE_RADIUS_SUBMAPS,
+            )
         {
             return Err(SimError::InvalidTerrain);
         }
@@ -5055,7 +5060,11 @@ impl WorldState {
         if self.tick != SimTick(0) {
             return Err(SimError::InvalidTerrain);
         }
-        self.ensure_active_bubble_generated(center)
+        if self.ensure_active_bubble_generated(center)? {
+            Ok(())
+        } else {
+            Err(SimError::InvalidTerrain)
+        }
     }
 
     pub fn spawn_ground_item(&mut self, spawn: ItemSpawn) -> Result<ItemId, SimError> {
@@ -7232,7 +7241,9 @@ impl WorldState {
         let Some(to) = from.checked_offset(dx, dy, dz) else {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         };
-        self.ensure_active_bubble_generated(to)?;
+        if !self.ensure_active_bubble_generated(to)? {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        }
         if self.actor_at(to).is_some() || self.creature_at(to).is_some() {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         }
@@ -7264,7 +7275,9 @@ impl WorldState {
         let Some(to) = from.checked_offset(direction.dx, direction.dy, 0) else {
             return Ok(());
         };
-        self.ensure_active_bubble_generated(to)?;
+        if !self.ensure_active_bubble_generated(to)? {
+            return Ok(());
+        }
         if !self.is_passable(to) || self.actor_at(to).is_some() || self.creature_at(to).is_some() {
             return Ok(());
         }
@@ -7487,7 +7500,10 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::InvalidMovement)?);
             return Ok(());
         };
-        self.ensure_active_bubble_generated(to)?;
+        if !self.ensure_active_bubble_generated(to)? {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         if !self.is_passable(to) || self.actor_at(to).is_some() || self.creature_at(to).is_some() {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
@@ -9077,7 +9093,14 @@ impl WorldState {
             )?);
             return Ok(());
         };
-        self.ensure_active_bubble_generated(target)?;
+        if !self.ensure_active_bubble_generated(target)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidBashInteraction,
+            )?);
+            return Ok(());
+        }
         if self.creature_bash_at(target).is_none() {
             events.push(self.rejection(
                 actor_id,
@@ -9099,22 +9122,28 @@ impl WorldState {
         )
     }
 
-    fn ensure_active_bubble_generated(&mut self, position: WorldPosition) -> Result<(), SimError> {
+    fn ensure_active_bubble_generated(
+        &mut self,
+        position: WorldPosition,
+    ) -> Result<bool, SimError> {
         let (center, _local) = position.chunk_and_local();
         if center.z != 0 {
-            return Ok(());
+            return Ok(true);
         }
         let Some(catalog) = self.worldgen.as_ref() else {
-            return Ok(());
+            return Ok(true);
         };
-        let planned = mapgen::plan_active_bubble(
+        let Some(planned) = mapgen::plan_active_bubble(
             self.world_seed,
             catalog,
             &self.item_groups,
             &self.chunks,
             center,
             ACTIVE_BUBBLE_RADIUS_SUBMAPS,
-        )?;
+        )?
+        else {
+            return Ok(false);
+        };
         if self.allocator.remaining()
             < u64::try_from(planned.items.len()).map_err(|_| SimError::NumericOverflow)?
         {
@@ -9141,7 +9170,7 @@ impl WorldState {
                 return Err(SimError::InvalidItem);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn apply_attack_creature(
@@ -11594,7 +11623,14 @@ impl WorldState {
             )?);
             return Ok(());
         }
-        self.ensure_active_bubble_generated(target)?;
+        if !self.ensure_active_bubble_generated(target)? {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::InvalidConstructionTarget,
+            )?);
+            return Ok(());
+        }
         if !self.construction_target_is_valid(actor_id, target, &recipe)? {
             events.push(self.rejection(
                 actor_id,
@@ -13475,6 +13511,10 @@ impl WorldState {
                 catalog,
                 &snapshot.item_groups,
                 ACTIVE_BUBBLE_RADIUS_SUBMAPS,
+            ) || !mapgen::catalog_initial_bubble_is_admissible(
+                catalog,
+                ChunkCoord { x: 0, y: 0, z: 0 },
+                ACTIVE_BUBBLE_RADIUS_SUBMAPS,
             )
         }) {
             return Err(SimError::InvalidSnapshot);
@@ -13752,7 +13792,7 @@ impl WorldState {
         if snapshot
             .worldgen
             .as_ref()
-            .is_some_and(|_| !mapgen::generated_cells_are_complete(&chunks))
+            .is_some_and(|catalog| !mapgen::generated_cells_match_layout(catalog, &chunks))
         {
             return Err(SimError::InvalidSnapshot);
         }
@@ -13887,7 +13927,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV58");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV59");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -14041,12 +14081,25 @@ mod tests {
             });
         }
         WorldgenCatalogV1 {
-            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
-            default_omt: cdda_protocol::WorldgenOmtIdentityV1 {
-                full_id: String::from("field_test"),
-                type_id: String::from("field_test"),
-                subtype_id: String::from("field_test"),
-                generator_id: String::from("field_test"),
+            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+            overmap: cdda_protocol::WorldgenOvermapLayoutV1 {
+                origin_x: -90,
+                origin_y: -90,
+                identities: vec![cdda_protocol::WorldgenOmtIdentityV1 {
+                    full_id: String::from("field_test"),
+                    type_id: String::from("field_test"),
+                    subtype_id: String::from("field_test"),
+                    generator_id: String::from("field_test"),
+                    rotation: 0,
+                }],
+                layers: vec![cdda_protocol::WorldgenOvermapLayerV1 {
+                    z: 0,
+                    runs: vec![cdda_protocol::WorldgenOvermapRunV1 {
+                        identity_index: 0,
+                        length: u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH)
+                            * u32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT),
+                    }],
+                }],
             },
             start_location: None,
             terrain_prototypes: vec![terrain],
@@ -28353,7 +28406,8 @@ mod tests {
                 .worldgen
                 .as_ref()
                 .expect("worldgen catalog should persist")
-                .default_omt
+                .overmap
+                .identities[0]
                 .generator_id,
             "field_test"
         );
@@ -28370,6 +28424,218 @@ mod tests {
             restored.canonical_hash().expect("restored hash"),
             world.canonical_hash().expect("original hash")
         );
+    }
+
+    #[test]
+    fn coordinate_owned_overmap_dispatches_rotates_and_limits_start_selection() {
+        let marker_group = ItemGroupDefinitionV1 {
+            group_id: String::from("marker_group"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        target: test_item_group_leaf("marker_item", None, false),
+                    }],
+                }],
+            },
+        };
+        let mut catalog = test_worldgen_catalog(test_terrain("t_a"), None);
+        catalog.terrain_prototypes = vec![
+            test_terrain("t_a"),
+            test_terrain("t_b"),
+            test_terrain("t_marker"),
+        ];
+        catalog.furniture_prototypes = vec![FurnitureTileSnapshot {
+            furniture_id: String::from("f_marker"),
+            move_cost_mod: 0,
+            transparent: true,
+            blocks_door: false,
+            comfort: 0,
+            floor_bedding_warmth: 0,
+        }];
+        catalog.overmap.identities = vec![
+            cdda_protocol::WorldgenOmtIdentityV1 {
+                full_id: String::from("field_a"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field_a"),
+                rotation: 0,
+            },
+            cdda_protocol::WorldgenOmtIdentityV1 {
+                full_id: String::from("field_b"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field_b"),
+                rotation: 1,
+            },
+        ];
+        let center_index = 90_u32 * u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH) + 90;
+        let cell_count = u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH)
+            * u32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT);
+        catalog.overmap.layers[0].runs = vec![
+            cdda_protocol::WorldgenOvermapRunV1 {
+                identity_index: 0,
+                length: center_index,
+            },
+            cdda_protocol::WorldgenOvermapRunV1 {
+                identity_index: 1,
+                length: 1,
+            },
+            cdda_protocol::WorldgenOvermapRunV1 {
+                identity_index: 0,
+                length: cell_count - center_index - 1,
+            },
+        ];
+        catalog.omt_generators[0].omt_id = String::from("field_a");
+        let mut field_b_cells = vec![
+            cdda_protocol::WorldgenCellV1 {
+                terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                    target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(1),
+                    weight: 1,
+                }],
+                furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                    target: cdda_protocol::WorldgenFurnitureTargetV1::None,
+                    weight: 1,
+                }],
+                item_group: None,
+            };
+            cdda_protocol::WORLDGEN_CELLS_PER_OMT
+        ];
+        let source_marker = 5 * mapgen::OMT_TILE_WIDTH + 2;
+        field_b_cells[source_marker] = cdda_protocol::WorldgenCellV1 {
+            terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(2),
+                weight: 1,
+            }],
+            furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                target: cdda_protocol::WorldgenFurnitureTargetV1::Prototype(0),
+                weight: 1,
+            }],
+            item_group: Some(cdda_protocol::WorldgenItemGroupPlacementV1 {
+                group_id: String::from("marker_group"),
+                chance: 100,
+            }),
+        };
+        catalog
+            .omt_generators
+            .push(cdda_protocol::WorldgenOmtGeneratorV1 {
+                omt_id: String::from("field_b"),
+                templates: vec![cdda_protocol::WorldgenTemplateV1 {
+                    weight: 1,
+                    cells: field_b_cells,
+                }],
+            });
+        catalog.start_location = Some(cdda_protocol::WorldgenStartLocationV1 {
+            start_location_id: String::from("sloc_field_b"),
+            targets: vec![cdda_protocol::WorldgenStartTargetV1 {
+                omt: String::from("field_b"),
+                match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Exact,
+            }],
+        });
+
+        let mut world = WorldState::new(71, [31; 32]);
+        world
+            .register_item_group_catalog(vec![marker_group.clone()])
+            .expect("marker group should register");
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_worldgen(catalog.clone())
+            .expect("heterogeneous worldgen should configure");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("heterogeneous cells should generate");
+
+        let terrain_id_at = |position: WorldPosition| {
+            let (coord, local) = position.chunk_and_local();
+            world
+                .chunks
+                .get(&coord)
+                .and_then(|chunk| chunk.tile(local))
+                .map(|tile| tile.terrain_id.as_str())
+        };
+        let rotated_marker = WorldPosition { x: 18, y: 2, z: 0 };
+        assert_eq!(terrain_id_at(rotated_marker), Some("t_marker"));
+        assert_eq!(
+            terrain_id_at(WorldPosition { x: 2, y: 5, z: 0 }),
+            Some("t_b")
+        );
+        assert_eq!(
+            terrain_id_at(WorldPosition { x: 24, y: 0, z: 0 }),
+            Some("t_a")
+        );
+        let (marker_chunk, marker_local) = rotated_marker.chunk_and_local();
+        assert_eq!(
+            world
+                .chunks
+                .get(&marker_chunk)
+                .and_then(|chunk| chunk.furniture(marker_local))
+                .map(|furniture| furniture.furniture_id.as_str()),
+            Some("f_marker")
+        );
+        assert!(world.ground_items.values().any(|ground| {
+            ground.position == rotated_marker && ground.item.type_id == "marker_item"
+        }));
+        assert_eq!(
+            overmap::start_location_omt_order(
+                world.world_seed,
+                world.allocator.next(),
+                world.worldgen.as_ref(),
+                &world.chunks,
+            )
+            .expect("selector should run")
+            .expect("selector should be configured"),
+            vec![ChunkCoord { x: 0, y: 0, z: 0 }]
+        );
+        let actor = world
+            .spawn_actor_first_available(true)
+            .expect("authoritative start path should use the matching OMT");
+        let position = world
+            .actor_snapshot(actor)
+            .expect("actor should exist")
+            .position;
+        assert_eq!(
+            ChunkCoord {
+                x: position.x.div_euclid(mapgen::OMT_TILE_WIDTH as i32),
+                y: position.y.div_euclid(mapgen::OMT_TILE_WIDTH as i32),
+                z: position.z,
+            },
+            (ChunkCoord { x: 0, y: 0, z: 0 })
+        );
+        let restored = WorldState::from_snapshot(&world.snapshot()).expect("snapshot restores");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("world hash")
+        );
+
+        let mut outside = WorldState::new(73, [37; 32]);
+        outside
+            .register_item_group_catalog(vec![marker_group])
+            .expect("marker group should register");
+        outside
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        outside
+            .configure_worldgen(catalog)
+            .expect("catalog should configure");
+        let before = outside.canonical_hash().expect("state should hash");
+        assert!(matches!(
+            outside.generate_initial_bubble(WorldPosition {
+                x: 90 * mapgen::OMT_TILE_WIDTH as i32,
+                y: 0,
+                z: 0,
+            }),
+            Err(SimError::InvalidTerrain)
+        ));
+        assert!(outside.chunks.is_empty());
+        assert!(outside.ground_items.is_empty());
+        assert_eq!(outside.canonical_hash().expect("state should hash"), before);
     }
 
     #[test]
@@ -28443,6 +28709,140 @@ mod tests {
                 .canonical_hash()
                 .expect("restored world should hash")
         );
+    }
+
+    #[test]
+    fn bounded_overmap_edge_rejects_movement_without_failing_the_tick() {
+        let mut world = WorldState::new(79, [41; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_worldgen(test_worldgen_catalog(test_terrain("t_edge"), None))
+            .expect("edge worldgen should configure");
+        let safe_center_x = 174 * SUBMAP_SIZE;
+        world
+            .generate_initial_bubble(WorldPosition {
+                x: safe_center_x,
+                y: 0,
+                z: 0,
+            })
+            .expect("last in-bounds active bubble should generate");
+        let start = WorldPosition {
+            x: safe_center_x + SUBMAP_SIZE - 1,
+            y: 1,
+            z: 0,
+        };
+        let actor = world
+            .spawn_actor(start, true)
+            .expect("edge actor should spawn on generated terrain");
+        let chunks_before = world.chunks.len();
+        let outcome = world
+            .advance_tick(vec![ClientCommand {
+                actor_id: actor,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::Move {
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                },
+            }])
+            .expect("bounded edge must be an ordinary command rejection");
+        assert_eq!(outcome.tick, SimTick(1));
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                actor_id,
+                reason: CommandRejection::Blocked,
+                ..
+            } if actor_id == actor
+        )));
+        assert_eq!(
+            world.actor_snapshot(actor).expect("actor remains").position,
+            start
+        );
+        assert_eq!(world.chunks.len(), chunks_before);
+    }
+
+    #[test]
+    fn remote_only_start_fails_closed_and_heterogeneous_shuffle_has_no_origin_bias() {
+        let mut catalog = test_worldgen_catalog(test_terrain("t_start"), None);
+        catalog.overmap.identities = vec![
+            cdda_protocol::WorldgenOmtIdentityV1 {
+                full_id: String::from("field_remote"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field_test"),
+                rotation: 0,
+            },
+            cdda_protocol::WorldgenOmtIdentityV1 {
+                full_id: String::from("field_test"),
+                type_id: String::from("field"),
+                subtype_id: String::from("field"),
+                generator_id: String::from("field_test"),
+                rotation: 0,
+            },
+        ];
+        let remote_index = 90_u32 * u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH) + 100;
+        let cell_count = u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH)
+            * u32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT);
+        catalog.overmap.layers[0].runs = vec![
+            cdda_protocol::WorldgenOvermapRunV1 {
+                identity_index: 1,
+                length: remote_index,
+            },
+            cdda_protocol::WorldgenOvermapRunV1 {
+                identity_index: 0,
+                length: 1,
+            },
+            cdda_protocol::WorldgenOvermapRunV1 {
+                identity_index: 1,
+                length: cell_count - remote_index - 1,
+            },
+        ];
+        catalog.start_location = Some(cdda_protocol::WorldgenStartLocationV1 {
+            start_location_id: String::from("sloc_remote"),
+            targets: vec![cdda_protocol::WorldgenStartTargetV1 {
+                omt: String::from("field_remote"),
+                match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Exact,
+            }],
+        });
+
+        let mut type_catalog = catalog.clone();
+        type_catalog.start_location = Some(cdda_protocol::WorldgenStartLocationV1 {
+            start_location_id: String::from("sloc_any_field"),
+            targets: vec![cdda_protocol::WorldgenStartTargetV1 {
+                omt: String::from("field"),
+                match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
+            }],
+        });
+        let mut remote_only = WorldState::new(83, [43; 32]);
+        assert!(matches!(
+            remote_only.configure_worldgen(catalog),
+            Err(SimError::InvalidTerrain)
+        ));
+        assert!(remote_only.worldgen.is_none());
+
+        let mut world = WorldState::new(89, [43; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_worldgen(type_catalog)
+            .expect("initial-bubble type start should configure");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("origin bubble should generate");
+        let seeded = overmap::start_location_omt_order(
+            world.world_seed,
+            world.allocator.next(),
+            world.worldgen.as_ref(),
+            &world.chunks,
+        )
+        .expect("heterogeneous selector should run")
+        .expect("selector should be configured");
+        assert_ne!(seeded[0], (ChunkCoord { x: 0, y: 0, z: 0 }));
     }
 
     #[test]
@@ -28562,6 +28962,23 @@ mod tests {
             forward.canonical_hash().expect("forward hash"),
             reverse.canonical_hash().expect("reverse hash")
         );
+
+        let mut outside_layout = forward.snapshot();
+        for chunk in &mut outside_layout.chunks {
+            chunk.coord.x += 360;
+        }
+        assert!(matches!(
+            WorldState::from_snapshot(&outside_layout),
+            Err(SimError::InvalidSnapshot)
+        ));
+        let mut missing_layer = forward.snapshot();
+        for chunk in &mut missing_layer.chunks {
+            chunk.coord.z = 1;
+        }
+        assert!(matches!(
+            WorldState::from_snapshot(&missing_layer),
+            Err(SimError::InvalidSnapshot)
+        ));
 
         let mut partial = WorldState::new(41, [13; 32]);
         partial

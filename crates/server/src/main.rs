@@ -14,9 +14,9 @@ use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, FieldTypeDefinition, FieldTypeRegistry,
     FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemGroupSubtype,
     ItemRegistry, MapgenRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
-    ProficiencyRegistry, RecipeRegistry, SkillRegistry, StartLocationRegistry,
-    StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
-    TerrainDefinition, TerrainRegistry,
+    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry,
+    StartLocationRegistry, StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode,
+    StrictItemGroupNodeKind, TerrainDefinition, TerrainRegistry,
 };
 use cdda_persistence::{
     AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1,
@@ -62,7 +62,7 @@ use tracing_subscriber::EnvFilter;
 
 mod worldgen;
 
-use worldgen::{RuntimeMapgenContent, lmoe_bootstrap_identity, runtime_mapgen_worldgen};
+use worldgen::{RuntimeMapgenContent, bootstrap_lmoe_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
 use worldgen::{runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice};
 
@@ -91,6 +91,7 @@ struct RuntimeWorldContent<'a> {
     furniture: &'a FurnitureRegistry,
     regions: &'a DefaultRegionTerrainFurnitureRegistry,
     mapgen: &'a MapgenRegistry,
+    overmap_terrain: &'a OvermapTerrainRegistry,
     start_locations: &'a StartLocationRegistry,
 }
 
@@ -275,6 +276,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &furniture,
         &item_groups,
     )?;
+    let overmap_terrain = OvermapTerrainRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let start_locations = StartLocationRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -354,6 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             furniture: &furniture,
             regions: &regions,
             mapgen: &mapgen,
+            overmap_terrain: &overmap_terrain,
             start_locations: &start_locations,
         },
     )?;
@@ -678,6 +686,7 @@ fn open_world(
     let furniture = content.furniture;
     let regions = content.regions;
     let mapgen = content.mapgen;
+    let overmap_terrain = content.overmap_terrain;
     let start_locations = content.start_locations;
     let mut store = WorldStore::open(path)?;
     let metadata = match store.metadata_optional()? {
@@ -731,8 +740,7 @@ fn open_world(
         items,
     )?;
     let worldgen = runtime_mapgen_worldgen(
-        "lmoe",
-        lmoe_bootstrap_identity(),
+        bootstrap_lmoe_overmap(overmap_terrain)?,
         start_locations
             .get("sloc_lmoe")
             .ok_or("pinned default content is missing sloc_lmoe")?,
@@ -4580,6 +4588,16 @@ mod tests {
         let item_groups =
             ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("item groups should load");
+        assert!(matches!(
+            item_groups
+                .strict_graph("field")
+                .expect_err("field loot must remain fail-closed until modifiers are supported"),
+            cdda_content::ItemGroupRegistryError::UnsupportedFields {
+                ref group,
+                ref fields,
+                ..
+            } if group == "everyday_corpse" && fields == &[String::from("damage")]
+        ));
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("ammunition should load");
@@ -4758,15 +4776,17 @@ mod tests {
             &item_groups,
         )
         .expect("strict mapgen should load");
+        let overmap_terrain =
+            OvermapTerrainRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("overmap terrain should load");
         let start_locations =
             StartLocationRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("start locations should load");
         let wilderness = runtime_mapgen_worldgen(
-            "lmoe",
-            lmoe_bootstrap_identity(),
+            bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
             start_locations
                 .get("sloc_lmoe")
-                .expect("lmoe start location should load"),
+                .expect("LMOE start location should load"),
             RuntimeMapgenContent {
                 mapgen: &mapgen,
                 regions: &regions,
@@ -4776,8 +4796,8 @@ mod tests {
             },
         )
         .expect("pinned surface mapgen should normalize");
-        assert_eq!(wilderness.default_omt.full_id, "lmoe_north");
-        assert_eq!(wilderness.default_omt.generator_id, "lmoe");
+        assert_eq!(wilderness.overmap.identities[0].full_id, "lmoe_north");
+        assert_eq!(wilderness.overmap.identities[0].generator_id, "lmoe");
         assert_eq!(
             wilderness
                 .start_location
@@ -4786,10 +4806,10 @@ mod tests {
                 .start_location_id,
             "sloc_lmoe"
         );
+        assert!(overmap_terrain.get_identity("field").is_some());
         assert!(
             runtime_mapgen_worldgen(
-                "lmoe",
-                lmoe_bootstrap_identity(),
+                bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
                 start_locations
                     .get("sloc_shelter_safe")
                     .expect("parameterized shelter start should load"),

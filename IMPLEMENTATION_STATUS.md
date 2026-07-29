@@ -2,119 +2,130 @@
 
 Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
-## Live snapshot
+## Live checkpoint
 
-- Current checkpoint: this commit; green parent `e75f20b` (`Extract server
-  worldgen normalization`).
+- Current checkpoint: this commit; green parent `98d413d` (`Add authoritative
+  start location selection`).
 - Active milestone: `mapgen-overmaps`.
-- Runtime versions: protocol 82, persistence schema/minimum recoverable schema
-  60, replay format 3, CanonicalStateV58, CanonicalEventsV18.
-- Conformance versions: scenario 7, observation 6.
-- Supported hosts: macOS, Linux, and Windows. The standalone server has no Bevy
-  dependency; Bevy 0.19 is confined to the graphical client. Networking and
-  endpoint-owned authentication use iroh 1.0.3.
-- This checkpoint contains the audited start-location/overmap-selection
-  increment described below.
+- Runtime: protocol 83, worldgen algorithm 2, persistence schema/minimum
+  recoverable schema 61, replay format 3, CanonicalStateV59, and
+  CanonicalEventsV18.
+- Conformance: scenario 7 and observation 6.
+- Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only; the server and
+  simulation are plain Rust. Networking and endpoint-owned authentication use
+  iroh 1.0.3.
 
-The detailed Protocol 81-era status and earlier subsystem history are archived
-in [docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md](docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md).
+Protocol 81-era and earlier narration is archived in
+[docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md](docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md).
+Protocol 82 is summarized in the repository history and architecture record;
+this file describes only the current runnable state and next boundary.
 
 ## Runnable behavior
 
-The repository builds a persistent server-authoritative multiplayer foundation,
-not yet a complete playable CDDA port. A Bevy client can enroll through iroh,
-create/select a persistent character, connect to the standalone server, move,
-interact with visible terrain/items, fight the current admitted creatures, and
-use the implemented crafting, reading, disassembly, construction, containment,
-survival, recovery, and replay paths. Characters remain present and vulnerable
-while disconnected, and the world clock continues without connected players.
+The repository is a persistent server-authoritative multiplayer foundation,
+not yet a complete CDDA port. The Bevy client can enroll through iroh,
+create/select a persistent character, move, fight the admitted creatures,
+interact with visible terrain and items, and use the implemented crafting,
+reading, disassembly, construction, containment, survival, recovery, and replay
+paths. Characters remain present and vulnerable while disconnected, and the
+world continues without players.
 
-Fresh worlds materialize 36 complete 24x24 OMTs/144 canonical chunks from the
-pinned `lmoe` local-map definition. Generation is atomic per four-submap OMT,
-coordinate-seeded, traversal-order independent, snapshot/replay stable, and
-bounded by one 4,096-ID reservation for admitted loot. The server now loads the
-selected start-location family, persists an explicit normalized overmap identity
-and start selector, and creates new characters in a deterministically selected
-matching OMT. While every coordinate shares the bootstrap identity, the origin
-OMT remains first so the character can reach the fixed starter loadout and
-encounter; deterministically shuffled matching OMTs are overflow capacity if
-that cell fills.
+Fresh worlds persist a bounded 180x180, z=0 overmap layout. The current server
+fills that coordinate-owned layout with the pinned `lmoe_north` identity to
+preserve the runnable bootstrap; it then materializes the 36 OMTs intersecting
+the initial active bubble as 144 canonical submaps. Each OMT is generated from
+its coordinate-selected generator, source-phase RNG is resolved before the
+completed terrain/furniture/item result rotates, and discovery outside the
+fixed layout fails atomically. Ordinary movement that would extend the active
+bubble past that boundary is rejected as blocked without failing the tick or
+stopping the server.
 
-The start-location loader implements strict inheritance and load-order patches;
-EXACT, TYPE, SUBTYPE, PREFIX, and CONTAINS terrain matching; source-ordered
-targets; city size/distance and z intervals; flags; and retained mapgen
-parameters. Runtime admission is deliberately narrower: the current server
-uses pinned `sloc_lmoe` only and rejects city-dependent starts, parameterized
-targets, preparation/placement flags, or starts excluding z=0. The pinned
-`lmoe_north`/`lmoe`/`lmoe` identity is explicit rather than inferred.
+The selected-content overmap-terrain registry strictly finalizes inheritance,
+ordered overlays, flag replacement/extension/deletion, ordinary four-way
+peers, all 16 linear peers, nonrotating identities, mapgen subtype routing, and
+clockwise local rotations. Unsupported OMT fields remain named in the content
+definition and do not imply runtime admission.
 
-Renderer-independent conformance now covers start selection and two-character
-placement through direct simulation, per-tick snapshot restoration, SQLite
-recovery, and portable replay. Existing character creation exposes this path to
-the client without granting the client authority over location choice.
+Start selection matches the identity owned by each generated coordinate rather
+than a global default. Exact, type, subtype, prefix, and contains matching are
+supported. Runtime admission requires every possible target to have a candidate
+in the durable initial bubble; character creation never generates unjournaled
+terrain. Only a uniform one-identity bootstrap receives origin affinity, while
+heterogeneous layouts retain their seeded shuffle. City constraints, mapgen
+parameters, every placement/preparation flag, and starts excluding z=0 fail
+closed. The production server still uses `sloc_lmoe`; character placement is
+authoritative and retains deterministic multiplayer fallback.
+
+## Measured evidence
+
+- A heterogeneous two-identity fixture dispatches separate generators by
+  coordinate, rotates a source marker at `(2,5)` to `(18,2)` together with its
+  furniture and item, restricts start selection to the matching OMT, exposes
+  that path through authoritative character creation, round-trips the snapshot,
+  and rejects out-of-layout discovery without mutation.
+- The shared heterogeneous start scenario produces identical state in direct,
+  per-tick snapshot, SQLite recovery, and portable-replay modes.
+- The persisted SQLite/replay worldgen fixture retains the complete bounded
+  layout and its generated chunks. Snapshot admission rejects complete 2x2 OMT
+  groups outside the owned coordinates and chunks on absent z-layers.
+- Edge traversal produces an ordinary authoritative `Blocked` rejection while
+  advancing the tick and leaving chunks unchanged. Remote-only start catalogs
+  fail runtime admission before world mutation.
+- The pinned C++ mapgen oracle characterizes all five OMT match modes, ordinary
+  and linear mapgen routing/rotation, marker rotation, and static
+  palette/nested phase ordering.
+- The only checked canonical hash change is the item-flow state root:
+  `68cf369b8e35b9b2c7613d273436c0a202c723927113d629e9c1a34a9a56e0a1`
+  under CanonicalStateV58 becomes
+  `ced77c1dd1cdaab7b30fbf202a15e0aae54548e5a4beb11b9b707417b6e94e11`
+  under CanonicalStateV59. That scenario has no worldgen state; its tick,
+  actor, inventory, ground item, and CanonicalEventsV18 trace are unchanged,
+  isolating the difference to the intentional state-hash domain change.
 
 ## Explicit boundaries
 
-- Every generated coordinate still shares the explicit `lmoe_north` bootstrap
-  identity. There is no persistent coordinate-owned overmap terrain layout yet.
-- Cities, roads, rivers, forests, specials, regional overmap settings, overmap
-  populations, spawn groups, zones, vehicles, and multiple generated z-levels
-  remain unavailable.
-- Local start-tile placement currently uses passability and occupancy within
-  the selected 24x24 OMT. Upstream inside/outside classification, connected-area
-  rating, start-point zones, bash/open reachability, NPC accommodation, and
-  `ALLOW_OUTSIDE`/`LONE_START`/`BOARDED` behavior are not claimed; definitions
-  requiring their explicit flags fail closed.
-- Nested/update mapgen, mapgen parameters, and positive-weight unsupported
-  variants remain fail closed. The ordinary `field` mapgen is still unavailable
-  because its corpse/container loot cannot yet enter canonical item state.
-- Before admitting an item-bearing server default, reservation management must
-  cover the full worst-case discovery allocation rather than relying on the
-  current 512-ID refill threshold.
-- Post-snapshot journal replay of traversal-triggered boundary generation needs
-  an explicit conformance case before broader on-demand overmap population.
+- The stored layout is genuinely coordinate-owned, but production population
+  still repeats `lmoe_north`; it is not an upstream forest/city/road/river/
+  special layout.
+- The pinned z=0 regional base is `field`, but its mapgen cannot yet be admitted:
+  the reachable `field -> everyday_corpse` item-group closure uses the general
+  `damage` modifier, and later container semantics are also not canonical.
+  Startup and its fixed-snapshot test reject that closure instead of dropping
+  rare content.
+- Adjacent overmaps, multiple generated z-levels, cities, forests, roads,
+  rivers, specials, map extras, spawn groups, populations, zones, vehicles,
+  and monsters from mapgen remain unavailable.
+- Inside/outside connected-area scoring, start zones, opening/bashing
+  reachability, NPC accommodation, `ALLOW_OUTSIDE`, `LONE_START`, and `BOARDED`
+  remain unavailable and fail closed.
+- Nested/update mapgen, mapgen parameters, multi-layer glyphs, weighted
+  one-time fill, recursive regional targets, and unsupported positive-weight
+  variants remain fail closed.
+- Generating a remote start OMT inside the character-creation transaction is
+  unavailable until that worldgen mutation is journaled and rolled back with
+  the character transaction.
 
-## Current increment evidence
+## Latest verification
 
-- Pinned selected content resolves 101 start locations; `sloc_lmoe` is the sole
-  current runtime start. `sloc_shelter_safe` parameters, forward-inherited
-  `sloc_house_boarded`, and unbounded `sloc_road` distance are retained and
-  characterized without being admitted.
-- The real C++ mapgen oracle already characterizes all five OMT matching modes,
-  rotatable and linear identities, point rotation, and static palette/nested
-  phase ordering against the fixed upstream tree.
-- Local verification is green: `cargo fmt --all -- --check`, workspace
-  all-target/all-feature `cargo check`, strict workspace `clippy`, warning-free
-  rustdoc, dependency-boundary and parity-ledger checks, selected-content
-  validation, content inventory, astronomy characterization, all three pinned
-  C++ differential oracles (8 pocket, 34 item-group, and 17 mapgen assertions),
-  and 322 workspace tests. The suite includes all nine shared conformance tests
-  and the full-content server normalization case.
-- Fresh independent review found that randomized first-OMT selection could
-  strand new characters from the fixed starter slice. Origin affinity and
-  direct/four-mode conformance assertions now prevent that regression. A
-  suggested city-distance rejection was not applied: pinned C++ requires a
-  city only for positive minimum city size or maximum distance below 180, and
-  the implementation and tests preserve that exact rule. No P0/P1 finding
-  remains.
-- The final default-parallel gate exposed two real-Iroh fixtures that left the
-  simulation's bounded output queue undrained during slow endpoint setup. Both
-  now use the existing test acknowledger; the subsequent 22-test server run and
-  complete 322-test workspace run are green without serializing network tests.
-- The checked item-flow state hash changed from
-  `088d6a3945e6f1e59b39021ea1a4986ad22f494e07c18a21c52f2d9c28540f8e` to
-  `68cf369b8e35b9b2c7613d273436c0a202c723927113d629e9c1a34a9a56e0a1`.
-  The scenario has no worldgen catalog, so encoded state shape is unchanged;
-  the change is exactly the intentional CanonicalStateV57-to-V58 domain
-  separation. Its event-trace hash remains unchanged.
+Local implementation gates are green: formatting; workspace all-target,
+all-feature check; strict Clippy; warning-free rustdoc; dependency boundaries;
+parity ledger; astronomy table; selected-content validation at the unchanged
+manifest hash `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
+content inventory; and all three pinned C++ differential oracles (17 mapgen, 34
+item-group, and 8 pocket assertions); and 331 workspace tests. Independent
+review found and the final tree fixes bounded-edge tick failure, unjournaled
+remote-start generation, out-of-layout snapshot admission, three OMT loader
+parity errors (reset definitions, non-inherited `uniform_terrain`, and
+string-only abstracts), resource-bound gaps, and heterogeneous origin bias. A
+fresh complete-diff rescan reported no remaining P0/P1 or lower-severity
+findings. Future hardening may index highly fragmented RLE identity lookup and
+add loader-local JSON byte caps before mutable content packages are admitted.
 
 ## Next dependency boundary
 
-Complete a persistent coordinate-owned overmap terrain-selection engine before
-admitting another mapgen example: load normalized OMT identities and the
-overmap-special relationships needed to place a coherent layout, retain
-unsupported constraints explicitly, characterize selection against pinned C++
-where practical, persist/replay the layout, and then let the existing generic
-start matcher select among genuinely different OMTs. Do not begin spawn groups
-or another subsystem until this increment is fully green, reviewed, documented,
-and checkpointed.
+Finish this checkpoint first. The next parity increment must inventory and
+implement the coherent item-group modifier/contained-item family needed by the
+pinned `field` closure, with C++ characterization and all four recovery modes,
+before replacing the runnable LMOE population with the real default field
+layer. Forest/city/road/river/special placement begins only after that base
+layer is exact and green.

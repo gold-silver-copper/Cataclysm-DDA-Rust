@@ -8,6 +8,7 @@ mod item;
 mod item_group;
 mod mapgen;
 mod monster;
+mod overmap_terrain;
 mod proficiency;
 mod recipe;
 mod region;
@@ -48,6 +49,12 @@ pub use mapgen::{
     WeightedMapgenId,
 };
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
+pub use overmap_terrain::{
+    MAX_OVERMAP_TERRAIN_ID_BYTES, MAX_OVERMAP_TERRAIN_IDENTITIES,
+    MAX_OVERMAP_TERRAIN_IDS_PER_DEFINITION, MAX_OVERMAP_TERRAIN_TYPES, OvermapTerrainIdentity,
+    OvermapTerrainRegistry, OvermapTerrainRegistryError, OvermapTerrainShape,
+    OvermapTerrainTypeDefinition,
+};
 pub use proficiency::{
     PROFICIENCY_MULTIPLIER_SCALE, ProficiencyDefinition, ProficiencyRegistry,
     ProficiencyRegistryError,
@@ -1256,6 +1263,28 @@ mod tests {
         let item_groups = ItemGroupRegistry::load_selected(&manifest, root, &catalog, &enabled)
             .expect("selected named item groups should normalize");
         assert!(item_groups.get("field").is_some());
+        let overmap_terrain =
+            OvermapTerrainRegistry::load_selected(&manifest, root, &catalog, &enabled)
+                .expect("selected overmap-terrain identities should finalize");
+        assert_eq!(
+            overmap_terrain
+                .get_identity("field")
+                .expect("non-rotating field identity")
+                .generator_id,
+            "field"
+        );
+        assert_eq!(
+            overmap_terrain
+                .get_identity("lmoe_north")
+                .expect("rotatable LMOE identity")
+                .rotation,
+            0
+        );
+        let road_ew = overmap_terrain
+            .get_identity("road_ew")
+            .expect("linear east-west road identity");
+        assert_eq!(road_ew.subtype_id, "road_straight");
+        assert_eq!(road_ew.rotation, 3);
         ammunition
             .validate_item_references(&items)
             .expect("ammunition defaults should resolve to concrete items");

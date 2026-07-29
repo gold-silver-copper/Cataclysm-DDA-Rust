@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 60;
-/// Old Postcard snapshots and journals cannot be decoded after the Protocol 82
+pub const SCHEMA_VERSION: i64 = 61;
+/// Old Postcard snapshots and journals cannot be decoded after the Protocol 83
 /// canonical overmap/start-location layout change. Metadata-only databases may
 /// still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 60;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 61;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -6764,12 +6764,25 @@ mod tests {
             item_group: None,
         };
         let catalog = cdda_protocol::WorldgenCatalogV1 {
-            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
-            default_omt: cdda_protocol::WorldgenOmtIdentityV1 {
-                full_id: String::from("sqlite_field"),
-                type_id: String::from("sqlite_field"),
-                subtype_id: String::from("sqlite_field"),
-                generator_id: String::from("sqlite_field"),
+            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+            overmap: cdda_protocol::WorldgenOvermapLayoutV1 {
+                origin_x: -90,
+                origin_y: -90,
+                identities: vec![cdda_protocol::WorldgenOmtIdentityV1 {
+                    full_id: String::from("sqlite_field"),
+                    type_id: String::from("sqlite_field"),
+                    subtype_id: String::from("sqlite_field"),
+                    generator_id: String::from("sqlite_field"),
+                    rotation: 0,
+                }],
+                layers: vec![cdda_protocol::WorldgenOvermapLayerV1 {
+                    z: 0,
+                    runs: vec![cdda_protocol::WorldgenOvermapRunV1 {
+                        identity_index: 0,
+                        length: u32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH)
+                            * u32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT),
+                    }],
+                }],
             },
             start_location: None,
             terrain_prototypes: vec![terrain],
@@ -6784,6 +6797,7 @@ mod tests {
                 }],
             }],
         };
+        let expected_overmap = catalog.overmap.clone();
         let mut world = WorldState::new(63, [19; 32]);
         world
             .install_reserved_block(block)
@@ -6804,16 +6818,16 @@ mod tests {
             .recover_latest(WorldState::new(63, [19; 32]))
             .expect("mapgen snapshot should recover");
         assert_eq!(sequence, 0);
-        assert_eq!(recovered.snapshot().chunks.len(), 144);
+        let recovered_snapshot = recovered.snapshot();
+        assert_eq!(recovered_snapshot.chunks.len(), 144);
         assert_eq!(
-            recovered
-                .snapshot()
+            recovered_snapshot
                 .worldgen
                 .as_ref()
                 .expect("catalog should recover")
-                .default_omt
-                .generator_id,
-            "sqlite_field"
+                .overmap
+                .clone(),
+            expected_overmap
         );
         assert_eq!(
             recovered.canonical_hash().expect("recovered hash"),
