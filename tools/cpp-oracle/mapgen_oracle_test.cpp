@@ -14,6 +14,7 @@
 #include "omdata.h"
 #include "overmap.h"
 #include "point.h"
+#include "start_location.h"
 #include "type_id.h"
 
 namespace
@@ -61,6 +62,25 @@ const char *phase_name( mapgen_phase phase )
             break;
     }
     return "invalid";
+}
+
+const char *match_type_name( ot_match_type type )
+{
+    switch( type ) {
+        case ot_match_type::exact:
+            return "EXACT";
+        case ot_match_type::type:
+            return "TYPE";
+        case ot_match_type::subtype:
+            return "SUBTYPE";
+        case ot_match_type::prefix:
+            return "PREFIX";
+        case ot_match_type::contains:
+            return "CONTAINS";
+        case ot_match_type::num_ot_match_type:
+            break;
+    }
+    return "INVALID";
 }
 
 std::vector<rotation_observation> rotatable_observations()
@@ -145,6 +165,28 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
 
     const std::vector<rotation_observation> rotatable = rotatable_observations();
     const std::vector<rotation_observation> linear = linear_observations();
+
+    const start_location_id start_id( "sloc_lmoe" );
+    REQUIRE( start_id.is_valid() );
+    const start_location &start = start_id.obj();
+    REQUIRE( start.targets_count() == 1 );
+    const omt_types_parameters chosen_target = start.random_target();
+    const std::vector<std::string> candidate_identity_ids = {
+        "shelter_north", "lmoe_north", "road_ew", "forest_thick"
+    };
+    std::vector<std::string> matching_candidate_ids;
+    for( const std::string &candidate : candidate_identity_ids ) {
+        const oter_str_id candidate_id( candidate );
+        REQUIRE( candidate_id.is_valid() );
+        if( is_ot_match( chosen_target.omt, candidate_id.id(), chosen_target.omt_type ) ) {
+            matching_candidate_ids.emplace_back( candidate );
+        }
+    }
+    REQUIRE_FALSE( matching_candidate_ids.empty() );
+    const start_location_placement_constraints &constraints = start.get_constraints();
+    const bool runtime_selectable_without_cities = !start.requires_city() &&
+            constraints.allowed_z_levels.contains( 0 ) && start.flags().empty() &&
+            chosen_target.parameters.empty();
 
     constexpr const char *palette_id_text = "rust_cpp_oracle_mapgen_palette_v1";
     JsonObject palette_json = json_loader::from_string( R"({
@@ -314,6 +356,28 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
         }
         json.end_array();
         json.member( "setup_completed", true );
+        json.end_object();
+
+        json.member( "start_location" );
+        json.start_object();
+        json.member( "start_location_id", start_id.str() );
+        json.member( "target_count", start.targets_count() );
+        json.member( "chosen_target_index", 0 );
+        json.member( "chosen_target_omt", chosen_target.omt );
+        json.member( "chosen_target_match_type", match_type_name( chosen_target.omt_type ) );
+        json.member( "chosen_target_parameter_count", chosen_target.parameters.size() );
+        json.member( "requires_city", start.requires_city() );
+        json.member( "city_size_minimum", constraints.city_size.min );
+        json.member( "city_size_maximum", constraints.city_size.max );
+        json.member( "city_distance_minimum", constraints.city_distance.min );
+        json.member( "city_distance_maximum", constraints.city_distance.max );
+        json.member( "allowed_z_minimum", constraints.allowed_z_levels.min );
+        json.member( "allowed_z_maximum", constraints.allowed_z_levels.max );
+        json.member( "flags", std::vector<std::string>( start.flags().begin(), start.flags().end() ) );
+        json.member( "runtime_selectable_without_cities", runtime_selectable_without_cities );
+        json.member( "candidate_identity_ids", candidate_identity_ids );
+        json.member( "matching_candidate_ids", matching_candidate_ids );
+        json.member( "selected_candidate_id", matching_candidate_ids.front() );
         json.end_object();
         json.end_object();
     }

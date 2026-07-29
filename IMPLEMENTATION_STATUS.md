@@ -26,9 +26,11 @@ Mapgen/overmap progress is split into durable submilestones:
 - `omt-identities-routing`: `complete`; the same direct run covers finalized
   rotatable and linear identities while conformance covers durable coordinate
   routing and bounded recovery.
-- `start-location-selection`: `complete`; every pinned match mode compares
-  directly, and normal server-authoritative character creation plus multiplayer
-  occupied-tile fallback agree through all four recovery modes.
+- `start-location-selection`: `complete`; the pinned production `sloc_lmoe`
+  definition, chosen target, constraints, and matching candidate set compare
+  directly. Normal server-authoritative character creation and the explicitly
+  Rust-specific multiplayer occupied-tile fallback agree through all four
+  recovery modes.
 - `regional-terrain-base`: `in_progress`; the containment engine removes the
   `civilian_phones_case` blocker. The exact field closure now stops at
   `accesories_personal_unisex_child` because `wearable_light` tool charge
@@ -84,19 +86,21 @@ is not admitted until its entire loot/containment closure is exact.
 
 ## Measured progress
 
-Runtime evidence remains four core definitions and 68 weighted points. Each counted
+Runtime evidence remains four core definitions and 44 weighted points. Each counted
 definition is generated, authoritatively interacted with, persisted, and
 client-accessible. No production definition receives four-mode credit from a
 normalized semantic substitute. The three newly normalizable furniture bashes
 earn no points yet because the current playable LMOE mapgen does not place
-them. The admitted mapgen generator, OMT identity, and start location now each
-carry exact four-mode credit; the structural-bash item group does not yet.
+them. The synthetic heterogeneous conformance catalog proves all four engine
+recovery modes but does not award production-definition credit to the admitted
+mapgen generator, OMT identity, or start location. The structural-bash item
+group also lacks production four-mode credit.
 Parser inventory remains separate: 7,621 item groups, 9,520 mapgen
 objects, 2,712 OMTs, and 150 starts earn no runtime credit merely for loading.
 
 The independently checked ordinary-gameplay denominator is split by source:
 core DDA has 13,865 target definitions and 263,435 possible weighted points,
-with 68 earned (0.0258%); selectable bundled mods have 5,967 target definitions
+with 44 earned (0.0167%); selectable bundled mods have 5,967 target definitions
 and 113,373 possible points, with zero earned. The bundled universe is the
 union of nonobsolete pinned mods that participate in at least one valid
 new-world selection; mutually exclusive configurations still contribute their
@@ -182,14 +186,19 @@ The fixed upstream checkout remains
 The active comparator candidate adds no wire or persistence representation. Its
 generic exact comparator loads pinned production OMT identities, runs the Rust
 24x24 `WorldState` generator, and compares 8 matching cases, 8 concrete
-rotatable/linear identities, and one generated terrain/furniture template with
-the C++ output. Its checked trace covers every one of the 576 generated cells;
-the C++ test passes 1,172 assertions. This direct cycle exposed and
+rotatable/linear identities, one generated terrain/furniture template, and the
+production `sloc_lmoe` target/candidate boundary with the C++ output. Its
+checked trace covers every one of the 576 generated cells, and the C++ test
+passes 1,179 assertions. This direct cycle exposed and
 fixed three stale linear marker expectations: the concrete `road_ns` and
 `road_ew` identities rotate by 0 and 3 respectively, not by the compass label
 used to request a peer. The existing heterogeneous start scenario supplies
 direct, per-tick snapshot, SQLite, and portable-replay evidence for all three
-families. Runtime progress is deliberately unbound until the implementation is
+families; occupied-tile fallback remains the documented multiplayer adaptation.
+The exact 16-byte manifested `INVALID_RAND.mo` test fixture is now force-tracked
+despite its upstream nested ignore rule, so a pristine checkout can load the
+production registry after the C++ run.
+Runtime progress is deliberately unbound until the implementation is
 committed and reviewed as a fixed tree. The candidate leaves `sim/lib.rs` at
 29,339 lines and `protocol/lib.rs` at 9,722; its Rust implementation growth is
 owned entirely by `crates/tools/src/cpp_oracle.rs` and the tools-only direct

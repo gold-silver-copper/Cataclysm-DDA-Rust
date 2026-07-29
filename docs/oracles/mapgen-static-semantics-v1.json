@@ -78,6 +78,26 @@
       ],
       "piece_phases": ["terrain", "furniture"],
       "setup_completed": true
+    },
+    "start_location": {
+      "start_location_id": "sloc_lmoe",
+      "target_count": 1,
+      "chosen_target_index": 0,
+      "chosen_target_omt": "lmoe",
+      "chosen_target_match_type": "TYPE",
+      "chosen_target_parameter_count": 0,
+      "requires_city": false,
+      "city_size_minimum": 0,
+      "city_size_maximum": 2147483647,
+      "city_distance_minimum": 0,
+      "city_distance_maximum": 2147483647,
+      "allowed_z_minimum": -10,
+      "allowed_z_maximum": 10,
+      "flags": [],
+      "runtime_selectable_without_cities": true,
+      "candidate_identity_ids": ["shelter_north", "lmoe_north", "road_ew", "forest_thick"],
+      "matching_candidate_ids": ["lmoe_north"],
+      "selected_candidate_id": "lmoe_north"
     }
   }
 }

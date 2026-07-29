@@ -4,7 +4,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use cdda_content::{ContentManifest, ModCatalog, OvermapTerrainRegistry};
+use cdda_content::{
+    ContentManifest, ModCatalog, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    StartLocationRegistry,
+};
 use cdda_protocol::{
     BASELINE_COMMIT, ChunkCoord, FurnitureTileSnapshot, TerrainTileSnapshot,
     WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH,
@@ -309,6 +312,7 @@ struct MapgenOracleObservationV1 {
     linear: Vec<MapgenRotationObservationV1>,
     palette: MapgenPaletteObservationV1,
     static_template: MapgenStaticTemplateObservationV1,
+    start_location: MapgenStartLocationObservationV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -362,12 +366,36 @@ struct MapgenStaticTemplateObservationV1 {
     setup_completed: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenStartLocationObservationV1 {
+    start_location_id: String,
+    target_count: i32,
+    chosen_target_index: i32,
+    chosen_target_omt: String,
+    chosen_target_match_type: String,
+    chosen_target_parameter_count: i32,
+    requires_city: bool,
+    city_size_minimum: i32,
+    city_size_maximum: i32,
+    city_distance_minimum: i32,
+    city_distance_maximum: i32,
+    allowed_z_minimum: i32,
+    allowed_z_maximum: i32,
+    flags: Vec<String>,
+    runtime_selectable_without_cities: bool,
+    candidate_identity_ids: Vec<String>,
+    matching_candidate_ids: Vec<String>,
+    selected_candidate_id: String,
+}
+
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct MapgenDirectObservationV1 {
     matching: Vec<MapgenMatchObservationV1>,
     rotatable: Vec<MapgenRotationObservationV1>,
     linear: Vec<MapgenRotationObservationV1>,
     static_template: MapgenStaticTemplateObservationV1,
+    start_location: MapgenStartLocationObservationV1,
 }
 
 struct RustStaticTemplateTiles {
@@ -1089,6 +1117,29 @@ fn validate_mapgen_observation(
     {
         return Err("mapgen admitted static-template observation is incomplete".into());
     }
+    let start = &observation.start_location;
+    if start.start_location_id != "sloc_lmoe"
+        || start.target_count != 1
+        || start.chosen_target_index != 0
+        || start.chosen_target_omt != "lmoe"
+        || start.chosen_target_match_type != "TYPE"
+        || start.chosen_target_parameter_count != 0
+        || start.requires_city
+        || start.city_size_minimum != 0
+        || start.city_size_maximum != i32::MAX
+        || start.city_distance_minimum != 0
+        || start.city_distance_maximum != i32::MAX
+        || start.allowed_z_minimum != -10
+        || start.allowed_z_maximum != 10
+        || !start.flags.is_empty()
+        || !start.runtime_selectable_without_cities
+        || start.candidate_identity_ids
+            != ["shelter_north", "lmoe_north", "road_ew", "forest_thick"]
+        || start.matching_candidate_ids != ["lmoe_north"]
+        || start.selected_candidate_id != "lmoe_north"
+    {
+        return Err("mapgen production start-location observation is incomplete".into());
+    }
     Ok(())
 }
 
@@ -1098,6 +1149,7 @@ fn direct_mapgen_projection(observation: &MapgenOracleObservationV1) -> MapgenDi
         rotatable: observation.rotatable.clone(),
         linear: observation.linear.clone(),
         static_template: observation.static_template.clone(),
+        start_location: observation.start_location.clone(),
     }
 }
 
@@ -1112,6 +1164,8 @@ fn rust_mapgen_direct_observation(
     let mods = ModCatalog::load(&manifest, content_root)?;
     let enabled = mods.recommended_new_world()?;
     let terrain = OvermapTerrainRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    let start_locations =
+        StartLocationRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
 
     let match_cases = [
         (
@@ -1222,7 +1276,72 @@ fn rust_mapgen_direct_observation(
             piece_phases: vec![String::from("terrain"), String::from("furniture")],
             setup_completed: true,
         },
+        start_location: rust_start_location_observation(&start_locations, &terrain)?,
     })
+}
+
+fn rust_start_location_observation(
+    registry: &StartLocationRegistry,
+    terrain: &OvermapTerrainRegistry,
+) -> Result<MapgenStartLocationObservationV1, Box<dyn std::error::Error>> {
+    let start = registry
+        .get("sloc_lmoe")
+        .ok_or("pinned Rust content is missing start location sloc_lmoe")?;
+    if start.targets.len() != 1 {
+        return Err("pinned sloc_lmoe no longer has exactly one target".into());
+    }
+    let chosen_target = start
+        .targets
+        .first()
+        .ok_or("pinned sloc_lmoe has no selectable target")?;
+    let (match_type_name, match_type) = protocol_match_type(chosen_target.match_type);
+    let candidate_identity_ids = ["shelter_north", "lmoe_north", "road_ew", "forest_thick"];
+    let mut matching_candidate_ids = Vec::new();
+    for candidate in candidate_identity_ids {
+        let identity = protocol_omt_identity(terrain, candidate)?;
+        if worldgen_omt_matches(&chosen_target.overmap_terrain, match_type, &identity) {
+            matching_candidate_ids.push(candidate.to_owned());
+        }
+    }
+    let selected_candidate_id = matching_candidate_ids
+        .first()
+        .ok_or("pinned sloc_lmoe target matched no normalized candidate")?
+        .clone();
+    Ok(MapgenStartLocationObservationV1 {
+        start_location_id: start.id.clone(),
+        target_count: i32::try_from(start.targets.len())?,
+        chosen_target_index: 0,
+        chosen_target_omt: chosen_target.overmap_terrain.clone(),
+        chosen_target_match_type: match_type_name.to_owned(),
+        chosen_target_parameter_count: i32::try_from(chosen_target.parameters.len())?,
+        requires_city: start.requires_city(),
+        city_size_minimum: start.city_sizes.minimum,
+        city_size_maximum: start.city_sizes.maximum,
+        city_distance_minimum: start.city_distance.minimum,
+        city_distance_maximum: start.city_distance.maximum,
+        allowed_z_minimum: start.allowed_z_levels.minimum,
+        allowed_z_maximum: start.allowed_z_levels.maximum,
+        flags: start.flags.iter().cloned().collect(),
+        runtime_selectable_without_cities: start.is_runtime_selectable_without_cities(),
+        candidate_identity_ids: candidate_identity_ids
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        matching_candidate_ids,
+        selected_candidate_id,
+    })
+}
+
+fn protocol_match_type(
+    match_type: OvermapTerrainMatchType,
+) -> (&'static str, WorldgenOmtMatchTypeV1) {
+    match match_type {
+        OvermapTerrainMatchType::Exact => ("EXACT", WorldgenOmtMatchTypeV1::Exact),
+        OvermapTerrainMatchType::Type => ("TYPE", WorldgenOmtMatchTypeV1::Type),
+        OvermapTerrainMatchType::Subtype => ("SUBTYPE", WorldgenOmtMatchTypeV1::Subtype),
+        OvermapTerrainMatchType::Prefix => ("PREFIX", WorldgenOmtMatchTypeV1::Prefix),
+        OvermapTerrainMatchType::Contains => ("CONTAINS", WorldgenOmtMatchTypeV1::Contains),
+    }
 }
 
 fn protocol_omt_identity(
@@ -2139,6 +2258,13 @@ mod tests {
             .generated_rows[0]
             .replace_range(0..1, "X");
         assert!(validate_mapgen_scenario(&bad_trace).is_err());
+
+        let mut bad_start = checked_mapgen_scenario();
+        bad_start
+            .expected_observation
+            .start_location
+            .selected_candidate_id = String::from("shelter_north");
+        assert!(validate_mapgen_scenario(&bad_start).is_err());
     }
 
     #[test]
@@ -2167,6 +2293,9 @@ mod tests {
         assert!(compare_direct_observation("mapgen", &direct, &changed).is_err());
         let mut changed = direct_mapgen_projection(&mapgen.expected_observation);
         changed.static_template.generated_rows[5].replace_range(2..3, ".");
+        assert!(compare_direct_observation("mapgen", &direct, &changed).is_err());
+        let mut changed = direct_mapgen_projection(&mapgen.expected_observation);
+        changed.start_location.chosen_target_omt = String::from("shelter");
         assert!(compare_direct_observation("mapgen", &direct, &changed).is_err());
     }
 }

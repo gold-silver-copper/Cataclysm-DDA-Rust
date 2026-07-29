@@ -2946,7 +2946,11 @@ matching, concrete identity routing, terrain/furniture placement, and rotation
 directly with the C++ observation. The C++ side also generates the admitted
 static template instead of reporting setup alone, and both sides compare an
 exact 24-row trace so an incorrect engine cannot match only sampled tiles or
-aggregate observations. The shared heterogeneous
+aggregate observations. Both sides also load the production `sloc_lmoe`
+definition and compare its sole chosen target, constraints, runtime-admission
+boundary, fixed candidate identities, matching subset, and selected candidate.
+Only target/candidate semantics are upstream-equivalent; deterministic
+occupied-tile fallback remains an explicit multiplayer adaptation. The shared heterogeneous
 scenario supplies direct, per-tick snapshot, SQLite, and portable-replay
 evidence; existing server character creation and Bevy exploration supply the
 normal authoritative path. `atomic-static-mapgen`, `omt-identities-routing`,

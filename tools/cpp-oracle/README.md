@@ -46,8 +46,11 @@ linear OMT routing using each concrete identity's actual mapgen rotation,
 a 24x24 admitted terrain/furniture template, including an exact trace of all
 576 generated cells. The Rust half independently loads
 the production identities and generates that template through the simulation;
-the command fails if either side differs from the checked corpus or from the
-other implementation. Run them with:
+the same direct comparison loads the production `sloc_lmoe` definition on both
+sides and checks its chosen target, constraints, runtime-admission state, and a
+fixed matching candidate set. Multiplayer occupied-tile fallback remains a
+Rust adaptation covered by shared conformance. The command fails if either side
+differs from the checked corpus or from the other implementation. Run them with:
 
 ```sh
 cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json
