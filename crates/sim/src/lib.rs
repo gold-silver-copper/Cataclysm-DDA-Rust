@@ -1,5 +1,6 @@
 //! Renderer-independent canonical simulation state.
 
+mod items;
 mod mapgen;
 mod overmap;
 
@@ -22,15 +23,14 @@ use cdda_protocol::{
     FurnitureTileSnapshot, GroundItemSnapshot, HeldInputSequence, HeldMovementUpdateSource,
     HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
     IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemId, ItemSnapshot, LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
-    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
-    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
-    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
-    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
-    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
-    MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
-    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS,
+    ItemGroupSourceV1, ItemId, ItemSnapshot, LocalTileCoord, MAX_ACTOR_BASE_STAT,
+    MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES,
+    MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES,
+    MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES,
+    MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS,
+    MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
+    MAX_DISASSEMBLY_COMPONENT_TYPES, MAX_ITEM_AMMUNITION_CONTAINER_POCKETS,
+    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL,
     MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
     MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
     MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
@@ -48,7 +48,12 @@ use rand_core::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
-use cdda_protocol::{ItemGroupItemPrototypeV1, ItemGroupNodeV1};
+use cdda_protocol::{
+    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupTargetV1,
+};
+
+use items::plan_item_group_source;
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
 pub const DEFAULT_ACTOR_HP: i32 = 100;
@@ -934,164 +939,6 @@ fn validate_furniture_bash_type(
         || bash.failure_sound_volume > i32::from(u16::MAX)
     {
         return Err(SimError::InvalidFurniture);
-    }
-    Ok(())
-}
-
-fn plan_item_group_source(
-    source: &ItemGroupSourceV1,
-    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
-    rng: &mut ChaCha8Rng,
-) -> Result<Vec<CraftItemPrototypeV1>, SimError> {
-    let mut output = Vec::new();
-    plan_item_group_source_into(source, item_groups, rng, &mut output, 0)?;
-    Ok(output)
-}
-
-fn plan_item_group_source_into(
-    source: &ItemGroupSourceV1,
-    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
-    rng: &mut ChaCha8Rng,
-    output: &mut Vec<CraftItemPrototypeV1>,
-    depth: usize,
-) -> Result<(), SimError> {
-    let graph = match source {
-        ItemGroupSourceV1::Group(group_id) => {
-            &item_groups
-                .get(group_id)
-                .ok_or(SimError::InvalidItem)?
-                .graph
-        }
-        ItemGroupSourceV1::Inline(graph) => graph,
-    };
-    plan_item_group_node(graph, graph.root_node, item_groups, rng, output, depth)
-}
-
-fn plan_item_group_node(
-    graph: &ItemGroupGraphV1,
-    node_id: u16,
-    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
-    rng: &mut ChaCha8Rng,
-    output: &mut Vec<CraftItemPrototypeV1>,
-    depth: usize,
-) -> Result<(), SimError> {
-    if depth > MAX_ITEM_GROUP_DEPTH {
-        return Err(SimError::InvalidItem);
-    }
-    let node = graph
-        .nodes
-        .iter()
-        .find(|node| node.node_id == node_id)
-        .ok_or(SimError::InvalidItem)?;
-    match node.kind {
-        ItemGroupKindV1::Collection => {
-            for entry in &node.entries {
-                // The pinned implementation rolls even for guaranteed entries.
-                if rng.next_u64() % 100 < u64::from(entry.probability) {
-                    plan_item_group_entry(graph, entry, item_groups, rng, output, depth)?;
-                }
-            }
-        }
-        ItemGroupKindV1::Distribution => {
-            let total = node.entries.iter().try_fold(0_u64, |total, entry| {
-                total.checked_add(u64::from(entry.probability))
-            });
-            let Some(total) = total.filter(|total| *total > 0) else {
-                return Ok(());
-            };
-            let ticket = inclusive_rng_u64(rng, 1, total);
-            let mut accumulated = 0_u64;
-            let entry = node
-                .entries
-                .iter()
-                .find(|entry| {
-                    accumulated = accumulated.saturating_add(u64::from(entry.probability));
-                    ticket <= accumulated
-                })
-                .ok_or(SimError::InvalidItem)?;
-            plan_item_group_entry(graph, entry, item_groups, rng, output, depth)?;
-        }
-    }
-    Ok(())
-}
-
-fn plan_item_group_entry(
-    graph: &ItemGroupGraphV1,
-    entry: &ItemGroupEntryV1,
-    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
-    rng: &mut ChaCha8Rng,
-    output: &mut Vec<CraftItemPrototypeV1>,
-    depth: usize,
-) -> Result<(), SimError> {
-    let count = if entry.count_min == entry.count_max {
-        u64::from(entry.count_min)
-    } else {
-        inclusive_rng_u64(rng, u64::from(entry.count_min), u64::from(entry.count_max))
-    };
-    for _ in 0..count {
-        plan_item_group_target(
-            graph,
-            &entry.target,
-            item_groups,
-            rng,
-            output,
-            depth.checked_add(1).ok_or(SimError::NumericOverflow)?,
-        )?;
-    }
-    Ok(())
-}
-
-fn plan_item_group_target(
-    graph: &ItemGroupGraphV1,
-    target: &ItemGroupTargetV1,
-    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
-    rng: &mut ChaCha8Rng,
-    output: &mut Vec<CraftItemPrototypeV1>,
-    depth: usize,
-) -> Result<(), SimError> {
-    if depth > MAX_ITEM_GROUP_DEPTH {
-        return Err(SimError::InvalidItem);
-    }
-    match target {
-        ItemGroupTargetV1::Item(item) => {
-            let mut prototype = item.prototype.clone();
-            if let Some(charges) = item.charges {
-                let rolled = if charges.minimum == charges.maximum {
-                    charges.minimum
-                } else {
-                    i32::try_from(inclusive_rng_u64(
-                        rng,
-                        u64::try_from(charges.minimum).map_err(|_| SimError::InvalidItem)?,
-                        u64::try_from(charges.maximum).map_err(|_| SimError::InvalidItem)?,
-                    ))
-                    .map_err(|_| SimError::NumericOverflow)?
-                };
-                prototype.charges = if item.minimum_one_charge {
-                    rolled.max(1)
-                } else {
-                    rolled
-                };
-            }
-            if output.len()
-                >= usize::try_from(MAX_ITEM_GROUP_OUTPUTS).map_err(|_| SimError::NumericOverflow)?
-            {
-                return Err(SimError::InvalidItem);
-            }
-            if validate_craft_item_prototype(&prototype).is_err() {
-                return Err(SimError::InvalidItem);
-            }
-            output.push(prototype);
-        }
-        ItemGroupTargetV1::Group(group_id) => plan_item_group_source_into(
-            &ItemGroupSourceV1::Group(group_id.clone()),
-            item_groups,
-            rng,
-            output,
-            depth,
-        )?,
-        ItemGroupTargetV1::Node(node_id) => {
-            plan_item_group_node(graph, *node_id, item_groups, rng, output, depth)?;
-        }
     }
     Ok(())
 }

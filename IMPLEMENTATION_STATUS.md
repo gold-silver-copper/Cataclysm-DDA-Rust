@@ -4,8 +4,8 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Current checkpoint: this commit; green parent `3d574b5` (`Add coordinate-owned
-  overmap routing`).
+- Current checkpoint: this commit; green parent `ce36152` (`Characterize
+  item-group modifiers and wrappers`).
 - Active milestone: `mapgen-overmaps`.
 - Runtime: protocol 83, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 61, replay format 3, CanonicalStateV59, and
@@ -118,18 +118,21 @@ all-feature check; strict Clippy; warning-free rustdoc; dependency boundaries;
 parity ledger; astronomy table; selected-content validation at the unchanged
 manifest hash `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
 content inventory; all three pinned C++ differential oracles; and 331 workspace
-tests. Independent review found two P1 portability defects (wall-clock holiday
-state and standard-library RNG/shuffle samples) plus two P2 fixture-adequacy
-gaps (container order and ammunition identity). All four are fixed; the final
-complete-diff rescan found no remaining P0-P3 issue. Existing nonblocking
-hardening opportunities remain indexed RLE identity lookup and loader-local
-JSON byte caps for future mutable content packages.
+tests. The characterization review fixed two P1 portability defects (wall-clock
+holiday state and standard-library RNG/shuffle samples) and two P2 fixture gaps
+(container order and ammunition identity); its final rescan was clean. A fresh
+review of the mechanical simulation item-planner extraction found no P0-P3
+issue and independently verified byte-equivalent control flow and RNG order.
+Existing nonblocking hardening opportunities remain indexed RLE identity lookup
+and loader-local JSON byte caps for future mutable content packages.
 
 ## Next dependency boundary
 
-Finish this characterization checkpoint first. Then implement the coherent
-item-group modifier/contained-item family needed by the pinned `field` closure,
-using the checked oracle and all four recovery modes before replacing the
-runnable LMOE population with the real default field layer.
+Implement authoritative item-group event selection under the pinned default
+disabled-event policy, including inactive collection entries and distribution
+tickets that deliberately yield no item. Then continue the coherent item-group
+modifier/contained-item family needed by the pinned `field` closure, using the
+checked oracle and all four recovery modes before replacing the runnable LMOE
+population with the real default field layer.
 Forest/city/road/river/special placement begins only after that base layer is
 exact and green.
