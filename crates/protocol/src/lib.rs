@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 84;
+pub const PROTOCOL_VERSION: u16 = 85;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2545,6 +2545,12 @@ pub struct InclusiveI32RangeV1 {
     pub maximum: i32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InclusiveU16RangeV1 {
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
 /// A direct item leaf in a normalized item-group graph. The server resolves
 /// immutable content into the same prototype used by crafting before the
 /// graph enters canonical simulation state.
@@ -2572,6 +2578,11 @@ pub struct ItemGroupEntryV1 {
     pub probability: u32,
     pub count_min: u16,
     pub count_max: u16,
+    /// Presence preserves upstream `Item_modifier` construction even for the
+    /// fixed-zero damage range, whose RNG evaluation precedes charge dressing.
+    /// Protocol 85 admits only `0..=0`; nonzero raw damage remains fail-closed
+    /// until item snapshots retain the exact raw value.
+    pub raw_damage: Option<InclusiveU16RangeV1>,
     pub event: Option<ItemGroupEventV1>,
     pub target: ItemGroupTargetV1,
 }
@@ -3962,9 +3973,25 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
             .iter()
             .try_fold(0_u32, |total, entry| total.checked_add(entry.probability));
         node.entries.iter().any(|entry| {
+            let modifier_requires_marker = entry.count_min != 1
+                || entry.count_max != 1
+                || matches!(
+                    &entry.target,
+                    ItemGroupTargetV1::Item(item) if item.charges.is_some()
+                );
             entry.probability == 0
                 || (node.kind == ItemGroupKindV1::Collection && entry.probability > 100)
                 || entry.count_min > entry.count_max
+                || (modifier_requires_marker && entry.raw_damage.is_none())
+                || matches!(
+                    &entry.target,
+                    ItemGroupTargetV1::Item(item) if item.prototype.type_id == "null"
+                )
+                || entry
+                    .raw_damage
+                    .is_some_and(|damage| damage.minimum != 0 || damage.maximum != 0)
+                || (entry.raw_damage.is_some()
+                    && !matches!(&entry.target, ItemGroupTargetV1::Item(_)))
                 || !valid_item_group_target(&entry.target, &node_ids)
         }) || (node.kind == ItemGroupKindV1::Distribution && weight_sum.is_none())
     }) {
@@ -5866,8 +5893,24 @@ mod tests {
             probability,
             count_min,
             count_max,
+            raw_damage: None,
             event: None,
             target,
+        }
+    }
+
+    fn item_group_modifier_entry(
+        probability: u32,
+        count_min: u16,
+        count_max: u16,
+        target: ItemGroupTargetV1,
+    ) -> ItemGroupEntryV1 {
+        ItemGroupEntryV1 {
+            raw_damage: Some(InclusiveU16RangeV1 {
+                minimum: 0,
+                maximum: 0,
+            }),
+            ..item_group_entry(probability, count_min, count_max, target)
         }
     }
 
@@ -6349,7 +6392,7 @@ mod tests {
                 nodes: vec![ItemGroupNodeV1 {
                     node_id: 0,
                     kind: ItemGroupKindV1::Distribution,
-                    entries: vec![item_group_entry(250, 1, 3, charged_leaf)],
+                    entries: vec![item_group_modifier_entry(250, 1, 3, charged_leaf)],
                 }],
             },
         };
@@ -6364,8 +6407,14 @@ mod tests {
                         entries: vec![
                             item_group_entry(
                                 100,
-                                2,
-                                2,
+                                1,
+                                1,
+                                ItemGroupTargetV1::Group(String::from("a_leaf")),
+                            ),
+                            item_group_entry(
+                                100,
+                                1,
+                                1,
                                 ItemGroupTargetV1::Group(String::from("a_leaf")),
                             ),
                             item_group_entry(25, 1, 1, ItemGroupTargetV1::Node(1)),
@@ -6497,6 +6546,141 @@ mod tests {
         };
         assert!(!item_group_catalog_is_valid(&[invalid_charges]));
 
+        let mut fixed_zero_damage = ItemGroupDefinitionV1 {
+            group_id: String::from("fixed_zero_damage"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
+                }],
+            },
+        };
+        fixed_zero_damage.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        assert!(item_group_catalog_is_valid(&[fixed_zero_damage.clone()]));
+        fixed_zero_damage.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 1,
+        });
+        assert!(!item_group_catalog_is_valid(&[fixed_zero_damage]));
+
+        let mut missing_count_marker = ItemGroupDefinitionV1 {
+            group_id: String::from("missing_count_marker"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 2, item_group_item("rock"))],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(
+            &[missing_count_marker.clone()]
+        ));
+        missing_count_marker.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        assert!(item_group_catalog_is_valid(&[missing_count_marker]));
+
+        let mut missing_charge_marker = item_group_item("nail");
+        let ItemGroupTargetV1::Item(item) = &mut missing_charge_marker else {
+            unreachable!("fixture is a direct item")
+        };
+        item.charges = Some(InclusiveI32RangeV1 {
+            minimum: 4,
+            maximum: 16,
+        });
+        let mut missing_charge_marker = ItemGroupDefinitionV1 {
+            group_id: String::from("missing_charge_marker"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, missing_charge_marker)],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(&[
+            missing_charge_marker.clone()
+        ]));
+        missing_charge_marker.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        assert!(item_group_catalog_is_valid(&[missing_charge_marker]));
+
+        let null_item = ItemGroupDefinitionV1 {
+            group_id: String::from("null_item"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, item_group_item("null"))],
+                }],
+            },
+        };
+        assert!(
+            !item_group_catalog_is_valid(&[null_item]),
+            "upstream discards concrete null leaves rather than materializing an item"
+        );
+
+        let mut local_modifier = ItemGroupDefinitionV1 {
+            group_id: String::from("local_modifier"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![
+                    ItemGroupNodeV1 {
+                        node_id: 0,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![item_group_entry(100, 1, 1, ItemGroupTargetV1::Node(1))],
+                    },
+                    ItemGroupNodeV1 {
+                        node_id: 1,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
+                    },
+                ],
+            },
+        };
+        assert!(item_group_catalog_is_valid(&[local_modifier.clone()]));
+        local_modifier.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        assert!(
+            !item_group_catalog_is_valid(&[local_modifier]),
+            "pinned local group objects return before leaf modifiers are parsed"
+        );
+
+        let mut named_modifier = named_cycle("named_modifier", "named_target");
+        named_modifier.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        let named_target = ItemGroupDefinitionV1 {
+            group_id: String::from("named_target"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
+                }],
+            },
+        };
+        assert!(
+            !item_group_catalog_is_valid(&[named_modifier, named_target]),
+            "wire prototypes cannot prove nested outputs lack modifier side effects"
+        );
+
         let charged_food_group = |minimum_one_charge| {
             let mut target = item_group_item("food");
             let ItemGroupTargetV1::Item(item) = &mut target else {
@@ -6508,7 +6692,7 @@ mod tests {
                 maximum: 0,
             });
             item.minimum_one_charge = minimum_one_charge;
-            ItemGroupDefinitionV1 {
+            let mut definition = ItemGroupDefinitionV1 {
                 group_id: String::from("charged_food"),
                 graph: ItemGroupGraphV1 {
                     root_node: 0,
@@ -6518,7 +6702,12 @@ mod tests {
                         entries: vec![item_group_entry(100, 1, 1, target)],
                     }],
                 },
-            }
+            };
+            definition.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
+                minimum: 0,
+                maximum: 0,
+            });
+            definition
         };
         assert!(item_group_catalog_is_valid(&[charged_food_group(true)]));
         assert!(!item_group_catalog_is_valid(&[charged_food_group(false)]));
@@ -6572,7 +6761,13 @@ mod tests {
                 nodes: vec![ItemGroupNodeV1 {
                     node_id: 0,
                     kind: ItemGroupKindV1::Collection,
-                    entries: vec![item_group_entry(100, 0, count_max, item_group_item("rock"))],
+                    entries: vec![ItemGroupEntryV1 {
+                        raw_damage: Some(InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        ..item_group_entry(100, 0, count_max, item_group_item("rock"))
+                    }],
                 }],
             },
         };

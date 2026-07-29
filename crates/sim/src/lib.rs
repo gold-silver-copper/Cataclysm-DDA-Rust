@@ -13473,7 +13473,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV60");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV61");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -26129,6 +26129,7 @@ mod tests {
                             probability: 1,
                             count_min: 1,
                             count_max: 1,
+                            raw_damage: None,
                             event: None,
                             target: test_item_group_leaf("beta", None, false),
                         },
@@ -26136,6 +26137,7 @@ mod tests {
                             probability: 2,
                             count_min: 1,
                             count_max: 1,
+                            raw_damage: None,
                             event: None,
                             target: test_item_group_leaf("gamma", None, false),
                         },
@@ -26153,6 +26155,10 @@ mod tests {
                         probability: 100,
                         count_min: 2,
                         count_max: 2,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
                         event: None,
                         target: test_item_group_leaf("alpha", None, false),
                     },
@@ -26160,6 +26166,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        raw_damage: None,
                         event: None,
                         target: ItemGroupTargetV1::Group(String::from("weighted_child")),
                     },
@@ -26167,6 +26174,10 @@ mod tests {
                         probability: 100,
                         count_min: 2,
                         count_max: 2,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
                         event: None,
                         target: test_item_group_leaf(
                             "charged",
@@ -26198,7 +26209,7 @@ mod tests {
                 .iter()
                 .map(|prototype| prototype.type_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["alpha", "alpha", "gamma", "charged", "charged"]
+            vec!["alpha", "alpha", "beta", "charged", "charged"]
         );
         assert!(
             first[3..]
@@ -26220,6 +26231,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        raw_damage: None,
                         event: None,
                         target: test_item_group_leaf("rock", None, false),
                     }],
@@ -26293,7 +26305,7 @@ mod tests {
     }
 
     #[test]
-    fn item_group_guaranteed_collection_rolls_but_fixed_ranges_do_not() {
+    fn item_group_guaranteed_collection_and_implicit_damage_preserve_rng_order() {
         let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
             root_node: 0,
             nodes: vec![ItemGroupNodeV1 {
@@ -26303,6 +26315,10 @@ mod tests {
                     probability: 100,
                     count_min: 2,
                     count_max: 2,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
                     event: None,
                     target: test_item_group_leaf(
                         "fixed_charges",
@@ -26324,10 +26340,18 @@ mod tests {
 
         let mut expected_rng = ChaCha8Rng::from_seed(seed);
         let _guaranteed_collection_roll = expected_rng.next_u64();
+        let _first_item_seed_roll = expected_rng.next_u64();
+        let _first_variant_roll = expected_rng.next_u64();
+        let _first_fit_roll = expected_rng.next_u64();
+        let _first_fixed_zero_damage_roll = expected_rng.next_u64();
+        let _second_item_seed_roll = expected_rng.next_u64();
+        let _second_variant_roll = expected_rng.next_u64();
+        let _second_fit_roll = expected_rng.next_u64();
+        let _second_fixed_zero_damage_roll = expected_rng.next_u64();
         assert_eq!(
             actual_rng.next_u64(),
             expected_rng.next_u64(),
-            "fixed count and fixed charges must not consume RNG values"
+            "fixed count and charges skip their own draws, but constructor, fit, and Item_modifier phases remain per item"
         );
     }
 
@@ -26368,6 +26392,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        raw_damage: None,
                         event: None,
                         target: ItemGroupTargetV1::Item(Box::new(
                             cdda_protocol::ItemGroupItemPrototypeV1 {
@@ -27993,6 +28018,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        raw_damage: None,
                         event: None,
                         target: test_item_group_leaf("marker_item", None, false),
                     }],
@@ -28413,6 +28439,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        raw_damage: None,
                         event: None,
                         target: test_item_group_leaf("rock", None, false),
                     }],
@@ -28424,6 +28451,11 @@ mod tests {
         let mut oversized_group = group.clone();
         oversized_group.graph.nodes[0].entries[0].count_min = 114;
         oversized_group.graph.nodes[0].entries[0].count_max = 114;
+        oversized_group.graph.nodes[0].entries[0].raw_damage =
+            Some(cdda_protocol::InclusiveU16RangeV1 {
+                minimum: 0,
+                maximum: 0,
+            });
         let oversized_catalog = catalog.clone();
         assert!(cdda_protocol::worldgen_catalog_is_valid(
             &oversized_catalog,

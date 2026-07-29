@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     BashDefinition, BashItemGroupSource, ItemDefinition, ItemGroupEvent, ItemGroupRegistry,
-    ItemGroupSubtype, ItemRegistry, StrictItemGroupDefinition, StrictItemGroupGraph,
-    StrictItemGroupNode, StrictItemGroupNodeKind,
+    ItemGroupSubtype, ItemRegistry, PocketTypeDefinition, StrictItemGroupDefinition,
+    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
-    InclusiveI32RangeV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
-    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, item_group_catalog_is_valid,
-    item_group_source_max_outputs,
+    CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    item_group_catalog_is_valid, item_group_source_max_outputs,
 };
 
 use super::{craft_item_prototype, default_instance_charges};
@@ -39,12 +39,11 @@ pub(super) fn runtime_bash_item_group_source(
         }
         None => return Err("bash item-group source disappeared during normalization".into()),
     };
-    let maximum_output = item_group_source_max_outputs(&source, &catalog).ok_or_else(|| {
-        format!("{owner_kind} {owner_id} produced an invalid Protocol 80 item-group graph")
-    })?;
+    let maximum_output = item_group_source_max_outputs(&source, &catalog)
+        .ok_or_else(|| format!("{owner_kind} {owner_id} produced an invalid item-group graph"))?;
     if maximum_output > cdda_sim::ID_RESERVATION_SIZE {
         return Err(format!(
-            "{owner_kind} {owner_id} Protocol 80 item group can generate {maximum_output} objects, exceeding the stable-ID reservation"
+            "{owner_kind} {owner_id} item group can generate {maximum_output} objects, exceeding the stable-ID reservation"
         )
         .into());
     }
@@ -102,7 +101,7 @@ pub(super) fn runtime_bash_item_group_catalog<'a>(
         .map(|definition| runtime_item_group_definition(definition, items))
         .collect::<Result<Vec<_>, _>>()?;
     if !item_group_catalog_is_valid(&catalog) {
-        return Err("reachable bash item-group catalog is invalid for Protocol 80".into());
+        return Err("reachable bash item-group catalog is invalid for the current protocol".into());
     }
     Ok(catalog)
 }
@@ -118,7 +117,7 @@ fn runtime_strict_item_group_catalog(
         .collect::<Result<Vec<_>, _>>()?;
     if !item_group_catalog_is_valid(&catalog) {
         return Err(format!(
-            "item-group closure rooted at {} is invalid for Protocol 80",
+            "item-group closure rooted at {} is invalid for the current protocol",
             graph.root.id
         )
         .into());
@@ -140,6 +139,13 @@ pub(super) fn runtime_item_group_graph(
     definition: &StrictItemGroupDefinition,
     items: &ItemRegistry,
 ) -> Result<ItemGroupGraphV1, Box<dyn std::error::Error>> {
+    if definition.wrapper.is_some() {
+        return Err(format!(
+            "item group {} requires unimplemented group containment",
+            definition.id
+        )
+        .into());
+    }
     if definition.ammo_chance != 0 || definition.magazine_chance != 0 {
         return Err(format!(
             "item group {} requires unimplemented ammunition or magazine dressing",
@@ -259,6 +265,45 @@ fn runtime_item_group_entry(
     items: &ItemRegistry,
 ) -> Result<ItemGroupEntryV1, Box<dyn std::error::Error>> {
     let node = strict_item_group_node(definition, node_id)?;
+    if node.direct_wrapper.is_some() || node.modifier_container.is_some() {
+        return Err(format!(
+            "item group {} requires unimplemented entry containment",
+            definition.id
+        )
+        .into());
+    }
+    if node.variant.is_some() {
+        return Err(format!(
+            "item group {} requires unimplemented item variants",
+            definition.id
+        )
+        .into());
+    }
+    if node.modifier_sealed.is_some() {
+        return Err(format!(
+            "item group {} requires unimplemented modifier sealing",
+            definition.id
+        )
+        .into());
+    }
+    let raw_damage = node
+        .damage
+        .map(
+            |damage| -> Result<InclusiveU16RangeV1, Box<dyn std::error::Error>> {
+                if damage.minimum != 0 || damage.maximum != 0 {
+                    return Err(format!(
+                        "item group {} requires unimplemented raw-damage modifiers",
+                        definition.id
+                    )
+                    .into());
+                }
+                Ok(InclusiveU16RangeV1 {
+                    minimum: 0,
+                    maximum: 0,
+                })
+            },
+        )
+        .transpose()?;
     let target = match &node.kind {
         StrictItemGroupNodeKind::Item(item_id) => {
             let item = items.get(item_id).ok_or_else(|| {
@@ -268,16 +313,25 @@ fn runtime_item_group_entry(
                 )
             })?;
             let (charges, minimum_one_charge) = runtime_item_group_charges(item, node.charges)?;
+            let prototype = craft_item_prototype(item, default_instance_charges(item), items)?;
+            validate_item_group_item_spawn(item, &prototype, raw_damage.is_some())?;
             ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
-                prototype: craft_item_prototype(item, default_instance_charges(item), items)?,
+                prototype,
                 charges,
                 minimum_one_charge,
             }))
         }
         StrictItemGroupNodeKind::Group(group_id) => {
+            if raw_damage.is_some() {
+                return Err(format!(
+                    "item group {} applies a modifier to nested group {group_id}; recursive modifier-side-effect admission is not implemented",
+                    definition.id
+                )
+                .into());
+            }
             if node.charges.is_some() {
                 return Err(format!(
-                    "item group {} applies charges to nested group {group_id}, which Protocol 80 cannot represent",
+                    "item group {} applies charges to nested group {group_id}, which the current protocol cannot represent",
                     definition.id
                 )
                 .into());
@@ -287,7 +341,7 @@ fn runtime_item_group_entry(
         StrictItemGroupNodeKind::Collection(_) | StrictItemGroupNodeKind::Distribution(_) => {
             if node.charges.is_some() {
                 return Err(format!(
-                    "item group {} applies charges to a local nested group, which Protocol 80 cannot represent",
+                    "item group {} applies charges to a local nested group, which the current protocol cannot represent",
                     definition.id
                 )
                 .into());
@@ -304,17 +358,157 @@ fn runtime_item_group_entry(
         probability: node.probability,
         count_min: u16::try_from(node.count.minimum)?,
         count_max: u16::try_from(node.count.maximum)?,
+        raw_damage,
         event: node.event.map(runtime_item_group_event),
         target,
     })
 }
 
+fn validate_item_group_item_spawn(
+    item: &ItemDefinition,
+    prototype: &CraftItemPrototypeV1,
+    modifier_present: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if item.id == "null" {
+        return Err("item-group null leaves do not materialize an item upstream".into());
+    }
+    if item.id == "corpse" || item.flags.contains("CORPSE") {
+        return Err(format!(
+            "item group item {} requires unimplemented corpse construction",
+            item.id
+        )
+        .into());
+    }
+    if item.flags.contains("VARSIZE") {
+        return Err(format!(
+            "item group item {} requires unimplemented variable-size FIT state",
+            item.id
+        )
+        .into());
+    }
+    if item.unsupported_fields.contains("container") {
+        return Err(format!(
+            "item group item {} requires unimplemented default containment",
+            item.id
+        )
+        .into());
+    }
+    const CONSTRUCTOR_STATE_FIELDS: &[&str] = &["countdown_interval", "variables", "relic_data"];
+    if let Some(field) = CONSTRUCTOR_STATE_FIELDS
+        .iter()
+        .find(|field| item.unsupported_fields.contains(**field))
+    {
+        return Err(format!(
+            "item group item {} requires unimplemented constructor state field {field}",
+            item.id
+        )
+        .into());
+    }
+    const CONSTRUCTOR_STATE_FLAGS: &[&str] = &[
+        "COLLAPSE_CONTENTS",
+        "ENERGY_SHIELD",
+        "NANOFAB_TEMPLATE",
+        "SPAWN_ACTIVE",
+    ];
+    if let Some(flag) = CONSTRUCTOR_STATE_FLAGS
+        .iter()
+        .find(|flag| item.flags.contains(**flag))
+    {
+        return Err(format!(
+            "item group item {} requires unimplemented constructor state flag {flag}",
+            item.id
+        )
+        .into());
+    }
+    if item.subtypes.contains("MAGAZINE") && item.count > 0 {
+        return Err(format!(
+            "item group magazine {} requires unimplemented preloaded ammunition",
+            item.id
+        )
+        .into());
+    }
+    if item.subtypes.contains("COMESTIBLE") && !item.flags.contains("NO_TEMP") {
+        return Err(format!(
+            "item group comestible {} requires unimplemented temperature state",
+            item.id
+        )
+        .into());
+    }
+    const CONSTRUCTOR_RNG_FIELDS: &[&str] = &[
+        "variants",
+        "nanofab_template_group",
+        "trait_group",
+        "built_in_mods",
+        "default_mods",
+        "snippet_category",
+        "expand_snippets",
+    ];
+    if let Some(field) = CONSTRUCTOR_RNG_FIELDS
+        .iter()
+        .find(|field| item.unsupported_fields.contains(**field))
+    {
+        return Err(format!(
+            "item group item {} requires unimplemented constructor RNG field {field}",
+            item.id
+        )
+        .into());
+    }
+    if modifier_present && item.category == "veh_parts" && !item.count_by_charges() {
+        return Err(format!(
+            "item group modifier for {} requires unimplemented degradation state",
+            item.id
+        )
+        .into());
+    }
+    if modifier_present
+        && item.subtypes.contains("GUN")
+        && !item.flags.contains("PRIMITIVE_RANGED_WEAPON")
+        && !item.flags.contains("NON_FOULING")
+    {
+        return Err(format!(
+            "item group modifier for {} requires unimplemented gun dirt and fault state",
+            item.id
+        )
+        .into());
+    }
+    let upstream_uses_magazine_dressing = item.subtypes.contains("MAGAZINE")
+        || item
+            .pockets
+            .iter()
+            .any(|pocket| pocket.pocket_type == PocketTypeDefinition::MagazineWell);
+    let projected_uses_magazine_dressing = prototype.magazine_capacity > 0
+        || !prototype.integral_magazines.is_empty()
+        || !prototype.magazine_wells.is_empty();
+    if modifier_present && upstream_uses_magazine_dressing && !projected_uses_magazine_dressing {
+        return Err(format!(
+            "item group modifier for {} has unrepresented magazine dressing draws",
+            item.id
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub(super) fn runtime_item_group_charges(
     item: &ItemDefinition,
-    charges: Option<cdda_content::ItemGroupRange>,
+    charges: Option<cdda_content::ItemGroupChargesRange>,
 ) -> Result<(Option<InclusiveI32RangeV1>, bool), Box<dyn std::error::Error>> {
     let Some(charges) = charges else {
         return Ok((None, false));
+    };
+    if charges.minimum == -1 && charges.maximum == -1 {
+        return Ok((None, false));
+    }
+    if charges.minimum < 0 || charges.maximum < 0 {
+        return Err(format!(
+            "item-group charges for {} require unimplemented capacity sentinels",
+            item.id
+        )
+        .into());
+    }
+    let charges = cdda_content::ItemGroupChargesRange {
+        minimum: charges.minimum.min(charges.maximum),
+        maximum: charges.maximum,
     };
     if item.subtypes.contains("TOOL")
         || item.subtypes.contains("GUN")
@@ -341,8 +535,8 @@ pub(super) fn runtime_item_group_charges(
     }
     Ok((
         Some(InclusiveI32RangeV1 {
-            minimum: i32::try_from(charges.minimum)?,
-            maximum: i32::try_from(charges.maximum)?,
+            minimum: charges.minimum,
+            maximum: charges.maximum,
         }),
         item.count_by_charges() || liquid,
     ))

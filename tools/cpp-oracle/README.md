@@ -25,10 +25,12 @@ than, equal to, and longer than a fixed container maximum. The item-group kernel
 uses the real `Item_group`, `Single_item_creator`, and `Item_modifier` paths to
 cover collection order and roll consumption, all distribution interval
 boundaries, fixed and ranged count/charges, and nested groups sharing one RNG
-stream. It also covers raw/display damage, variants, detachable and integral
-ammunition dressing, randomized general-container insertion with discard/spill
-overflow, the selected-content `everyday_corpse` wrappers, and both collection
-and distribution event filtering outside their holiday. The static mapgen
+stream. A direct fixed-count trace also proves the unconditional item-seed,
+empty-variant, fit, and default zero-damage modifier draws against the exact
+downstream RNG state. It also covers raw/display damage, variants, detachable
+and integral ammunition dressing, randomized general-container insertion with
+discard/spill overflow, the selected-content `everyday_corpse` wrappers, and
+both collection and distribution event filtering outside their holiday. The static mapgen
 kernel covers exact/type/subtype/prefix/contains OMT matching, rotatable and
 linear OMT routing, 24x24 coordinate rotation, palette piece phases, and
 successful setup of a one-cell nested JSON mapgen. Run them with:

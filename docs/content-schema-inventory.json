@@ -6343,7 +6343,7 @@
           "occurrences": 426
         },
         "container-item": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 1477
         },
         "copy-from": {
@@ -6375,7 +6375,7 @@
           "occurrences": 166
         },
         "on_overflow": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 198
         },
         "subtype": {

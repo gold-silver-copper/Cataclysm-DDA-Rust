@@ -18,8 +18,8 @@ use cdda_content::{
 };
 #[cfg(test)]
 use cdda_content::{
-    ItemGroupEvent, ItemGroupSubtype, StrictItemGroupDefinition, StrictItemGroupNode,
-    StrictItemGroupNodeKind,
+    ItemGroupEntryWrapper, ItemGroupEvent, ItemGroupOverflow, ItemGroupSubtype, ItemGroupWrapper,
+    StrictItemGroupDefinition, StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_persistence::{
     AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1,
@@ -4186,7 +4186,7 @@ mod tests {
 
     #[test]
     fn item_group_charge_overrides_follow_pinned_item_categories() {
-        let range = cdda_content::ItemGroupRange {
+        let range = cdda_content::ItemGroupChargesRange {
             minimum: 0,
             maximum: 7,
         };
@@ -4199,15 +4199,48 @@ mod tests {
             runtime_item_group_charges(&ordinary, Some(range)).is_err(),
             "a ranged ignored modifier would still consume pinned RNG"
         );
+        assert!(
+            runtime_item_group_charges(
+                &ordinary,
+                Some(cdda_content::ItemGroupChargesRange {
+                    minimum: 30,
+                    maximum: -1,
+                }),
+            )
+            .is_err(),
+            "capacity-dependent signed sentinels must stay runtime-closed"
+        );
         assert_eq!(
             runtime_item_group_charges(
                 &ordinary,
-                Some(cdda_content::ItemGroupRange {
+                Some(cdda_content::ItemGroupChargesRange {
+                    minimum: -1,
+                    maximum: -1,
+                }),
+            )
+            .expect("an explicit default sentinel is a no-op after marker retention"),
+            (None, false)
+        );
+        assert_eq!(
+            runtime_item_group_charges(
+                &ordinary,
+                Some(cdda_content::ItemGroupChargesRange {
                     minimum: 2,
                     maximum: 2,
                 }),
             )
             .expect("fixed ignored modifier consumes no RNG"),
+            (None, false)
+        );
+        assert_eq!(
+            runtime_item_group_charges(
+                &ordinary,
+                Some(cdda_content::ItemGroupChargesRange {
+                    minimum: 7,
+                    maximum: 2,
+                }),
+            )
+            .expect("pinned charge normalization clamps a reversed range to its maximum"),
             (None, false)
         );
 
@@ -4276,16 +4309,20 @@ mod tests {
         let item_groups =
             ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("item groups should load");
-        assert!(matches!(
-            item_groups
-                .strict_graph("field")
-                .expect_err("field loot must remain fail-closed until modifiers are supported"),
+        let field_error = item_groups
+            .strict_graph("field")
+            .expect_err("field loot must retain the next unsupported semantic edge");
+        assert!(
+            matches!(
+            &field_error,
             cdda_content::ItemGroupRegistryError::UnsupportedFields {
-                ref group,
-                ref fields,
+                group,
+                fields,
                 ..
-            } if group == "everyday_corpse" && fields == &[String::from("damage")]
-        ));
+            } if group == "civilian_phones_case" && fields == &[String::from("contents-group")]
+            ),
+            "unexpected next field-closure blocker: {field_error:?}"
+        );
         let content_events = [
             ItemGroupEvent::NewYear,
             ItemGroupEvent::Easter,
@@ -4299,6 +4336,7 @@ mod tests {
             subtype: ItemGroupSubtype::Distribution,
             ammo_chance: 0,
             magazine_chance: 0,
+            wrapper: None,
             roots: (0..content_events.len())
                 .map(|index| u32::try_from(index).expect("event index fits"))
                 .collect(),
@@ -4309,6 +4347,11 @@ mod tests {
                     probability: 1,
                     count: cdda_content::ItemGroupRange::ONE,
                     charges: None,
+                    damage: None,
+                    variant: None,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                    modifier_sealed: None,
                     event: Some(event),
                 })
                 .collect(),
@@ -4329,6 +4372,49 @@ mod tests {
                 Some(ItemGroupEventV1::Thanksgiving),
                 Some(ItemGroupEventV1::Christmas),
             ]
+        );
+        let mut damage_definition = event_definition.clone();
+        damage_definition.nodes[0].damage = Some(cdda_content::ItemGroupRange {
+            minimum: 1,
+            maximum: 4,
+        });
+        assert!(
+            runtime_item_group_graph(&damage_definition, &items)
+                .expect_err("raw damage must stay wire-closed")
+                .to_string()
+                .contains("raw-damage modifiers")
+        );
+        let mut entry_wrapper_definition = event_definition.clone();
+        entry_wrapper_definition.nodes[0].direct_wrapper = Some(ItemGroupEntryWrapper {
+            item: String::from("rock"),
+            variant: None,
+        });
+        assert!(
+            runtime_item_group_graph(&entry_wrapper_definition, &items)
+                .expect_err("entry containment must stay wire-closed")
+                .to_string()
+                .contains("entry containment")
+        );
+        let mut variant_definition = event_definition.clone();
+        variant_definition.nodes[0].variant = Some(String::from("oracle_variant"));
+        assert!(
+            runtime_item_group_graph(&variant_definition, &items)
+                .expect_err("item variants must stay wire-closed")
+                .to_string()
+                .contains("item variants")
+        );
+        let mut wrapper_definition = event_definition;
+        wrapper_definition.wrapper = Some(ItemGroupWrapper {
+            item: String::from("rock"),
+            variant: None,
+            sealed: true,
+            overflow: ItemGroupOverflow::Discard,
+        });
+        assert!(
+            runtime_item_group_graph(&wrapper_definition, &items)
+                .expect_err("group containment must stay wire-closed")
+                .to_string()
+                .contains("group containment")
         );
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
@@ -4634,7 +4720,11 @@ mod tests {
         let furniture_bashes =
             runtime_furniture_bash_types(&furniture, &bash_profiles, &fields, &items, &item_groups)
                 .expect("admitted furniture bashes should normalize");
-        assert_eq!(furniture_bashes.len(), 539);
+        assert_eq!(
+            furniture_bashes.len(),
+            521,
+            "modifier, containment, constructor-RNG, constructor-state, and temperature paths must fail closed"
+        );
         let furniture_bash_ids = furniture
             .iter()
             .filter(|definition| definition.bash.is_some())
@@ -4650,6 +4740,33 @@ mod tests {
                     .iter()
                     .any(|bash| bash.furniture_id == furniture_id),
                 "fresh-cabin furniture {furniture_id} should be admitted"
+            );
+        }
+        for furniture_id in [
+            "f_clothing_rail",
+            "f_archery_target_bale",
+            "f_beach_seaweed",
+            "f_drophammer",
+            "f_dumpster",
+            "f_exodii_charger",
+            "f_exodii_charger_cheap",
+            "f_exodii_pump",
+            "f_cardboard_door_o",
+            "f_cardboard_roof",
+            "f_firefly_terrarium",
+            "f_hay",
+            "f_pillow_fort",
+            "f_power_hammer",
+            "f_straw_bed",
+            "f_string_dimension_pump",
+            "f_tatami",
+            "f_treadmill",
+        ] {
+            assert!(
+                !furniture_bashes
+                    .iter()
+                    .any(|bash| bash.furniture_id == furniture_id),
+                "{furniture_id} must remain unavailable until all generated item state and RNG side effects are represented"
             );
         }
         assert!(furniture_bashes.iter().any(|bash| bash.result.is_some()));

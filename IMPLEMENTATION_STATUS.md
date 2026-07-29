@@ -4,14 +4,14 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `d76965c54d5fee3a081b2a7c860b94a750b92cdd`
+- Verified green parent: `d76965c54d5fee3a081b2a7c860b94a750b92cdd`
   (`Extract server item group normalization`).
-- Checkpoint binding: this documentation-only follow-up records the exact green
-  implementation commit and scoped independent review; runtime sources are
-  unchanged.
+- Candidate checkpoint: Protocol 85 item-modifier normalization is intentionally
+  unbound until the complete worktree passes the broad gates and independent
+  review. No later subsystem is in progress.
 - Active milestone: `regional-terrain-base`.
-- Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
-  recoverable schema 62, replay format 3, CanonicalStateV60, and
+- Runtime: protocol 85, worldgen algorithm 2, persistence schema/minimum
+  recoverable schema 63, replay format 3, CanonicalStateV61, and
   CanonicalEventsV18.
 - Conformance: scenario 7 and observation 6.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only; the server and
@@ -89,16 +89,41 @@ authoritative and retains deterministic multiplayer fallback.
   tickets. The checked scenario pins ordered seed traces for all six first
   container orders and exact corpse traces for seed 1 and the first raw-damage
   4000 content boundary, preventing an aggregate-only implementation from
-  passing. Rust now retains all six holiday qualifiers and applies the pinned
+  passing. Its direct fixed-count trace also pins exact downstream state after
+  the item presentation seed, empty-variant selection, fit, and modifier damage
+  phases. Rust now retains all six holiday qualifiers and applies the pinned
   default disabled policy without host time: inactive collection entries
   consume their roll, while inactive distribution tickets yield no item.
-- The only checked canonical hash change is the item-flow state root:
-  `ced77c1dd1cdaab7b30fbf202a15e0aae54548e5a4beb11b9b707417b6e94e11`
-  under CanonicalStateV59 becomes
+- Selected-content normalization now distinguishes unsigned count/damage ranges
+  from signed charge ranges, including upstream's independent `-1` capacity
+  sentinels. It retains modifier existence, variants, direct entry wrappers,
+  modifier-owned containers, sealing, group wrappers, wrapper variants, and
+  overflow policy instead of projecting them away. Strict `field` closure
+  advances from `everyday_corpse.damage` and `everyday_gear.charges` to the exact
+  next blocker, `civilian_phones_case.contents-group`.
+- Protocol 85 carries a fixed-zero raw-damage marker on every admitted entry
+  whose upstream loader constructed an `Item_modifier`. The planner consumes
+  every direct leaf's presentation-seed draw, empty-variant selection, and
+  unconditional fit draw, then evaluates that damage range before charge
+  dressing. Explicit default-only modifiers are therefore represented without
+  inferring source syntax. Variable-size items, nested-group modifiers,
+  degrading vehicle parts, fouling guns, corpse and preloaded-magazine
+  construction, temperature-bearing comestibles, constructor-owned state,
+  default containers, nonzero damage, variants, sealing, and general
+  containment fail closed; zero-chance magazine/ammunition dressing draws are
+  retained only when their projected pocket shape is exact.
+- The only fixed canonical hash change in this candidate is the item-flow state
+  root: CanonicalStateV60
   `b5537199f17d36755d7f9dea392646222e55d1671f4107990d7b09b09957326b`
-  under CanonicalStateV60. That scenario has no item groups; its tick, actor,
-  inventory, ground item, and CanonicalEventsV18 trace are unchanged, isolating
-  the difference to the intentional state-hash domain change.
+  becomes CanonicalStateV61
+  `2aae0f859788b6e83bd4c03972f32a6a78963a63c1cedf5774b6b1e895e37820`.
+  That scenario has no item-group catalog and its tick, actors, inventory,
+  ground items, and CanonicalEventsV18 trace are unchanged, isolating the
+  change to the intentional hash-domain version. The structural-bash fixture's
+  fixed nail charge changes from 6 to 4 because the corrected constructor,
+  variant, fit, and modifier phases advance the named RNG stream before charge
+  dressing. That new output remains identical in direct, snapshot, SQLite, and
+  portable-replay modes.
 - The extraction moves the complete 300-line canonical `ItemInstance`
   implementation without changing derives, field order, branches, mutations,
   errors, output order, or RNG. After normalizing only the newly required
@@ -111,27 +136,27 @@ authoritative and retains deterministic multiplayer fallback.
   the required `pub(super)` visibility, the old and new function bodies are
   textually identical. The binary root falls from 6,565 to 6,240 lines; the
   focused module is 349 lines. No runtime representation or behavior changes.
-- Runtime evidence at verified commit
-  `d76965c54d5fee3a081b2a7c860b94a750b92cdd` counts four admitted definitions
+- Runtime evidence remains four admitted definitions
   through generation, authoritative interaction, persistence, and client
   access: 44 points. Exact production definitions receive
   zero four-mode credit because the current conformance paths use normalized
   semantic substitutes; those fixtures are not mislabeled as production
   evidence. The separate parser inventory counts 7,621 item groups, 9,520
   mapgen objects, 2,712 overmap terrains, and 150 starts but assigns them no
-  runtime points merely for loading. The checked artifact, runtime versions,
-  and every named source of evidence are bound byte-for-byte to that commit.
+  runtime points merely for loading. Protocol 85 corrects RNG phase for the
+  already-counted structural bash definition; it does not claim a new
+  runtime-usable definition.
 
 ## Explicit boundaries
 
 - The stored layout is genuinely coordinate-owned, but production population
   still repeats `lmoe_north`; it is not an upstream forest/city/road/river/
   special layout.
-- The pinned z=0 regional base is `field`, but its mapgen cannot yet be admitted:
-  the reachable `field -> everyday_corpse` item-group closure uses the general
-  `damage` modifier, and later container semantics are also not canonical.
-  Startup and its fixed-snapshot test reject that closure instead of dropping
-  rare content.
+- The pinned z=0 regional base is `field`, but its mapgen cannot yet be admitted.
+  Content normalization reaches `civilian_phones_case.contents-group`; runtime
+  storage still lacks nonzero raw damage, item variants, modifier contents,
+  general containment, overflow, and ammunition/magazine dressing. Startup and
+  its fixed-snapshot test reject that closure instead of dropping rare content.
 - Adjacent overmaps, multiple generated z-levels, cities, forests, roads,
   rivers, specials, map extras, spawn groups, populations, zones, vehicles,
   and monsters from mapgen remain unavailable.
@@ -147,27 +172,30 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Verified commit `d76965c54d5fee3a081b2a7c860b94a750b92cdd` is green for
-formatting; workspace all-target/all-feature check; strict Clippy; warning-free
-rustdoc; dependency boundaries; the parity ledger and runtime-progress gates;
-astronomy; selected-content validation at unchanged manifest hash
-`45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
-content inventory; all three pinned C++ differential oracles (8/41/17
-assertions); and 335 workspace tests plus doc-tests. An independent reviewer
-audited the complete five-file server extraction against base
-`d219c8c69290fc42ee697005ba1cae81ae469001`; one P3 visibility widening was
-validated and fixed, and the final rescan found no P0-P3 issue. The durable
-record is `docs/reviews/server-item-group-normalization-extraction.md`. Existing
-nonblocking hardening opportunities remain indexed RLE identity lookup,
-loader-local JSON byte caps for future mutable content packages, and the
-explicit normalized Rust/C++ mapgen comparator named by the `oracle_pending`
-state.
+Green parent `d76965c54d5fee3a081b2a7c860b94a750b92cdd` retains its recorded
+full verification. The Protocol 85 candidate is green for formatting, strict
+all-target/all-feature Clippy, rustdoc with warnings denied, workspace
+all-target/all-feature check, and the full 338-test workspace suite plus
+doc-tests. Repository dependency-boundary, parity-ledger, weighted-runtime,
+astronomy, selected-content manifest, generated-inventory, and JSON syntax
+gates pass. The pinned default server loads all 7,621 item-group definitions and
+retains 521 admitted furniture bashes. The previous 539 included six degrading
+vehicle-part paths, one default-container path, three constructor-RNG paths,
+three constructor-state paths, and five temperature-state paths that are now
+explicitly rejected rather than projected.
+Real-C++ pocket, item-group, and mapgen oracles pass 8, 42, and 17 assertions
+respectively. The fixed upstream checkout
+is clean at `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, the two inventory support
+changes were audited. The only canonical hash change is the V60-to-V61 domain
+separator, while the structural-bash nail expectation changes from 6 to 4 for
+the corrected RNG phase detailed above. Independent scoped review and final
+post-review affected checks remain required before binding the checkpoint.
 
 ## Next dependency boundary
 
 The central-file split is now an explicit prerequisite DAG rather than an
 informal cleanup task. Current ownership surfaces are about 28.6K lines in
-simulation `lib.rs`, 8.3K in protocol, 13K in persistence, 6.2K in the server
+simulation `lib.rs`, 8.4K in protocol, 13K in persistence, 6.3K in the server
 binary root, and 8.8K in the server library. Item-group planning and the
 canonical item instance live in `sim/items.rs`; server item-group normalization
 now lives in `server/item_groups.rs`. Shared item-prototype conversion remains
@@ -177,14 +205,18 @@ boundaries. The ledger separately tracks actor, combat, activity, monster,
 canonical-state, protocol-domain, persistence-domain, and session/replication
 extractions. Anatomy and EOC expansion depend on the relevant boundaries.
 
-Implement the coherent item-group modifier/contained-item family needed by the
-pinned `field` closure, using the checked oracle and all four recovery modes
-before replacing the runnable LMOE population with the real default field
-layer. Damage must preserve upstream raw scaling and RNG order; general wrappers
-must retain nested stable identities and explicit overflow rather than flattening
-contents.
+Finish the coherent item-group modifier/contained-item family needed by the
+pinned `field` closure. The next exact content dependency is general
+`contents-group` normalization; the next runtime dependency is storing nonzero
+raw damage and variants on item state, followed by general wrapper contents
+with nested stable identities and explicit overflow. Use the checked oracle and
+all four recovery modes before replacing the runnable LMOE population with the
+real default field layer.
 Forest/city/road/river/special placement begins only after that base layer is
 exact and green.
-Batch the related modifier/containment wire and persistence representation into
-one reviewed version increment where practical; do not bump either version for
-mechanical module moves or unchanged encodings.
+Protocol 85/schema 63 is the fixed-zero modifier-presence batch. Batch the
+remaining item-state damage/variant representation with its persistence changes,
+and batch general containment separately; do not bump versions for mechanical
+module moves or unchanged encodings. Extract the protocol item-group domain
+before expanding that representation further so the 8.4K-line protocol root
+does not keep growing.

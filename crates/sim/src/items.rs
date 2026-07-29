@@ -413,6 +413,14 @@ fn plan_item_group_entry(
     output: &mut Vec<CraftItemPrototypeV1>,
     depth: usize,
 ) -> Result<(), SimError> {
+    let modifier_present = match entry.raw_damage {
+        Some(damage) if damage.minimum == 0 && damage.maximum == 0 => true,
+        Some(_) => return Err(SimError::InvalidItem),
+        None => false,
+    };
+    if modifier_present && !matches!(&entry.target, ItemGroupTargetV1::Item(_)) {
+        return Err(SimError::InvalidItem);
+    }
     let count = if entry.count_min == entry.count_max {
         u64::from(entry.count_min)
     } else {
@@ -426,6 +434,7 @@ fn plan_item_group_entry(
             rng,
             output,
             depth.checked_add(1).ok_or(SimError::NumericOverflow)?,
+            modifier_present,
         )?;
     }
     Ok(())
@@ -438,6 +447,7 @@ fn plan_item_group_target(
     rng: &mut ChaCha8Rng,
     output: &mut Vec<CraftItemPrototypeV1>,
     depth: usize,
+    modifier_present: bool,
 ) -> Result<(), SimError> {
     if depth > MAX_ITEM_GROUP_DEPTH {
         return Err(SimError::InvalidItem);
@@ -445,6 +455,26 @@ fn plan_item_group_target(
     match target {
         ItemGroupTargetV1::Item(item) => {
             let mut prototype = item.prototype.clone();
+            // Every upstream item initializes its per-instance presentation
+            // seed before the constructor body. Rust does not expose the
+            // presentation feature yet, but the shared generation stream must
+            // retain its phase.
+            let _ = rng.next_u64();
+            // item::select_itype_variant calls weighted_int_list::pick even
+            // when the finalized item type has no variants, so construction
+            // always consumes one full-width draw before item-group logic.
+            // Runtime admission excludes nonempty variants until variant state
+            // is canonical, but their empty-selection phase still matters.
+            let _ = rng.next_u64();
+            // Single_item_creator always evaluates one_in(3) before testing
+            // VARSIZE. Runtime admission excludes VARSIZE until FIT is stored,
+            // but the draw is still part of every concrete leaf's RNG phase.
+            let _ = rng.next_u64();
+            if modifier_present {
+                // Every pinned Item_modifier evaluates its damage range before
+                // charge dressing, even when that range is fixed at zero.
+                let _ = rng.next_u64();
+            }
             if let Some(charges) = item.charges {
                 let rolled = if charges.minimum == charges.maximum {
                     charges.minimum
@@ -462,6 +492,12 @@ fn plan_item_group_target(
                     rolled
                 };
             }
+            if modifier_present && prototype_uses_magazine_dressing(&prototype) {
+                // Pinned Item_modifier evaluates both zero-chance ammunition
+                // and magazine dressing rolls for magazines and wells.
+                let _ = rng.next_u64();
+                let _ = rng.next_u64();
+            }
             if output.len()
                 >= usize::try_from(MAX_ITEM_GROUP_OUTPUTS).map_err(|_| SimError::NumericOverflow)?
             {
@@ -472,18 +508,26 @@ fn plan_item_group_target(
             }
             output.push(prototype);
         }
-        ItemGroupTargetV1::Group(group_id) => plan_item_group_source_into(
-            &ItemGroupSourceV1::Group(group_id.clone()),
-            item_groups,
-            rng,
-            output,
-            depth,
-        )?,
+        ItemGroupTargetV1::Group(group_id) => {
+            plan_item_group_source_into(
+                &ItemGroupSourceV1::Group(group_id.clone()),
+                item_groups,
+                rng,
+                output,
+                depth,
+            )?;
+        }
         ItemGroupTargetV1::Node(node_id) => {
             plan_item_group_node(graph, *node_id, item_groups, rng, output, depth)?;
         }
     }
     Ok(())
+}
+
+fn prototype_uses_magazine_dressing(prototype: &CraftItemPrototypeV1) -> bool {
+    prototype.magazine_capacity > 0
+        || !prototype.integral_magazines.is_empty()
+        || !prototype.magazine_wells.is_empty()
 }
 
 #[cfg(test)]
@@ -520,6 +564,7 @@ mod tests {
             probability,
             count_min: 1,
             count_max: 1,
+            raw_damage: None,
             event,
             target: leaf(type_id),
         }
@@ -552,6 +597,9 @@ mod tests {
         let mut expected_rng = ChaCha8Rng::seed_from_u64(19);
         let _ = expected_rng.next_u64();
         let _ = expected_rng.next_u64();
+        let _ordinary_item_seed_roll = expected_rng.next_u64();
+        let _ordinary_variant_roll = expected_rng.next_u64();
+        let _ordinary_fit_roll = expected_rng.next_u64();
         assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
     }
 
@@ -593,6 +641,11 @@ mod tests {
 
             let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
             assert_eq!(inclusive_rng_u64(&mut expected_rng, 1, 5), ticket);
+            if ticket > 3 {
+                let _ordinary_item_seed_roll = expected_rng.next_u64();
+                let _ordinary_variant_roll = expected_rng.next_u64();
+                let _ordinary_fit_roll = expected_rng.next_u64();
+            }
             assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
         }
     }

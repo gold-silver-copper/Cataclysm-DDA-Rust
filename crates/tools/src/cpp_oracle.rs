@@ -96,6 +96,7 @@ struct ItemGroupOracleObservationV1 {
     distribution: Vec<ItemGroupDistributionObservationV1>,
     counts: Vec<ItemGroupRangeObservationV1>,
     charges: Vec<ItemGroupRangeObservationV1>,
+    modifier_rng_phase: ItemGroupModifierRngPhaseObservationV1,
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
     containers: Vec<ItemGroupContainerObservationV1>,
@@ -129,6 +130,16 @@ struct ItemGroupRangeObservationV1 {
     maximum: i32,
     target: i32,
     observed: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupModifierRngPhaseObservationV1 {
+    case_id: String,
+    rolls_consumed: u16,
+    expected_downstream: i32,
+    actual_downstream: i32,
+    downstream_draw_matches: bool,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -554,6 +565,19 @@ fn validate_item_group_observation(
         || !ranges_match(&observation.charges, &expected_charges)
     {
         return Err("item-group count or charges observation is incomplete".into());
+    }
+    if observation.modifier_rng_phase.case_id != "direct_fixed_count"
+        || observation.modifier_rng_phase.rolls_consumed != 4
+        || observation.modifier_rng_phase.expected_downstream
+            != observation.modifier_rng_phase.actual_downstream
+        || !observation.modifier_rng_phase.downstream_draw_matches
+    {
+        return Err(format!(
+            "item-group modifier RNG phase is incomplete: expected downstream {}, actual {}",
+            observation.modifier_rng_phase.expected_downstream,
+            observation.modifier_rng_phase.actual_downstream
+        )
+        .into());
     }
     let nested_trace = ["child_conditional", "child_always", "root_last"];
     if observation.nested.rolls_consumed != 4

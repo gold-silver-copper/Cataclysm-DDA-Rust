@@ -676,8 +676,10 @@ cells outside the layout or on absent z-layers.
 The production layout deliberately remains filled with `lmoe_north` so the
 existing playable bootstrap stays exact to its admitted content. The real
 regional z=0 base is `field`, but its reachable loot closure enters
-`everyday_corpse.damage` and later general container semantics; strict runtime
-admission records and rejects that boundary instead of omitting rare results.
+`civilian_phones_case.contents-group`; strict runtime admission records and
+rejects that boundary instead of omitting rare results. Earlier raw-damage,
+signed-charge, variant, and group/entry-wrapper shapes are retained explicitly,
+but nonzero damage and containment remain unavailable at runtime.
 Forest/city/road/river/special population and adjacent overmaps remain later
 work. Databases below schema 61 that contain serialized state are rejected
 before mutation.
@@ -697,6 +699,19 @@ direct execution, per-tick restore, SQLite recovery, and portable replay.
 Enabling seasonal content later requires an explicit persisted world policy;
 it cannot be inferred from process-local time. Databases below schema 62 that
 contain serialized state are rejected before mutation.
+
+Protocol 85 advances to schema 63 and CanonicalStateV61 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Normalized
+item-group entries now carry an explicit fixed-zero raw-damage marker whenever
+the pinned loader constructed an `Item_modifier`. For every direct leaf, the
+simulation preserves the per-item presentation-seed draw, empty-variant
+selection, and unconditional fit draw before evaluating the marker's damage
+range and charge dressing even for `count: 1`. Variable-size items,
+nested-group modifiers, degrading vehicle parts, fouling guns, corpse and
+preloaded-magazine construction, temperature-bearing comestibles,
+constructor-owned state, and definitions whose nonzero raw damage, variants,
+sealing, or containment cannot yet be stored remain fail-closed. Databases
+below schema 63 that contain serialized state are rejected before mutation.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned
@@ -953,7 +968,9 @@ The pocket scenario exercises real upstream `item_pocket::can_contain`
 maximum-length behavior at the shorter, equal, and longer boundaries. The
 item-group scenario covers ordered collection RNG consumption, distribution
 interval boundaries, fixed/ranged count and charges, zero-to-one clamping, and
-nested groups sharing the same RNG stream. It also characterizes raw versus
+nested groups sharing the same RNG stream. Its fixed-count representative pins
+the exact downstream value after item-seed, empty-variant, fit, and modifier
+damage phases. It also characterizes raw versus
 display damage, explicit variants, integral and detachable ammunition dressing,
 shuffled container insertion with discard/spill overflow, the real
 `everyday_corpse` wrapper family, nonholiday collection filtering, and inactive

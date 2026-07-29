@@ -24,6 +24,9 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "magazine",
     "copy-from",
     "extend",
+    "container-item",
+    "on_overflow",
+    "sealed",
 ];
 const IMPLEMENTED_ENTRY_FIELDS: &[&str] = &[
     "item",
@@ -33,7 +36,12 @@ const IMPLEMENTED_ENTRY_FIELDS: &[&str] = &[
     "prob",
     "count",
     "charges",
+    "damage",
     "event",
+    "variant",
+    "entry-wrapper",
+    "container-item",
+    "sealed",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -59,6 +67,28 @@ pub enum ItemGroupEvent {
     Christmas,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ItemGroupOverflow {
+    #[default]
+    None,
+    Spill,
+    Discard,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupWrapper {
+    pub item: String,
+    pub variant: Option<String>,
+    pub sealed: bool,
+    pub overflow: ItemGroupOverflow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupEntryWrapper {
+    pub item: String,
+    pub variant: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ItemGroupRange {
     pub minimum: u32,
@@ -70,6 +100,15 @@ impl ItemGroupRange {
         minimum: 1,
         maximum: 1,
     };
+}
+
+/// Raw item-group charge endpoints. Upstream uses `-1` as a capacity/default
+/// sentinel independently at either endpoint, so this must not be collapsed
+/// into the ordered unsigned range used by `count` and `damage`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ItemGroupChargesRange {
+    pub minimum: i32,
+    pub maximum: i32,
 }
 
 pub type ItemGroupNodeId = u32;
@@ -87,7 +126,22 @@ pub struct ItemGroupNode {
     pub kind: ItemGroupNodeKind,
     pub probability: u32,
     pub count: ItemGroupRange,
-    pub charges: Option<ItemGroupRange>,
+    pub charges: Option<ItemGroupChargesRange>,
+    /// `Some` preserves the existence of upstream's `Item_modifier`, including
+    /// its default fixed-zero damage operation when another modifier field
+    /// such as `count` or `charges` caused the modifier to be constructed.
+    pub damage: Option<ItemGroupRange>,
+    /// Item variant applied by upstream's general `Item_modifier`.
+    pub variant: Option<String>,
+    /// Direct `Single_item_creator` wrapper. It contains all output from one
+    /// entry execution and is distinct from the modifier-owned container.
+    pub direct_wrapper: Option<ItemGroupEntryWrapper>,
+    /// Modifier-owned container item. It wraps each generated output before a
+    /// possible direct wrapper is applied.
+    pub modifier_container: Option<String>,
+    /// Explicit modifier sealing policy. `None` means the field was absent;
+    /// modifier-created containers otherwise use upstream's default `true`.
+    pub modifier_sealed: Option<bool>,
     pub event: Option<ItemGroupEvent>,
     pub unsupported_fields: BTreeMap<String, Value>,
     pub source: String,
@@ -99,6 +153,12 @@ pub struct ItemGroupDefinition {
     pub subtype: ItemGroupSubtype,
     pub ammo_chance: u8,
     pub magazine_chance: u8,
+    /// Group wrapper policy exists independently of `container-item` in the
+    /// pinned loader and can be inherited before a later self-copy adds the
+    /// actual container.
+    pub wrapper_sealed: bool,
+    pub wrapper_overflow: ItemGroupOverflow,
+    pub wrapper: Option<ItemGroupWrapper>,
     pub roots: Vec<ItemGroupNodeId>,
     pub nodes: Vec<ItemGroupNode>,
     pub unsupported_fields: BTreeMap<String, Value>,
@@ -118,7 +178,12 @@ pub struct StrictItemGroupNode {
     pub kind: StrictItemGroupNodeKind,
     pub probability: u32,
     pub count: ItemGroupRange,
-    pub charges: Option<ItemGroupRange>,
+    pub charges: Option<ItemGroupChargesRange>,
+    pub damage: Option<ItemGroupRange>,
+    pub variant: Option<String>,
+    pub direct_wrapper: Option<ItemGroupEntryWrapper>,
+    pub modifier_container: Option<String>,
+    pub modifier_sealed: Option<bool>,
     pub event: Option<ItemGroupEvent>,
 }
 
@@ -128,6 +193,7 @@ pub struct StrictItemGroupDefinition {
     pub subtype: ItemGroupSubtype,
     pub ammo_chance: u8,
     pub magazine_chance: u8,
+    pub wrapper: Option<ItemGroupWrapper>,
     pub roots: Vec<ItemGroupNodeId>,
     pub nodes: Vec<StrictItemGroupNode>,
 }
@@ -188,6 +254,9 @@ impl ItemGroupRegistry {
                 subtype: ItemGroupSubtype::Collection,
                 ammo_chance: 0,
                 magazine_chance: 0,
+                wrapper_sealed: true,
+                wrapper_overflow: ItemGroupOverflow::None,
+                wrapper: None,
                 roots: Vec::new(),
                 nodes: Vec::new(),
                 unsupported_fields: BTreeMap::new(),
@@ -237,6 +306,9 @@ impl ItemGroupRegistry {
             subtype: ItemGroupSubtype::Collection,
             ammo_chance: 0,
             magazine_chance: 0,
+            wrapper_sealed: true,
+            wrapper_overflow: ItemGroupOverflow::None,
+            wrapper: None,
             roots: Vec::new(),
             nodes: Vec::new(),
             unsupported_fields: BTreeMap::new(),
@@ -356,6 +428,9 @@ impl ItemGroupRegistry {
                 subtype: requested_subtype,
                 ammo_chance: requested_ammo,
                 magazine_chance: requested_magazine,
+                wrapper_sealed: true,
+                wrapper_overflow: ItemGroupOverflow::None,
+                wrapper: None,
                 roots: Vec::new(),
                 nodes: Vec::new(),
                 unsupported_fields: BTreeMap::new(),
@@ -369,6 +444,7 @@ impl ItemGroupRegistry {
             IMPLEMENTED_FIELDS,
             &mut definition.unsupported_fields,
         );
+        apply_group_wrapper(object, source, &mut definition)?;
         if let Some(value) = object.get("extend") {
             let extension = value.as_object().ok_or_else(|| invalid(source, "extend"))?;
             for (field, value) in extension {
@@ -529,6 +605,30 @@ impl ItemGroupRegistry {
                     probability: node.probability,
                     count: node.count,
                     charges: node.charges,
+                    damage: node.damage,
+                    variant: node.variant.clone(),
+                    direct_wrapper: node
+                        .direct_wrapper
+                        .as_ref()
+                        .map(|wrapper| {
+                            Ok(ItemGroupEntryWrapper {
+                                item: self.resolve_item(&wrapper.item, &definition.id)?,
+                                variant: wrapper.variant.clone(),
+                            })
+                        })
+                        .transpose()?,
+                    modifier_container: node
+                        .modifier_container
+                        .as_ref()
+                        .map(|item| {
+                            if item == "null" {
+                                Ok(item.clone())
+                            } else {
+                                self.resolve_item(item, &definition.id)
+                            }
+                        })
+                        .transpose()?,
+                    modifier_sealed: node.modifier_sealed,
                     event: node.event,
                 })
             })
@@ -539,6 +639,18 @@ impl ItemGroupRegistry {
             subtype: definition.subtype,
             ammo_chance: definition.ammo_chance,
             magazine_chance: definition.magazine_chance,
+            wrapper: definition
+                .wrapper
+                .as_ref()
+                .map(|wrapper| {
+                    Ok(ItemGroupWrapper {
+                        item: self.resolve_item(&wrapper.item, &definition.id)?,
+                        variant: wrapper.variant.clone(),
+                        sealed: wrapper.sealed,
+                        overflow: wrapper.overflow,
+                    })
+                })
+                .transpose()?,
             roots: definition.roots.clone(),
             nodes,
         })
@@ -584,7 +696,15 @@ impl ItemGroupRegistry {
             .iter()
             .map(|root| self.maximum_node_output(definition, *root, memo))
             .collect::<Result<Vec<_>, _>>()?;
-        let output = combine_outputs(definition.subtype, &values, &definition.id)?;
+        let mut output = combine_outputs(definition.subtype, &values, &definition.id)?;
+        if definition.wrapper.is_some() {
+            output = bounded_output(
+                output
+                    .checked_add(1)
+                    .ok_or(ItemGroupRegistryError::NumericOverflow)?,
+                &definition.id,
+            )?;
+        }
         memo.insert(definition.id.clone(), output);
         Ok(output)
     }
@@ -626,11 +746,28 @@ impl ItemGroupRegistry {
                 combine_outputs(ItemGroupSubtype::Distribution, &values, &definition.id)?
             }
         };
-        bounded_output(
-            one.checked_mul(u64::from(node.count.maximum))
-                .ok_or(ItemGroupRegistryError::NumericOverflow)?,
-            &definition.id,
-        )
+        let output = one
+            .checked_mul(u64::from(node.count.maximum))
+            .ok_or(ItemGroupRegistryError::NumericOverflow)?;
+        let output = if node
+            .modifier_container
+            .as_deref()
+            .is_some_and(|item| item != "null")
+        {
+            output
+                .checked_mul(2)
+                .ok_or(ItemGroupRegistryError::NumericOverflow)?
+        } else {
+            output
+        };
+        let output = if node.direct_wrapper.is_some() {
+            output
+                .checked_add(1)
+                .ok_or(ItemGroupRegistryError::NumericOverflow)?
+        } else {
+            output
+        };
+        bounded_output(output, &definition.id)
     }
 }
 
@@ -641,6 +778,72 @@ impl ItemGroupDefinition {
             _ => None,
         })
     }
+}
+
+fn apply_group_wrapper(
+    object: &Map<String, Value>,
+    source: &str,
+    definition: &mut ItemGroupDefinition,
+) -> Result<(), ItemGroupRegistryError> {
+    if let Some(value) = object.get("container-item") {
+        let (item, variant) = match value {
+            Value::String(item) if !item.is_empty() => (item.clone(), None),
+            Value::Object(wrapper) => {
+                if wrapper
+                    .keys()
+                    .any(|field| !matches!(field.as_str(), "item" | "variant"))
+                {
+                    return Err(invalid(source, "container-item"));
+                }
+                let item = required_string(wrapper, "item", source)?.to_owned();
+                let variant = required_string(wrapper, "variant", source)?.to_owned();
+                (item, Some(variant))
+            }
+            _ => return Err(invalid(source, "container-item")),
+        };
+        if let Some(wrapper) = definition.wrapper.as_mut() {
+            wrapper.item = item;
+            // String-form overlays change only the item ID. Object-form
+            // overlays replace both item and variant in the pinned loader.
+            if variant.is_some() {
+                wrapper.variant = variant;
+            }
+        } else {
+            definition.wrapper = Some(ItemGroupWrapper {
+                item,
+                variant,
+                sealed: definition.wrapper_sealed,
+                overflow: definition.wrapper_overflow,
+            });
+        }
+    }
+
+    let overflow = object
+        .get("on_overflow")
+        .map(|value| match value.as_str() {
+            Some("none") => Ok(ItemGroupOverflow::None),
+            Some("spill") => Ok(ItemGroupOverflow::Spill),
+            Some("discard") => Ok(ItemGroupOverflow::Discard),
+            _ => Err(invalid(source, "on_overflow")),
+        })
+        .transpose()?;
+    let sealed = object
+        .get("sealed")
+        .map(|value| value.as_bool().ok_or_else(|| invalid(source, "sealed")))
+        .transpose()?;
+    if let Some(overflow) = overflow {
+        definition.wrapper_overflow = overflow;
+        if let Some(wrapper) = definition.wrapper.as_mut() {
+            wrapper.overflow = overflow;
+        }
+    }
+    if let Some(sealed) = sealed {
+        definition.wrapper_sealed = sealed;
+        if let Some(wrapper) = definition.wrapper.as_mut() {
+            wrapper.sealed = sealed;
+        }
+    }
+    Ok(())
 }
 
 fn append_group_entries(
@@ -690,6 +893,11 @@ fn append_legacy_items(
                             probability,
                             count: ItemGroupRange::ONE,
                             charges: None,
+                            damage: None,
+                            variant: None,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                            modifier_sealed: None,
                             event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
@@ -742,6 +950,11 @@ fn append_shortcut_array(
                     probability: 100,
                     count: ItemGroupRange::ONE,
                     charges: None,
+                    damage: None,
+                    variant: None,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                    modifier_sealed: None,
                     event: None,
                     unsupported_fields: BTreeMap::new(),
                     source: location,
@@ -760,6 +973,11 @@ fn append_shortcut_array(
                             probability,
                             count: ItemGroupRange::ONE,
                             charges: None,
+                            damage: None,
+                            variant: None,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                            modifier_sealed: None,
                             event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
@@ -846,33 +1064,93 @@ fn parse_object_entry(
     );
     let mut unsupported_fields = BTreeMap::new();
     retain_unsupported(object, IMPLEMENTED_ENTRY_FIELDS, &mut unsupported_fields);
-    let (count, charges) = if nested_group {
-        // Pinned add_entry returns immediately after building a local group;
-        // leaf modifiers on that object are not evaluated. Strict admission
-        // rejects their presence instead of executing divergent behavior.
-        for field in ["count", "charges"] {
-            if let Some(value) = object.get(field) {
-                unsupported_fields.insert(field.to_owned(), value.clone());
+    let (count, charges, damage, variant, direct_wrapper, modifier_container, modifier_sealed) =
+        if nested_group {
+            // Pinned add_entry returns immediately after building a local group;
+            // leaf modifiers on that object are not evaluated. Strict admission
+            // rejects their presence instead of executing divergent behavior.
+            for field in [
+                "count",
+                "charges",
+                "damage",
+                "variant",
+                "entry-wrapper",
+                "container-item",
+                "sealed",
+            ] {
+                if let Some(value) = object.get(field) {
+                    unsupported_fields.insert(field.to_owned(), value.clone());
+                }
             }
-        }
-        (ItemGroupRange::ONE, None)
-    } else {
-        (
-            admissible_range(
+            (ItemGroupRange::ONE, None, None, None, None, None, None)
+        } else {
+            let count = admissible_range(
                 object.get("count"),
                 source,
                 "count",
                 &mut unsupported_fields,
             )?
-            .unwrap_or(ItemGroupRange::ONE),
-            admissible_range(
-                object.get("charges"),
-                source,
-                "charges",
-                &mut unsupported_fields,
-            )?,
-        )
-    };
+            .unwrap_or(ItemGroupRange::ONE);
+            let charges =
+                admissible_charges_range(object.get("charges"), source, &mut unsupported_fields)?;
+            let variant = optional_string(object, "variant", source)?.map(str::to_owned);
+            let mut direct_wrapper =
+                optional_string(object, "entry-wrapper", source)?.map(|item| {
+                    ItemGroupEntryWrapper {
+                        item: item.to_owned(),
+                        variant: None,
+                    }
+                });
+            let mut modifier_container = None;
+            if let Some(value) = object.get("container-item") {
+                match value {
+                    Value::String(item) if !item.is_empty() => {
+                        modifier_container = Some(item.clone());
+                    }
+                    Value::Object(wrapper)
+                        if wrapper
+                            .keys()
+                            .all(|field| matches!(field.as_str(), "item" | "variant")) =>
+                    {
+                        direct_wrapper = Some(ItemGroupEntryWrapper {
+                            item: required_string(wrapper, "item", source)?.to_owned(),
+                            variant: Some(required_string(wrapper, "variant", source)?.to_owned()),
+                        });
+                    }
+                    _ => return Err(invalid(source, "container-item")),
+                }
+            }
+            let modifier_sealed = object
+                .get("sealed")
+                .map(|value| value.as_bool().ok_or_else(|| invalid(source, "sealed")))
+                .transpose()?;
+            let modifier_present = object.contains_key("count")
+                || object.contains_key("charges")
+                || object.contains_key("damage")
+                || variant.is_some()
+                || modifier_container.is_some()
+                || modifier_sealed.is_some();
+            let damage = if modifier_present {
+                Some(
+                    admissible_damage_range(object.get("damage"), source, &mut unsupported_fields)?
+                        .unwrap_or(ItemGroupRange {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                )
+            } else {
+                None
+            };
+            (
+                count,
+                charges,
+                damage,
+                variant,
+                direct_wrapper,
+                modifier_container,
+                modifier_sealed,
+            )
+        };
     Ok(Some(push_node(
         nodes,
         ItemGroupNode {
@@ -880,6 +1158,11 @@ fn parse_object_entry(
             probability,
             count,
             charges,
+            damage,
+            variant,
+            direct_wrapper,
+            modifier_container,
+            modifier_sealed,
             event,
             unsupported_fields,
             source: source.to_owned(),
@@ -926,6 +1209,52 @@ fn admissible_range(
         Ok(Some(ItemGroupRange { minimum, maximum }))
     } else {
         unsupported.insert(field.to_owned(), value.clone());
+        Ok(None)
+    }
+}
+
+fn admissible_damage_range(
+    value: Option<&Value>,
+    source: &str,
+    unsupported: &mut BTreeMap<String, Value>,
+) -> Result<Option<ItemGroupRange>, ItemGroupRegistryError> {
+    let parsed = admissible_range(value, source, "damage", unsupported)?;
+    if parsed.is_some_and(|range| range.maximum > 4) {
+        if let Some(value) = value {
+            unsupported.insert(String::from("damage"), value.clone());
+        }
+        Ok(None)
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn admissible_charges_range(
+    value: Option<&Value>,
+    source: &str,
+    unsupported: &mut BTreeMap<String, Value>,
+) -> Result<Option<ItemGroupChargesRange>, ItemGroupRegistryError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let pair = match value {
+        Value::Number(number) => number.as_i64().map(|number| (number, number)),
+        Value::Array(values) if values.len() == 2 => values[0].as_i64().zip(values[1].as_i64()),
+        Value::Array(_) => None,
+        _ => return Err(invalid(source, "charges")),
+    };
+    let Some((minimum, maximum)) = pair else {
+        unsupported.insert(String::from("charges"), value.clone());
+        return Ok(None);
+    };
+    let bound = i64::from(MAX_ITEM_GROUP_QUANTITY);
+    let range = (minimum >= -1 && minimum <= bound && maximum >= -1 && maximum <= bound)
+        .then(|| i32::try_from(minimum).ok().zip(i32::try_from(maximum).ok()))
+        .flatten();
+    if let Some((minimum, maximum)) = range {
+        Ok(Some(ItemGroupChargesRange { minimum, maximum }))
+    } else {
+        unsupported.insert(String::from("charges"), value.clone());
         Ok(None)
     }
 }
@@ -1381,6 +1710,52 @@ mod tests {
     }
 
     #[test]
+    fn self_copy_preserves_group_wrapper_policy_and_string_overlay_variant() {
+        let registry = load_values(serde_json::json!([
+            { "type": "ITEM", "id": "payload" },
+            { "type": "ITEM", "id": "bag" },
+            { "type": "ITEM", "id": "box" },
+            {
+                "type": "item_group",
+                "id": "g",
+                "subtype": "collection",
+                "on_overflow": "spill",
+                "sealed": false,
+                "items": ["payload"]
+            },
+            {
+                "type": "item_group",
+                "id": "g",
+                "subtype": "collection",
+                "copy-from": "g",
+                "container-item": { "item": "bag", "variant": "blue" }
+            },
+            {
+                "type": "item_group",
+                "id": "g",
+                "subtype": "collection",
+                "copy-from": "g",
+                "container-item": "box"
+            }
+        ]))
+        .expect("wrapper policy and container overlays should load");
+        assert_eq!(
+            registry
+                .strict_graph("g")
+                .expect("strict wrapper")
+                .root
+                .wrapper,
+            Some(ItemGroupWrapper {
+                item: String::from("box"),
+                variant: Some(String::from("blue")),
+                sealed: false,
+                overflow: ItemGroupOverflow::Spill,
+            }),
+            "policy can precede the container, and string overlays retain the inherited variant"
+        );
+    }
+
+    #[test]
     fn copy_from_cannot_inherit_a_different_item_group_id() {
         let error = load_values(serde_json::json!([
             { "type": "ITEM", "id": "a" },
@@ -1424,7 +1799,14 @@ mod tests {
         .expect("finalized registry");
         let node = &registry.get("g").expect("group").nodes[0];
         assert!(node.unsupported_fields.contains_key("count"));
-        assert!(node.unsupported_fields.contains_key("damage"));
+        assert!(!node.unsupported_fields.contains_key("damage"));
+        assert_eq!(
+            node.damage,
+            Some(ItemGroupRange {
+                minimum: 0,
+                maximum: 2,
+            })
+        );
         assert!(matches!(
             registry.strict_graph("g"),
             Err(ItemGroupRegistryError::UnsupportedFields { .. })
@@ -1566,6 +1948,184 @@ mod tests {
     }
 
     #[test]
+    fn raw_damage_and_group_wrappers_normalize_without_silent_projection() {
+        let registry = load_values(serde_json::json!([
+            { "type": "ITEM", "id": "payload" },
+            { "type": "ITEM", "id": "bag" },
+            {
+                "type": "item_group",
+                "id": "payloads",
+                "subtype": "collection",
+                "entries": [ { "item": "payload" } ]
+            },
+            {
+                "type": "item_group",
+                "id": "wrapped",
+                "subtype": "collection",
+                "container-item": { "item": "bag", "variant": "blue" },
+                "on_overflow": "spill",
+                "sealed": false,
+                "entries": [ { "group": "payloads", "count": 2, "damage": [ 1, 4 ] } ]
+            }
+        ]))
+        .expect("general modifier and wrapper shapes should parse");
+        let graph = registry
+            .strict_graph("wrapped")
+            .expect("supported semantics should survive strict normalization");
+        assert_eq!(graph.maximum_output, 3, "two payloads plus their wrapper");
+        assert_eq!(
+            graph.root.wrapper,
+            Some(ItemGroupWrapper {
+                item: String::from("bag"),
+                variant: Some(String::from("blue")),
+                sealed: false,
+                overflow: ItemGroupOverflow::Spill,
+            })
+        );
+        assert_eq!(
+            graph.root.nodes[0].damage,
+            Some(ItemGroupRange {
+                minimum: 1,
+                maximum: 4,
+            })
+        );
+        assert_eq!(graph.root.nodes[0].count.minimum, 2);
+        assert_eq!(graph.root.nodes[0].count.maximum, 2);
+    }
+
+    #[test]
+    fn modifier_existence_retains_implicit_zero_damage_and_invalid_shapes_fail_closed() {
+        let registry = load_values(serde_json::json!([
+            { "type": "ITEM", "id": "a" },
+            { "type": "ITEM", "id": "bag" },
+            {
+                "type": "item_group",
+                "id": "modifiers",
+                "subtype": "collection",
+                "entries": [
+                    { "item": "a" },
+                    { "item": "a", "count": 1 },
+                    { "item": "a", "charges": 3 },
+                    { "item": "a", "charges": [ 30, -1 ] },
+                    {
+                        "item": "a",
+                        "variant": "blue",
+                        "container-item": "bag",
+                        "sealed": false
+                    },
+                    {
+                        "item": "a",
+                        "count": 3,
+                        "entry-wrapper": "ignored",
+                        "container-item": { "item": "bag", "variant": "red" }
+                    },
+                    {
+                        "item": "a",
+                        "entry-wrapper": "bag",
+                        "container-item": "null"
+                    }
+                ]
+            }
+        ]))
+        .expect("modifier fixture should load");
+        let strict = registry
+            .strict_graph("modifiers")
+            .expect("strict modifiers");
+        assert_eq!(strict.root.nodes[0].damage, None);
+        assert_eq!(
+            strict.root.nodes[1].damage,
+            Some(ItemGroupRange {
+                minimum: 0,
+                maximum: 0,
+            })
+        );
+        assert_eq!(strict.root.nodes[2].damage, strict.root.nodes[1].damage);
+        assert_eq!(
+            strict.root.nodes[3].charges,
+            Some(ItemGroupChargesRange {
+                minimum: 30,
+                maximum: -1,
+            })
+        );
+        assert_eq!(strict.root.nodes[3].damage, strict.root.nodes[1].damage);
+        assert_eq!(strict.root.nodes[4].variant.as_deref(), Some("blue"));
+        assert_eq!(
+            strict.root.nodes[4].modifier_container.as_deref(),
+            Some("bag")
+        );
+        assert_eq!(strict.root.nodes[4].modifier_sealed, Some(false));
+        assert_eq!(strict.root.nodes[4].damage, strict.root.nodes[1].damage);
+        assert_eq!(
+            strict.root.nodes[5].direct_wrapper,
+            Some(ItemGroupEntryWrapper {
+                item: String::from("bag"),
+                variant: Some(String::from("red")),
+            }),
+            "object-form container-item replaces entry-wrapper upstream"
+        );
+        assert_eq!(strict.root.nodes[5].damage, strict.root.nodes[1].damage);
+        assert_eq!(
+            strict.root.nodes[6].modifier_container.as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            strict.root.nodes[6].direct_wrapper,
+            Some(ItemGroupEntryWrapper {
+                item: String::from("bag"),
+                variant: None,
+            })
+        );
+        assert_eq!(
+            strict.maximum_output, 12,
+            "direct wrappers contain all repeated outputs once, and null only suppresses defaults"
+        );
+
+        for invalid in [
+            serde_json::json!({
+                "type": "item_group",
+                "id": "too_damaged",
+                "subtype": "collection",
+                "entries": [ { "item": "a", "damage": 5 } ]
+            }),
+            serde_json::json!({
+                "type": "item_group",
+                "id": "nested_modifier",
+                "subtype": "collection",
+                "entries": [ { "collection": [ { "item": "a" } ], "damage": 1 } ]
+            }),
+        ] {
+            let registry = load_values(serde_json::json!([
+                { "type": "ITEM", "id": "a" },
+                invalid
+            ]))
+            .expect("unsupported semantics should remain loadable");
+            let group = registry
+                .iter()
+                .map(|(id, _)| id)
+                .find(|id| *id != "EMPTY_GROUP")
+                .expect("fixture group");
+            assert!(matches!(
+                registry.strict_graph(group),
+                Err(ItemGroupRegistryError::UnsupportedFields { .. })
+            ));
+        }
+        assert!(
+            load_values(serde_json::json!([
+                { "type": "ITEM", "id": "a" },
+                {
+                    "type": "item_group",
+                    "id": "invalid_wrapper",
+                    "subtype": "collection",
+                    "container-item": { "item": "a" },
+                    "entries": [ { "item": "a" } ]
+                }
+            ]))
+            .is_err(),
+            "object-form group wrappers require the upstream variant member"
+        );
+    }
+
+    #[test]
     fn pinned_wall_bash_results_has_eight_strict_local_entries() {
         let mut registry = ItemGroupRegistry::default();
         registry
@@ -1588,7 +2148,7 @@ mod tests {
         );
         assert_eq!(
             group.nodes[2].charges,
-            Some(ItemGroupRange {
+            Some(ItemGroupChargesRange {
                 minimum: 4,
                 maximum: 16
             })

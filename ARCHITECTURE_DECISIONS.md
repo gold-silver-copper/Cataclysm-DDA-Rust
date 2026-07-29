@@ -2957,3 +2957,40 @@ progress counter. Closely related item modifier and containment fields should be
 batched in one increment after their full representation is designed, rather
 than repeating migration, replay, fixture, and documentation work for isolated
 fields.
+
+## Explicit item-modifier presence and RNG phase
+
+Protocol 85 advances to schema 63 and CanonicalStateV61 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Selected-content
+normalization keeps the distinction between an absent item modifier and one
+whose damage range is explicitly zero. It also retains signed charge ranges,
+variants, direct and modifier-owned container IDs, group wrappers, sealing, and
+overflow policy. Independent `-1` charge endpoints and the string `"null"`
+container sentinel are preserved instead of coerced into ordinary unsigned
+ranges or resolvable item IDs.
+
+Only a fixed-zero raw-damage marker on a direct item is admitted to the
+canonical graph in this increment. Every concrete leaf first consumes the
+pinned per-item presentation-seed draw and empty-variant selection, followed by
+the unconditional `one_in(3)` fit draw; variable-size items remain closed until
+FIT state is canonical. The marker then evaluates the pinned modifier damage
+range before charge dressing. Local collection/distribution nodes reject
+the marker because the pinned loader never applies leaf modifiers to those
+composites. Named-group markers also reject because the wire prototypes cannot
+prove every returned item lacks degradation, gun-fault, or other unrepresented
+modifier side effects. Modifier-bearing degrading vehicle parts and fouling
+guns fail closed; exactly projected magazines and wells retain their two
+zero-chance dressing draws. Corpse construction, preloaded magazines,
+temperature-bearing comestibles, constructor-owned state, default containers,
+nonzero damage, variants, explicit sealing, nested modifier groups, and all
+wrapper/container materialization remain fail closed. This corrects the RNG
+phase of an already admitted structural-bash definition without claiming new
+runtime content.
+
+The Postcard representation therefore changes even when the marker is absent,
+so schema 63 is the minimum recoverable schema and the canonical state domain
+advances. The checked item-flow fixture contains no item-group catalog and keeps
+the same tick, actors, inventory, ground items, and CanonicalEventsV18 trace;
+only its intentional state-hash domain changes. The remaining item-state damage
+and variant representation should be one version batch, and general containment
+another, after the protocol item-group domain is mechanically extracted.

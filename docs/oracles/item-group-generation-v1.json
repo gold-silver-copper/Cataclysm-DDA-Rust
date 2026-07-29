@@ -34,6 +34,13 @@
       { "case_id": "range_minimum", "minimum": 1, "maximum": 4, "target": 1, "observed": 1 },
       { "case_id": "range_maximum", "minimum": 1, "maximum": 4, "target": 4, "observed": 4 }
     ],
+    "modifier_rng_phase": {
+      "case_id": "direct_fixed_count",
+      "rolls_consumed": 4,
+      "expected_downstream": 6558,
+      "actual_downstream": 6558,
+      "downstream_draw_matches": true
+    },
     "nested": {
       "rolls_consumed": 4,
       "expected_trace": ["child_conditional", "child_always", "root_last"],

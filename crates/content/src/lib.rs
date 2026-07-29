@@ -33,8 +33,9 @@ pub use item::{
     PocketTypeDefinition, StrictMagazineDefinition,
 };
 pub use item_group::{
-    ItemGroupDefinition, ItemGroupEvent, ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind,
-    ItemGroupRange, ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype,
+    ItemGroupChargesRange, ItemGroupDefinition, ItemGroupEntryWrapper, ItemGroupEvent,
+    ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind, ItemGroupOverflow, ItemGroupRange,
+    ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype, ItemGroupWrapper,
     MAX_ITEM_GROUP_LOCAL_DEPTH, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUT,
     MAX_ITEM_GROUP_QUANTITY, MAX_ITEM_GROUP_REFERENCE_DEPTH, StrictItemGroupDefinition,
     StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,

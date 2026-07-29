@@ -206,6 +206,20 @@ int create_with_charges( unsigned int seed, int minimum, int maximum )
     return items.front().charges;
 }
 
+int downstream_after_fixed_count( unsigned int seed )
+{
+    Single_item_creator creator( "test_pipe", Single_item_creator::S_ITEM, 100,
+                                 "Rust item-group modifier RNG oracle" );
+    creator.modifier.emplace();
+    creator.modifier->count = { 1, 1 };
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    return rng( 0, 9999 );
+}
+
 unsigned int seed_for_observed_charges( int minimum, int maximum, int target )
 {
     for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
@@ -498,6 +512,15 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     const int minimum_charges = create_with_charges( minimum_charges_seed, 1, 4 );
     const int maximum_charges = create_with_charges( maximum_charges_seed, 1, 4 );
 
+    constexpr unsigned int modifier_rng_seed = 73;
+    rng_set_engine_seed( modifier_rng_seed );
+    static_cast<void>( rng( 0, std::numeric_limits<int>::max() ) ); // item seed
+    static_cast<void>( rng_bits() ); // empty itype-variant selection still draws
+    static_cast<void>( rng( 0, 2 ) ); // unconditional one_in( 3 ) fit roll
+    static_cast<void>( rng( 0, 0 ) ); // default Item_modifier damage roll
+    const int modifier_rng_expected_downstream = rng( 0, 9999 );
+    const int modifier_rng_actual_downstream = downstream_after_fixed_count( modifier_rng_seed );
+
     const unsigned int nested_seed = seed_for_collection_branch( branch_probability );
     rng_set_engine_seed( nested_seed );
     static_cast<void>( rng( 0, 99 ) );
@@ -660,6 +683,16 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "observed", maximum_charges );
         json.end_object();
         json.end_array();
+
+        json.member( "modifier_rng_phase" );
+        json.start_object();
+        json.member( "case_id", "direct_fixed_count" );
+        json.member( "rolls_consumed", 4 );
+        json.member( "expected_downstream", modifier_rng_expected_downstream );
+        json.member( "actual_downstream", modifier_rng_actual_downstream );
+        json.member( "downstream_draw_matches",
+                     modifier_rng_expected_downstream == modifier_rng_actual_downstream );
+        json.end_object();
 
         json.member( "nested" );
         json.start_object();

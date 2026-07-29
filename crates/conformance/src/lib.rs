@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xb5, 0x53, 0x71, 0x99, 0xf1, 0x7d, 0x36, 0x75, 0x5d, 0x7f, 0x9d, 0xea, 0x39,
-                    0x26, 0x46, 0x22, 0x2e, 0x55, 0xd1, 0x67, 0x1f, 0x41, 0x07, 0x99, 0x0d, 0x7b,
-                    0x09, 0xb0, 0x99, 0x57, 0x32, 0x6b,
+                    0x2a, 0xae, 0x0f, 0x85, 0x97, 0x88, 0xb6, 0xe8, 0x3b, 0xd4, 0xc0, 0x39, 0x72,
+                    0xf3, 0x2a, 0x6a, 0x78, 0x96, 0x3a, 0x63, 0xc1, 0xce, 0xdf, 0x57, 0x74, 0xb6,
+                    0xb1, 0xe8, 0x95, 0xe3, 0x78, 0x20,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1264,6 +1264,7 @@ mod tests {
                             probability: 100,
                             count_min: 1,
                             count_max: 1,
+                            raw_damage: None,
                             event: Some(cdda_protocol::ItemGroupEventV1::Christmas),
                             target: item_leaf("holiday_token", None),
                         },
@@ -1271,6 +1272,10 @@ mod tests {
                             probability: 100,
                             count_min: 2,
                             count_max: 2,
+                            raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                                minimum: 0,
+                                maximum: 0,
+                            }),
                             event: None,
                             target: item_leaf("splinter", None),
                         },
@@ -1278,6 +1283,10 @@ mod tests {
                             probability: 100,
                             count_min: 1,
                             count_max: 1,
+                            raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                                minimum: 0,
+                                maximum: 0,
+                            }),
                             event: None,
                             target: item_leaf(
                                 "nail",
@@ -1428,7 +1437,8 @@ mod tests {
                 .iter()
                 .map(|item| (item.item.type_id.as_str(), item.item.charges))
                 .collect::<Vec<_>>(),
-            [("splinter", 1), ("splinter", 1), ("nail", 6)]
+            [("splinter", 1), ("splinter", 1), ("nail", 4)],
+            "the fixed seed must include each generated item's constructor, variant, and fit phases"
         );
         let (coord, local) = wall_position.chunk_and_local();
         let chunk = direct
