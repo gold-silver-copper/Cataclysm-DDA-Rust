@@ -4,10 +4,11 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `58140edef392d98f8ad87a2224396b84c599382b`
+- Verified green parent: `58140edef392d98f8ad87a2224396b84c599382b`
   (`Extract canonical item instance`).
-- Checkpoint binding: this documentation-only follow-up records the exact green
-  implementation commit and scoped independent review; runtime sources are
+- Checkpoint candidate: server item-group normalization has been mechanically
+  extracted and fully verified above that parent. Exact commit binding remains
+  pending in a documentation-only follow-up; runtime sources are otherwise
   unchanged.
 - Active milestone: `regional-terrain-base`.
 - Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
@@ -106,6 +107,11 @@ authoritative and retains deterministic multiplayer fallback.
   textually identical. `sim/lib.rs` is now 28,558 lines and `sim/items.rs` is
   599 lines; no wire, persistence, replay, event, or canonical-hash version
   changes.
+- The server extraction moves the complete 333-line item-group normalization
+  implementation from `main.rs` into `item_groups.rs`. After normalizing only
+  the required `pub(super)` visibility, the old and new function bodies are
+  textually identical. The binary root falls from 6,565 to 6,240 lines; the
+  focused module is 349 lines. No runtime representation or behavior changes.
 - Runtime evidence at verified commit
   `58140edef392d98f8ad87a2224396b84c599382b` counts four admitted definitions
   through generation, authoritative interaction, persistence, and client
@@ -142,17 +148,17 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Verified commit `58140edef392d98f8ad87a2224396b84c599382b` is green for
+The candidate above verified parent
+`58140edef392d98f8ad87a2224396b84c599382b` is green for
 formatting; workspace all-target/all-feature check; strict Clippy; warning-free
 rustdoc; dependency boundaries; the parity ledger and runtime-progress gates;
 astronomy; selected-content validation at unchanged manifest hash
 `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
 content inventory; all three pinned C++ differential oracles (8/41/17
 assertions); and 335 workspace tests plus doc-tests. An independent reviewer
-audited the scoped extraction against base
-`dd3c70cc4f9a2e2d3914c0a6c84f47b808e5ea06`, found no P0-P3 issue, and recorded
-the remaining encapsulation boundary: item validators, conversions, and direct
-parent-owned mutations still need later mechanical extraction. Existing
+audited the scoped server extraction against base
+`d219c8c69290fc42ee697005ba1cae81ae469001`; one P3 visibility widening was
+validated and fixed, and the final rescan found no P0-P3 issue. Existing
 nonblocking hardening opportunities remain indexed RLE identity lookup,
 loader-local JSON byte caps for future mutable content packages, and the
 explicit normalized Rust/C++ mapgen comparator named by the `oracle_pending`
@@ -162,11 +168,13 @@ state.
 
 The central-file split is now an explicit prerequisite DAG rather than an
 informal cleanup task. Current ownership surfaces are about 28.6K lines in
-simulation `lib.rs`, 8.3K in protocol, 13K in persistence, and 8.8K in the
-server library. Item-group planning and the canonical item instance now live in
-`sim/items.rs`; validators, materialization/conversion helpers, ownership
-transfers, and item-bound activities remain in the root for incremental
-extraction. The ledger separately tracks actor, combat, activity, monster,
+simulation `lib.rs`, 8.3K in protocol, 13K in persistence, 6.2K in the server
+binary root, and 8.8K in the server library. Item-group planning and the
+canonical item instance live in `sim/items.rs`; server item-group normalization
+now lives in `server/item_groups.rs`. Shared item-prototype conversion remains
+parent-owned, while simulation validators, materialization/conversion helpers,
+ownership transfers, and item-bound activities remain incremental extraction
+boundaries. The ledger separately tracks actor, combat, activity, monster,
 canonical-state, protocol-domain, persistence-domain, and session/replication
 extractions. Anatomy and EOC expansion depend on the relevant boundaries.
 
