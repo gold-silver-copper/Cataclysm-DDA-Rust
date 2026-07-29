@@ -4,12 +4,11 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `f4591fb9049228f3677777b8357cfed9ae325ea9`
-  (`Add deterministic item-group event policy`).
-- Active checkpoint candidate: canonical `ItemInstance` state and its pocket,
-  power, snapshot, and validation-facing behavior moved mechanically from
-  `sim/lib.rs` to `sim/items.rs`. Full local gates and an independent scoped
-  review are green; exact commit binding is pending.
+- Verified green commit: `58140edef392d98f8ad87a2224396b84c599382b`
+  (`Extract canonical item instance`).
+- Checkpoint binding: this documentation-only follow-up records the exact green
+  implementation commit and scoped independent review; runtime sources are
+  unchanged.
 - Active milestone: `regional-terrain-base`.
 - Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 62, replay format 3, CanonicalStateV60, and
@@ -100,7 +99,7 @@ authoritative and retains deterministic multiplayer fallback.
   under CanonicalStateV60. That scenario has no item groups; its tick, actor,
   inventory, ground item, and CanonicalEventsV18 trace are unchanged, isolating
   the difference to the intentional state-hash domain change.
-- The active extraction moves the complete 300-line canonical `ItemInstance`
+- The extraction moves the complete 300-line canonical `ItemInstance`
   implementation without changing derives, field order, branches, mutations,
   errors, output order, or RNG. After normalizing only the newly required
   `pub(super)` visibility, the reviewer found the old and new definitions
@@ -108,7 +107,7 @@ authoritative and retains deterministic multiplayer fallback.
   599 lines; no wire, persistence, replay, event, or canonical-hash version
   changes.
 - Runtime evidence at verified commit
-  `f4591fb9049228f3677777b8357cfed9ae325ea9` counts four admitted definitions
+  `58140edef392d98f8ad87a2224396b84c599382b` counts four admitted definitions
   through generation, authoritative interaction, persistence, and client
   access: 44 points. Exact production definitions receive
   zero four-mode credit because the current conformance paths use normalized
@@ -143,16 +142,14 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-The last bound runtime implementation remains
-`f4591fb9049228f3677777b8357cfed9ae325ea9`. The active mechanical extraction
-above it is green for formatting; workspace all-target/all-feature check;
-strict Clippy; warning-free rustdoc; dependency boundaries; the parity ledger
-and unbound runtime-progress gates; astronomy; selected-content validation at
-unchanged manifest hash
+Verified commit `58140edef392d98f8ad87a2224396b84c599382b` is green for
+formatting; workspace all-target/all-feature check; strict Clippy; warning-free
+rustdoc; dependency boundaries; the parity ledger and runtime-progress gates;
+astronomy; selected-content validation at unchanged manifest hash
 `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
 content inventory; all three pinned C++ differential oracles (8/41/17
 assertions); and 335 workspace tests plus doc-tests. An independent reviewer
-audited only the two-file simulation move against base
+audited the scoped extraction against base
 `dd3c70cc4f9a2e2d3914c0a6c84f47b808e5ea06`, found no P0-P3 issue, and recorded
 the remaining encapsulation boundary: item validators, conversions, and direct
 parent-owned mutations still need later mechanical extraction. Existing
