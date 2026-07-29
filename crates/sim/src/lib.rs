@@ -1,5 +1,7 @@
 //! Renderer-independent canonical simulation state.
 
+mod mapgen;
+
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt;
@@ -36,8 +38,9 @@ use cdda_protocol::{
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
     RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
     SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
-    WorldEventKind, WorldPosition, WorldSnapshotV1, adjusted_book_study_time_moves,
-    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
+    WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
+    adjusted_book_study_time_moves, item_group_catalog_is_valid, item_group_source_max_outputs,
+    item_group_sources_are_valid, worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -4754,7 +4757,7 @@ pub struct WorldState {
     furniture_bash_ids: BTreeSet<String>,
     furniture_bash_types: BTreeMap<String, FurnitureBashTypeV1>,
     smash_item_types: BTreeMap<String, SmashItemTypeV1>,
-    worldgen_default_terrain: Option<TerrainTileSnapshot>,
+    worldgen: Option<WorldgenCatalogV1>,
     actors: BTreeMap<ActorId, Actor>,
     creatures: BTreeMap<CreatureId, Creature>,
     ground_items: BTreeMap<ItemId, GroundItem>,
@@ -4781,7 +4784,7 @@ impl WorldState {
             furniture_bash_ids: BTreeSet::new(),
             furniture_bash_types: BTreeMap::new(),
             smash_item_types: BTreeMap::new(),
-            worldgen_default_terrain: None,
+            worldgen: None,
             actors: BTreeMap::new(),
             creatures: BTreeMap::new(),
             ground_items: BTreeMap::new(),
@@ -5026,16 +5029,32 @@ impl WorldState {
         self.chunks.get(&coord)?.fields(local)
     }
 
-    pub fn configure_flat_worldgen(
-        &mut self,
-        terrain: TerrainTileSnapshot,
-    ) -> Result<(), SimError> {
-        validate_terrain_tile(&terrain)?;
-        if self.tick != SimTick(0) || !self.chunks.is_empty() || terrain.move_cost <= 0 {
+    pub fn configure_worldgen(&mut self, catalog: WorldgenCatalogV1) -> Result<(), SimError> {
+        let item_groups = self.item_groups.values().cloned().collect::<Vec<_>>();
+        if self.tick != SimTick(0)
+            || !self.chunks.is_empty()
+            || self.worldgen.is_some()
+            || !worldgen_catalog_is_valid(&catalog, &item_groups)
+            || !mapgen::catalog_fits_one_id_reservation(
+                &catalog,
+                &item_groups,
+                ACTIVE_BUBBLE_RADIUS_SUBMAPS,
+            )
+        {
             return Err(SimError::InvalidTerrain);
         }
-        self.worldgen_default_terrain = Some(terrain);
+        self.worldgen = Some(catalog);
         Ok(())
+    }
+
+    /// Materializes the complete 2x2-submap overmap cells intersecting the
+    /// active bubble. Fresh servers and ordinary traversal use the same
+    /// authoritative planner.
+    pub fn generate_initial_bubble(&mut self, center: WorldPosition) -> Result<(), SimError> {
+        if self.tick != SimTick(0) {
+            return Err(SimError::InvalidTerrain);
+        }
+        self.ensure_active_bubble_generated(center)
     }
 
     pub fn spawn_ground_item(&mut self, spawn: ItemSpawn) -> Result<ItemId, SimError> {
@@ -9062,22 +9081,41 @@ impl WorldState {
         if center.z != 0 {
             return Ok(());
         }
-        let Some(terrain) = self.worldgen_default_terrain.clone() else {
+        let Some(catalog) = self.worldgen.as_ref() else {
             return Ok(());
         };
-        for y_offset in -ACTIVE_BUBBLE_RADIUS_SUBMAPS..=ACTIVE_BUBBLE_RADIUS_SUBMAPS {
-            for x_offset in -ACTIVE_BUBBLE_RADIUS_SUBMAPS..=ACTIVE_BUBBLE_RADIUS_SUBMAPS {
-                let (Some(x), Some(y)) = (
-                    center.x.checked_add(x_offset),
-                    center.y.checked_add(y_offset),
-                ) else {
-                    continue;
-                };
-                let coord = ChunkCoord { x, y, z: center.z };
-                if let std::collections::btree_map::Entry::Vacant(entry) = self.chunks.entry(coord)
-                {
-                    entry.insert(Chunk::filled(coord, terrain.clone())?);
-                }
+        let planned = mapgen::plan_active_bubble(
+            self.world_seed,
+            catalog,
+            &self.item_groups,
+            &self.chunks,
+            center,
+            ACTIVE_BUBBLE_RADIUS_SUBMAPS,
+        )?;
+        if self.allocator.remaining()
+            < u64::try_from(planned.items.len()).map_err(|_| SimError::NumericOverflow)?
+        {
+            return Err(SimError::IdReservationExhausted);
+        }
+        for chunk in planned.chunks {
+            if self.chunks.insert(chunk.coord, chunk).is_some() {
+                return Err(SimError::InvalidTerrain);
+            }
+        }
+        for (position, prototype) in planned.items {
+            let item_id = self.allocator.allocate_item()?;
+            if self
+                .ground_items
+                .insert(
+                    item_id,
+                    GroundItem {
+                        item: item_from_craft_prototype(item_id, &prototype),
+                        position,
+                    },
+                )
+                .is_some()
+            {
+                return Err(SimError::InvalidItem);
             }
         }
         Ok(())
@@ -13380,7 +13418,7 @@ impl WorldState {
             furniture_bash_ids: self.furniture_bash_ids.iter().cloned().collect(),
             furniture_bash_types: self.furniture_bash_types.values().cloned().collect(),
             smash_item_types: self.smash_item_types.values().cloned().collect(),
-            worldgen_default_terrain: self.worldgen_default_terrain.clone(),
+            worldgen: self.worldgen.clone(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
             creatures: self.creatures.values().map(Creature::snapshot).collect(),
             ground_items: self
@@ -13393,15 +13431,6 @@ impl WorldState {
     }
 
     pub fn from_snapshot(snapshot: &WorldSnapshotV1) -> Result<Self, SimError> {
-        if snapshot
-            .worldgen_default_terrain
-            .as_ref()
-            .is_some_and(|terrain| {
-                validate_terrain_tile(terrain).is_err() || terrain.move_cost <= 0
-            })
-        {
-            return Err(SimError::InvalidSnapshot);
-        }
         if !snapshot.item_groups_are_valid() {
             return Err(SimError::InvalidSnapshot);
         }
@@ -13411,6 +13440,22 @@ impl WorldState {
             .cloned()
             .map(|definition| (definition.group_id.clone(), definition))
             .collect::<BTreeMap<_, _>>();
+        if snapshot
+            .worldgen
+            .as_ref()
+            .is_some_and(|catalog| !worldgen_catalog_is_valid(catalog, &snapshot.item_groups))
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        if snapshot.worldgen.as_ref().is_some_and(|catalog| {
+            !mapgen::catalog_fits_one_id_reservation(
+                catalog,
+                &snapshot.item_groups,
+                ACTIVE_BUBBLE_RADIUS_SUBMAPS,
+            )
+        }) {
+            return Err(SimError::InvalidSnapshot);
+        }
         let mut field_types = BTreeMap::new();
         for field_type in &snapshot.field_types {
             validate_field_type(field_type)?;
@@ -13681,6 +13726,13 @@ impl WorldState {
                 return Err(SimError::InvalidSnapshot);
             }
         }
+        if snapshot
+            .worldgen
+            .as_ref()
+            .is_some_and(|_| !mapgen::generated_cells_are_complete(&chunks))
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
         for chunk in chunks.values() {
             for (index, damage) in chunk.map_damage.iter().copied().enumerate() {
                 if damage == 0 {
@@ -13796,7 +13848,7 @@ impl WorldState {
             furniture_bash_ids,
             furniture_bash_types,
             smash_item_types,
-            worldgen_default_terrain: snapshot.worldgen_default_terrain.clone(),
+            worldgen: snapshot.worldgen.clone(),
             actors,
             creatures,
             ground_items,
@@ -13812,7 +13864,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV56");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV57");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13938,6 +13990,44 @@ mod tests {
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+        }
+    }
+
+    fn test_worldgen_catalog(
+        terrain: TerrainTileSnapshot,
+        item_group: Option<&str>,
+    ) -> WorldgenCatalogV1 {
+        let mut cells = vec![
+            cdda_protocol::WorldgenCellV1 {
+                terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                    target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(0),
+                    weight: 1,
+                }],
+                furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                    target: cdda_protocol::WorldgenFurnitureTargetV1::None,
+                    weight: 1,
+                }],
+                item_group: None,
+            };
+            cdda_protocol::WORLDGEN_CELLS_PER_OMT
+        ];
+        if let Some(group_id) = item_group {
+            cells[0].item_group = Some(cdda_protocol::WorldgenItemGroupPlacementV1 {
+                group_id: group_id.to_owned(),
+                chance: 100,
+            });
+        }
+        WorldgenCatalogV1 {
+            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
+            default_omt_id: String::from("field_test"),
+            terrain_prototypes: vec![terrain],
+            furniture_prototypes: Vec::new(),
+            regional_terrain: Vec::new(),
+            regional_furniture: Vec::new(),
+            omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
+                omt_id: String::from("field_test"),
+                templates: vec![cdda_protocol::WorldgenTemplateV1 { weight: 1, cells }],
+            }],
         }
     }
 
@@ -28174,7 +28264,7 @@ mod tests {
     }
 
     #[test]
-    fn crossing_a_chunk_edge_generates_persistent_flat_wilderness() {
+    fn crossing_the_active_boundary_generates_persistent_atomic_omt_cells() {
         let terrain = TerrainTileSnapshot {
             terrain_id: String::from("t_grass"),
             move_cost: 2,
@@ -28194,15 +28284,15 @@ mod tests {
             .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
             .expect("block should install");
         world
-            .configure_flat_worldgen(terrain.clone())
+            .configure_worldgen(test_worldgen_catalog(terrain, None))
             .expect("world generation should configure once");
-        world.insert_chunk(
-            Chunk::filled(ChunkCoord { x: 0, y: 0, z: 0 }, terrain)
-                .expect("initial wilderness should be valid"),
-        );
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("initial OMT cells should generate atomically");
+        assert_eq!(world.snapshot().chunks.len(), 144);
         let actor = world
-            .spawn_actor(WorldPosition { x: 11, y: 1, z: 0 }, true)
-            .expect("actor should spawn at the edge");
+            .spawn_actor(WorldPosition { x: 71, y: 1, z: 0 }, true)
+            .expect("actor should spawn at the active edge");
         let command = ClientCommand {
             actor_id: actor,
             sequence: CommandSequence(1),
@@ -28219,23 +28309,23 @@ mod tests {
         assert!(outcome.events.iter().any(|event| matches!(
             event.kind,
             WorldEventKind::ActorMoved { actor_id, to, .. }
-                if actor_id == actor && to == (WorldPosition { x: 12, y: 1, z: 0 })
+                if actor_id == actor && to == (WorldPosition { x: 72, y: 1, z: 0 })
         )));
         let snapshot = world.snapshot();
-        assert_eq!(snapshot.chunks.len(), 121);
+        assert_eq!(snapshot.chunks.len(), 216);
         assert!(
             snapshot
                 .chunks
                 .iter()
-                .any(|chunk| chunk.coord == (ChunkCoord { x: 1, y: 0, z: 0 }))
+                .any(|chunk| chunk.coord == (ChunkCoord { x: 6, y: 0, z: 0 }))
         );
         assert_eq!(
             snapshot
-                .worldgen_default_terrain
+                .worldgen
                 .as_ref()
-                .expect("worldgen terrain should persist")
-                .terrain_id,
-            "t_grass"
+                .expect("worldgen catalog should persist")
+                .default_omt_id,
+            "field_test"
         );
         let restored =
             WorldState::from_snapshot(&snapshot).expect("generated chunk should restore");
@@ -28244,11 +28334,149 @@ mod tests {
                 .actor_snapshot(actor)
                 .expect("actor should restore")
                 .position,
-            (WorldPosition { x: 12, y: 1, z: 0 })
+            (WorldPosition { x: 72, y: 1, z: 0 })
         );
         assert_eq!(
             restored.canonical_hash().expect("restored hash"),
             world.canonical_hash().expect("original hash")
         );
+    }
+
+    #[test]
+    fn mapgen_item_groups_preflight_ids_and_commit_with_their_four_chunks() {
+        let group = ItemGroupDefinitionV1 {
+            group_id: String::from("field_loot"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        target: test_item_group_leaf("rock", None, false),
+                    }],
+                }],
+            },
+        };
+        let catalog = test_worldgen_catalog(test_terrain("t_grass"), Some("field_loot"));
+
+        let mut oversized_group = group.clone();
+        oversized_group.graph.nodes[0].entries[0].count_min = 114;
+        oversized_group.graph.nodes[0].entries[0].count_max = 114;
+        let oversized_catalog = catalog.clone();
+        assert!(cdda_protocol::worldgen_catalog_is_valid(
+            &oversized_catalog,
+            &[oversized_group.clone()]
+        ));
+        let mut impossible = WorldState::new(31, [6; 32]);
+        impossible
+            .register_item_group_catalog(vec![oversized_group])
+            .expect("individually bounded group should register");
+        assert!(matches!(
+            impossible.configure_worldgen(oversized_catalog),
+            Err(SimError::InvalidTerrain)
+        ));
+        assert!(impossible.worldgen.is_none());
+
+        let mut exhausted = WorldState::new(31, [7; 32]);
+        exhausted
+            .register_item_group_catalog(vec![group.clone()])
+            .expect("group should register");
+        exhausted
+            .install_reserved_block(ReservedIdBlock::new(1, 35).expect("valid short block"))
+            .expect("block should install");
+        exhausted
+            .configure_worldgen(catalog.clone())
+            .expect("catalog should configure");
+        assert!(matches!(
+            exhausted.generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 }),
+            Err(SimError::IdReservationExhausted)
+        ));
+        assert!(exhausted.chunks.is_empty());
+        assert!(exhausted.ground_items.is_empty());
+        assert_eq!(exhausted.allocator.next(), 1);
+
+        let mut world = WorldState::new(31, [7; 32]);
+        world
+            .register_item_group_catalog(vec![group])
+            .expect("group should register");
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 64).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_worldgen(catalog)
+            .expect("catalog should configure");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("geometry and loot should commit together");
+        assert_eq!(world.chunks.len(), 144);
+        assert_eq!(world.ground_items.len(), 36);
+        assert_eq!(world.allocator.next(), 37);
+        assert!(
+            world.ground_items.values().all(|ground| {
+                ground.item.type_id == "rock" && world.is_passable(ground.position)
+            })
+        );
+        let restored = WorldState::from_snapshot(&world.snapshot()).expect("snapshot restores");
+        assert_eq!(
+            restored.canonical_hash().expect("restored hash"),
+            world.canonical_hash().expect("world hash")
+        );
+    }
+
+    #[test]
+    fn coordinate_mapgen_is_traversal_order_independent_and_partial_cells_fail_atomically() {
+        let catalog = test_worldgen_catalog(test_terrain("t_grass"), None);
+        let centers = [
+            WorldPosition { x: 0, y: 0, z: 0 },
+            WorldPosition {
+                x: 144,
+                y: -144,
+                z: 0,
+            },
+        ];
+        let mut forward = WorldState::new(37, [11; 32]);
+        forward
+            .configure_worldgen(catalog.clone())
+            .expect("catalog should configure");
+        for center in centers {
+            forward
+                .generate_initial_bubble(center)
+                .expect("forward discovery should generate");
+        }
+        let mut reverse = WorldState::new(37, [11; 32]);
+        reverse
+            .configure_worldgen(catalog.clone())
+            .expect("catalog should configure");
+        for center in centers.into_iter().rev() {
+            reverse
+                .generate_initial_bubble(center)
+                .expect("reverse discovery should generate");
+        }
+        assert_eq!(
+            forward.canonical_hash().expect("forward hash"),
+            reverse.canonical_hash().expect("reverse hash")
+        );
+
+        let mut partial = WorldState::new(41, [13; 32]);
+        partial
+            .configure_worldgen(catalog)
+            .expect("catalog should configure");
+        partial.insert_chunk(
+            Chunk::filled(ChunkCoord { x: 0, y: 0, z: 0 }, test_terrain("t_grass"))
+                .expect("fixture chunk"),
+        );
+        assert!(matches!(
+            partial.generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 }),
+            Err(SimError::InvalidTerrain)
+        ));
+        assert_eq!(partial.chunks.len(), 1);
+        assert!(partial.ground_items.is_empty());
+        assert!(matches!(
+            WorldState::from_snapshot(&partial.snapshot()),
+            Err(SimError::InvalidSnapshot)
+        ));
     }
 }

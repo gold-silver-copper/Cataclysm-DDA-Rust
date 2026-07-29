@@ -2051,6 +2051,7 @@ dependencies = [
  "blake3",
  "serde",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

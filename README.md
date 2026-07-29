@@ -20,9 +20,9 @@ calorie/thirst/sleepiness survival state, voluntary and exhaustion sleep that
 continues while disconnected, a pinned zombie that persistently hunts connected
 or disconnected characters, leaves its pinned blood field and a carryable
 corpse when killed, and can later revive from that corpse, a
-pinned terrain cabin with an interactive door,
-content-derived beds, a chair, table, and blocking dresser whose furniture state
-participates in sight and per-character memory, and a first content-derived
+pinned JSON mapgen that creates persistent 24x24 overmap cells on demand,
+content-derived terrain and furniture state that participates in sight and
+per-character memory, and a first content-derived
 crafting loop. B opens the bounded recipe menu or resumes an interrupted
 activity; X cancels and restores reserved ingredients. Crafting consumes its
 real-time duration while connected or disconnected, remains vulnerable to
@@ -272,7 +272,7 @@ Protocol 59/schema 41/CanonicalStateV39/CanonicalEventsV11 add the first
 content-derived furniture-destruction boundary and finish the modeled wooden
 door chain. Bash selection now follows upstream layer precedence: a registered
 bashable furniture tile is damaged and replaced before its underlying terrain.
-The pinned cabin dresser uses the exact default bash profile, direct drops,
+The then-current pinned cabin dresser used the exact default bash profile, direct drops,
 dust/splinter fields, sounds, persistent damage, and `f_null` removal while the
 floor remains intact. The existing damaged/closed wooden-door stages now
 continue through `t_door_frame`; for the current known z=0 cabin topology, its
@@ -280,7 +280,7 @@ dynamic `t_null` result is explicitly resolved to `t_floor`. Canonical bash
 events identify whether the target was furniture or terrain and name its exact
 content ID. Both layers reproduce after snapshot restoration and replay.
 Other furniture definitions, dynamic roof/floor repair outside the admitted
-cabin topology, tents, collapse, explosions, item groups, and bash side effects
+then-current cabin topology, tents, collapse, explosions, item groups, and bash side effects
 remain fail-closed.
 
 Protocol 60/schema 42/CanonicalStateV40 broadens the same furniture boundary
@@ -291,7 +291,7 @@ resolved `t_null` terrain behavior, modeled dust/splinter fields, bounded direct
 drops, bounded sound, and no tent, collapse, explosion, item-group, or other
 unsupported side effect. Admission is transitively closed over replacement
 targets, so a safe first stage cannot lead to an unsupported bash stage. The
-set includes every furniture tile placed in the fresh cabin (`f_bed`,
+set included every furniture tile placed in the former fresh cabin (`f_bed`,
 `f_chair`, `f_dresser`, and `f_table`) and supports both `f_null` removal and
 explicit furniture-to-furniture replacement without changing underlying
 terrain. Pinned tests lock the 537-definition count, validate every canonical
@@ -587,7 +587,7 @@ exact whole removal returns the same contained object. Capacity, category,
 allocator, inventory, and access failures are atomic and cost no action points;
 accepted transfers use the pocket's pinned base move cost. The client binds `I`
 to deterministic fitting insertion and extends `Y` removal and inventory labels
-to these pockets. The starter cabin now supplies an empty pinned quiver and a
+to these pockets. The starter ground loadout supplies an empty pinned quiver and a
 separate wooden-arrow stack. Conformance scenario format 5/observation format 4 proves partial
 insertion, multiple same-category variants, exact removal, and category switching
 through direct execution, per-tick restore, SQLite recovery, and portable replay.
@@ -612,6 +612,24 @@ snapshot restore, SQLite recovery, and portable replay. Ammo/magazine dressing
 and unsupported entry fields remain fail-closed. Databases below schema 58 that
 contain serialized state are rejected before mutation.
 
+Protocol 81 advances to schema 59 and CanonicalStateV57 while retaining
+CanonicalEventsV18. Fresh worlds no longer use the synthetic grass filler or a
+hand-built partial-submap cabin. A strict selected-content loader retains
+ordinary string and flat-array OMT roots, exact 24x24 Unicode display-cell rows, variant
+weights, fixed and weighted terrain/furniture glyphs, static palette closure,
+default-region substitutions, and one named item-group placement per glyph.
+The server currently admits the real pinned `lmoe` surface definition and
+resolves `t_region_groundcover` through its retained weighted regional table.
+Each OMT is generated as an atomic 2x2-submap/24x24 unit from a coordinate-owned
+ChaCha stream, so discovery order, restart, and replay cannot change its
+contents. The initial active bubble contains 36 complete OMTs/144 chunks;
+movement plans every newly intersecting cell before committing any of them.
+The worldgen catalog, default OMT identity, regional tables, generated chunks,
+and referenced item-group closure are canonical and bounded. The ordinary
+`field` mapgen remains fail-closed because its corpse loot requires item damage
+and general container nesting that are not yet representable. Databases below
+schema 59 that contain serialized state are rejected before mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -621,7 +639,7 @@ capacity, and are all burned if the craft is canceled. Non-unit speed annotation
 valid providers for these legacy recipes because pinned CDDA applies their
 multiplier only to the still-unsupported step-recipe model. Charged qualities
 require their pinned per-use charge threshold on each provider without spending
-that energy merely for qualification. The cabin supplies a stick, small knife,
+that energy merely for qualification. The starter ground loadout supplies a stick, small knife,
 hammer, frozen toaster pastry, charged toaster, empty flashlight, a medium
 battery cell containing its stable battery-ammunition child, an empty quiver,
 wooden arrows, and pistol manual
@@ -659,7 +677,8 @@ hazard/shelter/medicine/sleep-location policy and richer nutrition rules remain
 incomplete.
 Authenticated character chat is routed by the server,
 and moving into unexplored wilderness deterministically generates and persists
-an 11x11 active grass-submap bubble. The HUD displays the pinned default
+every complete 24x24 OMT intersecting the active radius. The initial pinned
+`lmoe` surface bootstrap contains 36 atomic OMTs/144 submaps. The HUD displays the pinned default
 91-day-season calendar derived from the persistent world tick. Speed-100 actors
 and creatures perform ordinary 100-move actions once per second; actor movement
 uses the pinned cardinal/diagonal source/destination terrain-plus-furniture cost
@@ -858,13 +877,17 @@ core uses its wide-character API.
 ```sh
 cargo xtask cpp-oracle-check
 cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json
+cargo xtask cpp-oracle-check docs/oracles/mapgen-static-semantics-v1.json
 ```
 
 The pocket scenario exercises real upstream `item_pocket::can_contain`
 maximum-length behavior at the shorter, equal, and longer boundaries. The
 item-group scenario covers ordered collection RNG consumption, distribution
 interval boundaries, fixed/ranged count and charges, zero-to-one clamping, and
-nested groups sharing the same RNG stream. The runner rejects unknown JSON
+nested groups sharing the same RNG stream. The mapgen scenario verifies exact,
+type, subtype, prefix, and contains matching; rotatable and linear OMT
+orientation; point rotation; and static palette/nested phase ordering. The
+runner rejects unknown JSON
 fields, mismatched format or
 baseline versions, the wrong upstream Git tree, and any observation drift. It
 enforces byte bounds while reading, serializes concurrent invocations, freshly

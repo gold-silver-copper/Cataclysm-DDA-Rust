@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 80;
+pub const PROTOCOL_VERSION: u16 = 81;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -79,6 +79,23 @@ pub const MAX_ITEM_GROUP_ENTRIES: usize = 8_192;
 pub const MAX_ITEM_GROUP_DEPTH: usize = 32;
 /// One item-group invocation cannot require more than one reserved ID block.
 pub const MAX_ITEM_GROUP_OUTPUTS: u64 = 4_096;
+/// Canonical implementation version for deterministic local-map generation.
+pub const WORLDGEN_GENERATOR_VERSION_V1: u16 = 1;
+/// One overmap-terrain tile is exactly two 12x12 submaps on each axis.
+pub const WORLDGEN_SUBMAPS_PER_OMT_AXIS: usize = 2;
+pub const WORLDGEN_OMT_SIZE: usize = SUBMAP_SIZE as usize * WORLDGEN_SUBMAPS_PER_OMT_AXIS;
+pub const WORLDGEN_CELLS_PER_OMT: usize = WORLDGEN_OMT_SIZE * WORLDGEN_OMT_SIZE;
+pub const MAX_WORLDGEN_TERRAIN_PROTOTYPES: usize = 2_048;
+pub const MAX_WORLDGEN_FURNITURE_PROTOTYPES: usize = 1_024;
+pub const MAX_WORLDGEN_REGIONAL_TABLES: usize = 256;
+pub const MAX_WORLDGEN_REGIONAL_CHOICES: usize = 256;
+pub const MAX_WORLDGEN_REGIONAL_CHOICES_TOTAL: usize = 8_192;
+pub const MAX_WORLDGEN_OMT_GENERATORS: usize = 512;
+pub const MAX_WORLDGEN_TEMPLATES_PER_OMT: usize = 32;
+pub const MAX_WORLDGEN_TEMPLATES: usize = 512;
+pub const MAX_WORLDGEN_CELL_CHOICES: usize = 32;
+pub const MAX_WORLDGEN_WEIGHTED_CELL_TARGETS: usize = 1_048_576;
+pub const MAX_WORLDGEN_ID_BYTES: usize = 512;
 
 const fn default_true() -> bool {
     true
@@ -2312,6 +2329,115 @@ pub struct FurnitureTileSnapshot {
     pub floor_bedding_warmth: i32,
 }
 
+/// A weighted concrete prototype reference used by a regional terrain table.
+/// Choice order is canonical and intentionally retained because it determines
+/// deterministic weighted-ticket intervals.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenWeightedPrototypeV1 {
+    pub prototype_index: u16,
+    pub weight: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenFurniturePrototypeTargetV1 {
+    None,
+    Prototype(u16),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenWeightedFurniturePrototypeV1 {
+    pub target: WorldgenFurniturePrototypeTargetV1,
+    pub weight: u32,
+}
+
+/// One ID-sorted regional substitution table. Selecting a regional cell
+/// target consumes a separate weighted roll against this table.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenRegionalTerrainTableV1 {
+    pub regional_id: String,
+    pub choices: Vec<WorldgenWeightedPrototypeV1>,
+}
+
+/// Furniture regional substitutions can explicitly produce no furniture.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenRegionalFurnitureTableV1 {
+    pub regional_id: String,
+    pub choices: Vec<WorldgenWeightedFurniturePrototypeV1>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenTerrainTargetV1 {
+    Prototype(u16),
+    Regional(u16),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenWeightedTerrainTargetV1 {
+    pub target: WorldgenTerrainTargetV1,
+    pub weight: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenFurnitureTargetV1 {
+    None,
+    Prototype(u16),
+    Regional(u16),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenWeightedFurnitureTargetV1 {
+    pub target: WorldgenFurnitureTargetV1,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenItemGroupPlacementV1 {
+    pub group_id: String,
+    /// Independent pinned collection-style chance in 1..=100.
+    pub chance: u8,
+}
+
+/// One row-major local-map cell. A multi-entry target consumes one weighted
+/// roll; a one-entry target is fixed. A selected regional target always
+/// consumes one additional weighted-table roll, even with one candidate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenCellV1 {
+    pub terrain: Vec<WorldgenWeightedTerrainTargetV1>,
+    pub furniture: Vec<WorldgenWeightedFurnitureTargetV1>,
+    pub item_group: Option<WorldgenItemGroupPlacementV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenTemplateV1 {
+    pub weight: u32,
+    /// Exactly 576 row-major cells: one 24x24 OMT or four 12x12 submaps.
+    pub cells: Vec<WorldgenCellV1>,
+}
+
+/// One OMT-ID-sorted generator. Template order is source order because it is
+/// observable through deterministic weighted selection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenOmtGeneratorV1 {
+    pub omt_id: String,
+    pub templates: Vec<WorldgenTemplateV1>,
+}
+
+/// Immutable deterministic generation definitions retained by one world.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenCatalogV1 {
+    pub generator_version: u16,
+    /// Must name exactly one entry in `omt_generators`.
+    pub default_omt_id: String,
+    /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
+    pub terrain_prototypes: Vec<TerrainTileSnapshot>,
+    pub furniture_prototypes: Vec<FurnitureTileSnapshot>,
+    /// Regional-table-ID-sorted, unique catalogs referenced by compact indices.
+    pub regional_terrain: Vec<WorldgenRegionalTerrainTableV1>,
+    pub regional_furniture: Vec<WorldgenRegionalFurnitureTableV1>,
+    /// OMT-ID-sorted, unique generators.
+    pub omt_generators: Vec<WorldgenOmtGeneratorV1>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BashFieldEffectV1 {
     pub field_type_id: String,
@@ -2496,7 +2622,10 @@ pub struct WorldSnapshotV1 {
     pub furniture_bash_types: Vec<FurnitureBashTypeV1>,
     /// Item-type-ID-sorted strict player-smashing profiles.
     pub smash_item_types: Vec<SmashItemTypeV1>,
-    pub worldgen_default_terrain: Option<TerrainTileSnapshot>,
+    /// Immutable normalized mapgen definitions plus the default OMT identity.
+    /// Generated four-submap cells live in `chunks`; the catalog is retained
+    /// so recovery never rereads mutable external content.
+    pub worldgen: Option<WorldgenCatalogV1>,
     pub actors: Vec<ActorSnapshot>,
     pub creatures: Vec<CreatureSnapshot>,
     pub ground_items: Vec<GroundItemSnapshot>,
@@ -3902,13 +4031,227 @@ fn item_group_graph_references(graph: &ItemGroupGraphV1) -> impl Iterator<Item =
         })
 }
 
+fn valid_worldgen_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_WORLDGEN_ID_BYTES
+        && value.chars().all(|character| !character.is_control())
+}
+
+fn checked_positive_weight_sum(weights: impl IntoIterator<Item = u32>) -> bool {
+    weights
+        .into_iter()
+        .try_fold(0_u32, |total, weight| {
+            (weight > 0).then_some(())?;
+            total.checked_add(weight)
+        })
+        .is_some()
+}
+
+fn valid_worldgen_regional_terrain_table(
+    table: &WorldgenRegionalTerrainTableV1,
+    terrain_prototype_count: usize,
+) -> bool {
+    valid_worldgen_id(&table.regional_id)
+        && !table.choices.is_empty()
+        && table.choices.len() <= MAX_WORLDGEN_REGIONAL_CHOICES
+        && checked_positive_weight_sum(table.choices.iter().map(|choice| choice.weight))
+        && table
+            .choices
+            .iter()
+            .all(|choice| usize::from(choice.prototype_index) < terrain_prototype_count)
+}
+
+fn valid_worldgen_regional_furniture_table(
+    table: &WorldgenRegionalFurnitureTableV1,
+    furniture_prototype_count: usize,
+) -> bool {
+    valid_worldgen_id(&table.regional_id)
+        && !table.choices.is_empty()
+        && table.choices.len() <= MAX_WORLDGEN_REGIONAL_CHOICES
+        && checked_positive_weight_sum(table.choices.iter().map(|choice| choice.weight))
+        && table.choices.iter().all(|choice| match choice.target {
+            WorldgenFurniturePrototypeTargetV1::None => true,
+            WorldgenFurniturePrototypeTargetV1::Prototype(index) => {
+                usize::from(index) < furniture_prototype_count
+            }
+        })
+}
+
+fn valid_worldgen_cell_shape(cell: &WorldgenCellV1, catalog: &WorldgenCatalogV1) -> bool {
+    !cell.terrain.is_empty()
+        && cell.terrain.len() <= MAX_WORLDGEN_CELL_CHOICES
+        && !cell.furniture.is_empty()
+        && cell.furniture.len() <= MAX_WORLDGEN_CELL_CHOICES
+        && checked_positive_weight_sum(cell.terrain.iter().map(|choice| choice.weight))
+        && checked_positive_weight_sum(cell.furniture.iter().map(|choice| choice.weight))
+        && cell.terrain.iter().all(|choice| match choice.target {
+            WorldgenTerrainTargetV1::Prototype(index) => {
+                usize::from(index) < catalog.terrain_prototypes.len()
+            }
+            WorldgenTerrainTargetV1::Regional(index) => {
+                usize::from(index) < catalog.regional_terrain.len()
+            }
+        })
+        && cell.furniture.iter().all(|choice| match choice.target {
+            WorldgenFurnitureTargetV1::None => true,
+            WorldgenFurnitureTargetV1::Prototype(index) => {
+                usize::from(index) < catalog.furniture_prototypes.len()
+            }
+            WorldgenFurnitureTargetV1::Regional(index) => {
+                usize::from(index) < catalog.regional_furniture.len()
+            }
+        })
+        && cell.item_group.as_ref().is_none_or(|placement| {
+            valid_worldgen_id(&placement.group_id) && (1..=100).contains(&placement.chance)
+        })
+}
+
+/// Validates all local bounds and indices without requiring an item-group
+/// catalog. This is useful while content is being compiled in dependency order.
+/// Runtime admission should call [`worldgen_catalog_is_valid`] instead.
+#[must_use]
+pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
+    if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V1
+        || !valid_worldgen_id(&catalog.default_omt_id)
+        || catalog.terrain_prototypes.is_empty()
+        || catalog.terrain_prototypes.len() > MAX_WORLDGEN_TERRAIN_PROTOTYPES
+        || catalog.furniture_prototypes.len() > MAX_WORLDGEN_FURNITURE_PROTOTYPES
+        || catalog.regional_terrain.len() > MAX_WORLDGEN_REGIONAL_TABLES
+        || catalog.regional_furniture.len() > MAX_WORLDGEN_REGIONAL_TABLES
+        || catalog.omt_generators.is_empty()
+        || catalog.omt_generators.len() > MAX_WORLDGEN_OMT_GENERATORS
+    {
+        return false;
+    }
+    if !catalog.terrain_prototypes.iter().all(valid_terrain_tile)
+        || !catalog
+            .terrain_prototypes
+            .windows(2)
+            .all(|pair| pair[0].terrain_id < pair[1].terrain_id)
+        || !catalog
+            .furniture_prototypes
+            .iter()
+            .all(valid_furniture_tile)
+        || !catalog
+            .furniture_prototypes
+            .windows(2)
+            .all(|pair| pair[0].furniture_id < pair[1].furniture_id)
+        || !catalog
+            .regional_terrain
+            .windows(2)
+            .all(|pair| pair[0].regional_id < pair[1].regional_id)
+        || !catalog
+            .regional_furniture
+            .windows(2)
+            .all(|pair| pair[0].regional_id < pair[1].regional_id)
+        || !catalog
+            .omt_generators
+            .windows(2)
+            .all(|pair| pair[0].omt_id < pair[1].omt_id)
+    {
+        return false;
+    }
+
+    let mut regional_choice_count = 0_usize;
+    for table in &catalog.regional_terrain {
+        if !valid_worldgen_regional_terrain_table(table, catalog.terrain_prototypes.len()) {
+            return false;
+        }
+        let Some(total) = regional_choice_count.checked_add(table.choices.len()) else {
+            return false;
+        };
+        regional_choice_count = total;
+    }
+    for table in &catalog.regional_furniture {
+        if !valid_worldgen_regional_furniture_table(table, catalog.furniture_prototypes.len()) {
+            return false;
+        }
+        let Some(total) = regional_choice_count.checked_add(table.choices.len()) else {
+            return false;
+        };
+        regional_choice_count = total;
+    }
+    if regional_choice_count > MAX_WORLDGEN_REGIONAL_CHOICES_TOTAL {
+        return false;
+    }
+
+    let mut template_count = 0_usize;
+    let mut cell_target_count = 0_usize;
+    for generator in &catalog.omt_generators {
+        if !valid_worldgen_id(&generator.omt_id)
+            || generator.templates.is_empty()
+            || generator.templates.len() > MAX_WORLDGEN_TEMPLATES_PER_OMT
+            || !checked_positive_weight_sum(
+                generator.templates.iter().map(|template| template.weight),
+            )
+        {
+            return false;
+        }
+        let Some(total) = template_count.checked_add(generator.templates.len()) else {
+            return false;
+        };
+        template_count = total;
+        if template_count > MAX_WORLDGEN_TEMPLATES {
+            return false;
+        }
+        for template in &generator.templates {
+            if template.cells.len() != WORLDGEN_CELLS_PER_OMT {
+                return false;
+            }
+            for cell in &template.cells {
+                if !valid_worldgen_cell_shape(cell, catalog) {
+                    return false;
+                }
+                let Some(total) = cell_target_count
+                    .checked_add(cell.terrain.len())
+                    .and_then(|total| total.checked_add(cell.furniture.len()))
+                else {
+                    return false;
+                };
+                cell_target_count = total;
+                if cell_target_count > MAX_WORLDGEN_WEIGHTED_CELL_TARGETS {
+                    return false;
+                }
+            }
+        }
+    }
+
+    catalog
+        .omt_generators
+        .binary_search_by(|generator| generator.omt_id.as_str().cmp(&catalog.default_omt_id))
+        .is_ok()
+}
+
+/// Validates a canonical worldgen catalog and all named item-group placement
+/// references. The item-group catalog may contain definitions used elsewhere.
+#[must_use]
+pub fn worldgen_catalog_is_valid(
+    catalog: &WorldgenCatalogV1,
+    item_groups: &[ItemGroupDefinitionV1],
+) -> bool {
+    if !worldgen_catalog_shape_is_valid(catalog) || !item_group_catalog_is_valid(item_groups) {
+        return false;
+    }
+    let group_ids = item_groups
+        .iter()
+        .map(|definition| definition.group_id.as_str())
+        .collect::<BTreeSet<_>>();
+    catalog
+        .omt_generators
+        .iter()
+        .flat_map(|generator| &generator.templates)
+        .flat_map(|template| &template.cells)
+        .filter_map(|cell| cell.item_group.as_ref())
+        .all(|placement| group_ids.contains(placement.group_id.as_str()))
+}
+
 impl WorldSnapshotV1 {
     /// Validates the canonical item-group catalog and every terrain/furniture
     /// consumer in one pass. Full world restoration performs its other domain
     /// checks separately.
     #[must_use]
     pub fn item_groups_are_valid(&self) -> bool {
-        let sources = self
+        let mut sources = self
             .terrain_bash_types
             .iter()
             .filter_map(|bash| bash.drop_source.as_ref())
@@ -3917,9 +4260,20 @@ impl WorldSnapshotV1 {
                     .iter()
                     .filter_map(|bash| bash.drop_source.as_ref()),
             )
+            .cloned()
             .collect::<Vec<_>>();
-        item_group_sources_are_valid(&self.item_groups, sources.iter().copied())
-            && item_group_sources_have_exact_named_closure(&self.item_groups, &sources)
+        sources.extend(
+            self.worldgen
+                .iter()
+                .flat_map(|catalog| &catalog.omt_generators)
+                .flat_map(|generator| &generator.templates)
+                .flat_map(|template| &template.cells)
+                .filter_map(|cell| cell.item_group.as_ref())
+                .map(|placement| ItemGroupSourceV1::Group(placement.group_id.clone())),
+        );
+        let source_refs = sources.iter().collect::<Vec<_>>();
+        item_group_sources_are_valid(&self.item_groups, source_refs.iter().copied())
+            && item_group_sources_have_exact_named_closure(&self.item_groups, &source_refs)
     }
 }
 
@@ -5257,6 +5611,231 @@ mod tests {
             count_max,
             target,
         }
+    }
+
+    fn worldgen_test_terrain(terrain_id: &str) -> TerrainTileSnapshot {
+        TerrainTileSnapshot {
+            terrain_id: terrain_id.to_owned(),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        }
+    }
+
+    fn worldgen_test_item_groups() -> Vec<ItemGroupDefinitionV1> {
+        vec![ItemGroupDefinitionV1 {
+            group_id: String::from("field_loot"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: Vec::new(),
+                }],
+            },
+        }]
+    }
+
+    fn worldgen_test_catalog() -> WorldgenCatalogV1 {
+        let cell = WorldgenCellV1 {
+            terrain: vec![
+                WorldgenWeightedTerrainTargetV1 {
+                    target: WorldgenTerrainTargetV1::Prototype(0),
+                    weight: 3,
+                },
+                WorldgenWeightedTerrainTargetV1 {
+                    target: WorldgenTerrainTargetV1::Regional(0),
+                    weight: 1,
+                },
+            ],
+            furniture: vec![
+                WorldgenWeightedFurnitureTargetV1 {
+                    target: WorldgenFurnitureTargetV1::None,
+                    weight: 3,
+                },
+                WorldgenWeightedFurnitureTargetV1 {
+                    target: WorldgenFurnitureTargetV1::Regional(0),
+                    weight: 1,
+                },
+            ],
+            item_group: None,
+        };
+        let mut cells = vec![cell; WORLDGEN_CELLS_PER_OMT];
+        cells[0].item_group = Some(WorldgenItemGroupPlacementV1 {
+            group_id: String::from("field_loot"),
+            chance: 25,
+        });
+        WorldgenCatalogV1 {
+            generator_version: WORLDGEN_GENERATOR_VERSION_V1,
+            default_omt_id: String::from("field"),
+            terrain_prototypes: vec![
+                worldgen_test_terrain("t_floor"),
+                worldgen_test_terrain("t_grass"),
+            ],
+            furniture_prototypes: vec![FurnitureTileSnapshot {
+                furniture_id: String::from("f_chair"),
+                move_cost_mod: 0,
+                transparent: true,
+                blocks_door: false,
+                comfort: 1,
+                floor_bedding_warmth: 0,
+            }],
+            regional_terrain: vec![WorldgenRegionalTerrainTableV1 {
+                regional_id: String::from("region_groundcover"),
+                choices: vec![
+                    WorldgenWeightedPrototypeV1 {
+                        prototype_index: 0,
+                        weight: 3,
+                    },
+                    WorldgenWeightedPrototypeV1 {
+                        prototype_index: 1,
+                        weight: 1,
+                    },
+                ],
+            }],
+            regional_furniture: vec![WorldgenRegionalFurnitureTableV1 {
+                regional_id: String::from("region_furniture"),
+                choices: vec![
+                    WorldgenWeightedFurniturePrototypeV1 {
+                        target: WorldgenFurniturePrototypeTargetV1::None,
+                        weight: 3,
+                    },
+                    WorldgenWeightedFurniturePrototypeV1 {
+                        target: WorldgenFurniturePrototypeTargetV1::Prototype(0),
+                        weight: 1,
+                    },
+                ],
+            }],
+            omt_generators: vec![WorldgenOmtGeneratorV1 {
+                omt_id: String::from("field"),
+                templates: vec![WorldgenTemplateV1 {
+                    weight: 1_000,
+                    cells,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn worldgen_catalog_round_trips_with_independent_regional_targets() {
+        let catalog = worldgen_test_catalog();
+        let item_groups = worldgen_test_item_groups();
+        assert_eq!(WORLDGEN_OMT_SIZE, 24);
+        assert_eq!(WORLDGEN_CELLS_PER_OMT, 576);
+        assert!(worldgen_catalog_shape_is_valid(&catalog));
+        assert!(worldgen_catalog_is_valid(&catalog, &item_groups));
+
+        let encoded = postcard::to_stdvec(&catalog).expect("worldgen catalog should encode");
+        let decoded: WorldgenCatalogV1 =
+            postcard::from_bytes(&encoded).expect("worldgen catalog should decode");
+        assert_eq!(decoded, catalog);
+    }
+
+    #[test]
+    fn worldgen_catalog_rejects_noncanonical_and_out_of_bounds_payloads() {
+        let item_groups = worldgen_test_item_groups();
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.generator_version += 1;
+        assert!(!worldgen_catalog_is_valid(&invalid, &item_groups));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.omt_generators[0].templates[0].cells[0].furniture[0].weight = 0;
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.default_omt_id = String::from("missing");
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.terrain_prototypes.swap(0, 1);
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid
+            .regional_terrain
+            .push(invalid.regional_terrain[0].clone());
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.omt_generators[0].templates[0].cells.pop();
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.omt_generators[0].templates[0].cells[0].terrain[0].target =
+            WorldgenTerrainTargetV1::Prototype(u16::MAX);
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        invalid.omt_generators[0].templates[0].cells[0]
+            .item_group
+            .as_mut()
+            .expect("fixture has a placement")
+            .chance = 0;
+        assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut missing_group = worldgen_test_catalog();
+        missing_group.omt_generators[0].templates[0].cells[0]
+            .item_group
+            .as_mut()
+            .expect("fixture has a placement")
+            .group_id = String::from("absent");
+        assert!(worldgen_catalog_shape_is_valid(&missing_group));
+        assert!(!worldgen_catalog_is_valid(&missing_group, &item_groups));
+
+        let mut too_many_choices = worldgen_test_catalog();
+        too_many_choices.regional_terrain[0].choices = vec![
+            WorldgenWeightedPrototypeV1 {
+                prototype_index: 0,
+                weight: 1,
+            };
+            MAX_WORLDGEN_REGIONAL_CHOICES + 1
+        ];
+        assert!(!worldgen_catalog_shape_is_valid(&too_many_choices));
+    }
+
+    #[test]
+    fn worldgen_catalog_checks_every_cumulative_weight_sum() {
+        let mut regional_overflow = worldgen_test_catalog();
+        regional_overflow.regional_terrain[0].choices = vec![
+            WorldgenWeightedPrototypeV1 {
+                prototype_index: 0,
+                weight: u32::MAX,
+            },
+            WorldgenWeightedPrototypeV1 {
+                prototype_index: 1,
+                weight: 1,
+            },
+        ];
+        assert!(!worldgen_catalog_shape_is_valid(&regional_overflow));
+
+        let mut cell_overflow = worldgen_test_catalog();
+        cell_overflow.omt_generators[0].templates[0].cells[0].terrain = vec![
+            WorldgenWeightedTerrainTargetV1 {
+                target: WorldgenTerrainTargetV1::Prototype(0),
+                weight: u32::MAX,
+            },
+            WorldgenWeightedTerrainTargetV1 {
+                target: WorldgenTerrainTargetV1::Prototype(1),
+                weight: 1,
+            },
+        ];
+        assert!(!worldgen_catalog_shape_is_valid(&cell_overflow));
+
+        let mut template_overflow = worldgen_test_catalog();
+        let mut second = template_overflow.omt_generators[0].templates[0].clone();
+        template_overflow.omt_generators[0].templates[0].weight = u32::MAX;
+        second.weight = 1;
+        template_overflow.omt_generators[0].templates.push(second);
+        assert!(!worldgen_catalog_shape_is_valid(&template_overflow));
     }
 
     fn item_group_chain(nodes: usize) -> ItemGroupDefinitionV1 {

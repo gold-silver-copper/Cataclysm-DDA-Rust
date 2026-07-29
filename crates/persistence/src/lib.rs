@@ -20,10 +20,10 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 58;
-/// Old Postcard snapshots and journals cannot be decoded after the Protocol 79
-/// ammunition-container layout change. Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 58;
+pub const SCHEMA_VERSION: i64 = 59;
+/// Old Postcard snapshots and journals cannot be decoded after the Protocol 81
+/// canonical worldgen layout change. Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 59;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -6728,6 +6728,104 @@ mod tests {
                 panic!("failed to clean test database: {error}");
             }
         }
+    }
+
+    #[test]
+    fn atomic_mapgen_catalog_and_chunks_recover_from_sqlite_snapshot() {
+        let mut store = WorldStore::open_in_memory().expect("store should open");
+        store
+            .initialize_world(63, [19; 32])
+            .expect("world should initialize");
+        let block = store.reserve_id_block().expect("block should reserve");
+        let terrain = TerrainTileSnapshot {
+            terrain_id: String::from("t_grass"),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        let cell = cdda_protocol::WorldgenCellV1 {
+            terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(0),
+                weight: 1,
+            }],
+            furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                target: cdda_protocol::WorldgenFurnitureTargetV1::None,
+                weight: 1,
+            }],
+            item_group: None,
+        };
+        let catalog = cdda_protocol::WorldgenCatalogV1 {
+            generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
+            default_omt_id: String::from("sqlite_field"),
+            terrain_prototypes: vec![terrain],
+            furniture_prototypes: Vec::new(),
+            regional_terrain: Vec::new(),
+            regional_furniture: Vec::new(),
+            omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
+                omt_id: String::from("sqlite_field"),
+                templates: vec![cdda_protocol::WorldgenTemplateV1 {
+                    weight: 1,
+                    cells: vec![cell; cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                }],
+            }],
+        };
+        let mut world = WorldState::new(63, [19; 32]);
+        world
+            .install_reserved_block(block)
+            .expect("block should install");
+        world
+            .configure_worldgen(catalog)
+            .expect("catalog should configure");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("initial cells should generate");
+        assert_eq!(world.snapshot().chunks.len(), 144);
+        let expected_hash = world.canonical_hash().expect("world should hash");
+        store
+            .write_snapshot(0, &world)
+            .expect("mapgen snapshot should write");
+
+        let (sequence, recovered) = store
+            .recover_latest(WorldState::new(63, [19; 32]))
+            .expect("mapgen snapshot should recover");
+        assert_eq!(sequence, 0);
+        assert_eq!(recovered.snapshot().chunks.len(), 144);
+        assert_eq!(
+            recovered
+                .snapshot()
+                .worldgen
+                .as_ref()
+                .expect("catalog should recover")
+                .default_omt_id,
+            "sqlite_field"
+        );
+        assert_eq!(
+            recovered.canonical_hash().expect("recovered hash"),
+            expected_hash
+        );
+        let content = ContentIdentity {
+            baseline_commit: BASELINE_COMMIT.to_owned(),
+            manifest_hash: [71; 32],
+            enabled_mods: vec![String::from("dda")],
+        };
+        let replayed = store
+            .export_replay(content.clone())
+            .expect("mapgen replay should export")
+            .verify(&content)
+            .expect("mapgen replay should verify");
+        assert_eq!(replayed.snapshot().chunks.len(), 144);
+        assert_eq!(
+            replayed.canonical_hash().expect("replayed hash"),
+            expected_hash
+        );
     }
 
     #[test]

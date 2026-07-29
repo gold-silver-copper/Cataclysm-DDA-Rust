@@ -13,13 +13,13 @@ obstacle-routing, route-planned bashing, broad safe furniture-bashing, and final
 wooden-door-frame slices plus initial player-controlled smashing: close
 persistent iroh identity, recovery, and audit
 guarantees while accelerating toward generalized subsystem parity. The active
-machine-readable milestone is deterministic item groups. The selected-content
-registry and Protocol 80 canonical graph model now cover strict ordered
-collection/distribution generation, nested local and named references, count
-and charge ranges, and the pinned `wall_bash_results` structural-drop path.
-Unsupported entry behavior and ammo/magazine dressing remain fail-closed; the
-next boundary is reusing the interpreter for mapgen and spawn consumers while
-general physical containers remain blocked on dimensions and carry physics.
+machine-readable milestone is mapgen and overmaps. Protocol 81 now drives fresh
+and traversed terrain through strict pinned 24x24 JSON mapgen, atomic 2x2-submap
+cells, coordinate-owned RNG, retained regional substitutions, and canonical
+bounded worldgen catalogs. The server repeats the pinned `lmoe` surface until
+real overmap layout and start-location selection exist. Unsupported mapgen
+phases and the ordinary `field` corpse-loot closure remain fail-closed; the next
+boundary is persistent overmap terrain selection, starts, and spawn rules.
 
 ## Runnable behavior
 
@@ -68,7 +68,7 @@ general physical containers remain blocked on dimensions and carry physics.
   index/ID, base access moves, rigidity, and access flags. Authoritative `I`
   insertion and `Y` removal preserve stable IDs across whole, partial, merge,
   multi-variant, and category-switch paths; invalid capacity/category/access
-  requests are atomic. The starter cabin supplies a quiver and wooden arrows,
+  requests are atomic. The starter ground loadout supplies a quiver and wooden arrows,
   while scenario format 5/observation format 4 proves direct/snapshot/SQLite/portable-replay
   equivalence. Pre-57 serialized state rejects before mutation.
 - Protocol 80/schema 58/CanonicalStateV56 retain CanonicalEventsV18 while
@@ -84,6 +84,17 @@ general physical containers remain blocked on dimensions and carry physics.
   resolves to `t_floor`. Scenario format 6/observation format 5 prove exact
   direct/snapshot/SQLite/portable-replay equivalence. Pre-58 serialized state
   rejects before mutation.
+- Protocol 81/schema 59/CanonicalStateV57 retain CanonicalEventsV18 and replace
+  synthetic flat grass plus the hand-built cabin with strict pinned JSON
+  mapgen. Ordinary roots, exact 24x24 Unicode display-cell rows, fixed/weighted glyphs,
+  static palette closure, regional terrain/furniture substitutions, and one
+  named item-group placement per glyph normalize into a bounded canonical
+  catalog. Fresh worlds repeat pinned `lmoe`, materializing 36 atomic OMTs/144
+  chunks from coordinate-owned RNG; traversal-order, snapshot, SQLite snapshot
+  recovery, portable replay, aggregate stable-ID preflight, and partial-cell
+  rejection tests cover the runtime. The C++ oracle
+  verifies mapgen matching, orientation, rotation, and static phase ordering.
+  Pre-59 serialized state rejects before mutation.
 - Protocol 77/schema 55/CanonicalStateV53/CanonicalEventsV16 add strict
   item-backed integral MAGAZINE pockets to Protocol 76's ordered detachable
   wells. Whole-stack reload preserves the source ID; partial transfer into an
@@ -301,7 +312,7 @@ general physical containers remain blocked on dimensions and carry physics.
   supported-floor, tent, collapse, explosion, item-group, or other retained
   side effect. Replacement closure prevents an admitted first stage from
   producing a later unsupported bash stage. All four furniture IDs placed in
-  the fresh cabin are included.
+  the then-current fresh cabin were included.
   Runtime supports both removal and furniture replacement while preserving the
   terrain layer. The pinned count, every canonical definition, registry
   restoration, and a 128-KiB encoded-size ceiling are tested. Unsupported
@@ -589,7 +600,7 @@ general physical containers remain blocked on dimensions and carry physics.
   extend, delete, and relative definitions. Ordered tool/quality OR groups are
   server-normalized and protected from also serving as ingredients. Presence
   requirements aggregate distinct stable carried instances; charged tools use
-  aggregate carried energy and stable-ID-ordered depletion. The fresh cabin
+  aggregate carried energy and stable-ID-ordered depletion. The starter loadout
   adds a stick, small knife, hammer, frozen toaster pastry, charged toaster,
   empty flashlight, full medium battery, and pistol manual so implemented
   crafting-support, power, and study paths are playable. Clients send only a
@@ -968,16 +979,14 @@ general physical containers remain blocked on dimensions and carry physics.
   persistence, replay, networking, and Bevy presentation are wired end to end.
 - The first terrain registry finalizes 1,246 selected concrete definitions and
   23 abstracts, retains explicit unsupported fields, and validates open/close
-  transform references. Canonical 12x12 chunks now persist the pinned terrain
-  ID, move cost, and door transform for every tile. A content-derived cabin in
-  a nine-submap grass region is rendered in Bevy with chunk-relative rebasing;
-  a content-derived loaded revolver and compatible ammunition join the existing
-  food, water, and rock starter items;
-  authoritative O/L commands open
-  and close the door, revise the chunk, journal the event, and immediately
-  change collision. Crossing the generated edge deterministically materializes
-  and persists an 11x11 flat-grass active bubble, removing the fixed-world
-  boundary while CDDA overmap/mapgen semantics remain unimplemented.
+  transform references. Canonical 12x12 chunks persist the pinned terrain ID,
+  move cost, and door transform for every tile. Protocol 81 renders strict
+  pinned 24x24 JSON mapgen in Bevy with chunk-relative rebasing; the initial
+  36-OMT/144-chunk bubble and newly intersected atomic OMTs persist canonically.
+  A content-derived loaded revolver and compatible ammunition join the existing
+  food, water, and rock starter items. Authoritative O/L commands open and close
+  any admitted door, revise the chunk, journal the event, and immediately change
+  collision. Persistent overmap layout and start-location selection remain.
 - The first furniture registry finalizes 699 selected concrete definitions and
   one abstract through strict inheritance and modifiers. Eighteen inventoried
   identity, presentation, movement, comfort, flag, and transform fields load;
@@ -985,8 +994,9 @@ general physical containers remain blocked on dimensions and carry physics.
   furniture beside terrain in every canonical tile, CanonicalStateV22, snapshots,
   replay, per-character memory, and current/remembered replication. Negative
   movement modifiers block actors and creatures, opaque furniture blocks sight,
-  and the Bevy client colors and names furniture from pinned definitions. Fresh
-  cabins contain two beds, a blocking dresser, chair, and table. Furniture move
+  and the Bevy client colors and names furniture from pinned definitions. The
+  current `lmoe` bootstrap has no furniture glyphs; definitions placed by later
+  admitted OMTs retain the same canonical behavior. Furniture move
   cost now contributes to signed action debt; sleep-deprivation/comfort effects,
   storage, examination, moving, bashing/deconstruction, construction, and fire
   behavior remain unsupported.
@@ -995,7 +1005,9 @@ general physical containers remain blocked on dimensions and carry physics.
 
 ## Latest verification
 
-Run on Apple-silicon macOS on 2026-07-28:
+Run on Apple-silicon macOS on 2026-07-28 against Protocol 81, persistence
+schema/minimum recoverable schema 59, CanonicalStateV57, and
+CanonicalEventsV18:
 
 - `cargo fmt --all -- --check` — passed.
 - `cargo check --workspace --all-targets --all-features` — passed.
@@ -1006,7 +1018,7 @@ Run on Apple-silicon macOS on 2026-07-28:
 - `cargo xtask verify-dependency-boundaries` — passed; Bevy remains
   client-only.
 - `cargo xtask parity-ledger-check` — passed for 13 version-bound milestones;
-  active milestone `item-groups`, all Rust paths and DAG edges valid.
+  active milestone `mapgen-overmaps`, all Rust paths and DAG edges valid.
 - `cargo xtask content-validate` — passed for all 7,992 tracked files and
   manifest hash
   `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
@@ -1015,14 +1027,15 @@ Run on Apple-silicon macOS on 2026-07-28:
   MONSTER field-support classifications; all 1,374 `volume` and 284
   `attack_cost` occurrences are now marked loader-implemented.
 - `cargo xtask astronomy-table-check` — passed for all 364 pinned Boston days.
-- `cargo xtask cpp-oracle-check` — both checked scenarios passed against the
-  exact pinned C++ commit and tree: the pocket kernel's three strict
-  maximum-length cases/eight Catch assertions and the item-group kernel's 34
-  assertions over ordered collection/distribution, count/charge boundaries,
-  zero clamping, and nested shared RNG. Both require exact version-1 observation
-  equality and digest-checked adapters/runtime identity.
-- `cargo test --workspace --all-targets --all-features` — passed, 298 tests
-  including real loopback iroh enrollment/gameplay/authoritative crafting,
+- `cargo xtask cpp-oracle-check` plus the explicit item-group and mapgen-static
+  scenario paths — passed against the exact pinned C++ commit and tree: the
+  pocket kernel's eight Catch assertions, the item-group kernel's 34
+  assertions, and the mapgen kernel's 17 assertions over OMT matching,
+  orientation, rotation, and static phase ordering. All require exact
+  version-1 observation equality and digest-checked adapter/runtime identity.
+- `cargo test --workspace --all-targets --all-features` — passed, 317 tests,
+  including atomic worldgen, SQLite snapshot/portable-replay recovery, all four
+  real loopback iroh session tests in parallel, authoritative crafting,
   charged-tool bucket debit, resupply timing/capacity, offline
   interruption/resume/cancel, mandatory/optional/zero-learning proficiency
   behavior, recursive component/tool-`LIST` and tool-subtype expansion,
@@ -1800,6 +1813,17 @@ Run on Apple-silicon macOS on 2026-07-28:
   consumption, atomic output-ID preflight, the pinned wall-drop closure, and
   four-mode scenario conformance under CanonicalStateV56/schema 58. Item-group
   ammo/magazine dressing and non-bash consumers remain fail-closed.
+- Protocol 81 adds strict ordinary 24x24 mapgen and default-region loading,
+  bounded canonical worldgen DTOs, atomic coordinate-owned cell generation,
+  generated loot planning with stable IDs, and C++ static-semantics evidence
+  under CanonicalStateV57/schema 59. The current server default has no item
+  placements. Before admitting an item-bearing default, server reservation
+  management must guarantee the full worst-case discovery allocation instead
+  of relying on its 512-ID refill threshold. SQLite/portable replay currently
+  verifies already-generated snapshot chunks; journal-driven post-snapshot
+  boundary discovery remains a coverage gap. Overmap layout, starts,
+  nested/update mapgen, spawn groups, specials, populations, and multiple
+  z-levels remain.
 
 ## Next tasks
 
@@ -1839,7 +1863,8 @@ Run on Apple-silicon macOS on 2026-07-28:
    digestion/spoilage/health, remaining subtype slots, references, attacks, defenses,
    senses, effects, and death drops, then
    dependencies/replacements/EOCs without silently accepting unsupported data.
-8. Add larger generated maps with overmap terrain, mapgen-driven furniture,
-   creature population, and spawn rules, then implement ordinary furniture
-   interactions without treating parsed unsupported fields as behavior.
+8. Add persistent overmap terrain selection and start-location boundaries on
+   top of the atomic OMT planner, then add nested/update mapgen, creature/item
+   spawn rules, specials, populations, and multiple z-levels without treating
+   parsed unsupported fields as behavior.
 9. Continue the porting matrix subsystem by subsystem to full parity.

@@ -9,34 +9,42 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cdda_content::{
     AmmunitionRegistry, BashDamageProfileRegistry, BashDefinition, BashFieldEffectDefinition,
     BashItemGroupSource, ConstructionRegistry, ContentManifest, DEFAULT_MANIFEST_PATH,
-    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
-    ItemGroupRegistry, ItemGroupSubtype, ItemRegistry, ModCatalog, MonsterDefinition,
-    MonsterRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry, StrictItemGroupDefinition,
-    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind, TerrainDefinition,
-    TerrainRegistry,
+    DefaultRegionTerrainFurnitureRegistry, FieldTypeDefinition, FieldTypeRegistry,
+    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemGroupSubtype,
+    ItemRegistry, MapgenIdChoice, MapgenRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
+    ProficiencyRegistry, RecipeRegistry, SkillRegistry, StrictItemGroupDefinition,
+    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind, StrictMapgenDefinition,
+    TerrainDefinition, TerrainRegistry,
 };
 use cdda_persistence::{
     AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1,
     MIN_RECOVERABLE_SCHEMA_VERSION, PreparedReplayArchive, REPLAY_ARCHIVE_INTERVAL_SECONDS,
     ReplayArchiveCursor, ReplayBundleV1, SCHEMA_VERSION, SnapshotObjectV1, WorldStore,
 };
+#[cfg(test)]
+use cdda_protocol::ChunkCoord;
 use cdda_protocol::{
     ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, AmmunitionCapacityV1,
     AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, BashFieldEffectV1, BookStudyV1,
-    ChunkCoord, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
-    CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
-    CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
-    CraftSkillRequirementV1, CraftToolRequirementV1, CreatureCorpsePrototypeV1,
-    CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1, DisassemblyRecipeV1,
-    ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
-    FurnitureTileSnapshot, GAME_ALPN, InclusiveI32RangeV1, IntegralMagazinePocketPrototypeV1,
-    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupSourceV1, ItemGroupTargetV1, LocalTileCoord,
-    MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS,
-    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL,
-    MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1, RangedWeaponSnapshot, SimTick,
-    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, adjusted_book_study_time_moves,
-    item_group_catalog_is_valid, item_group_source_max_outputs,
+    ConstructionRecipeV1, ConstructionResultV1, ContentIdentity, CraftBookRequirementV1,
+    CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1, CraftProficiencyV1,
+    CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1, CraftSkillRequirementV1,
+    CraftToolRequirementV1, CreatureCorpsePrototypeV1, CreaturePathSettingsV1, CreatureSizeV1,
+    DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1,
+    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN,
+    InclusiveI32RangeV1, IntegralMagazinePocketPrototypeV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupSourceV1, ItemGroupTargetV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
+    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
+    MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
+    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
+    WorldgenCatalogV1, WorldgenCellV1, WorldgenFurniturePrototypeTargetV1,
+    WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1,
+    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenTemplateV1,
+    WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, adjusted_book_study_time_moves, item_group_catalog_is_valid,
+    item_group_source_max_outputs, worldgen_catalog_is_valid,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -47,7 +55,9 @@ use cdda_server::{
     character_creation_channel, handle_admin_connection, handle_enrollment_connection,
     handle_game_connection_with_sessions, load_or_create_secret_key,
 };
-use cdda_sim::{Chunk, CreatureSpawn, ItemSpawn, WorldState, canonical_events_hash};
+#[cfg(test)]
+use cdda_sim::Chunk;
+use cdda_sim::{CreatureSpawn, ItemSpawn, WorldState, canonical_events_hash};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -75,6 +85,8 @@ struct RuntimeWorldContent<'a> {
     bash_profiles: &'a BashDamageProfileRegistry,
     terrain: &'a TerrainRegistry,
     furniture: &'a FurnitureRegistry,
+    regions: &'a DefaultRegionTerrainFurnitureRegistry,
+    mapgen: &'a MapgenRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -241,6 +253,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let regions = DefaultRegionTerrainFurnitureRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+        &terrain,
+        &furniture,
+    )?;
+    let mapgen = MapgenRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+        &terrain,
+        &furniture,
+        &item_groups,
+    )?;
     let skills =
         SkillRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let proficiencies = ProficiencyRegistry::load_selected(
@@ -312,6 +341,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bash_profiles: &bash_profiles,
             terrain: &terrain,
             furniture: &furniture,
+            regions: &regions,
+            mapgen: &mapgen,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -633,6 +664,8 @@ fn open_world(
     let bash_profiles = content.bash_profiles;
     let terrain = content.terrain;
     let furniture = content.furniture;
+    let regions = content.regions;
+    let mapgen = content.mapgen;
     let mut store = WorldStore::open(path)?;
     let metadata = match store.metadata_optional()? {
         Some(metadata) => metadata,
@@ -684,6 +717,14 @@ fn open_world(
         item_groups,
         items,
     )?;
+    let worldgen = runtime_mapgen_worldgen(
+        "lmoe",
+        mapgen,
+        regions,
+        terrain,
+        furniture,
+        &item_group_catalog,
+    )?;
     initial.register_item_group_catalog(item_group_catalog)?;
     for definition in terrain_bash_definitions {
         let dynamic_floor_result =
@@ -711,60 +752,8 @@ fn open_world(
         initial.register_furniture_bash_type(bash)?;
     }
     if !has_snapshot {
-        let floor = terrain
-            .get("t_floor")
-            .ok_or("pinned default content has no floor terrain")?;
-        let grass = terrain
-            .get("t_grass")
-            .ok_or("pinned default content has no grass terrain")?;
-        let wall = terrain
-            .get("t_wall")
-            .ok_or("pinned default content has no wall terrain")?;
-        let door = terrain
-            .get("t_door_c")
-            .ok_or("pinned default content has no closed door terrain")?;
-        let grass_tile = terrain_tile(grass, terrain)?;
-        initial.configure_flat_worldgen(grass_tile.clone())?;
-        for chunk_y in -1..=1 {
-            for chunk_x in -1..=1 {
-                initial.insert_chunk(Chunk::filled(
-                    ChunkCoord {
-                        x: chunk_x,
-                        y: chunk_y,
-                        z: 0,
-                    },
-                    grass_tile.clone(),
-                )?);
-            }
-        }
-        let mut chunk = Chunk::filled(
-            ChunkCoord { x: 0, y: 0, z: 0 },
-            terrain_tile(floor, terrain)?,
-        )?;
-        for offset in 0..12_u8 {
-            for local in [
-                LocalTileCoord { x: offset, y: 0 },
-                LocalTileCoord { x: offset, y: 11 },
-                LocalTileCoord { x: 0, y: offset },
-                LocalTileCoord { x: 11, y: offset },
-            ] {
-                chunk.set_terrain(local, terrain_tile(wall, terrain)?)?;
-            }
-        }
-        chunk.set_terrain(LocalTileCoord { x: 6, y: 0 }, terrain_tile(door, terrain)?)?;
-        for (furniture_id, local) in [
-            ("f_bed", LocalTileCoord { x: 2, y: 2 }),
-            ("f_bed", LocalTileCoord { x: 3, y: 2 }),
-            ("f_dresser", LocalTileCoord { x: 9, y: 2 }),
-            ("f_chair", LocalTileCoord { x: 7, y: 7 }),
-            ("f_table", LocalTileCoord { x: 8, y: 7 }),
-        ] {
-            let definition = furniture
-                .get(furniture_id)
-                .ok_or("pinned default content is missing cabin furniture")?;
-            chunk.set_furniture(local, Some(furniture_tile(definition)))?;
-        }
-        initial.insert_chunk(chunk);
+        initial.configure_worldgen(worldgen)?;
+        initial.generate_initial_bubble(cdda_protocol::WorldPosition { x: 0, y: 0, z: 0 })?;
     }
     let (journal_sequence, mut world) = store.recover_latest(initial)?;
     let mut recovery_connection_updates = world.disconnect_all_for_recovery();
@@ -2342,6 +2331,413 @@ fn terrain_tile(
         close_transparent: close.map(|transform| transform.1),
         close_flat: close.map(|transform| transform.2),
     })
+}
+
+fn runtime_mapgen_worldgen(
+    omt_id: &str,
+    mapgen: &MapgenRegistry,
+    regions: &DefaultRegionTerrainFurnitureRegistry,
+    terrain: &TerrainRegistry,
+    furniture: &FurnitureRegistry,
+    item_groups: &[ItemGroupDefinitionV1],
+) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
+    let definitions = mapgen.get(omt_id).ok_or_else(|| {
+        let reason = mapgen
+            .unavailable_reports(omt_id)
+            .and_then(|reports| reports.first())
+            .and_then(|report| report.rejection_reason.as_deref())
+            .unwrap_or("no selected definition");
+        format!("pinned mapgen {omt_id} is unavailable: {reason}")
+    })?;
+    if definitions.is_empty() {
+        return Err(format!("pinned mapgen {omt_id} has no variants").into());
+    }
+
+    let mut terrain_ids = BTreeSet::new();
+    let mut furniture_ids = BTreeSet::new();
+    let mut regional_terrain_ids = BTreeSet::new();
+    let mut regional_furniture_ids = BTreeSet::new();
+    for definition in definitions {
+        if matches!(definition.fill_terrain, Some(MapgenIdChoice::Weighted(_))) {
+            return Err(format!(
+                "mapgen {omt_id} uses a weighted one-time fill that worldgen v1 cannot encode"
+            )
+            .into());
+        }
+        for choice in definition
+            .fill_terrain
+            .iter()
+            .chain(definition.terrain.values().flatten())
+        {
+            collect_runtime_terrain_choice(
+                choice,
+                regions,
+                terrain,
+                &mut terrain_ids,
+                &mut regional_terrain_ids,
+            )?;
+        }
+        for choice in definition.furniture.values().flatten() {
+            collect_runtime_furniture_choice(
+                choice,
+                regions,
+                furniture,
+                &mut furniture_ids,
+                &mut regional_furniture_ids,
+            )?;
+        }
+    }
+
+    let terrain_prototypes = terrain_ids
+        .iter()
+        .map(|id| {
+            terrain_tile(
+                terrain
+                    .get(id)
+                    .ok_or("mapgen terrain prototype disappeared")?,
+                terrain,
+            )
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let furniture_prototypes = furniture_ids
+        .iter()
+        .map(|id| {
+            furniture
+                .get(id)
+                .map(furniture_tile)
+                .ok_or_else(|| "mapgen furniture prototype disappeared".into())
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let terrain_indices = terrain_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+    let furniture_indices = furniture_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+    let regional_terrain_indices = regional_terrain_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+    let regional_furniture_indices = regional_furniture_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+
+    let regional_terrain = regional_terrain_ids
+        .iter()
+        .map(|id| {
+            let table = regions
+                .terrain_table(id)
+                .ok_or("reachable regional terrain table disappeared")?;
+            Ok(WorldgenRegionalTerrainTableV1 {
+                regional_id: id.clone(),
+                choices: table
+                    .choices
+                    .iter()
+                    .map(|choice| {
+                        Ok(WorldgenWeightedPrototypeV1 {
+                            prototype_index: *terrain_indices.get(&choice.id).ok_or(
+                                "worldgen v1 cannot encode recursive regional terrain choices",
+                            )?,
+                            weight: choice.weight,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let regional_furniture = regional_furniture_ids
+        .iter()
+        .map(|id| {
+            let table = regions
+                .furniture_table(id)
+                .ok_or("reachable regional furniture table disappeared")?;
+            Ok(WorldgenRegionalFurnitureTableV1 {
+                regional_id: id.clone(),
+                choices: table
+                    .choices
+                    .iter()
+                    .map(|choice| {
+                        let target = if choice.id == "f_null" {
+                            WorldgenFurniturePrototypeTargetV1::None
+                        } else {
+                            WorldgenFurniturePrototypeTargetV1::Prototype(
+                                *furniture_indices.get(&choice.id).ok_or(
+                                    "worldgen v1 cannot encode recursive regional furniture choices",
+                                )?,
+                            )
+                        };
+                        Ok(WorldgenWeightedFurniturePrototypeV1 {
+                            target,
+                            weight: choice.weight,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+
+    let templates = definitions
+        .iter()
+        .map(|definition| {
+            runtime_mapgen_template(
+                definition,
+                &terrain_indices,
+                &furniture_indices,
+                &regional_terrain_indices,
+                &regional_furniture_indices,
+            )
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let catalog = WorldgenCatalogV1 {
+        generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V1,
+        default_omt_id: omt_id.to_owned(),
+        terrain_prototypes,
+        furniture_prototypes,
+        regional_terrain,
+        regional_furniture,
+        omt_generators: vec![WorldgenOmtGeneratorV1 {
+            omt_id: omt_id.to_owned(),
+            templates,
+        }],
+    };
+    if !worldgen_catalog_is_valid(&catalog, item_groups) {
+        return Err(format!("pinned mapgen {omt_id} produced an invalid worldgen catalog").into());
+    }
+    Ok(catalog)
+}
+
+fn collect_runtime_terrain_choice(
+    choice: &MapgenIdChoice,
+    regions: &DefaultRegionTerrainFurnitureRegistry,
+    terrain: &TerrainRegistry,
+    concrete: &mut BTreeSet<String>,
+    regional: &mut BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for id in choice.ids() {
+        if let Some(table) = regions.terrain_table(id) {
+            regional.insert(id.to_owned());
+            for replacement in &table.choices {
+                if regions.terrain_table(&replacement.id).is_some() {
+                    return Err(format!(
+                        "worldgen v1 cannot encode recursive regional terrain {} -> {}",
+                        id, replacement.id
+                    )
+                    .into());
+                }
+                concrete.insert(replacement.id.clone());
+            }
+        } else {
+            let definition = terrain
+                .get(id)
+                .ok_or_else(|| format!("mapgen references missing terrain {id}"))?;
+            if definition.flags.contains("REGION_PSEUDO") {
+                return Err(format!("mapgen terrain {id} has no default regional table").into());
+            }
+            concrete.insert(id.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn collect_runtime_furniture_choice(
+    choice: &MapgenIdChoice,
+    regions: &DefaultRegionTerrainFurnitureRegistry,
+    furniture: &FurnitureRegistry,
+    concrete: &mut BTreeSet<String>,
+    regional: &mut BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for id in choice.ids() {
+        if id == "f_null" {
+            continue;
+        }
+        if let Some(table) = regions.furniture_table(id) {
+            regional.insert(id.to_owned());
+            for replacement in &table.choices {
+                if replacement.id == "f_null" {
+                    continue;
+                }
+                if regions.furniture_table(&replacement.id).is_some() {
+                    return Err(format!(
+                        "worldgen v1 cannot encode recursive regional furniture {} -> {}",
+                        id, replacement.id
+                    )
+                    .into());
+                }
+                concrete.insert(replacement.id.clone());
+            }
+        } else {
+            let definition = furniture
+                .get(id)
+                .ok_or_else(|| format!("mapgen references missing furniture {id}"))?;
+            if definition.flags.contains("REGION_PSEUDO") {
+                return Err(format!("mapgen furniture {id} has no default regional table").into());
+            }
+            concrete.insert(id.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn runtime_mapgen_template(
+    definition: &StrictMapgenDefinition,
+    terrain: &BTreeMap<String, u16>,
+    furniture: &BTreeMap<String, u16>,
+    regional_terrain: &BTreeMap<String, u16>,
+    regional_furniture: &BTreeMap<String, u16>,
+) -> Result<WorldgenTemplateV1, Box<dyn std::error::Error>> {
+    let fill = definition.fill_terrain.as_ref();
+    let cells = definition
+        .cells
+        .iter()
+        .map(|glyph| {
+            let terrain_layers = definition.terrain.get(glyph);
+            if terrain_layers.is_some_and(|layers| layers.len() != 1) {
+                return Err(format!(
+                    "mapgen {} has multiple terrain layers for glyph {glyph:?}",
+                    definition.source
+                )
+                .into());
+            }
+            let terrain_choice = terrain_layers
+                .and_then(|layers| layers.first())
+                .or(fill)
+                .ok_or_else(|| {
+                    format!(
+                        "mapgen {} has no terrain for glyph {glyph:?}",
+                        definition.source
+                    )
+                })?;
+            let furniture_layers = definition.furniture.get(glyph);
+            if furniture_layers.is_some_and(|layers| layers.len() != 1) {
+                return Err(format!(
+                    "mapgen {} has multiple furniture layers for glyph {glyph:?}",
+                    definition.source
+                )
+                .into());
+            }
+            Ok(WorldgenCellV1 {
+                terrain: runtime_mapgen_terrain_choice(terrain_choice, terrain, regional_terrain)?,
+                furniture: furniture_layers
+                    .and_then(|layers| layers.first())
+                    .map_or_else(
+                        || {
+                            Ok(vec![WorldgenWeightedFurnitureTargetV1 {
+                                target: WorldgenFurnitureTargetV1::None,
+                                weight: 1,
+                            }])
+                        },
+                        |choice| {
+                            runtime_mapgen_furniture_choice(choice, furniture, regional_furniture)
+                        },
+                    )?,
+                item_group: definition.items.get(glyph).map(|placement| {
+                    WorldgenItemGroupPlacementV1 {
+                        group_id: placement.item_group.clone(),
+                        chance: placement.chance,
+                    }
+                }),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    Ok(WorldgenTemplateV1 {
+        weight: definition.weight,
+        cells,
+    })
+}
+
+fn runtime_mapgen_terrain_choice(
+    choice: &MapgenIdChoice,
+    concrete: &BTreeMap<String, u16>,
+    regional: &BTreeMap<String, u16>,
+) -> Result<Vec<WorldgenWeightedTerrainTargetV1>, Box<dyn std::error::Error>> {
+    let target = |id: &str| {
+        regional.get(id).map_or_else(
+            || {
+                concrete
+                    .get(id)
+                    .copied()
+                    .map(WorldgenTerrainTargetV1::Prototype)
+                    .ok_or_else(|| format!("terrain target {id} disappeared"))
+            },
+            |index| Ok(WorldgenTerrainTargetV1::Regional(*index)),
+        )
+    };
+    match choice {
+        MapgenIdChoice::Fixed(id) => Ok(vec![WorldgenWeightedTerrainTargetV1 {
+            target: target(id)?,
+            weight: 1,
+        }]),
+        MapgenIdChoice::Weighted(entries) => {
+            if entries.len() == 1 {
+                return Err(
+                    "worldgen v1 cannot retain a one-entry weighted terrain RNG phase".into(),
+                );
+            }
+            entries
+                .iter()
+                .map(|entry| {
+                    Ok(WorldgenWeightedTerrainTargetV1 {
+                        target: target(&entry.id)?,
+                        weight: entry.weight,
+                    })
+                })
+                .collect::<Result<_, String>>()
+                .map_err(Into::into)
+        }
+    }
+}
+
+fn runtime_mapgen_furniture_choice(
+    choice: &MapgenIdChoice,
+    concrete: &BTreeMap<String, u16>,
+    regional: &BTreeMap<String, u16>,
+) -> Result<Vec<WorldgenWeightedFurnitureTargetV1>, Box<dyn std::error::Error>> {
+    let target = |id: &str| {
+        if id == "f_null" {
+            Ok(WorldgenFurnitureTargetV1::None)
+        } else {
+            regional.get(id).map_or_else(
+                || {
+                    concrete
+                        .get(id)
+                        .copied()
+                        .map(WorldgenFurnitureTargetV1::Prototype)
+                        .ok_or_else(|| format!("furniture target {id} disappeared"))
+                },
+                |index| Ok(WorldgenFurnitureTargetV1::Regional(*index)),
+            )
+        }
+    };
+    match choice {
+        MapgenIdChoice::Fixed(id) => Ok(vec![WorldgenWeightedFurnitureTargetV1 {
+            target: target(id)?,
+            weight: 1,
+        }]),
+        MapgenIdChoice::Weighted(entries) => {
+            if entries.len() == 1 {
+                return Err(
+                    "worldgen v1 cannot retain a one-entry weighted furniture RNG phase".into(),
+                );
+            }
+            entries
+                .iter()
+                .map(|entry| {
+                    Ok(WorldgenWeightedFurnitureTargetV1 {
+                        target: target(&entry.id)?,
+                        weight: entry.weight,
+                    })
+                })
+                .collect::<Result<_, String>>()
+                .map_err(Into::into)
+        }
+    }
 }
 
 fn runtime_terrain_bash_type(
@@ -4468,6 +4864,19 @@ mod tests {
     }
 
     #[test]
+    fn runtime_mapgen_rejects_weighted_singletons_that_would_lose_rng_phase() {
+        let weighted = MapgenIdChoice::Weighted(vec![cdda_content::WeightedMapgenId {
+            id: String::from("only"),
+            weight: 7,
+        }]);
+        let concrete = BTreeMap::from([(String::from("only"), 0)]);
+        let regional = BTreeMap::new();
+
+        assert!(runtime_mapgen_terrain_choice(&weighted, &concrete, &regional).is_err());
+        assert!(runtime_mapgen_furniture_choice(&weighted, &concrete, &regional).is_err());
+    }
+
+    #[test]
     fn item_group_charge_overrides_follow_pinned_item_categories() {
         let range = cdda_content::ItemGroupRange {
             minimum: 0,
@@ -4718,6 +5127,42 @@ mod tests {
         .expect("wall item-group closure should normalize");
         assert_eq!(wall_catalog.len(), 1);
         assert_eq!(wall_catalog[0].group_id, "wall_bash_results");
+        let regions = DefaultRegionTerrainFurnitureRegistry::load_selected(
+            &manifest,
+            content_root,
+            &mods,
+            &enabled,
+            &terrain,
+            &furniture,
+        )
+        .expect("default regional substitutions should load");
+        let mapgen = MapgenRegistry::load_selected(
+            &manifest,
+            content_root,
+            &mods,
+            &enabled,
+            &terrain,
+            &furniture,
+            &item_groups,
+        )
+        .expect("strict mapgen should load");
+        let wilderness = runtime_mapgen_worldgen(
+            "lmoe",
+            &mapgen,
+            &regions,
+            &terrain,
+            &furniture,
+            &wall_catalog,
+        )
+        .expect("pinned surface mapgen should normalize");
+        assert_eq!(wilderness.default_omt_id, "lmoe");
+        assert_eq!(wilderness.omt_generators[0].templates.len(), 1);
+        assert_eq!(wilderness.regional_terrain.len(), 1);
+        assert_eq!(
+            wilderness.regional_terrain[0].regional_id,
+            "t_region_groundcover"
+        );
+        assert!(worldgen_catalog_is_valid(&wilderness, &wall_catalog));
         let wall_entries = &wall_catalog[0].graph.nodes[0].entries;
         assert_eq!(wall_entries.len(), 8);
         assert_eq!(

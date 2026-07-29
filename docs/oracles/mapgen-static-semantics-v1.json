@@ -1,0 +1,43 @@
+{
+  "format_version": 1,
+  "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+  "upstream_tree": "210f31db2e8b2f0caed1809f1a66781859f9d129",
+  "kernel": "mapgen_static_semantics_v1",
+  "expected_observation": {
+    "format_version": 1,
+    "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+    "upstream_tree": "210f31db2e8b2f0caed1809f1a66781859f9d129",
+    "kernel": "mapgen_static_semantics_v1",
+    "matching": [
+      { "case_id": "exact_full", "query": "shelter_north", "terrain_id": "shelter_north", "match_type": "EXACT", "matches": true },
+      { "case_id": "exact_base_rejected", "query": "shelter", "terrain_id": "shelter_north", "match_type": "EXACT", "matches": false },
+      { "case_id": "rotatable_type", "query": "shelter", "terrain_id": "shelter_east", "match_type": "TYPE", "matches": true },
+      { "case_id": "linear_subtype", "query": "road_straight", "terrain_id": "road_ew", "match_type": "SUBTYPE", "matches": true },
+      { "case_id": "wrong_linear_subtype", "query": "road_curved", "terrain_id": "road_ew", "match_type": "SUBTYPE", "matches": false },
+      { "case_id": "prefix_separator", "query": "forest", "terrain_id": "forest_thick", "match_type": "PREFIX", "matches": true },
+      { "case_id": "partial_prefix_rejected", "query": "fore", "terrain_id": "forest_thick", "match_type": "PREFIX", "matches": false },
+      { "case_id": "contains_substring", "query": "rest_t", "terrain_id": "forest_thick", "match_type": "CONTAINS", "matches": true }
+    ],
+    "rotatable": [
+      { "direction": "north", "terrain_id": "shelter_north", "mapgen_id": "shelter", "rotation": 0, "marker_x": 2, "marker_y": 5 },
+      { "direction": "east", "terrain_id": "shelter_east", "mapgen_id": "shelter", "rotation": 1, "marker_x": 18, "marker_y": 2 },
+      { "direction": "south", "terrain_id": "shelter_south", "mapgen_id": "shelter", "rotation": 2, "marker_x": 21, "marker_y": 18 },
+      { "direction": "west", "terrain_id": "shelter_west", "mapgen_id": "shelter", "rotation": 3, "marker_x": 5, "marker_y": 21 }
+    ],
+    "linear": [
+      { "direction": "north", "terrain_id": "road_ns", "mapgen_id": "road_straight", "rotation": 0, "marker_x": 2, "marker_y": 5 },
+      { "direction": "east", "terrain_id": "road_ew", "mapgen_id": "road_straight", "rotation": 3, "marker_x": 18, "marker_y": 2 },
+      { "direction": "south", "terrain_id": "road_ns", "mapgen_id": "road_straight", "rotation": 0, "marker_x": 21, "marker_y": 18 },
+      { "direction": "west", "terrain_id": "road_ew", "mapgen_id": "road_straight", "rotation": 3, "marker_x": 5, "marker_y": 21 }
+    ],
+    "palette": {
+      "palette_id": "rust_cpp_oracle_mapgen_palette_v1",
+      "key": "X",
+      "key_has_terrain": true,
+      "piece_phases": ["terrain", "furniture", "removal", "nested_mapgen"],
+      "mapgen_size_x": 1,
+      "mapgen_size_y": 1,
+      "setup_completed": true
+    }
+  }
+}

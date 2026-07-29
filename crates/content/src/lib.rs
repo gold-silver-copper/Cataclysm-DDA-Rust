@@ -6,9 +6,11 @@ mod field;
 mod furniture;
 mod item;
 mod item_group;
+mod mapgen;
 mod monster;
 mod proficiency;
 mod recipe;
+mod region;
 mod skill;
 mod terrain;
 
@@ -35,6 +37,15 @@ pub use item_group::{
     MAX_ITEM_GROUP_REFERENCE_DEPTH, StrictItemGroupDefinition, StrictItemGroupGraph,
     StrictItemGroupNode, StrictItemGroupNodeKind,
 };
+pub use mapgen::{
+    DEFAULT_MAPGEN_WEIGHT, MAPGEN_HEIGHT, MAPGEN_WIDTH, MAX_MAPGEN_BINDINGS,
+    MAX_MAPGEN_CHOICE_ENTRIES, MAX_MAPGEN_CHOICE_TOTAL_WEIGHT, MAX_MAPGEN_CHOICE_WEIGHT,
+    MAX_MAPGEN_OM_TERRAINS, MAX_MAPGEN_OMT_ASSIGNMENTS, MAX_MAPGEN_PALETTE_DEPTH,
+    MAX_MAPGEN_PALETTE_LAYERS, MAX_MAPGEN_REPORT_ASSIGNMENTS, MAX_MAPGEN_ROOTS,
+    MAX_MAPGEN_VARIANTS, MAX_MAPGEN_WEIGHT, MAX_NAMED_PALETTES, MapgenIdChoice, MapgenRegistry,
+    MapgenRegistryError, MapgenRootReport, StrictMapgenDefinition, StrictMapgenItemPlacement,
+    WeightedMapgenId,
+};
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
 pub use proficiency::{
     PROFICIENCY_MULTIPLIER_SCALE, ProficiencyDefinition, ProficiencyRegistry,
@@ -43,6 +54,13 @@ pub use proficiency::{
 pub use recipe::{
     ComponentRequirement, ExternalRequirement, QualityRequirement, RecipeDefinition,
     RecipeProficiency, RecipeRegistry, RecipeRegistryError, RequirementDefinition, ToolRequirement,
+};
+pub use region::{
+    DEFAULT_REGION_TERRAIN_FURNITURE_ID, DefaultRegionTerrainFurnitureRegistry,
+    DefaultRegionTerrainFurnitureRegistryError, MAX_DEFAULT_REGION_TABLES,
+    MAX_REGION_SUBSTITUTION_CHOICES, MAX_REGION_SUBSTITUTION_DEFINITIONS,
+    MAX_REGION_SUBSTITUTION_DEPTH, MAX_REGION_SUBSTITUTION_TOTAL_WEIGHT,
+    MAX_REGION_SUBSTITUTION_WEIGHT, RegionSubstitutionTable, WeightedRegionSubstitution,
 };
 pub use skill::{SkillDefinition, SkillRegistry, SkillRegistryError};
 pub use terrain::{TerrainDefinition, TerrainRegistry, TerrainRegistryError};
@@ -1227,6 +1245,9 @@ mod tests {
 
         let items = ItemRegistry::load_selected(&manifest, root, &catalog, &enabled)
             .expect("selected ITEM definitions should finalize");
+        let item_groups = ItemGroupRegistry::load_selected(&manifest, root, &catalog, &enabled)
+            .expect("selected named item groups should normalize");
+        assert!(item_groups.get("field").is_some());
         ammunition
             .validate_item_references(&items)
             .expect("ammunition defaults should resolve to concrete items");
@@ -1485,6 +1506,74 @@ mod tests {
             .get("f_dresser")
             .expect("standard dresser should exist");
         assert!(!dresser.is_passable());
+
+        let regional = DefaultRegionTerrainFurnitureRegistry::load_selected(
+            &manifest, root, &catalog, &enabled, &terrain, &furniture,
+        )
+        .expect("default regional pseudo substitutions should finalize");
+        assert_eq!(regional.terrain_len(), 24);
+        assert_eq!(regional.furniture_len(), 10);
+        let groundcover = regional
+            .terrain_table("t_region_groundcover")
+            .expect("default regional groundcover table");
+        assert_eq!(groundcover.choices[0].id, "t_grass");
+        assert_eq!(groundcover.choices[0].weight, 12_000);
+        let shrub = regional
+            .terrain_table("t_region_shrub_forest")
+            .expect("recursive regional shrub table");
+        assert_eq!(shrub.choices[0].id, "t_region_shrub_forest_dense");
+        assert!(regional.terrain_table(&shrub.choices[0].id).is_some());
+
+        let mapgen = MapgenRegistry::load_selected(
+            &manifest,
+            root,
+            &catalog,
+            &enabled,
+            &terrain,
+            &furniture,
+            &item_groups,
+        )
+        .expect("selected ordinary mapgen definitions should be inventoried");
+        let rock_border = mapgen
+            .get("rock_border")
+            .and_then(|definitions| definitions.first())
+            .expect("strict rock-border mapgen should compile");
+        assert_eq!(rock_border.weight, DEFAULT_MAPGEN_WEIGHT);
+        assert_eq!(
+            rock_border.fill_terrain,
+            Some(MapgenIdChoice::Fixed(String::from("t_rock")))
+        );
+        assert_eq!(rock_border.cells.len(), MAPGEN_WIDTH * MAPGEN_HEIGHT);
+
+        let billboard = mapgen
+            .get("billboard_1")
+            .and_then(|definitions| definitions.first())
+            .expect("strict Unicode billboard mapgen should compile");
+        assert_eq!(billboard.weight, DEFAULT_MAPGEN_WEIGHT);
+        assert_eq!(billboard.cell(18, 12), Some("."));
+        assert_eq!(billboard.cell(19, 12), Some("≷"));
+        assert_eq!(
+            billboard.terrain.get("≷"),
+            Some(&vec![MapgenIdChoice::Fixed(String::from(
+                "t_ladder_up_down"
+            ))])
+        );
+
+        let field = mapgen
+            .get("field")
+            .and_then(|definitions| definitions.first())
+            .expect("pinned field mapgen should now compile strictly");
+        assert_eq!(
+            field.items.get("3"),
+            Some(&StrictMapgenItemPlacement {
+                item_group: String::from("field"),
+                chance: 1,
+            })
+        );
+        assert!(mapgen.unavailable_reports("field").is_none());
+        assert!(mapgen.reports().any(|report| {
+            report.is_available() && report.om_terrains.iter().any(|id| id == "field")
+        }));
 
         let skills = SkillRegistry::load_selected(&manifest, root, &catalog, &enabled)
             .expect("selected skill definitions should load");

@@ -12,12 +12,15 @@ const CACHE_FORMAT_VERSION: u16 = 1;
 const UPSTREAM_TREE: &str = "210f31db2e8b2f0caed1809f1a66781859f9d129";
 const KERNEL: &str = "item_pocket_max_length_v1";
 const ITEM_GROUP_KERNEL: &str = "item_group_generation_v1";
+const MAPGEN_KERNEL: &str = "mapgen_static_semantics_v1";
 const MAX_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_CASES: usize = 8;
 const DEFAULT_SCENARIO: &str = "docs/oracles/item-pocket-max-length-v1.json";
 const ADAPTER_SOURCE: &str = include_str!("../../../tools/cpp-oracle/item_pocket_oracle_test.cpp");
 const ITEM_GROUP_ADAPTER_SOURCE: &str =
     include_str!("../../../tools/cpp-oracle/item_group_oracle_test.cpp");
+const MAPGEN_ADAPTER_SOURCE: &str =
+    include_str!("../../../tools/cpp-oracle/mapgen_oracle_test.cpp");
 const ADAPTER_MAKEFILE: &str = include_str!("../../../tools/cpp-oracle/oracle.mk");
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +135,62 @@ struct ItemGroupNestedObservationV1 {
     downstream_draw_matches: bool,
 }
 
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct MapgenOracleScenarioV1 {
+    format_version: u16,
+    baseline_commit: String,
+    upstream_tree: String,
+    kernel: String,
+    expected_observation: MapgenOracleObservationV1,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenOracleObservationV1 {
+    format_version: u16,
+    baseline_commit: String,
+    upstream_tree: String,
+    kernel: String,
+    matching: Vec<MapgenMatchObservationV1>,
+    rotatable: Vec<MapgenRotationObservationV1>,
+    linear: Vec<MapgenRotationObservationV1>,
+    palette: MapgenPaletteObservationV1,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenMatchObservationV1 {
+    case_id: String,
+    query: String,
+    terrain_id: String,
+    match_type: String,
+    matches: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenRotationObservationV1 {
+    direction: String,
+    terrain_id: String,
+    mapgen_id: String,
+    rotation: i32,
+    marker_x: i32,
+    marker_y: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenPaletteObservationV1 {
+    palette_id: String,
+    key: String,
+    key_has_terrain: bool,
+    piece_phases: Vec<String>,
+    mapgen_size_x: i32,
+    mapgen_size_y: i32,
+    setup_completed: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OracleCacheV1 {
@@ -213,6 +272,20 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 BASELINE_COMMIT
             );
         }
+        MAPGEN_KERNEL => {
+            let scenario = load_mapgen_scenario(&scenario_path)?;
+            let observation = run_mapgen_binary(workspace, &upstream, &binary)?;
+            compare_mapgen(&scenario, &observation)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&observation)
+                    .map_err(|error| format!("could not encode oracle observation: {error}"))?
+            );
+            eprintln!(
+                "C++ oracle verified bounded static mapgen semantics against pinned {}",
+                BASELINE_COMMIT
+            );
+        }
         _ => return Err(format!("unsupported C++ oracle kernel: {kernel}").into()),
     }
     Ok(())
@@ -263,6 +336,14 @@ fn load_item_group_scenario(
         )
     })?;
     validate_item_group_scenario(&scenario)?;
+    Ok(scenario)
+}
+
+fn load_mapgen_scenario(path: &Path) -> Result<MapgenOracleScenarioV1, Box<dyn std::error::Error>> {
+    let bytes = read_bounded(path)?;
+    let scenario: MapgenOracleScenarioV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid mapgen oracle scenario {}: {error}", path.display()))?;
+    validate_mapgen_scenario(&scenario)?;
     Ok(scenario)
 }
 
@@ -412,6 +493,130 @@ fn validate_item_group_observation(
     Ok(())
 }
 
+fn validate_mapgen_scenario(
+    scenario: &MapgenOracleScenarioV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if scenario.format_version != ORACLE_FORMAT_VERSION
+        || scenario.baseline_commit != BASELINE_COMMIT
+        || scenario.upstream_tree != UPSTREAM_TREE
+        || scenario.kernel != MAPGEN_KERNEL
+    {
+        return Err("mapgen oracle scenario identity mismatch".into());
+    }
+    validate_mapgen_observation(&scenario.expected_observation)
+}
+
+fn validate_mapgen_observation(
+    observation: &MapgenOracleObservationV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if observation.format_version != ORACLE_FORMAT_VERSION
+        || observation.baseline_commit != BASELINE_COMMIT
+        || observation.upstream_tree != UPSTREAM_TREE
+        || observation.kernel != MAPGEN_KERNEL
+    {
+        return Err("mapgen oracle observation identity mismatch".into());
+    }
+    let matching = [
+        (
+            "exact_full",
+            "shelter_north",
+            "shelter_north",
+            "EXACT",
+            true,
+        ),
+        (
+            "exact_base_rejected",
+            "shelter",
+            "shelter_north",
+            "EXACT",
+            false,
+        ),
+        ("rotatable_type", "shelter", "shelter_east", "TYPE", true),
+        (
+            "linear_subtype",
+            "road_straight",
+            "road_ew",
+            "SUBTYPE",
+            true,
+        ),
+        (
+            "wrong_linear_subtype",
+            "road_curved",
+            "road_ew",
+            "SUBTYPE",
+            false,
+        ),
+        ("prefix_separator", "forest", "forest_thick", "PREFIX", true),
+        (
+            "partial_prefix_rejected",
+            "fore",
+            "forest_thick",
+            "PREFIX",
+            false,
+        ),
+        (
+            "contains_substring",
+            "rest_t",
+            "forest_thick",
+            "CONTAINS",
+            true,
+        ),
+    ];
+    if observation.matching.len() != matching.len()
+        || observation
+            .matching
+            .iter()
+            .zip(matching)
+            .any(|(actual, expected)| {
+                actual.case_id != expected.0
+                    || actual.query != expected.1
+                    || actual.terrain_id != expected.2
+                    || actual.match_type != expected.3
+                    || actual.matches != expected.4
+            })
+    {
+        return Err("mapgen matching observation is incomplete or out of order".into());
+    }
+    validate_rotations(&observation.rotatable, "shelter")?;
+    validate_rotations(&observation.linear, "road")?;
+    if observation.palette.palette_id != "rust_cpp_oracle_mapgen_palette_v1"
+        || observation.palette.key != "X"
+        || !observation.palette.key_has_terrain
+        || observation.palette.piece_phases != ["terrain", "furniture", "removal", "nested_mapgen"]
+        || observation.palette.mapgen_size_x != 1
+        || observation.palette.mapgen_size_y != 1
+        || !observation.palette.setup_completed
+    {
+        return Err("mapgen palette observation is incomplete".into());
+    }
+    Ok(())
+}
+
+fn validate_rotations(
+    observations: &[MapgenRotationObservationV1],
+    expected_family: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directions = ["north", "east", "south", "west"];
+    if observations.len() != directions.len()
+        || observations
+            .iter()
+            .zip(directions)
+            .any(|(observation, direction)| {
+                observation.direction != direction
+                    || observation.terrain_id.is_empty()
+                    || observation.mapgen_id.is_empty()
+                    || !observation.terrain_id.starts_with(expected_family)
+                    || !observation.mapgen_id.starts_with(expected_family)
+                    || !(0..=3).contains(&observation.rotation)
+                    || !(0..24).contains(&observation.marker_x)
+                    || !(0..24).contains(&observation.marker_y)
+            })
+    {
+        return Err(format!("invalid {expected_family} rotation observation").into());
+    }
+    Ok(())
+}
+
 fn ranges_match(
     actual: &[ItemGroupRangeObservationV1],
     expected: &[(&str, i32, i32, i32)],
@@ -477,6 +682,7 @@ fn prepare_binary(
         [
             ADAPTER_SOURCE.as_bytes(),
             ITEM_GROUP_ADAPTER_SOURCE.as_bytes(),
+            MAPGEN_ADAPTER_SOURCE.as_bytes(),
             ADAPTER_MAKEFILE.as_bytes(),
         ]
         .concat()
@@ -499,6 +705,10 @@ fn prepare_binary(
     fs::write(
         root.join("tests/rust_cpp_oracle_item_group_test.cpp"),
         ITEM_GROUP_ADAPTER_SOURCE,
+    )?;
+    fs::write(
+        root.join("tests/rust_cpp_oracle_mapgen_test.cpp"),
+        MAPGEN_ADAPTER_SOURCE,
     )?;
     fs::write(root.join("rust-cpp-oracle.mk"), ADAPTER_MAKEFILE)?;
 
@@ -746,6 +956,45 @@ fn run_item_group_binary(
     Ok(observation)
 }
 
+fn run_mapgen_binary(
+    workspace: &Path,
+    upstream: &Path,
+    binary: &Path,
+) -> Result<MapgenOracleObservationV1, Box<dyn std::error::Error>> {
+    cleanup_legacy_run_artifacts(workspace)?;
+    let run_root = workspace.join("target/cpp-oracle/runtime");
+    if run_root.exists() {
+        fs::remove_dir_all(&run_root)?;
+    }
+    fs::create_dir_all(&run_root)?;
+    let _artifacts = OracleRunArtifacts {
+        root: run_root.clone(),
+    };
+    let output_path = run_root.join("observation.json");
+    let user_dir = run_root.join("user");
+    export_upstream_paths(upstream, &run_root, &["data"])?;
+    let status = Command::new(binary)
+        .arg("rust_cpp_oracle_mapgen_static_semantics")
+        .args(["--rng-seed", "1", "--order", "lex", "--drop-world"])
+        .arg("--user-dir")
+        .arg(&user_dir)
+        .env("CDDA_RUST_CPP_ORACLE_OUTPUT", &output_path)
+        .env("LANGUAGE", "en")
+        .env("LC_ALL", "C")
+        .current_dir(&run_root)
+        .status()?;
+    if !status.success() {
+        return Err(
+            format!("pinned C++ mapgen oracle execution failed with status {status}").into(),
+        );
+    }
+    let bytes = read_bounded(&output_path)?;
+    let observation: MapgenOracleObservationV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("C++ mapgen oracle emitted invalid observation JSON: {error}"))?;
+    validate_mapgen_observation(&observation)?;
+    Ok(observation)
+}
+
 fn cleanup_legacy_run_artifacts(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace.join("target/cpp-oracle");
     if !root.is_dir() {
@@ -811,6 +1060,21 @@ fn compare_item_group(
     .into())
 }
 
+fn compare_mapgen(
+    scenario: &MapgenOracleScenarioV1,
+    observation: &MapgenOracleObservationV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if &scenario.expected_observation == observation {
+        return Ok(());
+    }
+    Err(format!(
+        "C++ mapgen oracle diverged from the checked scenario\nexpected: {}\nactual: {}",
+        serde_json::to_string_pretty(&scenario.expected_observation)?,
+        serde_json::to_string_pretty(observation)?
+    )
+    .into())
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let file = fs::File::open(path)
         .map_err(|error| format!("could not open {}: {error}", path.display()))?;
@@ -860,6 +1124,13 @@ mod tests {
             "../../../docs/oracles/item-group-generation-v1.json"
         ))
         .expect("checked item-group oracle scenario should decode")
+    }
+
+    fn checked_mapgen_scenario() -> MapgenOracleScenarioV1 {
+        serde_json::from_str(include_str!(
+            "../../../docs/oracles/mapgen-static-semantics-v1.json"
+        ))
+        .expect("checked mapgen oracle scenario should decode")
     }
 
     #[test]
@@ -965,6 +1236,21 @@ mod tests {
     }
 
     #[test]
+    fn checked_mapgen_scenario_is_complete_and_version_bound() {
+        let scenario = checked_mapgen_scenario();
+        validate_mapgen_scenario(&scenario)
+            .expect("checked mapgen oracle scenario should validate");
+
+        let mut incomplete = checked_mapgen_scenario();
+        incomplete.expected_observation.matching.pop();
+        assert!(validate_mapgen_scenario(&incomplete).is_err());
+
+        let mut bad_palette = checked_mapgen_scenario();
+        bad_palette.expected_observation.palette.setup_completed = false;
+        assert!(validate_mapgen_scenario(&bad_palette).is_err());
+    }
+
+    #[test]
     fn comparison_is_exact() {
         let scenario = checked_scenario();
         compare(&scenario, &scenario.expected_observation)
@@ -977,5 +1263,9 @@ mod tests {
         let item_group = checked_item_group_scenario();
         compare_item_group(&item_group, &item_group.expected_observation)
             .expect("identical item-group observation should compare");
+
+        let mapgen = checked_mapgen_scenario();
+        compare_mapgen(&mapgen, &mapgen.expected_observation)
+            .expect("identical mapgen observation should compare");
     }
 }

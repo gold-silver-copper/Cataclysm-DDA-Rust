@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 80,
-  "persistence_schema_version": 58,
+  "protocol_version": 81,
+  "persistence_schema_version": 59,
   "replay_format_version": 3,
-  "active_milestone": "item-groups",
+  "active_milestone": "mapgen-overmaps",
   "milestones": [
     {
       "id": "conformance-foundation",
@@ -25,9 +25,9 @@
       "state": "in_progress",
       "priority": 1,
       "depends_on": ["conformance-foundation"],
-      "upstream_sources": ["../Cataclysm-DDA/tests/cata_catch.h", "../Cataclysm-DDA/tests/test_main.cpp", "../Cataclysm-DDA/tests/fake_messages.cpp", "../Cataclysm-DDA/src/item_pocket.cpp", "../Cataclysm-DDA/src/item_pocket.h", "../Cataclysm-DDA/src/item_group.cpp", "../Cataclysm-DDA/src/item_factory.cpp"],
-      "rust_paths": ["crates/tools/src/cpp_oracle.rs", "tools/cpp-oracle/item_pocket_oracle_test.cpp", "tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-pocket-max-length-v1.json", "docs/oracles/item-group-generation-v1.json"],
-      "scenario_families": ["item-pocket-max-length", "item-group-generation", "movement-kernel", "combat-kernel"],
+      "upstream_sources": ["../Cataclysm-DDA/tests/cata_catch.h", "../Cataclysm-DDA/tests/test_main.cpp", "../Cataclysm-DDA/tests/fake_messages.cpp", "../Cataclysm-DDA/src/item_pocket.cpp", "../Cataclysm-DDA/src/item_pocket.h", "../Cataclysm-DDA/src/item_group.cpp", "../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/mapgen.cpp", "../Cataclysm-DDA/src/mapgen_functions.cpp"],
+      "rust_paths": ["crates/tools/src/cpp_oracle.rs", "tools/cpp-oracle/item_pocket_oracle_test.cpp", "tools/cpp-oracle/item_group_oracle_test.cpp", "tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/item-pocket-max-length-v1.json", "docs/oracles/item-group-generation-v1.json", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "scenario_families": ["item-pocket-max-length", "item-group-generation", "mapgen-static-semantics", "movement-kernel", "combat-kernel"],
       "differential_oracle": "active",
       "multiplayer_adaptation": "Compares normalized deterministic kernels; server authority, connection state, and persistent time are reported as explicit Rust adaptations.",
       "unlocks": ["generated characterization corpora", "pinned semantic drift detection"]
@@ -61,13 +61,13 @@
     {
       "id": "mapgen-overmaps",
       "title": "Overmaps, mapgen, palettes, starts, and spawn generation",
-      "state": "planned",
+      "state": "in_progress",
       "priority": 4,
       "depends_on": ["item-groups", "cpp-differential-oracle"],
-      "upstream_sources": ["../Cataclysm-DDA/src/mapgen.cpp", "../Cataclysm-DDA/src/overmap.cpp"],
-      "rust_paths": ["crates/content/src/lib.rs", "crates/sim/src/lib.rs"],
+      "upstream_sources": ["../Cataclysm-DDA/src/mapgen.cpp", "../Cataclysm-DDA/src/mapgen_functions.cpp", "../Cataclysm-DDA/src/overmap.cpp"],
+      "rust_paths": ["crates/content/src/mapgen.rs", "crates/content/src/region.rs", "crates/protocol/src/lib.rs", "crates/sim/src/mapgen.rs", "crates/sim/src/lib.rs", "crates/server/src/main.rs", "tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
       "scenario_families": ["seeded-overmap-generation", "palette-and-nested-mapgen", "start-location-spawns"],
-      "differential_oracle": "planned",
+      "differential_oracle": "active",
       "multiplayer_adaptation": "Chunks generate once from world-owned seeds, persist canonically, and replicate only server-authoritative visible state.",
       "unlocks": ["ordinary persistent world generation", "spawn groups", "scenario start locations"]
     },

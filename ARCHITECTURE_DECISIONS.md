@@ -2754,3 +2754,58 @@ Ammo and magazine dressing, damage/on-drop modifiers, container nesting, and
 charges applied to nested group targets are not represented by Protocol 80 and
 must reject admission. This boundary prevents the generic interpreter from
 claiming behavior that currently requires deeper item-content semantics.
+
+## Canonical atomic mapgen discovery
+
+Protocol 81 advances to schema 59 and CanonicalStateV57 while retaining
+CanonicalEventsV18. The canonical world stores a bounded normalized worldgen
+catalog rather than an opaque process-local loader or a single flat-terrain
+prototype. It contains concrete terrain/furniture prototypes, regional
+substitution tables, weighted OMT templates, exactly 576 cells per template,
+and optional named item-group placements. IDs and tables are sorted and indexed
+explicitly; validation bounds every aggregate and requires the exact reachable
+item-group closure. A persisted world is therefore self-contained and does not
+silently change when runtime content loading changes.
+
+One CDDA overmap terrain cell owns exactly four canonical 12x12 submaps. The
+server plans and commits the complete 2x2-submap/24x24 cell as one unit and
+rejects any snapshot or live discovery that contains only some siblings.
+Generation uses a named ChaCha8 stream derived from world seed, generator
+version, OMT coordinates, z-level, and OMT identity—not simulation tick or
+traversal order. Template selection, terrain glyph choices, furniture glyph
+choices, item chance/group evaluation, and then tile-ordered regional terrain
+and furniture resolution consume that stream in explicit phases. Template and
+regional-table selection remain weighted calls and consume a draw even with
+one candidate; fixed cell targets do not. A guaranteed 100-percent item
+placement consumes no outer chance draw before its item group. Loot is
+planned before mutation, checked for passable placement, bounded to one stable
+ID reservation, and preflighted against the allocator before chunks or objects
+are committed. Catalog admission also proves the worst-case output of every
+selectable template across the maximum 36-OMT active-bubble discovery fits that
+reservation, so an accepted world cannot become permanently ungeneratable at a
+discovery boundary.
+
+The strict content layer retains ordinary string/flat-array OMT roots, exact
+24x24 Unicode display-cell rows (including base-plus-combining sequences),
+positive variant weights, fixed/weighted terrain and
+furniture glyphs, repeated static-palette expansion, default regional tables,
+and one named item-group placement per glyph. Unsupported positive-weight
+variants fail closed instead of being omitted. Runtime worldgen v1 additionally
+rejects multi-layer glyphs, weighted one-time fill, recursive regional targets,
+and one-entry weighted choices whose RNG phase cannot be retained. These
+definitions remain available in the content report for the next semantic
+version. Successful definitions and unavailable reports are shared across OMT
+indices, and aggregate assignment limits bound expansion independently of the
+raw-root limit.
+
+Fresh servers currently repeat the real pinned `lmoe` surface mapgen and
+resolve its `t_region_groundcover` pseudo terrain through the default region,
+creating 36 complete OMTs/144 chunks in the initial active bubble. This is a
+deliberate bootstrap, not an approximation of the upstream overmap: terrain
+layout, start locations, nested/update mapgen, parameters, zones, specials,
+populations, vehicles, monsters, and multiple z-levels remain unavailable. The
+ordinary `field` definition is also unavailable to the server until its
+`everyday_corpse` closure can preserve item damage and general container
+nesting. A development-only pinned C++ oracle locks OMT matching and rotation,
+point rotation, and static palette/nested phase order without entering the
+shipped Rust runtime.

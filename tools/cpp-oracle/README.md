@@ -25,15 +25,23 @@ than, equal to, and longer than a fixed container maximum. The item-group kernel
 uses the real `Item_group`, `Single_item_creator`, and `Item_modifier` paths to
 cover collection order and roll consumption, all distribution interval
 boundaries, fixed and ranged count/charges, and nested groups sharing one RNG
-stream. Run it with:
+stream. The static mapgen kernel covers exact/type/subtype/prefix/contains OMT
+matching, rotatable and linear OMT routing, 24x24 coordinate rotation, palette
+piece phases, and successful setup of a one-cell nested JSON mapgen. Run them
+with:
 
 ```sh
 cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json
+cargo xtask cpp-oracle-check docs/oracles/mapgen-static-semantics-v1.json
 ```
 
 Seed values used to reach range boundaries are deliberately omitted from the
 observation. The adapter finds them within a fixed search bound, then emits only
 normalized semantic results, ordered traces, and downstream RNG-state equality.
+The static mapgen kernel contains no random choices or seed-dependent expected
+values. It intentionally does not call full overmap generation, whose standard
+library distributions and shuffles are not portable semantic fixtures between
+macOS and Linux.
 
 This remains a bounded bootstrap, not a general C++ RPC service: adding a kernel
 requires a new versioned scenario/observation shape and explicit C++ adapter
