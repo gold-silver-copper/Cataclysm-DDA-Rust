@@ -6,9 +6,11 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 - Verified green commit: `761962583d359c0992af3d6a4d1ec10c41a30905`
   (`Preserve item group modifier phases`).
-- Checkpoint binding: this docs-only commit binds the reviewed implementation
-  above; no later subsystem is in progress.
-- Active milestone: `regional-terrain-base`.
+- Checkpoint binding: the current protocol-domain extraction is a candidate
+  based on the exact verified implementation above; it is not yet a
+  green checkpoint and no later subsystem is in progress.
+- Active milestone: `regional-terrain-base`; active prerequisite:
+  `protocol-domain-modules` item-group ownership extraction.
 - Runtime: protocol 85, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 63, replay format 3, CanonicalStateV61, and
   CanonicalEventsV18.
@@ -135,6 +137,14 @@ authoritative and retains deterministic multiplayer fallback.
   the required `pub(super)` visibility, the old and new function bodies are
   textually identical. The binary root falls from 6,565 to 6,240 lines; the
   focused module is 349 lines. No runtime representation or behavior changes.
+- The protocol extraction moves the complete item-group wire DTO, bounds,
+  graph evaluator, and validation domain into `protocol/item_groups.rs` while
+  retaining every existing crate-root public path through re-exports. The
+  424-line evaluator/validation block is textually identical after normalizing
+  only the required `pub(super)` closure-check visibility. `protocol/lib.rs`
+  falls from 8,532 to 8,008 lines and the focused module is 541 lines. Field,
+  variant, and derive order are unchanged, so protocol 85, schema 63, replay 3,
+  CanonicalStateV61, and all canonical hash domains remain unchanged.
 - Runtime evidence remains four admitted definitions
   through generation, authoritative interaction, persistence, and client
   access: 44 points. Exact production definitions receive
@@ -192,19 +202,32 @@ validated and resolved all findings, and found no remaining P0-P3 issue. The
 durable scoped record is
 `docs/reviews/protocol-85-item-modifier-presence.md`.
 
+The protocol-domain candidate passes the complete 30-test protocol
+suite, formatting, strict all-target/all-feature Clippy, rustdoc with warnings
+denied, workspace all-target/all-feature check, the full 338-test workspace
+suite, and doc-tests. Dependency-boundary, parity-ledger, weighted-runtime,
+astronomy, selected-content manifest, generated-inventory, JSON, and diff gates
+pass. The 424-line moved evaluator/validation block is textually identical
+after normalizing only its required parent visibility, and the pinned C++
+pocket/item-group/mapgen oracles pass 8/42/17 assertions. It does not replace
+the verified commit above until independent review is complete.
+
 ## Next dependency boundary
 
 The central-file split is now an explicit prerequisite DAG rather than an
 informal cleanup task. Current ownership surfaces are about 28.6K lines in
-simulation `lib.rs`, 8.4K in protocol, 13K in persistence, 6.3K in the server
+simulation `lib.rs`, 8.0K in protocol, 13K in persistence, 6.3K in the server
 binary root, and 8.8K in the server library. Item-group planning and the
 canonical item instance live in `sim/items.rs`; server item-group normalization
-now lives in `server/item_groups.rs`. Shared item-prototype conversion remains
-parent-owned, while simulation validators, materialization/conversion helpers,
-ownership transfers, and item-bound activities remain incremental extraction
-boundaries. The ledger separately tracks actor, combat, activity, monster,
-canonical-state, protocol-domain, persistence-domain, and session/replication
-extractions. Anatomy and EOC expansion depend on the relevant boundaries.
+now lives in `server/item_groups.rs`; protocol item-group DTOs, bounds, and
+validation now live in `protocol/item_groups.rs`. Shared item-prototype
+conversion remains parent-owned, while simulation validators,
+materialization/conversion helpers, ownership transfers, item-bound activities,
+and the remaining command/state/event protocol domains remain incremental
+extraction boundaries. The ledger separately tracks actor, combat, activity,
+monster, canonical-state, protocol-domain, persistence-domain, and
+session/replication extractions. Anatomy and EOC expansion depend on the
+relevant boundaries.
 
 Finish the coherent item-group modifier/contained-item family needed by the
 pinned `field` closure. The next exact content dependency is general
@@ -218,6 +241,6 @@ exact and green.
 Protocol 85/schema 63 is the fixed-zero modifier-presence batch. Batch the
 remaining item-state damage/variant representation with its persistence changes,
 and batch general containment separately; do not bump versions for mechanical
-module moves or unchanged encodings. Extract the protocol item-group domain
-before expanding that representation further so the 8.4K-line protocol root
-does not keep growing.
+module moves or unchanged encodings. The item-group protocol ownership
+prerequisite is implemented in this candidate and must be green and reviewed
+before that representation expands.
