@@ -4,13 +4,12 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `de09724a27064d293041ce1cf4df5e458ac403a7`
-  (`Extract protocol item group domain`). The Protocol 86 worktree is not yet
-  checkpoint-bound.
+- Verified green commit: `cc34f40d79f9323f395643b7fa4c3d23127eb9e7`
+  (`Represent exact item damage and variants`).
 - Active milestone: `regional-terrain-base`. Protocol item-group ownership and
   simulation item-instance ownership are extracted; the broader protocol and
   simulation item module milestones remain in progress.
-- Worktree representation: protocol 86, worldgen algorithm 2, persistence
+- Checkpoint representation: protocol 86, worldgen algorithm 2, persistence
   schema/minimum recoverable schema 64, replay format 3, CanonicalStateV62, and
   CanonicalEventsV18.
 - Conformance: scenario 7 and observation 6.
@@ -48,7 +47,7 @@ terrain/furniture/item rotation, matching start selection, durable chunks, and
 ordinary blocked layout edges are implemented. The real default `field` layer
 is not admitted until its entire loot/containment closure is exact.
 
-## Active Protocol 86 family
+## Protocol 86 family
 
 - ITEM content normalization finalizes source-ordered generic variants through
   replacement, inheritance, `extend`, and `delete`. Missing or empty alternate
@@ -102,7 +101,7 @@ earn no points yet because the current playable LMOE mapgen does not place
 them. Parser inventory remains separate: 7,621 item groups, 9,520 mapgen
 objects, 2,712 OMTs, and 150 starts earn no runtime credit merely for loading.
 
-Current ownership sizes are 28,696 lines in `sim/lib.rs`, 1,151 in
+Current ownership sizes are 28,696 lines in `sim/lib.rs`, 1,150 in
 `sim/items.rs`, 8,180 in `protocol/lib.rs`, 640 in
 `protocol/item_groups.rs`, 13,058 in persistence, 8,776 in the server library,
 6,377 in the server binary root, and 665 in server item-group normalization.
@@ -129,7 +128,8 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Latest verification
 
-The Protocol 86 implementation candidate passes formatting, all-target
+The exact verified commit `cc34f40d79f9323f395643b7fa4c3d23127eb9e7`
+passes formatting, all-target
 workspace checking, strict Clippy, 346 workspace tests, doc-tests, and
 warning-free rustdoc. All six dependency/parity/progress/astronomy/content
 gates pass; runtime progress remains four definitions and 44 points. The three
@@ -138,8 +138,9 @@ production content test confirms exactly 524 admitted furniture bashes. A
 fresh full-diff review against `f882a5d46e8d27163399b97c5ffaf6f0bda67320`
 found and resolved charge/dressing order, variant fallback/`<any>`, float32
 corpse damage, bounds, duplicate-validation complexity, and stale-documentation
-issues; its final pass found no remaining P0/P1. Checkpoint binding is the only
-remaining step.
+issues; its final pass found no remaining P0/P1. The bound runtime record names
+this exact implementation, and the durable review record is
+[docs/reviews/protocol-86-item-damage-variants.md](docs/reviews/protocol-86-item-damage-variants.md).
 
 The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
@@ -147,11 +148,11 @@ The fixed upstream checkout remains
 
 ## Next dependency boundary
 
-Finish and checkpoint the Protocol 86 damage/variant family without beginning
-another subsystem. Then implement generalized `contents-group` and wrapper
-ownership in the extracted item modules, with nested stable IDs and explicit
-overflow. Require a pinned exact characterization, generalized engine,
+Resume `regional-terrain-base` by implementing generalized `contents-group` and
+wrapper ownership in the extracted item modules, with nested stable IDs and
+explicit overflow. Require a pinned exact characterization, generalized engine,
 direct-comparison disposition, all four recovery modes, runtime admission, and
 ordinary server/client access before replacing the LMOE production fill with
 the real field base. Forest/city/road/river/special placement begins only after
-that base is exact and green.
+that base is exact and green; anatomy and EOCs remain behind the listed
+modularization milestones.
