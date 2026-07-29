@@ -4,8 +4,8 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `0552ce841fd50dd48789b700170ddce9154284fb`
-  (`Implement generalized item containment family`).
+- Verified green commit: `37bb6f473153d3dc320f055c5ae35330b48b38a1`
+  (`Address mapgen checkpoint review findings`).
 - Active milestone: `regional-terrain-base`. The three runnable mapgen/overmap
   families now have their reusable direct Rust-to-C++ comparator and complete
   six-part evidence; field admission resumes at the retained tool-charge
@@ -86,8 +86,8 @@ is not admitted until its entire loot/containment closure is exact.
 
 ## Measured progress
 
-Runtime evidence remains four core definitions and 44 weighted points. Each counted
-definition is generated, authoritatively interacted with, persisted, and
+Runtime evidence remains four core definitions and 44 weighted points. Each
+counted definition is generated, authoritatively interacted with, persisted, and
 client-accessible. No production definition receives four-mode credit from a
 normalized semantic substitute. The three newly normalizable furniture bashes
 earn no points yet because the current playable LMOE mapgen does not place
@@ -148,27 +148,43 @@ mechanical extraction milestones before anatomy or EOC expansion.
 ## Latest verification
 
 The exact verified implementation commit
-`0552ce841fd50dd48789b700170ddce9154284fb`, parent
-`2a3ab9d42b61e0ed90d167650bfb1ee2e2512277`, passes formatting, all-target
+`37bb6f473153d3dc320f055c5ae35330b48b38a1`, parent
+`6da2b7a21fa5f595c596fefa7535cf2a1f5a116e`, passes formatting, all-target
 workspace checking, strict Clippy, 373 workspace tests plus doc-tests, and
 warning-free rustdoc. All six dependency/parity/progress/astronomy/content
 gates pass; runtime progress remains four definitions and 44 points. The three
-pinned C++ oracles pass 8 pocket, 65 item-group, and 17 mapgen assertions. The
+pinned C++ oracles pass 8 pocket, 65 item-group, and 1,179 mapgen assertions. The
 production content test confirms exactly 524 admitted furniture bashes and the
 7,992-file manifest hash
 `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
 
-An independent fresh-context review used detached worktree
-`/tmp/cdda-item-group-final.R8yg77` and fixed tree
-`372f320a7123ae7c54b926f4bcbbc95aecb669d1`. It reproduced stable patch ID
-`fec84981a56457fd6a4ae0bcc4a4540bb36c592c`, reviewed all 24 changed files, and
-found no remaining P0-P3 issue. Confirmed review findings corrected rigid E-file
-validation, the legitimate fractional loose-battery state, and consistency
-between recipe, containment, prototype, and reconstructed snapshot
-count-by-charge metadata. The exact review scope, earlier findings and
-resolutions, rejected concerns, verification, and residual risks are recorded
-in
-[docs/reviews/protocol-87-item-containment.md](docs/reviews/protocol-87-item-containment.md).
+The comparator loads the pinned production OMT and start-location registries,
+runs the Rust 24x24 `WorldState` generator, and compares eight match witnesses,
+eight concrete rotatable/linear identities, every cell in an exact 24-row
+terrain/furniture trace, and the production `sloc_lmoe` target, constraints,
+fixed candidates, matching subset, and selected candidate with C++. It exposed
+and corrected the stale assumption that a linear peer rotates by the requested
+compass label: concrete `road_ns` uses rotation 0, and `road_ew` uses rotation
+3. Multiplayer occupied-tile fallback remains a Rust-specific adaptation and
+is proven through direct, per-tick snapshot, SQLite, and portable replay.
+
+The first exact-commit review of `6da2b7a21fa5f595c596fefa7535cf2a1f5a116e`
+confirmed one P1 and two P2 findings: the start milestone lacked a real start
+observation, synthetic conformance definitions had been awarded production
+four-mode credit, and a manifested 16-byte translation fixture was ignored by
+the repository. The review/fix commit adds the direct production start
+observation, restores the honest 44-point score, and force-tracks the exact
+upstream `INVALID_RAND.mo` fixture.
+
+The final independent review used clean detached worktree
+`/tmp/cdda-mapgen-final-review.9F0RwO`, fixed tree
+`4551187dfc6992ee63ff11d5d6dbde8bef0dc17a`, cumulative patch ID
+`7a7d1fdfac24417e73215cda94f07b245b07e2a8`, and review/fix patch ID
+`406ced6df0b58daf20cd4f7e67f2c1ae369a9625`. It reviewed the complete 12-file
+family diff and 9-file fix delta, reproduced the pristine content and direct
+oracle gates, and found no remaining P0-P3 issue. Scope, findings, resolutions,
+verification, rejected concerns, and residual limitations are recorded in
+[docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
 
 The only checked canonical fixture hash changed from
 `8f8710e06937a50c14bcad35a17dbc41a059128061f4be9316c4c6449358dc66` to
@@ -182,27 +198,6 @@ reproduce this representation.
 The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
 `210f31db2e8b2f0caed1809f1a66781859f9d129`.
-
-The active comparator candidate adds no wire or persistence representation. Its
-generic exact comparator loads pinned production OMT identities, runs the Rust
-24x24 `WorldState` generator, and compares 8 matching cases, 8 concrete
-rotatable/linear identities, one generated terrain/furniture template, and the
-production `sloc_lmoe` target/candidate boundary with the C++ output. Its
-checked trace covers every one of the 576 generated cells, and the C++ test
-passes 1,179 assertions. This direct cycle exposed and
-fixed three stale linear marker expectations: the concrete `road_ns` and
-`road_ew` identities rotate by 0 and 3 respectively, not by the compass label
-used to request a peer. The existing heterogeneous start scenario supplies
-direct, per-tick snapshot, SQLite, and portable-replay evidence for all three
-families; occupied-tile fallback remains the documented multiplayer adaptation.
-The exact 16-byte manifested `INVALID_RAND.mo` test fixture is now force-tracked
-despite its upstream nested ignore rule, so a pristine checkout can load the
-production registry after the C++ run.
-Runtime progress is deliberately unbound until the implementation is
-committed and reviewed as a fixed tree. The candidate leaves `sim/lib.rs` at
-29,339 lines and `protocol/lib.rs` at 9,722; its Rust implementation growth is
-owned entirely by `crates/tools/src/cpp_oracle.rs` and the tools-only direct
-simulation dependency.
 
 ## Next dependency boundary
 
