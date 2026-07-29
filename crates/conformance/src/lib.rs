@@ -7,10 +7,10 @@ use cdda_persistence::{
     StoreError, WorldStore,
 };
 use cdda_protocol::{
-    ActorConnectionUpdateV1, ActorId, CharacterCreationStatsV1, ChunkCoord, ClientCommand,
-    CommandKind, CommandSequence, ContentIdentity, IntegralMagazinePocketPrototypeV1, ItemId,
-    MagazineWellPrototypeV1, PoweredToolStateV1, RangedWeaponSnapshot, SimTick, WorldEvent,
-    WorldPosition, WorldSnapshotV1,
+    ActorConnectionUpdateV1, ActorId, AmmunitionContainerPocketPrototypeV1,
+    CharacterCreationStatsV1, ChunkCoord, ClientCommand, CommandKind, CommandSequence,
+    ContentIdentity, IntegralMagazinePocketPrototypeV1, ItemId, MagazineWellPrototypeV1,
+    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, WorldEvent, WorldPosition, WorldSnapshotV1,
 };
 use cdda_sim::{
     Chunk, ID_RESERVATION_SIZE, ItemSpawn, ReservedIdBlock, SimError, WorldState,
@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use cdda_protocol::WorldEventKind;
 
-pub const SCENARIO_FORMAT_VERSION: u16 = 4;
-pub const OBSERVATION_FORMAT_VERSION: u16 = 3;
+pub const SCENARIO_FORMAT_VERSION: u16 = 5;
+pub const OBSERVATION_FORMAT_VERSION: u16 = 4;
 const MAX_ALIASES: usize = 512;
 const MAX_ALIAS_BYTES: usize = 64;
 const MAX_CHUNKS: usize = 121;
@@ -75,6 +75,7 @@ pub struct ScenarioItemV1 {
     pub magazine_capacity: u32,
     pub integral_magazines: Vec<IntegralMagazinePocketPrototypeV1>,
     pub magazine_wells: Vec<MagazineWellPrototypeV1>,
+    pub ammunition_containers: Vec<AmmunitionContainerPocketPrototypeV1>,
     pub residual_energy_millijoules: u32,
     pub powered_tool: Option<PoweredToolStateV1>,
 }
@@ -120,6 +121,11 @@ pub enum ScenarioCommandV1 {
         owner_item: String,
         pocket_index: u16,
         contained_item: String,
+    },
+    InsertPocketItem {
+        owner_item: String,
+        pocket_index: u16,
+        source_item: String,
     },
     Wait,
 }
@@ -544,7 +550,22 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
             ammunition_type: item.ammunition_type.clone(),
             ranged_weapon: item.ranged_weapon.clone(),
         };
-        let id = if item.integral_magazines.is_empty() {
+        let id = if !item.ammunition_containers.is_empty() {
+            if item.magazine_capacity != 0
+                || !item.integral_magazines.is_empty()
+                || !item.magazine_wells.is_empty()
+                || item.residual_energy_millijoules != 0
+                || item.powered_tool.is_some()
+            {
+                return Err(ConformanceError::InvalidScenario(
+                    "ammunition-container fixtures cannot mix storage families",
+                ));
+            }
+            world.spawn_ground_item_with_ammunition_containers(
+                spawn,
+                item.ammunition_containers.clone(),
+            )?
+        } else if item.integral_magazines.is_empty() {
             world.spawn_ground_item_with_powered_magazine_wells(
                 spawn,
                 item.magazine_capacity,
@@ -612,6 +633,15 @@ fn resolve_command(
             owner_item: item_id(owner_item)?,
             pocket_index: *pocket_index,
             contained_item: item_id(contained_item)?,
+        },
+        ScenarioCommandV1::InsertPocketItem {
+            owner_item,
+            pocket_index,
+            source_item,
+        } => CommandKind::InsertPocketItem {
+            owner_item: item_id(owner_item)?,
+            pocket_index: *pocket_index,
+            source_item: item_id(source_item)?,
         },
         ScenarioCommandV1::Wait => CommandKind::Wait,
     })
@@ -806,7 +836,7 @@ fn scenario_event_trace_hash(
 ) -> Result<[u8; 32], ConformanceError> {
     let encoded = postcard::to_stdvec(event_batches)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"CddaScenarioEventsV4\0");
+    hasher.update(b"CddaScenarioEventsV5\0");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -847,6 +877,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             }],
@@ -881,14 +912,14 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x71, 0x4d, 0x44, 0x8d, 0xda, 0x9a, 0x36, 0x0f, 0x26, 0xaf, 0xe7, 0x09, 0xbb,
-                    0xac, 0x8b, 0x3b, 0xe5, 0x18, 0xe3, 0x38, 0x6c, 0xa6, 0xee, 0x33, 0x8b, 0xb4,
-                    0x8f, 0x13, 0x88, 0xe6, 0xe0, 0xce,
+                    0x54, 0xcb, 0xf9, 0x04, 0xb7, 0xed, 0x19, 0x16, 0x39, 0x16, 0x49, 0x18, 0x1b,
+                    0xef, 0xdf, 0x70, 0x66, 0x17, 0x43, 0xb2, 0xf4, 0x67, 0xf8, 0xb6, 0x3d, 0xdb,
+                    0xb1, 0xa6, 0x0c, 0xa4, 0x6a, 0xb1,
                 ],
                 event_trace_hash: [
-                    0x7e, 0xd8, 0x14, 0x0b, 0xfd, 0x64, 0x35, 0x18, 0x0b, 0xc8, 0x94, 0xcb, 0x1d,
-                    0xc2, 0x85, 0x71, 0x2e, 0x83, 0x8c, 0xf5, 0x04, 0xb1, 0x77, 0x16, 0x14, 0x0c,
-                    0x78, 0x43, 0xba, 0xdb, 0x6f, 0xa3,
+                    0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
+                    0x07, 0x4a, 0x20, 0xcc, 0xee, 0x48, 0xcd, 0xa0, 0x5d, 0xba, 0xcf, 0x69, 0x3d,
+                    0x95, 0xd3, 0x93, 0x3d, 0x31, 0x28,
                 ],
                 actors: vec![ScenarioActorExpectationV1 {
                     actor: String::from("survivor"),
@@ -910,6 +941,7 @@ mod tests {
     fn item_flow_is_identical_across_all_conformance_modes() {
         let observation = verify_scenario(&item_flow_scenario())
             .expect("item scenario should conform across every mode");
+        assert_eq!(observation.format_version, OBSERVATION_FORMAT_VERSION);
         let actor = observation
             .final_snapshot
             .actors
@@ -948,6 +980,7 @@ mod tests {
             magazine_capacity,
             integral_magazines: Vec::new(),
             magazine_wells,
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool,
         };
@@ -1169,6 +1202,7 @@ mod tests {
                         unloadable: true,
                     }],
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -1186,6 +1220,7 @@ mod tests {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -1311,6 +1346,226 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn ammunition_containers_are_identical_across_recovery_and_replay() {
+        let position = WorldPosition { x: 1, y: 1, z: 0 };
+        let ordinary =
+            |alias: &str, type_id: &str, charges: i32, ammunition_type: &str| ScenarioItemV1 {
+                alias: alias.to_owned(),
+                position,
+                type_id: type_id.to_owned(),
+                charges,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: ammunition_type.to_owned(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                integral_magazines: Vec::new(),
+                magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            };
+        let quiver = || {
+            let mut item = ordinary("quiver", "quiver", 1, "");
+            item.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: 2,
+                pocket_id: String::from("QUIVER"),
+                capacities: vec![
+                    cdda_protocol::AmmunitionCapacityV1 {
+                        ammunition_type: String::from("arrow"),
+                        capacity: 6,
+                    },
+                    cdda_protocol::AmmunitionCapacityV1 {
+                        ammunition_type: String::from("bolt"),
+                        capacity: 4,
+                    },
+                ],
+                rigid: false,
+                access_moves: 20,
+                reloadable: true,
+                unloadable: true,
+            }];
+            item
+        };
+        let scenario = |world_namespace: u64,
+                        ground_items: Vec<ScenarioItemV1>,
+                        commands: Vec<ScenarioCommandV1>| {
+            let mut steps = Vec::new();
+            for command in commands {
+                steps.push(ScenarioStepV1::Command {
+                    actor: String::from("survivor"),
+                    command,
+                });
+                steps.push(ScenarioStepV1::Advance { ticks: 25 });
+            }
+            ScenarioV1 {
+                format_version: SCENARIO_FORMAT_VERSION,
+                protocol_version: cdda_protocol::PROTOCOL_VERSION,
+                persistence_schema_version: SCHEMA_VERSION,
+                replay_format_version: REPLAY_FORMAT_VERSION,
+                baseline_commit: String::from(cdda_protocol::BASELINE_COMMIT),
+                world_namespace,
+                world_seed: [21; 32],
+                content_manifest_hash: [22; 32],
+                enabled_mods: vec![String::from("dda")],
+                chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+                actors: vec![ScenarioActorV1 {
+                    alias: String::from("survivor"),
+                    position,
+                    connected: true,
+                    stats: CharacterCreationStatsV1::default(),
+                }],
+                ground_items,
+                steps,
+                expected: ScenarioExpectationV1 {
+                    final_tick: SimTick(0),
+                    final_state_hash: [0; 32],
+                    event_trace_hash: [0; 32],
+                    actors: Vec::new(),
+                    ground_items: Vec::new(),
+                    event_batches: None,
+                },
+            }
+        };
+        let assert_all_modes = |scenario: &ScenarioV1| {
+            let direct = run_scenario(scenario, ScenarioMode::Direct)
+                .expect("container scenario should run directly");
+            for mode in [
+                ScenarioMode::SnapshotEachTick,
+                ScenarioMode::SqliteRecovery,
+                ScenarioMode::PortableReplay,
+            ] {
+                assert_eq!(
+                    run_scenario(scenario, mode).expect("container scenario should replay"),
+                    direct,
+                    "{mode} must preserve container state and events"
+                );
+            }
+            direct
+        };
+
+        let partial = scenario(
+            903,
+            vec![quiver(), ordinary("arrows", "arrow_wood", 10, "arrow")],
+            vec![
+                ScenarioCommandV1::PickUp {
+                    item: String::from("quiver"),
+                },
+                ScenarioCommandV1::PickUp {
+                    item: String::from("arrows"),
+                },
+                ScenarioCommandV1::InsertPocketItem {
+                    owner_item: String::from("quiver"),
+                    pocket_index: 2,
+                    source_item: String::from("arrows"),
+                },
+            ],
+        );
+        let direct = assert_all_modes(&partial);
+        let actor = direct.final_snapshot.actors.first().expect("actor remains");
+        let quiver_item = actor
+            .inventory
+            .iter()
+            .find(|item| item.type_id == "quiver")
+            .expect("quiver remains");
+        let source = actor
+            .inventory
+            .iter()
+            .find(|item| item.type_id == "arrow_wood")
+            .expect("partial source remains");
+        let nested = &quiver_item.ammunition_containers[0].contents[0];
+        assert_eq!((nested.charges, source.charges), (6, 4));
+        assert_ne!(nested.id, source.id);
+        assert!(direct.event_batches.iter().any(|batch| {
+            batch.events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    WorldEventKind::AmmunitionInsertedIntoContainer {
+                        transferred: 6,
+                        pocket_ammunition: 6,
+                        source_charges_remaining: 4,
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let category_switch = scenario(
+            904,
+            vec![
+                quiver(),
+                ordinary("wood", "arrow_wood", 2, "arrow"),
+                ordinary("metal", "arrow_metal", 4, "arrow"),
+                ordinary("bolts", "bolt_wood", 3, "bolt"),
+            ],
+            vec![
+                ScenarioCommandV1::PickUp {
+                    item: String::from("quiver"),
+                },
+                ScenarioCommandV1::PickUp {
+                    item: String::from("wood"),
+                },
+                ScenarioCommandV1::PickUp {
+                    item: String::from("metal"),
+                },
+                ScenarioCommandV1::PickUp {
+                    item: String::from("bolts"),
+                },
+                ScenarioCommandV1::InsertPocketItem {
+                    owner_item: String::from("quiver"),
+                    pocket_index: 2,
+                    source_item: String::from("wood"),
+                },
+                ScenarioCommandV1::InsertPocketItem {
+                    owner_item: String::from("quiver"),
+                    pocket_index: 2,
+                    source_item: String::from("metal"),
+                },
+                ScenarioCommandV1::RemovePocketItem {
+                    owner_item: String::from("quiver"),
+                    pocket_index: 2,
+                    contained_item: String::from("wood"),
+                },
+                ScenarioCommandV1::RemovePocketItem {
+                    owner_item: String::from("quiver"),
+                    pocket_index: 2,
+                    contained_item: String::from("metal"),
+                },
+                ScenarioCommandV1::InsertPocketItem {
+                    owner_item: String::from("quiver"),
+                    pocket_index: 2,
+                    source_item: String::from("bolts"),
+                },
+            ],
+        );
+        let direct = assert_all_modes(&category_switch);
+        let actor = direct.final_snapshot.actors.first().expect("actor remains");
+        let pocket = &actor
+            .inventory
+            .iter()
+            .find(|item| item.type_id == "quiver")
+            .expect("quiver remains")
+            .ammunition_containers[0];
+        assert_eq!(pocket.contents.len(), 1);
+        assert_eq!(pocket.contents[0].type_id, "bolt_wood");
+        assert_eq!(pocket.contents[0].charges, 3);
+        assert!(
+            actor
+                .inventory
+                .iter()
+                .any(|item| item.type_id == "arrow_wood" && item.charges == 2)
+        );
+        assert!(
+            actor
+                .inventory
+                .iter()
+                .any(|item| item.type_id == "arrow_metal" && item.charges == 4)
+        );
     }
 
     #[test]

@@ -16,7 +16,9 @@ guarantees while accelerating toward generalized subsystem parity. The active
 machine-readable milestone is item containment: inherited pocket definitions
 are retained losslessly and strict magazine/well admission is generalized
 through ordered detachable wells and strict item-backed integral magazine
-pockets. General container contents are the next containment boundary.
+pockets plus strict ammunition-restricted containers. General physical
+containers remain blocked on item dimensions and recursive carry physics;
+deterministic item-group generation is the next accelerated subsystem.
 
 ## Runnable behavior
 
@@ -56,6 +58,15 @@ pockets. General container contents are the next containment boundary.
   scenario format 4/observation format 3 cover whole-stack removal through all
   four execution/recovery modes. Pre-56 serialized state rejects before
   mutation.
+- Protocol 79/schema 57/CanonicalStateV55/CanonicalEventsV18 add strict
+  ammunition-restricted `CONTAINER` pockets without claiming general physical
+  containment. Pinned quivers retain sorted category capacities, inherited
+  index/ID, base access moves, rigidity, and access flags. Authoritative `I`
+  insertion and `Y` removal preserve stable IDs across whole, partial, merge,
+  multi-variant, and category-switch paths; invalid capacity/category/access
+  requests are atomic. The starter cabin supplies a quiver and wooden arrows,
+  while scenario format 5/observation format 4 proves direct/snapshot/SQLite/portable-replay
+  equivalence. Pre-57 serialized state rejects before mutation.
 - Protocol 77/schema 55/CanonicalStateV53/CanonicalEventsV16 add strict
   item-backed integral MAGAZINE pockets to Protocol 76's ordered detachable
   wells. Whole-stack reload preserves the source ID; partial transfer into an
@@ -1760,7 +1771,12 @@ Run on Apple-silicon macOS on 2026-07-28:
   across lossless unload/reload. Access, stale-ID, active-power, and capacity
   failures are atomic; CanonicalStateV54/CanonicalEventsV17, schema-56 recovery,
   and direct/snapshot/SQLite/portable-replay conformance cover the boundary.
-  General container contents remain the next containment boundary.
+  Ammunition-restricted containers remain the next containment boundary.
+- Protocol 79 adds that ammunition-restricted container boundary with strict
+  pinned quiver projection, stable-ID partial/whole insertion, same-category
+  multi-variant contents, exact removal, category switching, access-move cost,
+  CanonicalStateV55/CanonicalEventsV18, schema-57 recovery, and four-mode
+  conformance. General physical containers remain fail-closed.
 
 ## Next tasks
 

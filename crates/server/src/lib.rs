@@ -4881,6 +4881,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             actor_id: event_actor,
             ..
         }
+        | WorldEventKind::AmmunitionInsertedIntoContainer {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::PocketItemRemoved {
             actor_id: event_actor,
             ..
@@ -5190,6 +5194,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -5244,6 +5249,7 @@ mod tests {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -5379,6 +5385,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         });
@@ -6416,11 +6423,13 @@ mod tests {
                     magazine_capacity: 2,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
                 })),
             }],
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: Some(cdda_protocol::PoweredToolStateV1 {
                 inactive_type_id: String::from("wizard_cane_cheap"),
@@ -6529,11 +6538,13 @@ mod tests {
                         magazine_capacity: 56,
                         integral_magazines: Vec::new(),
                         magazine_wells: Vec::new(),
+                        ammunition_containers: Vec::new(),
                         residual_energy_millijoules: 998_440,
                         powered_tool: None,
                         creature_corpse: None,
                     })),
                 }],
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: Some(cdda_protocol::PoweredToolStateV1 {
                     inactive_type_id: String::from("flashlight"),

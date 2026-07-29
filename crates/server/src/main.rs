@@ -19,15 +19,16 @@ use cdda_persistence::{
     ReplayArchiveCursor, ReplayBundleV1, SCHEMA_VERSION, SnapshotObjectV1, WorldStore,
 };
 use cdda_protocol::{
-    ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, BASELINE_COMMIT,
-    BashDropPrototypeV1, BashFieldEffectV1, BookStudyV1, ChunkCoord, ConstructionRecipeV1,
-    ConstructionResultV1, ContentIdentity, CraftBookRequirementV1, CraftByproductV1,
-    CraftComponentRequirementV1, CraftItemPrototypeV1, CraftProficiencyV1, CraftQualityProviderV1,
-    CraftQualityRequirementV1, CraftRecipeV1, CraftSkillRequirementV1, CraftToolRequirementV1,
-    CreatureCorpsePrototypeV1, CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1,
-    DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1,
-    FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN, IntegralMagazinePocketPrototypeV1,
-    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS,
+    ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, AmmunitionCapacityV1,
+    AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, BashDropPrototypeV1, BashFieldEffectV1,
+    BookStudyV1, ChunkCoord, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
+    CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
+    CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
+    CraftSkillRequirementV1, CraftToolRequirementV1, CreatureCorpsePrototypeV1,
+    CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1, DisassemblyRecipeV1,
+    ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
+    FurnitureTileSnapshot, GAME_ALPN, IntegralMagazinePocketPrototypeV1, LocalTileCoord,
+    MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS,
     MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL,
     MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1, RangedWeaponSnapshot, SimTick,
     SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, adjusted_book_study_time_moves,
@@ -790,6 +791,41 @@ fn open_world(
                 ranged_weapon: None,
             })?;
         }
+        let quiver = items
+            .get("quiver")
+            .ok_or("pinned default content has no starter quiver")?;
+        let quiver_containers = runtime_ammunition_containers(quiver);
+        if quiver_containers.is_empty() {
+            return Err("pinned starter quiver has no strict ammunition container".into());
+        }
+        world.spawn_ground_item_with_ammunition_containers(
+            ItemSpawn {
+                position: spawn_position,
+                type_id: quiver.id.clone(),
+                charges: default_instance_charges(quiver),
+                melee_damage_milli: quiver.melee_damage_milli()?,
+                calories: quiver.calories,
+                quench: quiver.quench,
+                comestible_type: quiver.comestible_type.clone(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            },
+            quiver_containers,
+        )?;
+        let arrow = items
+            .get("arrow_wood")
+            .ok_or("pinned default content has no starter wooden arrow")?;
+        world.spawn_ground_item(ItemSpawn {
+            position: spawn_position,
+            type_id: arrow.id.clone(),
+            charges: arrow.default_charges().max(1),
+            melee_damage_milli: arrow.melee_damage_milli()?,
+            calories: arrow.calories,
+            quench: arrow.quench,
+            comestible_type: arrow.comestible_type.clone(),
+            ammunition_type: single_ammunition_type(arrow)?,
+            ranged_weapon: None,
+        })?;
         let flashlight = items
             .get("flashlight")
             .ok_or("pinned default content has no starter flashlight")?;
@@ -1887,6 +1923,7 @@ fn craft_item_prototype_with_ammunition(
         magazine_capacity,
         integral_magazines,
         magazine_wells,
+        ammunition_containers: runtime_ammunition_containers(item),
         residual_energy_millijoules: 0,
         powered_tool: runtime_powered_tool(item, items)?,
     })
@@ -1925,6 +1962,30 @@ fn runtime_integral_magazines(item: &ItemDefinition) -> Vec<IntegralMagazinePock
             pocket_id: magazine.pocket_id,
             ammunition_type: magazine.ammunition_type,
             capacity: magazine.capacity,
+            reloadable: !item.flags.contains("NO_RELOAD"),
+            unloadable: !item.flags.contains("NO_UNLOAD"),
+        })
+        .collect()
+}
+
+fn runtime_ammunition_containers(
+    item: &ItemDefinition,
+) -> Vec<AmmunitionContainerPocketPrototypeV1> {
+    item.ammunition_containers
+        .iter()
+        .map(|pocket| AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: pocket.pocket_index,
+            pocket_id: pocket.pocket_id.clone(),
+            capacities: pocket
+                .capacities
+                .iter()
+                .map(|(ammunition_type, capacity)| AmmunitionCapacityV1 {
+                    ammunition_type: ammunition_type.clone(),
+                    capacity: *capacity,
+                })
+                .collect(),
+            rigid: pocket.rigid,
+            access_moves: pocket.access_moves,
             reloadable: !item.flags.contains("NO_RELOAD"),
             unloadable: !item.flags.contains("NO_UNLOAD"),
         })
@@ -4453,6 +4514,111 @@ mod tests {
                 strict_battery_magazine_capacity(item).map(|capacity| (item_id, capacity))
             })
             .collect::<Vec<_>>();
+        let quiver = items
+            .get("quiver")
+            .expect("pinned default content should contain the starter quiver");
+        let quiver_containers = runtime_ammunition_containers(quiver);
+        assert_eq!(
+            quiver_containers,
+            [AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                capacities: vec![
+                    AmmunitionCapacityV1 {
+                        ammunition_type: String::from("arrow"),
+                        capacity: 20,
+                    },
+                    AmmunitionCapacityV1 {
+                        ammunition_type: String::from("bolt"),
+                        capacity: 20,
+                    },
+                ],
+                rigid: false,
+                access_moves: 20,
+                reloadable: true,
+                unloadable: true,
+            }]
+        );
+        let mut sealed_quiver = quiver.clone();
+        sealed_quiver.flags.insert(String::from("NO_RELOAD"));
+        sealed_quiver.flags.insert(String::from("NO_UNLOAD"));
+        let sealed_projection = runtime_ammunition_containers(&sealed_quiver);
+        assert!(
+            sealed_projection
+                .iter()
+                .all(|pocket| !pocket.reloadable && !pocket.unloadable),
+            "container access flags must project into authoritative runtime policy"
+        );
+        assert_eq!(
+            craft_item_prototype(quiver, default_instance_charges(quiver), &items)
+                .expect("quiver craft prototype should normalize")
+                .ammunition_containers,
+            quiver_containers,
+            "crafted and spawned quivers must use the same strict pocket projection"
+        );
+        let arrow = items
+            .get("arrow_wood")
+            .expect("pinned default content should contain starter arrows");
+        let mut container_world = WorldState::new(59, [59; 32]);
+        container_world
+            .install_reserved_block(cdda_sim::ReservedIdBlock { start: 1, end: 8 })
+            .expect("container fixture ID block should install");
+        container_world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
+        let container_position = WorldPosition { x: 1, y: 1, z: 0 };
+        let quiver_id = container_world
+            .spawn_ground_item_with_ammunition_containers(
+                ItemSpawn {
+                    position: container_position,
+                    type_id: quiver.id.clone(),
+                    charges: default_instance_charges(quiver),
+                    melee_damage_milli: quiver
+                        .melee_damage_milli()
+                        .expect("quiver melee damage should normalize"),
+                    calories: quiver.calories,
+                    quench: quiver.quench,
+                    comestible_type: quiver.comestible_type.clone(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                },
+                runtime_ammunition_containers(quiver),
+            )
+            .expect("strict starter quiver should spawn");
+        let arrow_id = container_world
+            .spawn_ground_item(ItemSpawn {
+                position: container_position,
+                type_id: arrow.id.clone(),
+                charges: arrow.default_charges().max(1),
+                melee_damage_milli: arrow
+                    .melee_damage_milli()
+                    .expect("arrow melee damage should normalize"),
+                calories: arrow.calories,
+                quench: arrow.quench,
+                comestible_type: arrow.comestible_type.clone(),
+                ammunition_type: single_ammunition_type(arrow)
+                    .expect("wooden arrow should have one ammunition type"),
+                ranged_weapon: None,
+            })
+            .expect("starter arrow stack should spawn");
+        let container_snapshot = container_world.snapshot();
+        let spawned_quiver = container_snapshot
+            .ground_items
+            .iter()
+            .find(|ground| ground.item.id == quiver_id)
+            .expect("spawned quiver should remain on the ground");
+        assert_eq!(spawned_quiver.item.ammunition_containers.len(), 1);
+        assert!(
+            spawned_quiver.item.ammunition_containers[0]
+                .contents
+                .is_empty()
+        );
+        let spawned_arrow = container_snapshot
+            .ground_items
+            .iter()
+            .find(|ground| ground.item.id == arrow_id)
+            .expect("spawned arrow should remain on the ground");
+        assert_eq!(spawned_arrow.item.type_id, "arrow_wood");
+        assert_eq!(spawned_arrow.item.ammunition_type, "arrow");
+        assert_eq!(spawned_arrow.item.charges, arrow.default_charges().max(1));
         assert_eq!(
             runtime_battery_magazines,
             [

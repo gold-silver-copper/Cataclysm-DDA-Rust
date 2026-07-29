@@ -51,8 +51,14 @@ items. Explicit authoritative removal returns integral ammunition or detachable
 magazines to top-level inventory with the same stable ID; fractional battery
 energy follows its loose battery item and can round-trip without loss. Pinned
 `NO_UNLOAD`, stale contained IDs, active power wells, and full inventories fail
-closed before mutation. This does not yet imply general CONTAINER pockets,
-speedloaders, casings/ejection behavior, grids, UPS, or arbitrary power parity.
+closed before mutation. Strict ammunition-restricted `CONTAINER` pockets now
+project their category capacities, inherited index/ID, base access moves,
+rigidity, and access flags. They preserve multiple distinct same-category item
+variants and stable IDs across bounded partial/whole insertion and exact whole
+removal; pinned `quiver`, `nylon_quiver`, and `quiver_simple_cloth` are admitted,
+while richer mixed hosts remain fail-closed. This does not yet imply general
+physical CONTAINER pockets, length/volume/weight carry physics, speedloaders,
+casings/ejection behavior, grids, UPS, or arbitrary power parity.
 Inherited `power_draw` quantities normalize W/kW/mW to exact integer
 milliwatts, while inherited `light` and `revert_to` remain
 strict scalar projections. A deliberately narrow transform projection accepts

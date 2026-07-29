@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt;
 
 use cdda_protocol::{
-    ActorConnectionUpdateV1, ActorId, ActorSnapshot, BashTargetKindV1, BookStudyActivitySnapshotV1,
+    ActorConnectionUpdateV1, ActorId, ActorSnapshot, AmmunitionContainerPocketPrototypeV1,
+    AmmunitionContainerPocketSnapshotV1, BashTargetKindV1, BookStudyActivitySnapshotV1,
     BookStudyInterruptionReason, BookStudyV1, CRAFT_PRACTICE_ACTION_POINTS,
     CRAFT_PROFICIENCY_SCALE, CharacterCreationStatsV1, ChunkCoord, ChunkSnapshot, ClientCommand,
     CommandKind, CommandRejection, CommandSequence, ConstructionActivitySnapshotV1,
@@ -18,21 +19,23 @@ use cdda_protocol::{
     FurnitureTileSnapshot, GroundItemSnapshot, HeldInputSequence, HeldMovementUpdateSource,
     HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
     IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemId, ItemSnapshot,
-    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
+    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
+    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
     MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
     MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
     MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
     MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
-    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL,
-    MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
-    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
-    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
-    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
-    MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot, PoweredToolStateV1,
-    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
-    RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
-    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
-    WorldEventKind, WorldPosition, WorldSnapshotV1, adjusted_book_study_time_moves,
+    MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
+    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
+    MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
+    MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
+    MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
+    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
+    PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
+    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, SimTick,
+    SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
+    TerrainTileSnapshot, WakeReason, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
+    adjusted_book_study_time_moves,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -973,7 +976,8 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
                     .is_ok_and(|charges| charges <= snapshot.magazine_capacity)
                 || snapshot.ammunition_type.is_empty()
                 || snapshot.ranged_weapon.is_some()
-                || !snapshot.magazine_wells.is_empty()))
+                || !snapshot.magazine_wells.is_empty()
+                || !snapshot.ammunition_containers.is_empty()))
         || (snapshot.residual_energy_millijoules != 0
             && !((snapshot.magazine_capacity > 0
                 && u32::try_from(snapshot.charges)
@@ -985,6 +989,7 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
                     && snapshot.component_provenance.is_none()
                     && snapshot.integral_magazines.is_empty()
                     && snapshot.magazine_wells.is_empty()
+                    && snapshot.ammunition_containers.is_empty()
                     && snapshot.powered_tool.is_none()
                     && snapshot.creature_corpse.is_none()))
             || snapshot.residual_energy_millijoules >= MILLIJOULES_PER_BATTERY_CHARGE)
@@ -1011,12 +1016,21 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
     validate_component_provenance(&snapshot.component_provenance)?;
     validate_integral_magazine_snapshots(&snapshot.integral_magazines, depth)?;
     validate_magazine_well_snapshots(&snapshot.magazine_wells, depth)?;
-    if snapshot.integral_magazines.iter().any(|magazine| {
+    validate_ammunition_container_snapshots(&snapshot.ammunition_containers, depth)?;
+    if pocket_indices_collide(
+        snapshot
+            .integral_magazines
+            .iter()
+            .map(|pocket| pocket.pocket_index),
         snapshot
             .magazine_wells
             .iter()
-            .any(|well| well.pocket_index == magazine.pocket_index)
-    }) {
+            .map(|pocket| pocket.pocket_index),
+        snapshot
+            .ammunition_containers
+            .iter()
+            .map(|pocket| pocket.pocket_index),
+    ) {
         return Err(SimError::InvalidItem);
     }
     if let Some(powered) = &snapshot.powered_tool
@@ -1042,6 +1056,7 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
             || snapshot.magazine_capacity != 0
             || !snapshot.integral_magazines.is_empty()
             || !snapshot.magazine_wells.is_empty()
+            || !snapshot.ammunition_containers.is_empty()
             || snapshot.residual_energy_millijoules != 0
             || snapshot.powered_tool.is_some()
             || validate_creature_corpse_prototype(&corpse.prototype).is_err()
@@ -1075,6 +1090,13 @@ fn validate_creature_corpse_context(
         .integral_magazines
         .iter()
         .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+    {
+        validate_creature_corpse_context(ammunition, tick, field_types)?;
+    }
+    for ammunition in item
+        .ammunition_containers
+        .iter()
+        .flat_map(|pocket| &pocket.contents)
     {
         validate_creature_corpse_context(ammunition, tick, field_types)?;
     }
@@ -1161,6 +1183,7 @@ fn validate_integral_magazine_snapshot(
             || ammunition.magazine_capacity != 0
             || !ammunition.integral_magazines.is_empty()
             || !ammunition.magazine_wells.is_empty()
+            || !ammunition.ammunition_containers.is_empty()
             || ammunition.residual_energy_millijoules != 0
             || ammunition.powered_tool.is_some()
             || ammunition.creature_corpse.is_some()
@@ -1225,6 +1248,7 @@ fn validate_magazine_well_snapshot(
             .is_err()
             || (installed.magazine_capacity == 0 && installed.integral_magazines.is_empty())
             || !installed.magazine_wells.is_empty()
+            || !installed.ammunition_containers.is_empty()
             || validate_item_snapshot_at(installed, depth + 1).is_err())
     {
         return Err(SimError::InvalidItem);
@@ -1259,6 +1283,141 @@ fn validate_magazine_well_snapshots(
         .try_for_each(|well| validate_magazine_well_snapshot(well, depth))
 }
 
+fn validate_ammunition_container_prototype(
+    pocket: &AmmunitionContainerPocketPrototypeV1,
+) -> Result<(), SimError> {
+    if pocket.pocket_id.len() > 512
+        || pocket.pocket_id.chars().any(char::is_control)
+        || pocket.access_moves == 0
+        || pocket.capacities.is_empty()
+        || pocket.capacities.len() > MAX_AMMUNITION_CONTAINER_TYPES
+        || pocket.capacities.iter().any(|capacity| {
+            validate_item_type_id(&capacity.ammunition_type).is_err()
+                || capacity.capacity == 0
+                || capacity.capacity > i32::MAX as u32
+        })
+        || pocket
+            .capacities
+            .windows(2)
+            .any(|pair| pair[0].ammunition_type >= pair[1].ammunition_type)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
+fn validate_ammunition_container_prototypes(
+    pockets: &[AmmunitionContainerPocketPrototypeV1],
+) -> Result<(), SimError> {
+    if pockets.len() > MAX_ITEM_AMMUNITION_CONTAINER_POCKETS
+        || pockets
+            .windows(2)
+            .any(|pair| pair[0].pocket_index >= pair[1].pocket_index)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    pockets
+        .iter()
+        .try_for_each(validate_ammunition_container_prototype)
+}
+
+fn ammunition_container_prototype_from_snapshot(
+    pocket: &AmmunitionContainerPocketSnapshotV1,
+) -> AmmunitionContainerPocketPrototypeV1 {
+    AmmunitionContainerPocketPrototypeV1 {
+        pocket_index: pocket.pocket_index,
+        pocket_id: pocket.pocket_id.clone(),
+        capacities: pocket.capacities.clone(),
+        access_moves: pocket.access_moves,
+        rigid: pocket.rigid,
+        reloadable: pocket.reloadable,
+        unloadable: pocket.unloadable,
+    }
+}
+
+fn validate_ammunition_container_snapshot(
+    pocket: &AmmunitionContainerPocketSnapshotV1,
+    depth: usize,
+) -> Result<(), SimError> {
+    validate_ammunition_container_prototype(&ammunition_container_prototype_from_snapshot(pocket))?;
+    if pocket.contents.len() > MAX_AMMUNITION_CONTAINER_CONTENTS
+        || pocket
+            .contents
+            .windows(2)
+            .any(|pair| pair[0].id >= pair[1].id)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    let active_type = pocket
+        .contents
+        .first()
+        .map(|item| item.ammunition_type.as_str());
+    let mut occupied = 0_u32;
+    for item in &pocket.contents {
+        if item.charges <= 0
+            || item.ammunition_type.is_empty()
+            || active_type != Some(item.ammunition_type.as_str())
+            || !item.comestible_type.is_empty()
+            || item.ranged_weapon.is_some()
+            || item.component_provenance.is_some()
+            || item.magazine_capacity != 0
+            || !item.integral_magazines.is_empty()
+            || !item.magazine_wells.is_empty()
+            || !item.ammunition_containers.is_empty()
+            || item.residual_energy_millijoules != 0
+            || item.powered_tool.is_some()
+            || item.creature_corpse.is_some()
+            || validate_item_snapshot_at(item, depth + 1).is_err()
+        {
+            return Err(SimError::InvalidItem);
+        }
+        occupied = occupied
+            .checked_add(u32::try_from(item.charges).map_err(|_| SimError::InvalidItem)?)
+            .ok_or(SimError::NumericOverflow)?;
+    }
+    if let Some(active_type) = active_type {
+        let capacity = pocket
+            .capacities
+            .binary_search_by(|candidate| candidate.ammunition_type.as_str().cmp(active_type))
+            .ok()
+            .and_then(|index| pocket.capacities.get(index))
+            .map(|capacity| capacity.capacity)
+            .ok_or(SimError::InvalidItem)?;
+        if occupied > capacity {
+            return Err(SimError::InvalidItem);
+        }
+    }
+    Ok(())
+}
+
+fn validate_ammunition_container_snapshots(
+    pockets: &[AmmunitionContainerPocketSnapshotV1],
+    depth: usize,
+) -> Result<(), SimError> {
+    if pockets.len() > MAX_ITEM_AMMUNITION_CONTAINER_POCKETS
+        || pockets
+            .windows(2)
+            .any(|pair| pair[0].pocket_index >= pair[1].pocket_index)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    pockets
+        .iter()
+        .try_for_each(|pocket| validate_ammunition_container_snapshot(pocket, depth))
+}
+
+fn pocket_indices_collide(
+    integral: impl Iterator<Item = u16>,
+    wells: impl Iterator<Item = u16>,
+    containers: impl Iterator<Item = u16>,
+) -> bool {
+    let mut indices = BTreeSet::new();
+    integral
+        .chain(wells)
+        .chain(containers)
+        .any(|index| !indices.insert(index))
+}
+
 fn item_snapshot_contains_id(item: &ItemSnapshot, item_id: ItemId) -> bool {
     item.id == item_id
         || item
@@ -1271,6 +1430,11 @@ fn item_snapshot_contains_id(item: &ItemSnapshot, item_id: ItemId) -> bool {
             .iter()
             .filter_map(|well| well.installed_magazine.as_deref())
             .any(|installed| item_snapshot_contains_id(installed, item_id))
+        || item
+            .ammunition_containers
+            .iter()
+            .flat_map(|pocket| &pocket.contents)
+            .any(|contained| item_snapshot_contains_id(contained, item_id))
 }
 
 fn register_stable_item_ids(
@@ -1299,6 +1463,13 @@ fn register_stable_item_ids(
         .filter_map(|well| well.installed_magazine.as_deref())
     {
         register_stable_item_ids(installed, world_namespace, item_ids, maximum_counter)?;
+    }
+    for contained in item
+        .ammunition_containers
+        .iter()
+        .flat_map(|pocket| &pocket.contents)
+    {
+        register_stable_item_ids(contained, world_namespace, item_ids, maximum_counter)?;
     }
     Ok(())
 }
@@ -1346,7 +1517,8 @@ fn validate_item_component(
                     .is_ok_and(|charges| charges <= component.magazine_capacity)
                 || component.ammunition_type.is_empty()
                 || component.ranged_weapon.is_some()
-                || !component.magazine_wells.is_empty()))
+                || !component.magazine_wells.is_empty()
+                || !component.ammunition_containers.is_empty()))
         || (component.residual_energy_millijoules != 0
             && (component.magazine_capacity == 0
                 || !u32::try_from(component.charges)
@@ -1374,12 +1546,21 @@ fn validate_item_component(
     validate_item_type_id(&component.type_id)?;
     validate_integral_magazine_prototypes(&component.integral_magazines)?;
     validate_magazine_well_prototypes(&component.magazine_wells)?;
-    if component.integral_magazines.iter().any(|magazine| {
+    validate_ammunition_container_prototypes(&component.ammunition_containers)?;
+    if pocket_indices_collide(
+        component
+            .integral_magazines
+            .iter()
+            .map(|pocket| pocket.pocket_index),
         component
             .magazine_wells
             .iter()
-            .any(|well| well.pocket_index == magazine.pocket_index)
-    }) {
+            .map(|pocket| pocket.pocket_index),
+        component
+            .ammunition_containers
+            .iter()
+            .map(|pocket| pocket.pocket_index),
+    ) {
         return Err(SimError::InvalidItem);
     }
     if let Some(powered) = &component.powered_tool
@@ -1424,6 +1605,7 @@ fn component_state_matches_prototype(
         && state.magazine_capacity == prototype.magazine_capacity
         && state.integral_magazines == prototype.integral_magazines
         && state.magazine_wells == prototype.magazine_wells
+        && state.ammunition_containers == prototype.ammunition_containers
         && state.residual_energy_millijoules == prototype.residual_energy_millijoules
         && state.powered_tool == prototype.powered_tool
 }
@@ -1680,7 +1862,8 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
                     .is_ok_and(|charges| charges <= item.magazine_capacity)
                 || item.ammunition_type.is_empty()
                 || item.ranged_weapon.is_some()
-                || !item.magazine_wells.is_empty()))
+                || !item.magazine_wells.is_empty()
+                || !item.ammunition_containers.is_empty()))
         || (item.residual_energy_millijoules != 0
             && (item.magazine_capacity == 0
                 || !u32::try_from(item.charges)
@@ -1708,11 +1891,17 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
     validate_integral_magazine_prototypes(&item.integral_magazines)
         .map_err(|_| SimError::InvalidCraft)?;
     validate_magazine_well_prototypes(&item.magazine_wells).map_err(|_| SimError::InvalidCraft)?;
-    if item.integral_magazines.iter().any(|magazine| {
-        item.magazine_wells
+    validate_ammunition_container_prototypes(&item.ammunition_containers)
+        .map_err(|_| SimError::InvalidCraft)?;
+    if pocket_indices_collide(
+        item.integral_magazines
             .iter()
-            .any(|well| well.pocket_index == magazine.pocket_index)
-    }) {
+            .map(|pocket| pocket.pocket_index),
+        item.magazine_wells.iter().map(|pocket| pocket.pocket_index),
+        item.ammunition_containers
+            .iter()
+            .map(|pocket| pocket.pocket_index),
+    ) {
         return Err(SimError::InvalidCraft);
     }
     if let Some(powered) = &item.powered_tool
@@ -2667,6 +2856,7 @@ struct ItemInstance {
     magazine_capacity: u32,
     integral_magazines: Vec<IntegralMagazinePocketSnapshotV1>,
     magazine_wells: Vec<MagazineWellSnapshotV1>,
+    ammunition_containers: Vec<AmmunitionContainerPocketSnapshotV1>,
     residual_energy_millijoules: u32,
     powered_tool: Option<PoweredToolStateV1>,
     creature_corpse: Option<CreatureCorpseSnapshotV1>,
@@ -2919,6 +3109,7 @@ impl ItemInstance {
             magazine_capacity: self.magazine_capacity,
             integral_magazines: self.integral_magazines.clone(),
             magazine_wells: self.magazine_wells.clone(),
+            ammunition_containers: self.ammunition_containers.clone(),
             residual_energy_millijoules: self.residual_energy_millijoules,
             powered_tool: self.powered_tool.clone(),
             creature_corpse: self.creature_corpse.clone(),
@@ -2942,6 +3133,7 @@ impl ItemInstance {
             magazine_capacity: snapshot.magazine_capacity,
             integral_magazines: snapshot.integral_magazines.clone(),
             magazine_wells: snapshot.magazine_wells.clone(),
+            ammunition_containers: snapshot.ammunition_containers.clone(),
             residual_energy_millijoules: snapshot.residual_energy_millijoules,
             powered_tool: snapshot.powered_tool.clone(),
             creature_corpse: snapshot.creature_corpse.clone(),
@@ -2975,9 +3167,26 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.magazine_capacity == right.magazine_capacity
         && left.integral_magazines == right.integral_magazines
         && left.magazine_wells == right.magazine_wells
+        && left.ammunition_containers == right.ammunition_containers
         && left.residual_energy_millijoules == right.residual_energy_millijoules
         && left.powered_tool == right.powered_tool
         && left.creature_corpse == right.creature_corpse
+}
+
+fn plain_ammunition_container_content(item: &ItemSnapshot) -> bool {
+    !item.ammunition_type.is_empty()
+        && item.charges > 0
+        && item.comestible_type.is_empty()
+        && item.ranged_weapon.is_none()
+        && item.component_provenance.is_none()
+        && item.magazine_capacity == 0
+        && item.integral_magazines.is_empty()
+        && item.magazine_wells.is_empty()
+        && item.ammunition_containers.is_empty()
+        && item.residual_energy_millijoules == 0
+        && item.powered_tool.is_none()
+        && item.creature_corpse.is_none()
+        && validate_item_snapshot(item).is_ok()
 }
 
 fn snapshot_ammunition_capacity(item: &ItemSnapshot) -> u32 {
@@ -3089,6 +3298,20 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
                 installed_magazine: None,
             })
             .collect(),
+        ammunition_containers: prototype
+            .ammunition_containers
+            .iter()
+            .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                capacities: pocket.capacities.clone(),
+                access_moves: pocket.access_moves,
+                rigid: pocket.rigid,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                contents: Vec::new(),
+            })
+            .collect(),
         residual_energy_millijoules: prototype.residual_energy_millijoules,
         powered_tool: prototype.powered_tool.clone(),
         creature_corpse: None,
@@ -3134,6 +3357,20 @@ fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemI
                 installed_magazine: None,
             })
             .collect(),
+        ammunition_containers: component
+            .ammunition_containers
+            .iter()
+            .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                capacities: pocket.capacities.clone(),
+                access_moves: pocket.access_moves,
+                rigid: pocket.rigid,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                contents: Vec::new(),
+            })
+            .collect(),
         residual_energy_millijoules: component.residual_energy_millijoules,
         powered_tool: component.powered_tool.clone(),
         creature_corpse: None,
@@ -3153,6 +3390,7 @@ fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftI
         magazine_capacity: component.magazine_capacity,
         integral_magazines: component.integral_magazines.clone(),
         magazine_wells: component.magazine_wells.clone(),
+        ammunition_containers: component.ammunition_containers.clone(),
         residual_energy_millijoules: component.residual_energy_millijoules,
         powered_tool: component.powered_tool.clone(),
     }
@@ -3201,6 +3439,12 @@ fn component_from_consumed(
                 unloadable: well.unloadable,
             })
             .collect(),
+        ammunition_containers: consumed
+            .item
+            .ammunition_containers
+            .iter()
+            .map(ammunition_container_prototype_from_snapshot)
+            .collect(),
         residual_energy_millijoules: consumed.item.residual_energy_millijoules,
         powered_tool: consumed.item.powered_tool.clone(),
     }
@@ -3230,6 +3474,11 @@ fn craft_output_component_provenance(
                 .integral_magazines
                 .iter()
                 .any(|pocket| pocket.loaded_ammunition.is_some())
+            || consumed
+                .item
+                .ammunition_containers
+                .iter()
+                .any(|pocket| !pocket.contents.is_empty())
     }) {
         return Err(SimError::InvalidCraft);
     }
@@ -3333,6 +3582,7 @@ fn same_item_definition(item: &ItemInstance, snapshot: &ItemSnapshot) -> bool {
         && item.ranged_weapon == snapshot.ranged_weapon
         && item.magazine_capacity == snapshot.magazine_capacity
         && item.magazine_wells == snapshot.magazine_wells
+        && item.ammunition_containers == snapshot.ammunition_containers
         && item.residual_energy_millijoules == snapshot.residual_energy_millijoules
         && item.powered_tool == snapshot.powered_tool
 }
@@ -3963,6 +4213,10 @@ fn plan_component_groups(
                         .integral_magazines
                         .iter()
                         .all(|pocket| pocket.loaded_ammunition.is_none())
+                    && item
+                        .ammunition_containers
+                        .iter()
+                        .all(|pocket| pocket.contents.is_empty())
             }) {
                 let units = if alternative.count_by_charges {
                     u64::try_from(item.charges).unwrap_or(0)
@@ -3997,6 +4251,10 @@ fn plan_component_groups(
                     .integral_magazines
                     .iter()
                     .all(|pocket| pocket.loaded_ammunition.is_none())
+                && item
+                    .ammunition_containers
+                    .iter()
+                    .all(|pocket| pocket.contents.is_empty())
         }) {
             if remaining == 0 {
                 break;
@@ -4225,6 +4483,14 @@ fn command_mutates_craft_split_parent(
         CommandKind::RemovePocketItem { owner_item, .. } => {
             is_craft_split_parent(activity, *owner_item)
         }
+        CommandKind::InsertPocketItem {
+            owner_item,
+            source_item,
+            ..
+        } => {
+            is_craft_split_parent(activity, *owner_item)
+                || is_craft_split_parent(activity, *source_item)
+        }
         CommandKind::ShootActor { .. } | CommandKind::ShootCreature { .. } => {
             wielded.is_some_and(|item_id| is_craft_split_parent(activity, item_id))
         }
@@ -4251,6 +4517,11 @@ fn command_mutates_construction_split_parent(
             ammunition_item, ..
         } => is_split_parent(*ammunition_item) || wielded.is_some_and(is_split_parent),
         CommandKind::RemovePocketItem { owner_item, .. } => is_split_parent(*owner_item),
+        CommandKind::InsertPocketItem {
+            owner_item,
+            source_item,
+            ..
+        } => is_split_parent(*owner_item) || is_split_parent(*source_item),
         CommandKind::ShootActor { .. } | CommandKind::ShootCreature { .. } => {
             wielded.is_some_and(is_split_parent)
         }
@@ -4275,6 +4546,7 @@ struct ItemMagazineStorageSpawn {
     magazine_capacity: u32,
     integral_magazines: Vec<IntegralMagazinePocketPrototypeV1>,
     magazine_wells: Vec<MagazineWellPrototypeV1>,
+    ammunition_containers: Vec<AmmunitionContainerPocketPrototypeV1>,
     residual_energy_millijoules: u32,
     powered_tool: Option<PoweredToolStateV1>,
     preloaded_ammunition: Vec<(u16, ItemSpawn)>,
@@ -4316,7 +4588,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV17");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV18");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4633,6 +4905,7 @@ impl WorldState {
                 magazine_capacity,
                 integral_magazines: Vec::new(),
                 magazine_wells,
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules,
                 powered_tool,
                 preloaded_ammunition: Vec::new(),
@@ -4656,6 +4929,7 @@ impl WorldState {
                 magazine_capacity: 0,
                 integral_magazines,
                 magazine_wells,
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool,
                 preloaded_ammunition: Vec::new(),
@@ -4680,9 +4954,31 @@ impl WorldState {
                 magazine_capacity: 0,
                 integral_magazines,
                 magazine_wells,
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool,
                 preloaded_ammunition,
+            },
+        )
+    }
+
+    /// Spawns an item with canonical empty ammo-restricted container pockets.
+    /// Player transfers into those pockets must use `InsertPocketItem`.
+    pub fn spawn_ground_item_with_ammunition_containers(
+        &mut self,
+        spawn: ItemSpawn,
+        ammunition_containers: Vec<AmmunitionContainerPocketPrototypeV1>,
+    ) -> Result<ItemId, SimError> {
+        self.spawn_ground_item_with_all_magazine_pockets(
+            spawn,
+            ItemMagazineStorageSpawn {
+                magazine_capacity: 0,
+                integral_magazines: Vec::new(),
+                magazine_wells: Vec::new(),
+                ammunition_containers,
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+                preloaded_ammunition: Vec::new(),
             },
         )
     }
@@ -4696,6 +4992,7 @@ impl WorldState {
             magazine_capacity,
             integral_magazines,
             magazine_wells,
+            ammunition_containers,
             residual_energy_millijoules,
             powered_tool,
             preloaded_ammunition,
@@ -4715,7 +5012,8 @@ impl WorldState {
                         .is_ok_and(|charges| charges <= magazine_capacity)
                     || spawn.ammunition_type.is_empty()
                     || spawn.ranged_weapon.is_some()
-                    || !magazine_wells.is_empty()))
+                    || !magazine_wells.is_empty()
+                    || !ammunition_containers.is_empty()))
             || (residual_energy_millijoules != 0
                 && (magazine_capacity == 0
                     || !u32::try_from(spawn.charges)
@@ -4743,11 +5041,14 @@ impl WorldState {
         }
         validate_integral_magazine_prototypes(&integral_magazines)?;
         validate_magazine_well_prototypes(&magazine_wells)?;
-        if integral_magazines.iter().any(|magazine| {
-            magazine_wells
+        validate_ammunition_container_prototypes(&ammunition_containers)?;
+        if pocket_indices_collide(
+            integral_magazines.iter().map(|pocket| pocket.pocket_index),
+            magazine_wells.iter().map(|pocket| pocket.pocket_index),
+            ammunition_containers
                 .iter()
-                .any(|well| well.pocket_index == magazine.pocket_index)
-        }) {
+                .map(|pocket| pocket.pocket_index),
+        ) {
             return Err(SimError::InvalidItem);
         }
         let mut preloaded = BTreeMap::new();
@@ -4783,6 +5084,7 @@ impl WorldState {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
@@ -4855,6 +5157,19 @@ impl WorldState {
                             compatible_magazine_type_ids: well.compatible_magazine_type_ids,
                             unloadable: well.unloadable,
                             installed_magazine: None,
+                        })
+                        .collect(),
+                    ammunition_containers: ammunition_containers
+                        .into_iter()
+                        .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
+                            pocket_index: pocket.pocket_index,
+                            pocket_id: pocket.pocket_id,
+                            capacities: pocket.capacities,
+                            access_moves: pocket.access_moves,
+                            rigid: pocket.rigid,
+                            reloadable: pocket.reloadable,
+                            unloadable: pocket.unloadable,
+                            contents: Vec::new(),
                         })
                         .collect(),
                     residual_energy_millijoules,
@@ -6518,6 +6833,26 @@ impl WorldState {
             CommandKind::Attack { .. } | CommandKind::AttackCreature { .. } => {
                 self.actor_melee_action_cost(actor_id)
             }
+            CommandKind::InsertPocketItem {
+                owner_item,
+                pocket_index,
+                source_item,
+            } => self.ammunition_container_insert_action_cost(
+                actor_id,
+                *owner_item,
+                *pocket_index,
+                *source_item,
+            ),
+            CommandKind::RemovePocketItem {
+                owner_item,
+                pocket_index,
+                contained_item,
+            } => self.ammunition_container_remove_action_cost(
+                actor_id,
+                *owner_item,
+                *pocket_index,
+                *contained_item,
+            ),
             CommandKind::Wake
             | CommandKind::Activate { .. }
             | CommandKind::Craft { .. }
@@ -6531,6 +6866,112 @@ impl WorldState {
             | CommandKind::CancelConstruction => Ok(0),
             _ => Ok(i64::from(ACTOR_ACTION_THRESHOLD)),
         }
+    }
+
+    fn ammunition_container_insert_action_cost(
+        &self,
+        actor_id: ActorId,
+        owner_item: ItemId,
+        pocket_index: u16,
+        source_item: ItemId,
+    ) -> Result<i64, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(owner) = actor.inventory.get(&owner_item) else {
+            return Ok(0);
+        };
+        let Some(pocket) = owner
+            .ammunition_containers
+            .iter()
+            .find(|pocket| pocket.pocket_index == pocket_index)
+        else {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        };
+        let valid =
+            owner_item != source_item
+                && pocket.reloadable
+                && actor.inventory.get(&source_item).is_some_and(|source| {
+                    let snapshot = source.snapshot();
+                    if !plain_ammunition_container_content(&snapshot) {
+                        return false;
+                    }
+                    let Some(capacity) = pocket
+                        .capacities
+                        .binary_search_by(|candidate| {
+                            candidate.ammunition_type.cmp(&source.ammunition_type)
+                        })
+                        .ok()
+                        .and_then(|index| pocket.capacities.get(index))
+                        .map(|capacity| capacity.capacity)
+                    else {
+                        return false;
+                    };
+                    if pocket.contents.first().is_some_and(|contained| {
+                        contained.ammunition_type != source.ammunition_type
+                    }) {
+                        return false;
+                    }
+                    let Some(occupied) = pocket.contents.iter().try_fold(0_u32, |total, item| {
+                        u32::try_from(item.charges)
+                            .ok()
+                            .and_then(|charges| total.checked_add(charges))
+                    }) else {
+                        return false;
+                    };
+                    if occupied >= capacity {
+                        return false;
+                    }
+                    let merge = pocket
+                        .contents
+                        .iter()
+                        .any(|contained| same_item_stack_state(contained, &snapshot));
+                    let transfer = u32::try_from(source.charges)
+                        .ok()
+                        .map(|charges| charges.min(capacity - occupied));
+                    merge
+                        || (pocket.contents.len() < MAX_AMMUNITION_CONTAINER_CONTENTS
+                            && transfer.is_some_and(|transfer| {
+                                transfer == u32::try_from(source.charges).unwrap_or_default()
+                                    || self.allocator.can_allocate()
+                            }))
+                });
+        if !valid {
+            return Ok(0);
+        }
+        i64::from(pocket.access_moves)
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    fn ammunition_container_remove_action_cost(
+        &self,
+        actor_id: ActorId,
+        owner_item: ItemId,
+        pocket_index: u16,
+        contained_item: ItemId,
+    ) -> Result<i64, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(owner) = actor.inventory.get(&owner_item) else {
+            return Ok(0);
+        };
+        let Some(pocket) = owner
+            .ammunition_containers
+            .iter()
+            .find(|pocket| pocket.pocket_index == pocket_index)
+        else {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        };
+        if !pocket.unloadable
+            || actor.inventory.len() >= MAX_ACTOR_INVENTORY_ITEMS
+            || pocket
+                .contents
+                .binary_search_by_key(&contained_item, |contained| contained.id)
+                .is_err()
+        {
+            return Ok(0);
+        }
+        i64::from(pocket.access_moves)
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+            .ok_or(SimError::NumericOverflow)
     }
 
     fn movement_action_cost(
@@ -6637,6 +7078,18 @@ impl WorldState {
                 owner_item,
                 pocket_index,
                 contained_item,
+                events,
+            ),
+            CommandKind::InsertPocketItem {
+                owner_item,
+                pocket_index,
+                source_item,
+            } => self.apply_insert_pocket_item(
+                actor_id,
+                sequence,
+                owner_item,
+                pocket_index,
+                source_item,
                 events,
             ),
             CommandKind::Wield { item_id } => {
@@ -7344,6 +7797,193 @@ impl WorldState {
         Ok(())
     }
 
+    fn apply_insert_pocket_item(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        owner_item: ItemId,
+        pocket_index: u16,
+        source_item: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if owner_item == source_item {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        }
+        let Some(owner) = actor.inventory.get(&owner_item) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        let Some(pocket) = owner
+            .ammunition_containers
+            .iter()
+            .find(|pocket| pocket.pocket_index == pocket_index)
+        else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::PocketMissing)?);
+            return Ok(());
+        };
+        if !pocket.reloadable {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::PocketNotReloadable,
+            )?);
+            return Ok(());
+        }
+        let Some(source) = actor.inventory.get(&source_item) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        let source_snapshot = source.snapshot();
+        if !plain_ammunition_container_content(&source_snapshot) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        }
+        let ammunition_type = source.ammunition_type.clone();
+        let Some(capacity) = pocket
+            .capacities
+            .binary_search_by(|candidate| candidate.ammunition_type.cmp(&ammunition_type))
+            .ok()
+            .and_then(|index| pocket.capacities.get(index))
+            .map(|capacity| capacity.capacity)
+        else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        };
+        if pocket
+            .contents
+            .first()
+            .is_some_and(|contained| contained.ammunition_type != ammunition_type)
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::IncompatibleAmmunition,
+            )?);
+            return Ok(());
+        }
+        let occupied = pocket.contents.iter().try_fold(0_u32, |total, item| {
+            total
+                .checked_add(u32::try_from(item.charges).map_err(|_| SimError::InvalidItem)?)
+                .ok_or(SimError::NumericOverflow)
+        })?;
+        let remaining_capacity = capacity
+            .checked_sub(occupied)
+            .ok_or(SimError::InvalidItem)?;
+        if remaining_capacity == 0 {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::PocketFull)?);
+            return Ok(());
+        }
+        let source_charges = u32::try_from(source.charges).map_err(|_| SimError::InvalidItem)?;
+        let transferred = source_charges.min(remaining_capacity);
+        let source_charges_remaining = source_charges
+            .checked_sub(transferred)
+            .ok_or(SimError::NumericOverflow)?;
+        let merge_target = pocket
+            .contents
+            .iter()
+            .find(|contained| same_item_stack_state(contained, &source_snapshot))
+            .map(|contained| contained.id);
+        if merge_target.is_none() && pocket.contents.len() >= MAX_AMMUNITION_CONTAINER_CONTENTS {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::PocketFull)?);
+            return Ok(());
+        }
+        let split_id = if merge_target.is_none() && source_charges_remaining > 0 {
+            if !self.allocator.can_allocate() {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::StableIdsUnavailable,
+                )?);
+                return Ok(());
+            }
+            Some(self.allocator.allocate_item()?)
+        } else {
+            None
+        };
+
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let mut source = actor
+            .inventory
+            .remove(&source_item)
+            .ok_or(SimError::UnknownItem)?;
+        source.charges =
+            i32::try_from(source_charges_remaining).map_err(|_| SimError::NumericOverflow)?;
+        let contained_item = {
+            let pocket = actor
+                .inventory
+                .get_mut(&owner_item)
+                .and_then(|owner| {
+                    owner
+                        .ammunition_containers
+                        .iter_mut()
+                        .find(|pocket| pocket.pocket_index == pocket_index)
+                })
+                .ok_or(SimError::UnknownItem)?;
+            if let Some(merge_target) = merge_target {
+                let contained = pocket
+                    .contents
+                    .iter_mut()
+                    .find(|contained| contained.id == merge_target)
+                    .ok_or(SimError::UnknownItem)?;
+                contained.charges = contained
+                    .charges
+                    .checked_add(i32::try_from(transferred).map_err(|_| SimError::NumericOverflow)?)
+                    .ok_or(SimError::NumericOverflow)?;
+                merge_target
+            } else {
+                let mut contained = source_snapshot;
+                contained.id = split_id.unwrap_or(source_item);
+                contained.charges =
+                    i32::try_from(transferred).map_err(|_| SimError::NumericOverflow)?;
+                let contained_item = contained.id;
+                pocket.contents.push(contained);
+                pocket.contents.sort_by_key(|contained| contained.id);
+                contained_item
+            }
+        };
+        if source_charges_remaining > 0 && actor.inventory.insert(source_item, source).is_some() {
+            return Err(SimError::InvalidItem);
+        }
+        if source_charges_remaining == 0 && actor.wielded == Some(source_item) {
+            actor.wielded = None;
+        }
+        let pocket_ammunition = occupied
+            .checked_add(transferred)
+            .ok_or(SimError::NumericOverflow)?;
+        events.push(
+            self.make_event(WorldEventKind::AmmunitionInsertedIntoContainer {
+                actor_id,
+                owner_item,
+                pocket_index,
+                source_item,
+                contained_item,
+                ammunition_type,
+                transferred,
+                pocket_ammunition,
+                source_charges_remaining: i32::try_from(source_charges_remaining)
+                    .map_err(|_| SimError::NumericOverflow)?,
+            })?,
+        );
+        Ok(())
+    }
+
     fn apply_remove_pocket_item(
         &mut self,
         actor_id: ActorId,
@@ -7356,6 +7996,7 @@ impl WorldState {
         enum RemovalSource {
             Integral,
             MagazineWell,
+            AmmunitionContainer,
         }
 
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
@@ -7428,6 +8069,32 @@ impl WorldState {
                     return Ok(());
                 };
                 (RemovalSource::MagazineWell, installed.clone())
+            } else if let Some(pocket) = owner
+                .ammunition_containers
+                .iter()
+                .find(|pocket| pocket.pocket_index == pocket_index)
+            {
+                if !pocket.unloadable {
+                    events.push(self.rejection(
+                        actor_id,
+                        sequence,
+                        CommandRejection::PocketNotUnloadable,
+                    )?);
+                    return Ok(());
+                }
+                let Some(contained) = pocket
+                    .contents
+                    .iter()
+                    .find(|contained| contained.id == contained_item)
+                else {
+                    events.push(self.rejection(
+                        actor_id,
+                        sequence,
+                        CommandRejection::PocketItemMissing,
+                    )?);
+                    return Ok(());
+                };
+                (RemovalSource::AmmunitionContainer, contained.clone())
             } else {
                 events.push(self.rejection(actor_id, sequence, CommandRejection::PocketMissing)?);
                 return Ok(());
@@ -7471,6 +8138,18 @@ impl WorldState {
                 .find(|well| well.pocket_index == pocket_index)
                 .and_then(|well| well.installed_magazine.take())
                 .ok_or(SimError::UnknownItem)?,
+            RemovalSource::AmmunitionContainer => {
+                let pocket = owner
+                    .ammunition_containers
+                    .iter_mut()
+                    .find(|pocket| pocket.pocket_index == pocket_index)
+                    .ok_or(SimError::UnknownItem)?;
+                let position = pocket
+                    .contents
+                    .binary_search_by_key(&contained_item, |contained| contained.id)
+                    .map_err(|_| SimError::UnknownItem)?;
+                Box::new(pocket.contents.remove(position))
+            }
         };
         if detached.id != contained_item {
             return Err(SimError::InvalidItem);
@@ -8414,6 +9093,7 @@ impl WorldState {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: Some(CreatureCorpseSnapshotV1 {
@@ -11092,6 +11772,18 @@ impl WorldState {
             )?);
             return Ok(());
         }
+        if target
+            .ammunition_containers
+            .iter()
+            .any(|pocket| !pocket.contents.is_empty())
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::DisassemblyUnavailable,
+            )?);
+            return Ok(());
+        }
         if recipe.requires_empty_charges && (target.ranged_weapon.is_some() || target.charges != 0)
         {
             events.push(self.rejection(
@@ -12934,7 +13626,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV54");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV55");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13229,11 +13921,13 @@ mod tests {
                     magazine_capacity: 2,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
                 })),
             }],
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: Some(PoweredToolStateV1 {
                 inactive_type_id: String::from("wizard_cane_cheap"),
@@ -13320,6 +14014,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -13397,6 +14092,7 @@ mod tests {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },
@@ -13416,6 +14112,7 @@ mod tests {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 }),
@@ -14098,6 +14795,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         });
@@ -14376,6 +15074,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         });
@@ -15128,6 +15827,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         };
@@ -15188,6 +15888,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         };
@@ -15213,6 +15914,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -15315,6 +16017,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
         };
@@ -16091,7 +16794,7 @@ mod tests {
         assert_ne!(
             before_hash,
             replay.canonical_hash().expect("changed world should hash"),
-            "clumsy attack capability must participate in CanonicalStateV54"
+            "clumsy attack capability must participate in CanonicalStateV55"
         );
         replay = world.clone();
 
@@ -16548,7 +17251,7 @@ mod tests {
         assert_ne!(
             goal_hash,
             no_goal.canonical_hash().expect("no-goal state should hash"),
-            "last-seen intent must participate in CanonicalStateV54"
+            "last-seen intent must participate in CanonicalStateV55"
         );
         let mut wrong_z_snapshot = world.snapshot();
         wrong_z_snapshot
@@ -17138,6 +17841,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -17463,6 +18167,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -17594,6 +18299,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             },
@@ -18802,7 +19508,7 @@ mod tests {
         assert_ne!(
             before,
             changed.canonical_hash().expect("changed state should hash"),
-            "monster melee_skill and dodge must participate in CanonicalStateV54"
+            "monster melee_skill and dodge must participate in CanonicalStateV55"
         );
     }
 
@@ -19429,11 +20135,13 @@ mod tests {
                     magazine_capacity: 56,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
                 })),
             }],
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
@@ -19752,7 +20460,7 @@ mod tests {
         assert_ne!(
             tiny_world.canonical_hash().expect("tiny world hashes"),
             medium_hash,
-            "base size must participate in CanonicalStateV54"
+            "base size must participate in CanonicalStateV55"
         );
         let restored = WorldState::from_snapshot(&tiny_world.snapshot())
             .expect("private monster size should restore");
@@ -19867,7 +20575,7 @@ mod tests {
         assert_ne!(
             world.canonical_hash().expect("immobile world should hash"),
             mobile_hash,
-            "immobility must participate in CanonicalStateV54"
+            "immobility must participate in CanonicalStateV55"
         );
         assert!(
             WorldState::from_snapshot(&world.snapshot())
@@ -19977,7 +20685,7 @@ mod tests {
         assert_ne!(
             attacker.canonical_hash().expect("attacker world hashes"),
             pacifist_hash,
-            "pacifism must participate in CanonicalStateV54"
+            "pacifism must participate in CanonicalStateV55"
         );
         assert!(
             WorldState::from_snapshot(&world.snapshot())
@@ -20030,7 +20738,7 @@ mod tests {
         assert_ne!(
             slow.canonical_hash().expect("slow world hashes"),
             fast.canonical_hash().expect("fast world hashes"),
-            "attack cost must participate in CanonicalStateV54"
+            "attack cost must participate in CanonicalStateV55"
         );
         assert_eq!(
             WorldState::from_snapshot(&fast.snapshot())
@@ -20988,6 +21696,7 @@ mod tests {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: Some(CreatureCorpseSnapshotV1 {
@@ -22526,6 +23235,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
@@ -22565,6 +23275,269 @@ mod tests {
                 .inventory,
             before_full_rejection.actors[0].inventory
         );
+    }
+
+    #[test]
+    fn ammunition_container_transfers_are_bounded_atomic_and_identity_preserving() {
+        let (mut world, actor, _other) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor);
+        let position = world.actor_snapshot(actor).expect("actor exists").position;
+        let quiver = world
+            .spawn_ground_item_with_ammunition_containers(
+                ItemSpawn {
+                    position,
+                    type_id: String::from("quiver"),
+                    charges: 1,
+                    melee_damage_milli: BTreeMap::new(),
+                    calories: 0,
+                    quench: 0,
+                    comestible_type: String::new(),
+                    ammunition_type: String::new(),
+                    ranged_weapon: None,
+                },
+                vec![AmmunitionContainerPocketPrototypeV1 {
+                    pocket_index: 2,
+                    pocket_id: String::from("QUIVER"),
+                    capacities: vec![
+                        cdda_protocol::AmmunitionCapacityV1 {
+                            ammunition_type: String::from("arrow"),
+                            capacity: 6,
+                        },
+                        cdda_protocol::AmmunitionCapacityV1 {
+                            ammunition_type: String::from("bolt"),
+                            capacity: 4,
+                        },
+                    ],
+                    rigid: false,
+                    access_moves: 20,
+                    reloadable: true,
+                    unloadable: true,
+                }],
+            )
+            .expect("strict quiver should spawn");
+        let spawn_ammunition =
+            |world: &mut WorldState, type_id: &str, ammunition_type: &str, charges| {
+                world
+                    .spawn_ground_item(ItemSpawn {
+                        position,
+                        type_id: type_id.to_owned(),
+                        charges,
+                        melee_damage_milli: BTreeMap::new(),
+                        calories: 0,
+                        quench: 0,
+                        comestible_type: String::new(),
+                        ammunition_type: ammunition_type.to_owned(),
+                        ranged_weapon: None,
+                    })
+                    .expect("ammunition should spawn")
+            };
+        let arrows = spawn_ammunition(&mut world, "arrow_wood", "arrow", 10);
+        let metal_arrows = spawn_ammunition(&mut world, "arrow_metal", "arrow", 2);
+        let bolts = spawn_ammunition(&mut world, "bolt_wood", "bolt", 3);
+        let issue = |world: &mut WorldState, sequence, kind| {
+            world
+                .advance_tick(vec![ClientCommand {
+                    actor_id: actor,
+                    sequence: CommandSequence(sequence),
+                    client_tick: world.tick(),
+                    kind,
+                }])
+                .expect("command should advance")
+        };
+        for (offset, item_id) in [quiver, arrows, metal_arrows, bolts]
+            .into_iter()
+            .enumerate()
+        {
+            issue(
+                &mut world,
+                u64::try_from(offset + 1).expect("small sequence"),
+                CommandKind::PickUp { item_id },
+            );
+        }
+
+        let allocator_before_split = world.allocator.next;
+        let partial = issue(
+            &mut world,
+            5,
+            CommandKind::InsertPocketItem {
+                owner_item: quiver,
+                pocket_index: 2,
+                source_item: arrows,
+            },
+        );
+        let nested_split = partial
+            .events
+            .iter()
+            .find_map(|event| match event.kind {
+                WorldEventKind::AmmunitionInsertedIntoContainer {
+                    source_item,
+                    contained_item,
+                    transferred: 6,
+                    pocket_ammunition: 6,
+                    source_charges_remaining: 4,
+                    ..
+                } if source_item == arrows => Some(contained_item),
+                _ => None,
+            })
+            .expect("partial insertion should expose the split ID");
+        assert_ne!(nested_split, arrows);
+        assert_eq!(world.allocator.next, allocator_before_split + 1);
+        let actor_after_partial = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            actor_after_partial
+                .inventory
+                .iter()
+                .find(|item| item.id == arrows)
+                .expect("partial source remains")
+                .charges,
+            4
+        );
+        assert_eq!(
+            actor_after_partial
+                .inventory
+                .iter()
+                .find(|item| item.id == quiver)
+                .expect("quiver remains")
+                .ammunition_containers[0]
+                .contents[0]
+                .id,
+            nested_split
+        );
+
+        let allocator_before_remove = world.allocator.next;
+        issue(
+            &mut world,
+            6,
+            CommandKind::RemovePocketItem {
+                owner_item: quiver,
+                pocket_index: 2,
+                contained_item: nested_split,
+            },
+        );
+        let actor_after_remove = world.actor_snapshot(actor).expect("actor remains");
+        assert!(
+            actor_after_remove
+                .inventory
+                .iter()
+                .any(|item| item.id == nested_split && item.charges == 6)
+        );
+        assert!(
+            actor_after_remove
+                .inventory
+                .iter()
+                .find(|item| item.id == quiver)
+                .expect("quiver remains")
+                .ammunition_containers[0]
+                .contents
+                .is_empty()
+        );
+        assert_eq!(world.allocator.next, allocator_before_remove);
+
+        issue(
+            &mut world,
+            7,
+            CommandKind::InsertPocketItem {
+                owner_item: quiver,
+                pocket_index: 2,
+                source_item: metal_arrows,
+            },
+        );
+        issue(
+            &mut world,
+            8,
+            CommandKind::InsertPocketItem {
+                owner_item: quiver,
+                pocket_index: 2,
+                source_item: arrows,
+            },
+        );
+        let full_quiver = world.actor_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            full_quiver
+                .inventory
+                .iter()
+                .find(|item| item.id == quiver)
+                .expect("quiver remains")
+                .ammunition_containers[0]
+                .contents
+                .iter()
+                .map(|item| (item.id, item.type_id.as_str(), item.charges))
+                .collect::<Vec<_>>(),
+            vec![(arrows, "arrow_wood", 4), (metal_arrows, "arrow_metal", 2)]
+        );
+        world
+            .actors
+            .get_mut(&actor)
+            .expect("actor remains")
+            .action_points = i64::from(ACTOR_ACTION_THRESHOLD);
+        let before_mismatch = world.snapshot();
+        let rejected = issue(
+            &mut world,
+            9,
+            CommandKind::InsertPocketItem {
+                owner_item: quiver,
+                pocket_index: 2,
+                source_item: bolts,
+            },
+        );
+        assert!(rejected.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::CommandRejected {
+                reason: CommandRejection::IncompatibleAmmunition,
+                ..
+            }
+        )));
+        assert_eq!(
+            world
+                .actor_snapshot(actor)
+                .expect("actor remains")
+                .inventory,
+            before_mismatch.actors[0].inventory
+        );
+        assert_eq!(
+            world
+                .actors
+                .get(&actor)
+                .expect("actor remains")
+                .action_points,
+            i64::from(ACTOR_ACTION_THRESHOLD),
+            "rejected container transfers cost no action points"
+        );
+
+        for (sequence, contained_item) in [(10, arrows), (11, metal_arrows)] {
+            issue(
+                &mut world,
+                sequence,
+                CommandKind::RemovePocketItem {
+                    owner_item: quiver,
+                    pocket_index: 2,
+                    contained_item,
+                },
+            );
+        }
+        world.actors.get_mut(&actor).expect("actor remains").wielded = Some(bolts);
+        issue(
+            &mut world,
+            12,
+            CommandKind::InsertPocketItem {
+                owner_item: quiver,
+                pocket_index: 2,
+                source_item: bolts,
+            },
+        );
+        let switched = world.actor_snapshot(actor).expect("actor remains");
+        let switched_pocket = &switched
+            .inventory
+            .iter()
+            .find(|item| item.id == quiver)
+            .expect("quiver remains")
+            .ammunition_containers[0];
+        assert_eq!(switched_pocket.contents.len(), 1);
+        assert_eq!(switched_pocket.contents[0].id, bolts);
+        assert_eq!(switched_pocket.contents[0].ammunition_type, "bolt");
+        assert_eq!(switched.wielded, None);
+        WorldState::from_snapshot(&world.snapshot())
+            .expect("whole insertion of wielded ammunition must remain recoverable");
     }
 
     #[test]
@@ -24984,7 +25957,7 @@ mod tests {
             changed_stats
                 .canonical_hash()
                 .expect("changed base stats hash"),
-            "all canonical base stats must participate in CanonicalStateV54"
+            "all canonical base stats must participate in CanonicalStateV55"
         );
         let mut invalid_profile = setup_snapshot.clone();
         invalid_profile.smash_item_types[0].attack_time_moves = 0;
@@ -25001,7 +25974,7 @@ mod tests {
             changed_accuracy_world
                 .canonical_hash()
                 .expect("changed accuracy state hashes"),
-            "strict weapon to-hit must participate in CanonicalStateV54"
+            "strict weapon to-hit must participate in CanonicalStateV55"
         );
         let mut unsupported =
             WorldState::from_snapshot(&setup_snapshot).expect("unsupported setup restores");
@@ -25248,6 +26221,7 @@ mod tests {
                     magazine_capacity: 0,
                     integral_magazines: Vec::new(),
                     magazine_wells: Vec::new(),
+                    ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                 },

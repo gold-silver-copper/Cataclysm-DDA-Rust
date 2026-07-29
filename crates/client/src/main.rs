@@ -130,6 +130,11 @@ enum ClientAction {
         pocket_index: u16,
         contained_item: ItemId,
     },
+    InsertPocketItem {
+        owner_item: ItemId,
+        pocket_index: u16,
+        source_item: ItemId,
+    },
     Sleep,
     Wake,
     Wait,
@@ -1057,6 +1062,15 @@ async fn run_game_session(
                         pocket_index,
                         contained_item,
                     }),
+                    Some(ClientAction::InsertPocketItem {
+                        owner_item,
+                        pocket_index,
+                        source_item,
+                    }) => Some(CommandKind::InsertPocketItem {
+                        owner_item,
+                        pocket_index,
+                        source_item,
+                    }),
                     Some(ClientAction::Sleep) => Some(CommandKind::Sleep),
                     Some(ClientAction::Wake) => Some(CommandKind::Wake),
                     Some(ClientAction::Wait) => Some(CommandKind::Wait),
@@ -1756,6 +1770,20 @@ fn handle_item_menu(
             let _send_result = game.actions.try_send(action);
         } else {
             game.notice = String::from("No carried pocket item can be removed.");
+        }
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyI) {
+        if snapshot.controlled_actor.craft_activity.is_some()
+            || snapshot.controlled_actor.read_activity.is_some()
+            || snapshot.controlled_actor.disassembly_activity.is_some()
+            || snapshot.controlled_actor.construction_activity.is_some()
+        {
+            game.notice = String::from("Finish or cancel the current activity first.");
+        } else if let Some(action) = first_pocket_item_insertion(snapshot) {
+            let _send_result = game.actions.try_send(action);
+        } else {
+            game.notice = String::from("No carried ammunition fits a carried container pocket.");
         }
         return;
     }
@@ -2932,7 +2960,43 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
     let name = content
         .and_then(|content| content.0.get(&item.type_id))
         .map_or(item.type_id.as_str(), |definition| definition.name.as_str());
-    let charges = if !item.integral_magazines.is_empty() {
+    let charges = if !item.ammunition_containers.is_empty() {
+        Some(format!(
+            " [{}]",
+            item.ammunition_containers
+                .iter()
+                .map(|pocket| {
+                    let stored = pocket
+                        .contents
+                        .iter()
+                        .fold(0_i32, |total, item| total.saturating_add(item.charges));
+                    if let Some(active) = pocket.contents.first() {
+                        let capacity = pocket
+                            .capacities
+                            .iter()
+                            .find(|capacity| capacity.ammunition_type == active.ammunition_type)
+                            .map(|capacity| capacity.capacity)
+                            .unwrap_or_default();
+                        format!(
+                            "p{} {} {stored}/{capacity}",
+                            pocket.pocket_index, active.ammunition_type
+                        )
+                    } else {
+                        let capacities = pocket
+                            .capacities
+                            .iter()
+                            .map(|capacity| {
+                                format!("{}:{}", capacity.ammunition_type, capacity.capacity)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        format!("p{} empty 0 [{capacities}]", pocket.pocket_index)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    } else if !item.integral_magazines.is_empty() {
         Some(format!(
             " [{}]",
             item.integral_magazines
@@ -3027,6 +3091,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.magazine_capacity == right.magazine_capacity
         && left.integral_magazines == right.integral_magazines
         && left.magazine_wells == right.magazine_wells
+        && left.ammunition_containers == right.ammunition_containers
         && left.residual_energy_millijoules == right.residual_energy_millijoules
         && left.powered_tool == right.powered_tool
         && left.creature_corpse == right.creature_corpse
@@ -3086,9 +3151,87 @@ fn first_pocket_item_removal(snapshot: &ReplicationSnapshotV1) -> Option<ClientA
                         )
                     })
             });
-            integral.chain(wells)
+            let containers = owner
+                .ammunition_containers
+                .iter()
+                .filter(|pocket| pocket.unloadable)
+                .flat_map(|pocket| {
+                    pocket.contents.iter().map(|contained| {
+                        (
+                            owner.id,
+                            pocket.pocket_index,
+                            contained.id,
+                            ClientAction::RemovePocketItem {
+                                owner_item: owner.id,
+                                pocket_index: pocket.pocket_index,
+                                contained_item: contained.id,
+                            },
+                        )
+                    })
+                });
+            integral.chain(wells).chain(containers)
         })
         .min_by_key(|(owner, pocket, contained, _)| (*owner, *pocket, *contained))
+        .map(|(_, _, _, action)| action)
+}
+
+fn first_pocket_item_insertion(snapshot: &ReplicationSnapshotV1) -> Option<ClientAction> {
+    let actor = &snapshot.controlled_actor;
+    actor
+        .inventory
+        .iter()
+        .flat_map(|owner| {
+            owner
+                .ammunition_containers
+                .iter()
+                .filter(|pocket| pocket.reloadable)
+                .flat_map(move |pocket| {
+                    actor.inventory.iter().filter_map(move |source| {
+                        if source.id == owner.id
+                            || source.charges <= 0
+                            || source.ammunition_type.is_empty()
+                            || !source.comestible_type.is_empty()
+                            || source.ranged_weapon.is_some()
+                            || source.component_provenance.is_some()
+                            || source.magazine_capacity != 0
+                            || !source.integral_magazines.is_empty()
+                            || !source.magazine_wells.is_empty()
+                            || !source.ammunition_containers.is_empty()
+                            || source.residual_energy_millijoules != 0
+                            || source.powered_tool.is_some()
+                            || source.creature_corpse.is_some()
+                        {
+                            return None;
+                        }
+                        let capacity = pocket
+                            .capacities
+                            .iter()
+                            .find(|capacity| capacity.ammunition_type == source.ammunition_type)?
+                            .capacity;
+                        if pocket.contents.first().is_some_and(|contained| {
+                            contained.ammunition_type != source.ammunition_type
+                        }) {
+                            return None;
+                        }
+                        let occupied = pocket.contents.iter().try_fold(0_u32, |total, item| {
+                            u32::try_from(item.charges)
+                                .ok()
+                                .and_then(|charges| total.checked_add(charges))
+                        })?;
+                        (occupied < capacity).then_some((
+                            owner.id,
+                            pocket.pocket_index,
+                            source.id,
+                            ClientAction::InsertPocketItem {
+                                owner_item: owner.id,
+                                pocket_index: pocket.pocket_index,
+                                source_item: source.id,
+                            },
+                        ))
+                    })
+                })
+        })
+        .min_by_key(|(owner, pocket, source, _)| (*owner, *pocket, *source))
         .map(|(_, _, _, action)| action)
 }
 
@@ -4089,6 +4232,15 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!(
             "Loaded {loaded} charge(s) into pocket {pocket_index}; {pocket_ammunition} now loaded."
         ),
+        WorldEventKind::AmmunitionInsertedIntoContainer {
+            transferred,
+            pocket_ammunition,
+            pocket_index,
+            ammunition_type,
+            ..
+        } => format!(
+            "Stored {transferred} {ammunition_type} charge(s) in pocket {pocket_index}; {pocket_ammunition} now stored."
+        ),
         WorldEventKind::PocketItemRemoved {
             pocket_index,
             charges,
@@ -4237,6 +4389,7 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::PocketNotReloadable => "that pocket cannot be reloaded",
         CommandRejection::PocketNotUnloadable => "that pocket cannot be unloaded",
         CommandRejection::PocketItemMissing => "that item is not in the selected pocket",
+        CommandRejection::PocketFull => "that pocket is full",
         CommandRejection::ActorSleeping => "your character is sleeping",
         CommandRejection::ActorAwake => "your character is already awake",
         CommandRejection::NotTired => "your character is not tired enough to sleep",
@@ -4809,7 +4962,7 @@ fn gameplay_status(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; reload: U; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5015,6 +5168,7 @@ mod tests {
                 magazine_capacity: 0,
                 integral_magazines: Vec::new(),
                 magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
@@ -5232,6 +5386,64 @@ mod tests {
                 contained_item,
             }) if owner_item == integral_owner.id && contained_item == ItemId::new(1, 10)
         ));
+
+        let mut quiver = item(11, "", "", None);
+        quiver.type_id = String::from("quiver");
+        quiver.charges = 1;
+        quiver.ammunition_containers = vec![cdda_protocol::AmmunitionContainerPocketSnapshotV1 {
+            pocket_index: 3,
+            pocket_id: String::from("QUIVER"),
+            capacities: vec![
+                cdda_protocol::AmmunitionCapacityV1 {
+                    ammunition_type: String::from("arrow"),
+                    capacity: 20,
+                },
+                cdda_protocol::AmmunitionCapacityV1 {
+                    ammunition_type: String::from("bolt"),
+                    capacity: 20,
+                },
+            ],
+            rigid: false,
+            access_moves: 20,
+            reloadable: true,
+            unloadable: true,
+            contents: Vec::new(),
+        }];
+        let mut arrows = item(12, "arrow", "", None);
+        arrows.type_id = String::from("arrow_wood");
+        arrows.charges = 10;
+        let mut bolts = item(13, "bolt", "", None);
+        bolts.type_id = String::from("bolt_wood");
+        bolts.charges = 10;
+        battery_snapshot.controlled_actor.inventory =
+            vec![bolts.clone(), arrows.clone(), quiver.clone()];
+        assert!(matches!(
+            first_pocket_item_insertion(&battery_snapshot),
+            Some(ClientAction::InsertPocketItem {
+                owner_item,
+                pocket_index: 3,
+                source_item,
+            }) if owner_item == quiver.id && source_item == arrows.id
+        ));
+        assert!(item_menu_label(&quiver, None).contains("p3 empty"));
+        let mut contained = arrows.clone();
+        contained.id = ItemId::new(1, 14);
+        contained.charges = 6;
+        quiver.ammunition_containers[0].contents.push(contained);
+        battery_snapshot.controlled_actor.inventory = vec![bolts, arrows, quiver.clone()];
+        assert!(item_menu_label(&quiver, None).contains("p3 arrow 6/20"));
+        assert!(matches!(
+            first_pocket_item_removal(&battery_snapshot),
+            Some(ClientAction::RemovePocketItem {
+                owner_item,
+                pocket_index: 3,
+                contained_item,
+            }) if owner_item == quiver.id && contained_item == ItemId::new(1, 14)
+        ));
+        assert!(matches!(
+            first_pocket_item_insertion(&battery_snapshot),
+            Some(ClientAction::InsertPocketItem { source_item, .. }) if source_item == ItemId::new(1, 12)
+        ));
         battery_snapshot.controlled_actor.inventory = vec![tool.clone()];
         assert_eq!(
             item_menu_entries(
@@ -5336,6 +5548,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
@@ -6012,6 +6225,7 @@ mod tests {
             magazine_capacity: 0,
             integral_magazines: Vec::new(),
             magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,

@@ -130,6 +130,10 @@ pub struct ItemDefinition {
     /// Strictly parsed integral MAGAZINE ammo restrictions from inherited
     /// `pocket_data`; one entry maps an ammunition category to capacity.
     pub integral_magazines: Vec<BTreeMap<String, i32>>,
+    /// Strict ammo-restricted CONTAINER pockets from inherited `pocket_data`.
+    /// Mixed layouts remain closed so projecting these pockets cannot silently
+    /// discard unsupported sibling pocket behavior.
+    pub ammunition_containers: Vec<StrictAmmunitionContainerDefinition>,
     pub count: i32,
     pub range: i32,
     pub dispersion: i32,
@@ -211,6 +215,15 @@ pub struct StrictMagazineDefinition {
     pub capacity: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictAmmunitionContainerDefinition {
+    pub pocket_index: u16,
+    pub pocket_id: String,
+    pub capacities: BTreeMap<String, u32>,
+    pub access_moves: u16,
+    pub rigid: bool,
+}
+
 impl PocketDefinition {
     /// A strict integral magazine has no behavior beyond ammunition category
     /// and capacity. Other preserved fields keep the pocket fail-closed.
@@ -247,6 +260,48 @@ impl PocketDefinition {
                 .raw_fields
                 .keys()
                 .all(|field| FIELDS.contains(&field.as_str()))
+    }
+
+    /// A strict ammunition container uses only category capacities and the
+    /// base access cost. General volume, length, sealing, holster, and
+    /// encumbrance behavior remains unavailable rather than being discarded.
+    #[must_use]
+    pub fn strict_ammunition_container(&self) -> Option<StrictAmmunitionContainerDefinition> {
+        const FIELDS: &[&str] = &["ammo_restriction", "id", "moves", "pocket_type", "rigid"];
+        if self.pocket_type != PocketTypeDefinition::Container
+            || self.ammo_restrictions.is_empty()
+            || !self.raw_fields.contains_key("ammo_restriction")
+            || !self
+                .raw_fields
+                .keys()
+                .all(|field| FIELDS.contains(&field.as_str()))
+        {
+            return None;
+        }
+        let access_moves = match self.raw_fields.get("moves") {
+            Some(value) => u16::try_from(value.as_i64()?)
+                .ok()
+                .filter(|moves| *moves > 0)?,
+            None => 100,
+        };
+        let rigid = match self.raw_fields.get("rigid") {
+            Some(value) => value.as_bool()?,
+            None => false,
+        };
+        let capacities = self
+            .ammo_restrictions
+            .iter()
+            .map(|(ammunition_type, capacity)| {
+                Some((ammunition_type.clone(), u32::try_from(*capacity).ok()?))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        Some(StrictAmmunitionContainerDefinition {
+            pocket_index: self.pocket_index,
+            pocket_id: self.pocket_id.clone(),
+            capacities,
+            access_moves,
+            rigid,
+        })
     }
 }
 
@@ -764,9 +819,23 @@ fn apply_power_pocket_projections(
             _ => (),
         }
     }
+    let all_pockets_have_supported_shapes = normalized_pockets.iter().all(|pocket| {
+        pocket.strict_integral_magazine().is_some()
+            || pocket.strict_magazine_well()
+            || pocket.strict_ammunition_container().is_some()
+    });
+    let ammunition_containers = if all_pockets_have_supported_shapes {
+        normalized_pockets
+            .iter()
+            .filter_map(PocketDefinition::strict_ammunition_container)
+            .collect()
+    } else {
+        Vec::new()
+    };
     item.pockets = normalized_pockets;
     item.magazine_wells = magazine_wells;
     item.integral_magazines = integral_magazines;
+    item.ammunition_containers = ammunition_containers;
     Ok(())
 }
 
@@ -2398,6 +2467,308 @@ mod tests {
             items["test_sealed_magazine"]
                 .unsupported_fields
                 .contains("pocket_data")
+        );
+    }
+
+    #[test]
+    fn strict_ammunition_container_projection_applies_defaults_and_inherits_replacements() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let base = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_quiver",
+            "name": "test quiver",
+            "pocket_data": [{
+                "ammo_restriction": {"arrow": 20, "bolt": 20}
+            }]
+        }));
+        assert!(load_one(&base, &mut items, &mut abstracts).expect("base quiver should load"));
+        let inherited = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_inherited_quiver",
+            "copy-from": "test_quiver",
+            "name": "inherited quiver"
+        }));
+        assert!(
+            load_one(&inherited, &mut items, &mut abstracts).expect("inherited quiver should load")
+        );
+        let replacement = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_replacement_quiver",
+            "copy-from": "test_quiver",
+            "name": "replacement quiver",
+            "pocket_data": [
+                {
+                    "id": "short",
+                    "pocket_type": "CONTAINER",
+                    "ammo_restriction": {"bolt": 12},
+                    "moves": 20,
+                    "rigid": true
+                },
+                {
+                    "id": "long",
+                    "ammo_restriction": {"arrow": 30, "atlatl": 5},
+                    "moves": 30
+                }
+            ]
+        }));
+        assert!(
+            load_one(&replacement, &mut items, &mut abstracts)
+                .expect("replacement quiver should load")
+        );
+
+        let default_projection = StrictAmmunitionContainerDefinition {
+            pocket_index: 0,
+            pocket_id: String::new(),
+            capacities: BTreeMap::from([(String::from("arrow"), 20), (String::from("bolt"), 20)]),
+            access_moves: 100,
+            rigid: false,
+        };
+        assert_eq!(
+            items["test_quiver"].ammunition_containers,
+            std::slice::from_ref(&default_projection)
+        );
+        assert_eq!(
+            items["test_inherited_quiver"].ammunition_containers,
+            [default_projection]
+        );
+        assert_eq!(
+            items["test_replacement_quiver"].ammunition_containers,
+            [
+                StrictAmmunitionContainerDefinition {
+                    pocket_index: 0,
+                    pocket_id: String::from("short"),
+                    capacities: BTreeMap::from([(String::from("bolt"), 12)]),
+                    access_moves: 20,
+                    rigid: true,
+                },
+                StrictAmmunitionContainerDefinition {
+                    pocket_index: 1,
+                    pocket_id: String::from("long"),
+                    capacities: BTreeMap::from([
+                        (String::from("arrow"), 30),
+                        (String::from("atlatl"), 5),
+                    ]),
+                    access_moves: 30,
+                    rigid: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn strict_ammunition_container_projection_rejects_invalid_or_extra_behavior() {
+        for restriction in [
+            serde_json::json!({}),
+            serde_json::json!({"": 1}),
+            serde_json::json!({"arrow": 0}),
+            serde_json::json!({"arrow": -1}),
+            serde_json::json!({"arrow": i64::from(i32::MAX) + 1}),
+            serde_json::json!({"arrow": 1.5}),
+            serde_json::json!({"arrow": "20"}),
+        ] {
+            let value = serde_json::json!({"ammo_restriction": restriction});
+            assert!(
+                parse_pocket_definition(
+                    value.as_object().expect("pocket should be an object"),
+                    0,
+                    "test"
+                )
+                .is_err()
+            );
+        }
+
+        for moves in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u16::MAX) + 1),
+            serde_json::json!(1.5),
+            serde_json::json!("20"),
+        ] {
+            let value = serde_json::json!({
+                "ammo_restriction": {"arrow": 20},
+                "moves": moves
+            });
+            let pocket = parse_pocket_definition(
+                value.as_object().expect("pocket should be an object"),
+                0,
+                "test",
+            )
+            .expect("raw pocket shape should remain preserved");
+            assert_eq!(pocket.strict_ammunition_container(), None);
+        }
+
+        let invalid_rigid = serde_json::json!({
+            "ammo_restriction": {"arrow": 20},
+            "rigid": "true"
+        });
+        let pocket = parse_pocket_definition(
+            invalid_rigid
+                .as_object()
+                .expect("pocket should be an object"),
+            0,
+            "test",
+        )
+        .expect("raw pocket shape should remain preserved");
+        assert_eq!(pocket.strict_ammunition_container(), None);
+
+        for (field, field_value) in [
+            ("volume_encumber_modifier", serde_json::json!(0.3)),
+            ("holster", serde_json::json!(true)),
+            ("watertight", serde_json::json!(true)),
+            ("max_contains_volume", serde_json::json!("1 L")),
+            ("item_restriction", serde_json::json!(["arrow_wood"])),
+            ("weight_multiplier", serde_json::json!(0.5)),
+            ("description", serde_json::json!("unsupported behavior")),
+            ("//", serde_json::json!("comments are not canonical fields")),
+        ] {
+            let mut pocket_value = serde_json::json!({
+                "ammo_restriction": {"arrow": 20}
+            });
+            pocket_value
+                .as_object_mut()
+                .expect("pocket should be an object")
+                .insert(field.to_owned(), field_value);
+            let pocket = parse_pocket_definition(
+                pocket_value
+                    .as_object()
+                    .expect("pocket should be an object"),
+                0,
+                "test",
+            )
+            .expect("raw pocket shape should remain preserved");
+            assert_eq!(pocket.strict_ammunition_container(), None, "field {field}");
+        }
+
+        for invalid_type in [serde_json::json!("MAGIC"), serde_json::json!(1)] {
+            let value = serde_json::json!({
+                "pocket_type": invalid_type,
+                "ammo_restriction": {"arrow": 20}
+            });
+            assert!(
+                parse_pocket_definition(
+                    value.as_object().expect("pocket should be an object"),
+                    0,
+                    "test"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn strict_ammunition_container_projection_fails_closed_for_mixed_hosts() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let mixed = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_mixed_quiver",
+            "name": "mixed quiver",
+            "pocket_data": [
+                {"ammo_restriction": {"arrow": 20}, "moves": 20},
+                {
+                    "pocket_type": "CONTAINER",
+                    "max_contains_volume": "1 L",
+                    "max_contains_weight": "1 kg"
+                }
+            ]
+        }));
+        assert!(load_one(&mixed, &mut items, &mut abstracts).expect("mixed host should load"));
+        assert_eq!(items["test_mixed_quiver"].pockets.len(), 2);
+        assert!(
+            items["test_mixed_quiver"].pockets[0]
+                .strict_ammunition_container()
+                .is_some()
+        );
+        assert!(items["test_mixed_quiver"].ammunition_containers.is_empty());
+    }
+
+    #[test]
+    fn pinned_ammunition_container_fixtures_admit_and_exclude_exact_shapes() {
+        fn pinned_item(relative_path: &str, item_id: &str) -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(relative_path);
+            let bytes = fs::read(&path).expect("pinned item file should be readable");
+            serde_json::from_slice::<Value>(&bytes)
+                .expect("pinned item file should be valid JSON")
+                .as_array()
+                .expect("pinned item file should contain an array")
+                .iter()
+                .find(|value| value.get("id").and_then(Value::as_str) == Some(item_id))
+                .unwrap_or_else(|| panic!("pinned item {item_id} should exist in {path:?}"))
+                .clone()
+        }
+
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        for item_id in ["quiver", "nylon_quiver", "quiver_simple_cloth"] {
+            let item = raw(pinned_item(
+                "vendor/cdda/data/json/items/armor/ammo_pouch.json",
+                item_id,
+            ));
+            assert!(
+                load_one(&item, &mut items, &mut abstracts)
+                    .unwrap_or_else(|error| panic!("pinned item {item_id} should load: {error}"))
+            );
+        }
+        {
+            let item_id = "quiver_takedown_bow";
+            let item = raw(pinned_item(
+                "vendor/cdda/data/json/items/armor/ammo_pouch.json",
+                item_id,
+            ));
+            assert!(
+                load_one(&item, &mut items, &mut abstracts)
+                    .unwrap_or_else(|error| panic!("pinned item {item_id} should load: {error}"))
+            );
+        }
+        let stone_pouch = raw(pinned_item(
+            "vendor/cdda/data/json/items/armor/bandolier.json",
+            "stone_pouch",
+        ));
+        assert!(
+            load_one(&stone_pouch, &mut items, &mut abstracts)
+                .expect("pinned stone pouch should load")
+        );
+
+        assert_eq!(
+            items["quiver"].ammunition_containers,
+            [StrictAmmunitionContainerDefinition {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                capacities: BTreeMap::from([
+                    (String::from("arrow"), 20),
+                    (String::from("bolt"), 20),
+                ]),
+                access_moves: 20,
+                rigid: false,
+            }]
+        );
+        assert_eq!(
+            items["nylon_quiver"].ammunition_containers,
+            items["quiver"].ammunition_containers
+        );
+        assert_eq!(
+            items["quiver_simple_cloth"].ammunition_containers,
+            [StrictAmmunitionContainerDefinition {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                capacities: BTreeMap::from([
+                    (String::from("arrow"), 30),
+                    (String::from("atlatl"), 5),
+                    (String::from("bolt"), 30),
+                    (String::from("fishspear"), 5),
+                ]),
+                access_moves: 30,
+                rigid: false,
+            }]
+        );
+        assert!(items["stone_pouch"].ammunition_containers.is_empty());
+        assert!(
+            items["quiver_takedown_bow"]
+                .ammunition_containers
+                .is_empty()
         );
     }
 

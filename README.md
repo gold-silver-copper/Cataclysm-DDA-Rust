@@ -573,6 +573,27 @@ direct execution, per-tick restore, SQLite recovery, and portable replay.
 Databases below schema 56 that contain serialized state are rejected before
 mutation.
 
+Protocol 79 advances to schema 57, CanonicalStateV55, and CanonicalEventsV18.
+The strict item loader and authoritative runtime now admit ammunition-restricted
+`CONTAINER` pockets such as pinned `quiver`, while richer physical containers
+remain fail-closed. A pocket retains its inherited index/ID, sorted per-category
+capacities, base access moves, rigidity, and `NO_RELOAD`/`NO_UNLOAD` policy.
+Only ordinary count-by-charge ammunition may enter; one category is active at a
+time, while distinct item variants of that category retain separate stable
+objects. Whole insertion preserves the source ID, a partial insertion that
+creates a new contained stack allocates exactly one split ID, compatible
+merging retains the lowest existing ID, and
+exact whole removal returns the same contained object. Capacity, category,
+allocator, inventory, and access failures are atomic and cost no action points;
+accepted transfers use the pocket's pinned base move cost. The client binds `I`
+to deterministic fitting insertion and extends `Y` removal and inventory labels
+to these pockets. The starter cabin now supplies an empty pinned quiver and a
+separate wooden-arrow stack. Conformance scenario format 5/observation format 4 proves partial
+insertion, multiple same-category variants, exact removal, and category switching
+through direct execution, per-tick restore, SQLite recovery, and portable replay.
+Databases below schema 57 that contain serialized state are rejected before
+mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -584,7 +605,8 @@ multiplier only to the still-unsupported step-recipe model. Charged qualities
 require their pinned per-use charge threshold on each provider without spending
 that energy merely for qualification. The cabin supplies a stick, small knife,
 hammer, frozen toaster pastry, charged toaster, empty flashlight, a medium
-battery cell containing its stable battery-ammunition child, and pistol manual
+battery cell containing its stable battery-ammunition child, an empty quiver,
+wooden arrows, and pistol manual
 so the implemented paths are immediately playable.
 Pinned skill IDs, practical/theoretical levels, raw practice experience,
 skill-gated autolearning, and one practice unit per nominal crafting second are
