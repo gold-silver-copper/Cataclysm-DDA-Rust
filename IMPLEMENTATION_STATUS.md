@@ -4,9 +4,10 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `73a64d0` (`Extract simulation item-group planning`).
-- Active worktree: Protocol 84 holiday-qualified item-group selection; targeted
-  gates are green, full checkpoint gates and independent review are pending.
+- Verified green commit: `f4591fb9049228f3677777b8357cfed9ae325ea9`
+  (`Add deterministic item-group event policy`).
+- Checkpoint binding: this documentation-only follow-up records the exact green
+  implementation commit and independent review; runtime sources are unchanged.
 - Active milestone: `regional-terrain-base`.
 - Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 62, replay format 3, CanonicalStateV60, and
@@ -97,15 +98,16 @@ authoritative and retains deterministic multiplayer fallback.
   under CanonicalStateV60. That scenario has no item groups; its tick, actor,
   inventory, ground item, and CanonicalEventsV18 trace are unchanged, isolating
   the difference to the intentional state-hash domain change.
-- Active-worktree runtime evidence counts four admitted definitions through
-  generation, authoritative interaction, persistence, and client access: 44
-  points above green parent `73a64d0`. Exact production definitions receive
+- Runtime evidence at verified commit
+  `f4591fb9049228f3677777b8357cfed9ae325ea9` counts four admitted definitions
+  through generation, authoritative interaction, persistence, and client
+  access: 44 points. Exact production definitions receive
   zero four-mode credit because the current conformance paths use normalized
   semantic substitutes; those fixtures are not mislabeled as production
   evidence. The separate parser inventory counts 7,621 item groups, 9,520
   mapgen objects, 2,712 overmap terrains, and 150 starts but assigns them no
-  runtime points merely for loading. Exact commit binding remains pending until
-  the green implementation checkpoint exists.
+  runtime points merely for loading. The checked artifact, runtime versions,
+  and every named source of evidence are bound byte-for-byte to that commit.
 
 ## Explicit boundaries
 
@@ -132,18 +134,20 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Verified commit `73a64d0` is green for formatting; workspace all-target,
-all-feature check; strict Clippy; warning-free rustdoc; dependency boundaries;
-parity ledger; astronomy table; selected-content validation at the unchanged
-manifest hash `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
-content inventory; all three pinned C++ differential oracles; and 331 workspace
-tests. The characterization review fixed two P1 portability defects (wall-clock
-holiday state and standard-library RNG/shuffle samples) and two P2 fixture gaps
-(container order and ammunition identity); its final rescan was clean. A fresh
-review of the mechanical simulation item-planner extraction found no P0-P3
-issue and independently verified byte-equivalent control flow and RNG order.
-Existing nonblocking hardening opportunities remain indexed RLE identity lookup
-and loader-local JSON byte caps for future mutable content packages.
+Verified commit `f4591fb9049228f3677777b8357cfed9ae325ea9` is green for
+formatting; workspace all-target/all-feature check; strict Clippy; warning-free
+rustdoc; dependency boundaries; the parity ledger and runtime-progress gates;
+astronomy; selected-content validation at unchanged manifest hash
+`45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
+content inventory; all three pinned C++ differential oracles (8/41/17
+assertions); and 335 workspace tests. Independent review found and resolved the
+stale runtime-evidence binding, synthetic-fixture scoring overclaim, declarative
+completion-gate weakness, missing direct mapgen comparator overclaim, and two
+final-binding provenance holes. Its final full-diff rescan found no remaining
+P0-P3 issue. Existing nonblocking hardening opportunities remain indexed RLE
+identity lookup, loader-local JSON byte caps for future mutable content
+packages, and the explicit normalized Rust/C++ mapgen comparator now named by
+the `oracle_pending` state.
 
 ## Next dependency boundary
 
