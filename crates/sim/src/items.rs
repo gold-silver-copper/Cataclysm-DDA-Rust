@@ -1,14 +1,323 @@
 use std::collections::BTreeMap;
 
 use cdda_protocol::{
-    CraftItemPrototypeV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
-    ItemGroupKindV1, ItemGroupSourceV1, ItemGroupTargetV1, MAX_ITEM_GROUP_DEPTH,
-    MAX_ITEM_GROUP_OUTPUTS,
+    AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
+    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemId, ItemSnapshot, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS,
+    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
+    RangedWeaponSnapshot,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
+use serde::{Deserialize, Serialize};
 
-use super::{SimError, inclusive_rng_u64, validate_craft_item_prototype};
+use super::{
+    SimError, debit_integral_magazine_charges, debit_snapshot_ammunition_charges,
+    inclusive_rng_u64, powered_light_effective_emission, snapshot_ammunition_capacity,
+    snapshot_stored_ammunition_charges, validate_craft_item_prototype, validate_item_snapshot,
+};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct ItemInstance {
+    pub(super) id: ItemId,
+    pub(super) type_id: String,
+    pub(super) charges: i32,
+    pub(super) damage: u16,
+    pub(super) melee_damage_milli: BTreeMap<String, i32>,
+    pub(super) calories: i32,
+    pub(super) quench: i32,
+    pub(super) comestible_type: String,
+    pub(super) ammunition_type: String,
+    pub(super) ranged_weapon: Option<RangedWeaponSnapshot>,
+    pub(super) component_provenance: Option<Vec<ItemComponentSnapshotV1>>,
+    pub(super) magazine_capacity: u32,
+    pub(super) integral_magazines: Vec<IntegralMagazinePocketSnapshotV1>,
+    pub(super) magazine_wells: Vec<MagazineWellSnapshotV1>,
+    pub(super) ammunition_containers: Vec<AmmunitionContainerPocketSnapshotV1>,
+    pub(super) residual_energy_millijoules: u32,
+    pub(super) powered_tool: Option<PoweredToolStateV1>,
+    pub(super) creature_corpse: Option<CreatureCorpseSnapshotV1>,
+}
+
+impl ItemInstance {
+    pub(super) fn integral_ammunition_charges(&self) -> i32 {
+        self.integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .fold(0_i32, |total, ammunition| {
+                total.saturating_add(ammunition.charges)
+            })
+    }
+
+    pub(super) fn stored_ammunition_charges(&self) -> i32 {
+        if self.integral_magazines.is_empty() {
+            self.charges
+        } else {
+            self.integral_ammunition_charges()
+        }
+    }
+
+    pub(super) fn available_tool_charges(&self) -> i32 {
+        if self.magazine_wells.is_empty() {
+            return self.stored_ammunition_charges();
+        }
+        self.magazine_wells
+            .iter()
+            .filter_map(|well| well.installed_magazine.as_deref())
+            .fold(0, |total, magazine| {
+                total.saturating_add(snapshot_stored_ammunition_charges(magazine))
+            })
+    }
+
+    pub(super) fn debit_tool_charges(&mut self, charges: i32) -> Result<i32, SimError> {
+        if charges < 0 {
+            return Err(SimError::InvalidItem);
+        }
+        if self.magazine_wells.is_empty() {
+            if self.integral_magazines.is_empty() {
+                self.charges = self
+                    .charges
+                    .checked_sub(charges)
+                    .filter(|remaining| *remaining >= 0)
+                    .ok_or(SimError::InvalidItem)?;
+            } else {
+                debit_integral_magazine_charges(&mut self.integral_magazines, charges)?;
+            }
+            return Ok(self.stored_ammunition_charges());
+        }
+        if self.available_tool_charges() < charges {
+            return Err(SimError::InvalidItem);
+        }
+        let mut required = charges;
+        for magazine in self
+            .magazine_wells
+            .iter_mut()
+            .filter_map(|well| well.installed_magazine.as_deref_mut())
+        {
+            let debit = required.min(snapshot_stored_ammunition_charges(magazine));
+            debit_snapshot_ammunition_charges(magazine, debit)?;
+            required -= debit;
+            if required == 0 {
+                break;
+            }
+        }
+        Ok(self.available_tool_charges())
+    }
+
+    fn power_magazine(&self) -> Option<&ItemSnapshot> {
+        let pocket_index = self.powered_tool.as_ref()?.power_pocket_index;
+        self.magazine_wells
+            .iter()
+            .find(|well| well.pocket_index == pocket_index)?
+            .installed_magazine
+            .as_deref()
+    }
+
+    fn power_magazine_mut(&mut self) -> Option<&mut ItemSnapshot> {
+        let pocket_index = self.powered_tool.as_ref()?.power_pocket_index;
+        self.magazine_wells
+            .iter_mut()
+            .find(|well| well.pocket_index == pocket_index)?
+            .installed_magazine
+            .as_deref_mut()
+    }
+
+    pub(super) fn available_power_energy_millijoules(&self) -> Result<u64, SimError> {
+        let Some(magazine) = self.power_magazine() else {
+            return Ok(0);
+        };
+        let charges = u64::try_from(snapshot_stored_ammunition_charges(magazine))
+            .map_err(|_| SimError::InvalidItem)?;
+        let residual = if magazine.integral_magazines.is_empty() {
+            magazine.residual_energy_millijoules
+        } else {
+            magazine
+                .integral_magazines
+                .iter()
+                .try_fold(0_u32, |total, pocket| {
+                    total.checked_add(pocket.residual_energy_millijoules)
+                })
+                .ok_or(SimError::NumericOverflow)?
+        };
+        charges
+            .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+            .and_then(|energy| energy.checked_add(u64::from(residual)))
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    pub(super) fn effective_powered_light_emission(&self) -> Result<u16, SimError> {
+        let Some(powered) = self.powered_tool.as_ref().filter(|powered| powered.active) else {
+            return Ok(0);
+        };
+        let Some(magazine) = self.power_magazine() else {
+            return Ok(0);
+        };
+        Ok(powered_light_effective_emission(
+            powered.light_emission,
+            powered.dims_with_charge,
+            self.available_power_energy_millijoules()?,
+            snapshot_ammunition_capacity(magazine),
+        ))
+    }
+
+    pub(super) fn consume_activation_power(&mut self, charges: u16) -> Result<bool, SimError> {
+        let Some(magazine) = self.power_magazine_mut() else {
+            return Ok(false);
+        };
+        let charges = i32::from(charges);
+        if snapshot_stored_ammunition_charges(magazine) < charges {
+            return Ok(false);
+        }
+        debit_snapshot_ammunition_charges(magazine, charges)?;
+        Ok(true)
+    }
+
+    pub(super) fn consume_continuous_power(&mut self, millijoules: u32) -> Result<bool, SimError> {
+        let Some(magazine) = self.power_magazine_mut() else {
+            return Ok(false);
+        };
+        if !magazine.integral_magazines.is_empty() {
+            let available =
+                magazine
+                    .integral_magazines
+                    .iter()
+                    .try_fold(0_u64, |total, pocket| {
+                        let charges = pocket
+                            .loaded_ammunition
+                            .as_deref()
+                            .map(|ammunition| ammunition.charges)
+                            .unwrap_or(0);
+                        u64::try_from(charges)
+                            .map_err(|_| SimError::InvalidItem)?
+                            .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                            .and_then(|energy| {
+                                energy.checked_add(u64::from(pocket.residual_energy_millijoules))
+                            })
+                            .and_then(|energy| total.checked_add(energy))
+                            .ok_or(SimError::NumericOverflow)
+                    })?;
+            let mut remaining = u64::from(millijoules);
+            if available < remaining {
+                return Ok(false);
+            }
+            for pocket in &mut magazine.integral_magazines {
+                let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() else {
+                    continue;
+                };
+                let pocket_energy = u64::try_from(ammunition.charges)
+                    .map_err(|_| SimError::InvalidItem)?
+                    .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                    .and_then(|energy| {
+                        energy.checked_add(u64::from(pocket.residual_energy_millijoules))
+                    })
+                    .ok_or(SimError::NumericOverflow)?;
+                let consumed = pocket_energy.min(remaining);
+                let retained = pocket_energy
+                    .checked_sub(consumed)
+                    .ok_or(SimError::NumericOverflow)?;
+                ammunition.charges =
+                    i32::try_from(retained / u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                        .map_err(|_| SimError::NumericOverflow)?;
+                pocket.residual_energy_millijoules =
+                    u32::try_from(retained % u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                        .map_err(|_| SimError::NumericOverflow)?;
+                remaining = remaining
+                    .checked_sub(consumed)
+                    .ok_or(SimError::NumericOverflow)?;
+                if retained == 0 {
+                    pocket.loaded_ammunition = None;
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+            return Ok(true);
+        }
+        let available = u64::try_from(magazine.charges)
+            .map_err(|_| SimError::InvalidItem)?
+            .checked_mul(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+            .and_then(|energy| energy.checked_add(u64::from(magazine.residual_energy_millijoules)))
+            .ok_or(SimError::NumericOverflow)?;
+        if available < u64::from(millijoules) {
+            return Ok(false);
+        }
+        let mut residual = u64::from(magazine.residual_energy_millijoules);
+        while residual < u64::from(millijoules) {
+            magazine.charges = magazine
+                .charges
+                .checked_sub(1)
+                .ok_or(SimError::NumericOverflow)?;
+            residual = residual
+                .checked_add(u64::from(MILLIJOULES_PER_BATTERY_CHARGE))
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        residual = residual
+            .checked_sub(u64::from(millijoules))
+            .ok_or(SimError::NumericOverflow)?;
+        magazine.residual_energy_millijoules =
+            u32::try_from(residual).map_err(|_| SimError::NumericOverflow)?;
+        Ok(true)
+    }
+
+    pub(super) fn set_powered_active(&mut self, active: bool) -> Result<(), SimError> {
+        let powered = self.powered_tool.as_mut().ok_or(SimError::InvalidItem)?;
+        powered.active = active;
+        self.type_id.clone_from(if active {
+            &powered.active_type_id
+        } else {
+            &powered.inactive_type_id
+        });
+        Ok(())
+    }
+
+    pub(super) fn snapshot(&self) -> ItemSnapshot {
+        ItemSnapshot {
+            id: self.id,
+            type_id: self.type_id.clone(),
+            charges: self.charges,
+            damage: self.damage,
+            melee_damage_milli: self.melee_damage_milli.clone(),
+            calories: self.calories,
+            quench: self.quench,
+            comestible_type: self.comestible_type.clone(),
+            ammunition_type: self.ammunition_type.clone(),
+            ranged_weapon: self.ranged_weapon.clone(),
+            component_provenance: self.component_provenance.clone(),
+            magazine_capacity: self.magazine_capacity,
+            integral_magazines: self.integral_magazines.clone(),
+            magazine_wells: self.magazine_wells.clone(),
+            ammunition_containers: self.ammunition_containers.clone(),
+            residual_energy_millijoules: self.residual_energy_millijoules,
+            powered_tool: self.powered_tool.clone(),
+            creature_corpse: self.creature_corpse.clone(),
+        }
+    }
+
+    pub(super) fn from_snapshot(snapshot: &ItemSnapshot) -> Result<Self, SimError> {
+        validate_item_snapshot(snapshot)?;
+        Ok(Self {
+            id: snapshot.id,
+            type_id: snapshot.type_id.clone(),
+            charges: snapshot.charges,
+            damage: snapshot.damage,
+            melee_damage_milli: snapshot.melee_damage_milli.clone(),
+            calories: snapshot.calories,
+            quench: snapshot.quench,
+            comestible_type: snapshot.comestible_type.clone(),
+            ammunition_type: snapshot.ammunition_type.clone(),
+            ranged_weapon: snapshot.ranged_weapon.clone(),
+            component_provenance: snapshot.component_provenance.clone(),
+            magazine_capacity: snapshot.magazine_capacity,
+            integral_magazines: snapshot.integral_magazines.clone(),
+            magazine_wells: snapshot.magazine_wells.clone(),
+            ammunition_containers: snapshot.ammunition_containers.clone(),
+            residual_energy_millijoules: snapshot.residual_energy_millijoules,
+            powered_tool: snapshot.powered_tool.clone(),
+            creature_corpse: snapshot.creature_corpse.clone(),
+        })
+    }
+}
 
 pub(super) fn plan_item_group_source(
     source: &ItemGroupSourceV1,

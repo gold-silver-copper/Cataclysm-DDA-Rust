@@ -6,8 +6,10 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 - Verified green commit: `f4591fb9049228f3677777b8357cfed9ae325ea9`
   (`Add deterministic item-group event policy`).
-- Checkpoint binding: this documentation-only follow-up records the exact green
-  implementation commit and independent review; runtime sources are unchanged.
+- Active checkpoint candidate: canonical `ItemInstance` state and its pocket,
+  power, snapshot, and validation-facing behavior moved mechanically from
+  `sim/lib.rs` to `sim/items.rs`. Full local gates and an independent scoped
+  review are green; exact commit binding is pending.
 - Active milestone: `regional-terrain-base`.
 - Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 62, replay format 3, CanonicalStateV60, and
@@ -98,6 +100,13 @@ authoritative and retains deterministic multiplayer fallback.
   under CanonicalStateV60. That scenario has no item groups; its tick, actor,
   inventory, ground item, and CanonicalEventsV18 trace are unchanged, isolating
   the difference to the intentional state-hash domain change.
+- The active extraction moves the complete 300-line canonical `ItemInstance`
+  implementation without changing derives, field order, branches, mutations,
+  errors, output order, or RNG. After normalizing only the newly required
+  `pub(super)` visibility, the reviewer found the old and new definitions
+  textually identical. `sim/lib.rs` is now 28,558 lines and `sim/items.rs` is
+  599 lines; no wire, persistence, replay, event, or canonical-hash version
+  changes.
 - Runtime evidence at verified commit
   `f4591fb9049228f3677777b8357cfed9ae325ea9` counts four admitted definitions
   through generation, authoritative interaction, persistence, and client
@@ -134,30 +143,35 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Verified commit `f4591fb9049228f3677777b8357cfed9ae325ea9` is green for
-formatting; workspace all-target/all-feature check; strict Clippy; warning-free
-rustdoc; dependency boundaries; the parity ledger and runtime-progress gates;
-astronomy; selected-content validation at unchanged manifest hash
+The last bound runtime implementation remains
+`f4591fb9049228f3677777b8357cfed9ae325ea9`. The active mechanical extraction
+above it is green for formatting; workspace all-target/all-feature check;
+strict Clippy; warning-free rustdoc; dependency boundaries; the parity ledger
+and unbound runtime-progress gates; astronomy; selected-content validation at
+unchanged manifest hash
 `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
 content inventory; all three pinned C++ differential oracles (8/41/17
-assertions); and 335 workspace tests. Independent review found and resolved the
-stale runtime-evidence binding, synthetic-fixture scoring overclaim, declarative
-completion-gate weakness, missing direct mapgen comparator overclaim, and two
-final-binding provenance holes. Its final full-diff rescan found no remaining
-P0-P3 issue. Existing nonblocking hardening opportunities remain indexed RLE
-identity lookup, loader-local JSON byte caps for future mutable content
-packages, and the explicit normalized Rust/C++ mapgen comparator now named by
-the `oracle_pending` state.
+assertions); and 335 workspace tests plus doc-tests. An independent reviewer
+audited only the two-file simulation move against base
+`dd3c70cc4f9a2e2d3914c0a6c84f47b808e5ea06`, found no P0-P3 issue, and recorded
+the remaining encapsulation boundary: item validators, conversions, and direct
+parent-owned mutations still need later mechanical extraction. Existing
+nonblocking hardening opportunities remain indexed RLE identity lookup,
+loader-local JSON byte caps for future mutable content packages, and the
+explicit normalized Rust/C++ mapgen comparator named by the `oracle_pending`
+state.
 
 ## Next dependency boundary
 
 The central-file split is now an explicit prerequisite DAG rather than an
-informal cleanup task. Current ownership surfaces are about 28.9K lines in
+informal cleanup task. Current ownership surfaces are about 28.6K lines in
 simulation `lib.rs`, 8.3K in protocol, 13K in persistence, and 8.8K in the
-server library. Item-group planning has moved to `sim/items.rs`; the ledger now
-tracks the remaining item, actor, combat, activity, monster, canonical-state,
-protocol-domain, persistence-domain, and session/replication extractions
-separately. Anatomy and EOC expansion depend on the relevant extractions.
+server library. Item-group planning and the canonical item instance now live in
+`sim/items.rs`; validators, materialization/conversion helpers, ownership
+transfers, and item-bound activities remain in the root for incremental
+extraction. The ledger separately tracks actor, combat, activity, monster,
+canonical-state, protocol-domain, persistence-domain, and session/replication
+extractions. Anatomy and EOC expansion depend on the relevant boundaries.
 
 Implement the coherent item-group modifier/contained-item family needed by the
 pinned `field` closure, using the checked oracle and all four recovery modes
