@@ -4,7 +4,16 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use cdda_protocol::BASELINE_COMMIT;
+use cdda_content::{ContentManifest, ModCatalog, OvermapTerrainRegistry};
+use cdda_protocol::{
+    BASELINE_COMMIT, ChunkCoord, FurnitureTileSnapshot, TerrainTileSnapshot,
+    WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH,
+    WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1,
+    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
+    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedTerrainTargetV1, worldgen_omt_matches,
+};
+use cdda_sim::WorldState;
 use serde::{Deserialize, Serialize};
 
 const ORACLE_FORMAT_VERSION: u16 = 1;
@@ -299,9 +308,10 @@ struct MapgenOracleObservationV1 {
     rotatable: Vec<MapgenRotationObservationV1>,
     linear: Vec<MapgenRotationObservationV1>,
     palette: MapgenPaletteObservationV1,
+    static_template: MapgenStaticTemplateObservationV1,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MapgenMatchObservationV1 {
     case_id: String,
@@ -311,7 +321,7 @@ struct MapgenMatchObservationV1 {
     matches: bool,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MapgenRotationObservationV1 {
     direction: String,
@@ -332,6 +342,39 @@ struct MapgenPaletteObservationV1 {
     mapgen_size_x: i32,
     mapgen_size_y: i32,
     setup_completed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenStaticTemplateObservationV1 {
+    width_tiles: i32,
+    height_tiles: i32,
+    source_marker_x: i32,
+    source_marker_y: i32,
+    background_terrain_id: String,
+    marker_terrain_id: String,
+    marker_furniture_id: String,
+    generated_background_terrain_id: String,
+    generated_marker_terrain_id: String,
+    generated_marker_furniture_id: String,
+    generated_rows: Vec<String>,
+    piece_phases: Vec<String>,
+    setup_completed: bool,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct MapgenDirectObservationV1 {
+    matching: Vec<MapgenMatchObservationV1>,
+    rotatable: Vec<MapgenRotationObservationV1>,
+    linear: Vec<MapgenRotationObservationV1>,
+    static_template: MapgenStaticTemplateObservationV1,
+}
+
+struct RustStaticTemplateTiles {
+    background: String,
+    marker_terrain: String,
+    marker_furniture: String,
+    generated_rows: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -419,13 +462,19 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
             let scenario = load_mapgen_scenario(&scenario_path)?;
             let observation = run_mapgen_binary(workspace, &upstream, &binary)?;
             compare_mapgen(&scenario, &observation)?;
+            let rust_observation = rust_mapgen_direct_observation(workspace)?;
+            compare_direct_observation(
+                "mapgen/OMT/start-location",
+                &direct_mapgen_projection(&observation),
+                &rust_observation,
+            )?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&observation)
                     .map_err(|error| format!("could not encode oracle observation: {error}"))?
             );
             eprintln!(
-                "C++ oracle verified bounded static mapgen semantics against pinned {}",
+                "C++ oracle and direct Rust comparison verified bounded static mapgen semantics against pinned {}",
                 BASELINE_COMMIT
             );
         }
@@ -1016,7 +1065,388 @@ fn validate_mapgen_observation(
     {
         return Err("mapgen palette observation is incomplete".into());
     }
+    let template = &observation.static_template;
+    if template.width_tiles != 24
+        || template.height_tiles != 24
+        || template.source_marker_x != 2
+        || template.source_marker_y != 5
+        || template.background_terrain_id != "t_dirt"
+        || template.marker_terrain_id != "t_floor"
+        || template.marker_furniture_id != "f_table"
+        || template.generated_background_terrain_id != template.background_terrain_id
+        || template.generated_marker_terrain_id != template.marker_terrain_id
+        || template.generated_marker_furniture_id != template.marker_furniture_id
+        || template.generated_rows.len() != 24
+        || template.generated_rows.iter().enumerate().any(|(y, row)| {
+            row.len() != 24
+                || row
+                    .bytes()
+                    .enumerate()
+                    .any(|(x, tile)| tile != if (x, y) == (2, 5) { b'X' } else { b'.' })
+        })
+        || template.piece_phases != ["terrain", "furniture"]
+        || !template.setup_completed
+    {
+        return Err("mapgen admitted static-template observation is incomplete".into());
+    }
     Ok(())
+}
+
+fn direct_mapgen_projection(observation: &MapgenOracleObservationV1) -> MapgenDirectObservationV1 {
+    MapgenDirectObservationV1 {
+        matching: observation.matching.clone(),
+        rotatable: observation.rotatable.clone(),
+        linear: observation.linear.clone(),
+        static_template: observation.static_template.clone(),
+    }
+}
+
+fn rust_mapgen_direct_observation(
+    workspace: &Path,
+) -> Result<MapgenDirectObservationV1, Box<dyn std::error::Error>> {
+    let manifest_path = workspace.join("vendor/cdda-content-manifest.json");
+    let manifest = ContentManifest::load(&manifest_path)?;
+    let content_root = manifest_path
+        .parent()
+        .ok_or("pinned content manifest has no parent directory")?;
+    let mods = ModCatalog::load(&manifest, content_root)?;
+    let enabled = mods.recommended_new_world()?;
+    let terrain = OvermapTerrainRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+
+    let match_cases = [
+        (
+            "exact_full",
+            "shelter_north",
+            "shelter_north",
+            "EXACT",
+            WorldgenOmtMatchTypeV1::Exact,
+        ),
+        (
+            "exact_base_rejected",
+            "shelter",
+            "shelter_north",
+            "EXACT",
+            WorldgenOmtMatchTypeV1::Exact,
+        ),
+        (
+            "rotatable_type",
+            "shelter",
+            "shelter_east",
+            "TYPE",
+            WorldgenOmtMatchTypeV1::Type,
+        ),
+        (
+            "linear_subtype",
+            "road_straight",
+            "road_ew",
+            "SUBTYPE",
+            WorldgenOmtMatchTypeV1::Subtype,
+        ),
+        (
+            "wrong_linear_subtype",
+            "road_curved",
+            "road_ew",
+            "SUBTYPE",
+            WorldgenOmtMatchTypeV1::Subtype,
+        ),
+        (
+            "prefix_separator",
+            "forest",
+            "forest_thick",
+            "PREFIX",
+            WorldgenOmtMatchTypeV1::Prefix,
+        ),
+        (
+            "partial_prefix_rejected",
+            "fore",
+            "forest_thick",
+            "PREFIX",
+            WorldgenOmtMatchTypeV1::Prefix,
+        ),
+        (
+            "contains_substring",
+            "rest_t",
+            "forest_thick",
+            "CONTAINS",
+            WorldgenOmtMatchTypeV1::Contains,
+        ),
+    ];
+    let matching = match_cases
+        .into_iter()
+        .map(|(case_id, query, terrain_id, match_name, match_type)| {
+            let identity = protocol_omt_identity(&terrain, terrain_id)?;
+            Ok(MapgenMatchObservationV1 {
+                case_id: case_id.to_owned(),
+                query: query.to_owned(),
+                terrain_id: terrain_id.to_owned(),
+                match_type: match_name.to_owned(),
+                matches: worldgen_omt_matches(query, match_type, &identity),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+
+    let directions = ["north", "east", "south", "west"];
+    let rotatable_ids = [
+        "shelter_north",
+        "shelter_east",
+        "shelter_south",
+        "shelter_west",
+    ];
+    let linear_ids = ["road_ns", "road_ew", "road_ns", "road_ew"];
+    let rotatable = rust_rotation_observations(&terrain, directions, rotatable_ids)?;
+    let linear = rust_rotation_observations(&terrain, directions, linear_ids)?;
+    let north = rotatable
+        .first()
+        .ok_or("rotatable Rust mapgen observation is empty")?;
+    let template_tiles =
+        rust_static_template_tiles(&protocol_omt_identity(&terrain, "shelter_north")?)?;
+    if (north.marker_x, north.marker_y) != (2, 5) {
+        return Err("north static-template marker did not remain at its source coordinate".into());
+    }
+    Ok(MapgenDirectObservationV1 {
+        matching,
+        rotatable,
+        linear,
+        static_template: MapgenStaticTemplateObservationV1 {
+            width_tiles: i32::try_from(WORLDGEN_OMT_SIZE)?,
+            height_tiles: i32::try_from(WORLDGEN_OMT_SIZE)?,
+            source_marker_x: 2,
+            source_marker_y: 5,
+            background_terrain_id: String::from("t_dirt"),
+            marker_terrain_id: String::from("t_floor"),
+            marker_furniture_id: String::from("f_table"),
+            generated_background_terrain_id: template_tiles.background,
+            generated_marker_terrain_id: template_tiles.marker_terrain,
+            generated_marker_furniture_id: template_tiles.marker_furniture,
+            generated_rows: template_tiles.generated_rows,
+            piece_phases: vec![String::from("terrain"), String::from("furniture")],
+            setup_completed: true,
+        },
+    })
+}
+
+fn protocol_omt_identity(
+    registry: &OvermapTerrainRegistry,
+    full_id: &str,
+) -> Result<WorldgenOmtIdentityV1, Box<dyn std::error::Error>> {
+    let identity = registry
+        .get_identity(full_id)
+        .ok_or_else(|| format!("pinned Rust content is missing OMT identity {full_id}"))?;
+    Ok(WorldgenOmtIdentityV1 {
+        full_id: identity.full_id.clone(),
+        type_id: identity.type_id.clone(),
+        subtype_id: identity.subtype_id.clone(),
+        generator_id: identity.generator_id.clone(),
+        rotation: identity.rotation,
+    })
+}
+
+fn rust_rotation_observations<const N: usize>(
+    registry: &OvermapTerrainRegistry,
+    directions: [&str; N],
+    full_ids: [&str; N],
+) -> Result<Vec<MapgenRotationObservationV1>, Box<dyn std::error::Error>> {
+    directions
+        .into_iter()
+        .zip(full_ids)
+        .map(|(direction, full_id)| {
+            let identity = protocol_omt_identity(registry, full_id)?;
+            let (marker_x, marker_y) = rust_static_template_marker(&identity)?;
+            Ok(MapgenRotationObservationV1 {
+                direction: direction.to_owned(),
+                terrain_id: identity.full_id,
+                mapgen_id: identity.generator_id,
+                rotation: i32::from(identity.rotation),
+                marker_x,
+                marker_y,
+            })
+        })
+        .collect()
+}
+
+fn rust_static_template_marker(
+    identity: &WorldgenOmtIdentityV1,
+) -> Result<(i32, i32), Box<dyn std::error::Error>> {
+    let snapshot = rust_static_template_snapshot(identity)?;
+    rust_static_template_marker_in(&snapshot)
+}
+
+fn rust_static_template_marker_in(
+    snapshot: &WorldSnapshotV1,
+) -> Result<(i32, i32), Box<dyn std::error::Error>> {
+    let mut marker = None;
+    for y in 0..i32::try_from(WORLDGEN_OMT_SIZE)? {
+        for x in 0..i32::try_from(WORLDGEN_OMT_SIZE)? {
+            let (terrain, furniture) = generated_tile(snapshot, x, y)?;
+            if terrain == "t_floor" {
+                if furniture.as_deref() != Some("f_table") || marker.replace((x, y)).is_some() {
+                    return Err("Rust static mapgen produced an invalid marker shape".into());
+                }
+            } else if terrain != "t_dirt" || furniture.is_some() {
+                return Err("Rust static mapgen produced an unexpected background tile".into());
+            }
+        }
+    }
+    marker.ok_or_else(|| "Rust static mapgen did not produce its marker".into())
+}
+
+fn rust_static_template_tiles(
+    identity: &WorldgenOmtIdentityV1,
+) -> Result<RustStaticTemplateTiles, Box<dyn std::error::Error>> {
+    let snapshot = rust_static_template_snapshot(identity)?;
+    let (background, background_furniture) = generated_tile(&snapshot, 0, 0)?;
+    if background_furniture.is_some() {
+        return Err("Rust static mapgen background unexpectedly has furniture".into());
+    }
+    let (marker_x, marker_y) = rust_static_template_marker_in(&snapshot)?;
+    let (marker, furniture) = generated_tile(&snapshot, marker_x, marker_y)?;
+    let mut generated_rows = Vec::with_capacity(WORLDGEN_OMT_SIZE);
+    for y in 0..i32::try_from(WORLDGEN_OMT_SIZE)? {
+        let mut row = String::with_capacity(WORLDGEN_OMT_SIZE);
+        for x in 0..i32::try_from(WORLDGEN_OMT_SIZE)? {
+            let (terrain, furniture) = generated_tile(&snapshot, x, y)?;
+            row.push(
+                if terrain == "t_floor" && furniture.as_deref() == Some("f_table") {
+                    'X'
+                } else if terrain == "t_dirt" && furniture.is_none() {
+                    '.'
+                } else {
+                    return Err(
+                        "Rust static mapgen cannot encode an unexpected generated tile".into(),
+                    );
+                },
+            );
+        }
+        generated_rows.push(row);
+    }
+    Ok(RustStaticTemplateTiles {
+        background,
+        marker_terrain: marker,
+        marker_furniture: furniture.ok_or("Rust static mapgen marker has no furniture")?,
+        generated_rows,
+    })
+}
+
+fn rust_static_template_snapshot(
+    identity: &WorldgenOmtIdentityV1,
+) -> Result<WorldSnapshotV1, Box<dyn std::error::Error>> {
+    let background = TerrainTileSnapshot {
+        terrain_id: String::from("t_dirt"),
+        move_cost: 2,
+        transparent: true,
+        flat: true,
+        open: String::new(),
+        open_move_cost: None,
+        open_transparent: None,
+        open_flat: None,
+        close: String::new(),
+        close_move_cost: None,
+        close_transparent: None,
+        close_flat: None,
+    };
+    let marker = TerrainTileSnapshot {
+        terrain_id: String::from("t_floor"),
+        ..background.clone()
+    };
+    let mut cells = vec![
+        WorldgenCellV1 {
+            terrain: vec![WorldgenWeightedTerrainTargetV1 {
+                target: WorldgenTerrainTargetV1::Prototype(0),
+                weight: 1,
+            }],
+            furniture: vec![WorldgenWeightedFurnitureTargetV1 {
+                target: WorldgenFurnitureTargetV1::None,
+                weight: 1,
+            }],
+            item_group: None,
+        };
+        WORLDGEN_CELLS_PER_OMT
+    ];
+    let source_marker = 5 * WORLDGEN_OMT_SIZE + 2;
+    cells[source_marker] = WorldgenCellV1 {
+        terrain: vec![WorldgenWeightedTerrainTargetV1 {
+            target: WorldgenTerrainTargetV1::Prototype(1),
+            weight: 1,
+        }],
+        furniture: vec![WorldgenWeightedFurnitureTargetV1 {
+            target: WorldgenFurnitureTargetV1::Prototype(0),
+            weight: 1,
+        }],
+        item_group: None,
+    };
+    let catalog = WorldgenCatalogV1 {
+        generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        overmap: WorldgenOvermapLayoutV1 {
+            origin_x: -90,
+            origin_y: -90,
+            identities: vec![identity.clone()],
+            layers: vec![WorldgenOvermapLayerV1 {
+                z: 0,
+                runs: vec![WorldgenOvermapRunV1 {
+                    identity_index: 0,
+                    length: u32::from(WORLDGEN_OVERMAP_WIDTH) * u32::from(WORLDGEN_OVERMAP_HEIGHT),
+                }],
+            }],
+        },
+        start_location: None,
+        terrain_prototypes: vec![background, marker],
+        furniture_prototypes: vec![FurnitureTileSnapshot {
+            furniture_id: String::from("f_table"),
+            move_cost_mod: 0,
+            transparent: true,
+            blocks_door: false,
+            comfort: 0,
+            floor_bedding_warmth: 0,
+        }],
+        regional_terrain: Vec::new(),
+        regional_furniture: Vec::new(),
+        omt_generators: vec![WorldgenOmtGeneratorV1 {
+            omt_id: identity.generator_id.clone(),
+            templates: vec![WorldgenTemplateV1 { weight: 1, cells }],
+        }],
+    };
+    let mut world = WorldState::new(1, [47; 32]);
+    world.configure_worldgen(catalog)?;
+    world.generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })?;
+    Ok(world.snapshot())
+}
+
+fn generated_tile(
+    snapshot: &WorldSnapshotV1,
+    x: i32,
+    y: i32,
+) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    let submap_size = cdda_protocol::SUBMAP_SIZE;
+    let coord = ChunkCoord {
+        x: x.div_euclid(submap_size),
+        y: y.div_euclid(submap_size),
+        z: 0,
+    };
+    let local_x = usize::try_from(x.rem_euclid(submap_size))?;
+    let local_y = usize::try_from(y.rem_euclid(submap_size))?;
+    let width = usize::try_from(submap_size)?;
+    let index = local_y
+        .checked_mul(width)
+        .and_then(|row| row.checked_add(local_x))
+        .ok_or("Rust static mapgen tile index overflow")?;
+    let chunk = snapshot
+        .chunks
+        .iter()
+        .find(|chunk| chunk.coord == coord)
+        .ok_or("Rust static mapgen omitted an expected chunk")?;
+    let terrain = chunk
+        .tiles
+        .get(index)
+        .ok_or("Rust static mapgen omitted an expected terrain tile")?
+        .terrain_id
+        .clone();
+    let furniture = chunk
+        .furniture
+        .get(index)
+        .ok_or("Rust static mapgen omitted an expected furniture tile")?
+        .as_ref()
+        .map(|furniture| furniture.furniture_id.clone());
+    Ok((terrain, furniture))
 }
 
 fn validate_rotations(
@@ -1502,6 +1932,25 @@ fn compare_mapgen(
     .into())
 }
 
+fn compare_direct_observation<T>(
+    family: &str,
+    cpp: &T,
+    rust: &T,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    T: PartialEq + Serialize,
+{
+    if cpp == rust {
+        return Ok(());
+    }
+    Err(format!(
+        "direct Rust-to-C++ {family} comparison diverged\nC++: {}\nRust: {}",
+        serde_json::to_string_pretty(cpp)?,
+        serde_json::to_string_pretty(rust)?
+    )
+    .into())
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let file = fs::File::open(path)
         .map_err(|error| format!("could not open {}: {error}", path.display()))?;
@@ -1675,6 +2124,21 @@ mod tests {
         let mut bad_palette = checked_mapgen_scenario();
         bad_palette.expected_observation.palette.setup_completed = false;
         assert!(validate_mapgen_scenario(&bad_palette).is_err());
+
+        let mut bad_template = checked_mapgen_scenario();
+        bad_template
+            .expected_observation
+            .static_template
+            .generated_marker_furniture_id = String::from("f_null");
+        assert!(validate_mapgen_scenario(&bad_template).is_err());
+
+        let mut bad_trace = checked_mapgen_scenario();
+        bad_trace
+            .expected_observation
+            .static_template
+            .generated_rows[0]
+            .replace_range(0..1, "X");
+        assert!(validate_mapgen_scenario(&bad_trace).is_err());
     }
 
     #[test]
@@ -1694,5 +2158,15 @@ mod tests {
         let mapgen = checked_mapgen_scenario();
         compare_mapgen(&mapgen, &mapgen.expected_observation)
             .expect("identical mapgen observation should compare");
+
+        let direct = direct_mapgen_projection(&mapgen.expected_observation);
+        compare_direct_observation("mapgen", &direct, &direct)
+            .expect("identical direct observations should compare");
+        let mut changed = direct_mapgen_projection(&mapgen.expected_observation);
+        changed.linear[1].marker_x = 18;
+        assert!(compare_direct_observation("mapgen", &direct, &changed).is_err());
+        let mut changed = direct_mapgen_projection(&mapgen.expected_observation);
+        changed.static_template.generated_rows[5].replace_range(2..3, ".");
+        assert!(compare_direct_observation("mapgen", &direct, &changed).is_err());
     }
 }

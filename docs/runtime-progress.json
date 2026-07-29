@@ -1,8 +1,8 @@
 {
   "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "green_parent_commit": "cc34f40d79f9323f395643b7fa4c3d23127eb9e7",
-  "verified_commit": "0552ce841fd50dd48789b700170ddce9154284fb",
+  "green_parent_commit": "0552ce841fd50dd48789b700170ddce9154284fb",
+  "verified_commit": null,
   "protocol_version": 87,
   "persistence_schema_version": 65,
   "replay_format_version": 3,
@@ -59,7 +59,7 @@
       ],
       "target_definitions": 13865,
       "maximum_weighted_points": 263435,
-      "earned_weighted_points": 44,
+      "earned_weighted_points": 68,
       "evidence_paths": ["docs/content-schema-inventory.json", "vendor/cdda-content-manifest.json"]
     }
   ],
@@ -71,8 +71,8 @@
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,
       "client_accessible_definitions": 1,
-      "four_mode_definitions": 0,
-      "weighted_points": 11,
+      "four_mode_definitions": 1,
+      "weighted_points": 19,
       "ordinary_gameplay_loops": ["create a world, spawn in generated terrain, and traverse its durable chunks"],
       "evidence_paths": ["crates/server/src/worldgen.rs", "crates/conformance/src/lib.rs"]
     },
@@ -83,8 +83,8 @@
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,
       "client_accessible_definitions": 1,
-      "four_mode_definitions": 0,
-      "weighted_points": 11,
+      "four_mode_definitions": 1,
+      "weighted_points": 19,
       "ordinary_gameplay_loops": ["move through the coordinate-owned surface and receive authoritative blocked edges"],
       "evidence_paths": ["crates/sim/src/overmap.rs", "crates/conformance/src/lib.rs"]
     },
@@ -95,8 +95,8 @@
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,
       "client_accessible_definitions": 1,
-      "four_mode_definitions": 0,
-      "weighted_points": 11,
+      "four_mode_definitions": 1,
+      "weighted_points": 19,
       "ordinary_gameplay_loops": ["create a persistent character at a server-selected matching start"],
       "evidence_paths": ["crates/content/src/start_location.rs", "crates/conformance/src/lib.rs"]
     },

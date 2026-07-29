@@ -8,7 +8,9 @@
 #include "cata_catch.h"
 #include "json.h"
 #include "json_loader.h"
+#include "map.h"
 #include "mapgen.h"
+#include "mapgendata.h"
 #include "omdata.h"
 #include "overmap.h"
 #include "point.h"
@@ -77,7 +79,7 @@ std::vector<rotation_observation> rotatable_observations()
     for( const auto &[direction, name] : directions ) {
         const oter_id terrain = shelter->get_rotated( direction );
         result.push_back( { name, terrain.id().str(), terrain->get_mapgen_id(),
-                            terrain->get_rotation(), marker.rotate( static_cast<int>( direction ), dimensions ) } );
+                            terrain->get_rotation(), marker.rotate( terrain->get_rotation(), dimensions ) } );
     }
     return result;
 }
@@ -98,7 +100,7 @@ std::vector<rotation_observation> linear_observations()
     for( const auto &[direction, name] : directions ) {
         const oter_id terrain = road_ns->get_rotated( direction );
         result.push_back( { name, terrain.id().str(), terrain->get_mapgen_id(),
-                            terrain->get_rotation(), marker.rotate( static_cast<int>( direction ), dimensions ) } );
+                            terrain->get_rotation(), marker.rotate( terrain->get_rotation(), dimensions ) } );
     }
     return result;
 }
@@ -175,6 +177,78 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
     nested.finalize_parameters();
     const point_rel_ms mapgen_size = nested.get_mapgensize();
 
+    constexpr const char *static_palette_id_text = "rust_cpp_oracle_admitted_static_v1";
+    JsonObject static_palette_json = json_loader::from_string( R"({
+        "id": "rust_cpp_oracle_admitted_static_v1",
+        "terrain": { ".": "t_dirt", "X": "t_floor" },
+        "furniture": { "X": "f_table" }
+    })" ).get_object();
+    mapgen_palette::load( static_palette_json, "dda" );
+    const mapgen_palette &static_palette = mapgen_palette::get( palette_id( static_palette_id_text ) );
+    const auto static_pieces = static_palette.format_placings.find( map_key( "X" ) );
+    REQUIRE( static_pieces != static_palette.format_placings.end() );
+    REQUIRE( static_pieces->second.size() == 2 );
+    std::vector<std::string> static_piece_phases;
+    for( const shared_ptr_fast<const jmapgen_piece> &piece : static_pieces->second ) {
+        static_piece_phases.emplace_back( phase_name( piece->phase() ) );
+    }
+    std::string static_rows = "{\"mapgensize\":[24,24],\"rows\":[";
+    for( int y = 0; y < 24; ++y ) {
+        if( y != 0 ) {
+            static_rows += ',';
+        }
+        std::string row( 24, '.' );
+        if( y == 5 ) {
+            row[2] = 'X';
+        }
+        static_rows += '\"' + row + '\"';
+    }
+    static_rows += "],\"palettes\":[\"rust_cpp_oracle_admitted_static_v1\"]}";
+    JsonObject static_nested_json = json_loader::from_string( static_rows ).get_object();
+    mapgen_function_json_nested static_nested( std::move( static_nested_json ),
+            "Rust admitted static mapgen oracle" );
+    static_nested.setup();
+    static_nested.finalize_parameters();
+    const point_rel_ms static_size = static_nested.get_mapgensize();
+    REQUIRE( static_size.x() == 24 );
+    REQUIRE( static_size.y() == 24 );
+    tinymap generated;
+    generated.load( tripoint_abs_omt::zero, true );
+    map *generated_map = generated.cast_to_map();
+    for( const tripoint_bub_ms &p : generated_map->points_on_zlevel( 0 ) ) {
+        generated_map->i_clear( p );
+        generated_map->furn_set( p, furn_id( "f_null" ) );
+        generated_map->trap_set( p, trap_id( "tr_null" ) );
+        generated_map->ter_set( p, ter_id( "t_dirt" ) );
+    }
+    mapgendata generated_data( *generated_map, mapgendata::dummy_settings );
+    static_nested.nest( generated_data, tripoint_rel_ms::zero, "Rust admitted static oracle" );
+    const tripoint_bub_ms background( 0, 0, 0 );
+    const tripoint_bub_ms static_marker( 2, 5, 0 );
+    std::vector<std::string> generated_rows;
+    int generated_markers = 0;
+    for( int y = 0; y < 24; ++y ) {
+        std::string row;
+        row.reserve( 24 );
+        for( int x = 0; x < 24; ++x ) {
+            const tripoint_bub_ms p( x, y, 0 );
+            const std::string terrain_id = generated_map->ter( p ).id().str();
+            const std::string furniture_id = generated_map->furn( p ).id().str();
+            if( terrain_id == "t_floor" && furniture_id == "f_table" ) {
+                row += 'X';
+                ++generated_markers;
+            } else {
+                INFO( "unexpected generated tile at " << p.to_string() << ": " <<
+                      terrain_id << '/' << furniture_id );
+                REQUIRE( terrain_id == "t_dirt" );
+                REQUIRE( furniture_id == "f_null" );
+                row += '.';
+            }
+        }
+        generated_rows.emplace_back( std::move( row ) );
+    }
+    REQUIRE( generated_markers == 1 );
+
     std::ofstream output( output_path, std::ios::out | std::ios::trunc );
     REQUIRE( output.is_open() );
     {
@@ -217,6 +291,28 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
         json.end_array();
         json.member( "mapgen_size_x", mapgen_size.x() );
         json.member( "mapgen_size_y", mapgen_size.y() );
+        json.member( "setup_completed", true );
+        json.end_object();
+
+        json.member( "static_template" );
+        json.start_object();
+        json.member( "width_tiles", static_size.x() );
+        json.member( "height_tiles", static_size.y() );
+        json.member( "source_marker_x", static_marker.x() );
+        json.member( "source_marker_y", static_marker.y() );
+        json.member( "background_terrain_id", "t_dirt" );
+        json.member( "marker_terrain_id", "t_floor" );
+        json.member( "marker_furniture_id", "f_table" );
+        json.member( "generated_background_terrain_id", generated_map->ter( background ).id().str() );
+        json.member( "generated_marker_terrain_id", generated_map->ter( static_marker ).id().str() );
+        json.member( "generated_marker_furniture_id", generated_map->furn( static_marker ).id().str() );
+        json.member( "generated_rows", generated_rows );
+        json.member( "piece_phases" );
+        json.start_array();
+        for( const std::string &phase : static_piece_phases ) {
+            json.write( phase );
+        }
+        json.end_array();
         json.member( "setup_completed", true );
         json.end_object();
         json.end_object();

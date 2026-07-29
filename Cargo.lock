@@ -2127,6 +2127,7 @@ dependencies = [
  "cdda-content",
  "cdda-persistence",
  "cdda-protocol",
+ "cdda-sim",
  "iroh",
  "postcard",
  "rand",

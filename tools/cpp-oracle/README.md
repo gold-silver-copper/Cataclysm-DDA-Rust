@@ -6,7 +6,10 @@ versioned scenario, verifies the checkout commit and Git tree, exports that
 exact commit into ignored `target/cpp-oracle/`, adds the oracle-only Catch test,
 builds a minimal `cata_test` from the upstream test main, its fake-message
 support, and the adapter, then compares strict JSON output with the checked
-observation. An exclusive cross-process file lock spans preparation and
+observation. For the mapgen family it additionally loads the pinned production
+OMT registry, runs the real Rust `WorldState` generator, and compares the two
+normalized observations directly through one reusable exact comparator. An
+exclusive cross-process file lock spans preparation and
 execution, and every execution separately exports the pinned `data/` tree into
 its self-cleaning runtime directory.
 
@@ -38,8 +41,13 @@ phone-case witnesses retain the case variant, locked/unlocked phone, battery
 charges, ordered E-files, sealing/capacity state, and downstream RNG draw for
 empty and many-E-file boundaries. The static mapgen
 kernel covers exact/type/subtype/prefix/contains OMT matching, rotatable and
-linear OMT routing, 24x24 coordinate rotation, palette piece phases, and
-successful setup of a one-cell nested JSON mapgen. Run them with:
+linear OMT routing using each concrete identity's actual mapgen rotation,
+24x24 coordinate rotation, palette piece phases, and successful generation of
+a 24x24 admitted terrain/furniture template, including an exact trace of all
+576 generated cells. The Rust half independently loads
+the production identities and generates that template through the simulation;
+the command fails if either side differs from the checked corpus or from the
+other implementation. Run them with:
 
 ```sh
 cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json

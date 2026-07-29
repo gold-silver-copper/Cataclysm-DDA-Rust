@@ -2939,9 +2939,25 @@ has a pinned characterization (including exact traces at randomized
 boundaries), a generalized Rust engine, direct Rust/C++ comparison,
 direct/snapshot/SQLite/portable-replay conformance, runtime content admission,
 and a normal authoritative client path when player interaction applies.
-The existing mapgen C++ characterization and separate Rust expectations do not
-yet constitute that direct comparator, so the first three runnable mapgen
-submilestones remain `oracle_pending` rather than being labeled complete.
+The first three runnable families use one reusable exact comparator rather than
+separate hand-maintained expectations. The tool loads the pinned production OMT
+registry, generates a real 24x24 Rust `WorldState` template, and compares its
+matching, concrete identity routing, terrain/furniture placement, and rotation
+directly with the C++ observation. The C++ side also generates the admitted
+static template instead of reporting setup alone, and both sides compare an
+exact 24-row trace so an incorrect engine cannot match only sampled tiles or
+aggregate observations. The shared heterogeneous
+scenario supplies direct, per-tick snapshot, SQLite, and portable-replay
+evidence; existing server character creation and Bevy exploration supply the
+normal authoritative path. `atomic-static-mapgen`, `omt-identities-routing`,
+and `start-location-selection` are therefore complete while the broader C++
+oracle and regional-terrain milestones remain in progress.
+
+Linear OMT witnesses use the concrete identity's mapgen rotation, not the
+compass direction used to request that peer. At the pinned baseline both north
+and south resolve to `road_ns` rotation 0, while east and west resolve to
+`road_ew` rotation 3. The direct comparator caught the earlier direction-based
+oracle expectation before milestone completion.
 
 Large behavioral systems must not keep accumulating in the central crate files.
 Items, actors, combat, activities, monsters, canonical state, protocol domains,

@@ -13,7 +13,35 @@
     "runtime content admission",
     "normal authoritative server/client path or explicit not-applicable rationale"
   ],
-  "completed_family_evidence": [],
+  "completed_family_evidence": [
+    {
+      "milestone_id": "atomic-static-mapgen",
+      "pinned_characterization": ["tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/mapgen.rs", "crates/sim/src/mapgen.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs"],
+      "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/main.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "omt-identities-routing",
+      "pinned_characterization": ["tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/overmap_terrain.rs", "crates/protocol/src/lib.rs", "crates/sim/src/mapgen.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs"],
+      "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/main.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "start-location-selection",
+      "pinned_characterization": ["tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/start_location.rs", "crates/sim/src/overmap.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs"],
+      "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/main.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    }
+  ],
   "milestones": [
     {
       "id": "conformance-foundation",
@@ -70,39 +98,39 @@
     {
       "id": "atomic-static-mapgen",
       "title": "Admitted atomic static mapgen kernel",
-      "state": "oracle_pending",
+      "state": "complete",
       "priority": 4,
       "depends_on": [],
       "upstream_sources": ["../Cataclysm-DDA/src/mapgen.cpp", "../Cataclysm-DDA/src/mapgen_functions.cpp"],
       "rust_paths": ["crates/content/src/mapgen.rs", "crates/protocol/src/lib.rs", "crates/sim/src/mapgen.rs", "crates/server/src/worldgen.rs", "tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
       "scenario_families": ["atomic-2x2-submap-generation", "static-palette-phase-order", "terrain-furniture-item-rotation", "snapshot-sqlite-replay-mapgen"],
-      "differential_oracle": "active",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "A complete admitted OMT is planned before mutation, generated once from a world-owned stream, persisted canonically, and replicated as server-owned visible state.",
       "unlocks": ["atomic 24x24 static OMT generation", "persistent generated chunks", "static named item-group placement"]
     },
     {
       "id": "omt-identities-routing",
       "title": "Bounded OMT identities and coordinate routing",
-      "state": "oracle_pending",
+      "state": "complete",
       "priority": 5,
       "depends_on": ["atomic-static-mapgen"],
       "upstream_sources": ["../Cataclysm-DDA/src/overmap.cpp", "../Cataclysm-DDA/src/overmap_terrain.cpp"],
       "rust_paths": ["crates/content/src/overmap_terrain.rs", "crates/protocol/src/lib.rs", "crates/sim/src/overmap.rs", "crates/sim/src/mapgen.rs", "crates/server/src/worldgen.rs", "tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
       "scenario_families": ["coordinate-owned-omt-routing", "ordinary-linear-nonrotating-identities", "bounded-layout-recovery", "blocked-edge-traversal"],
-      "differential_oracle": "active",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "A persisted 180x180 layout owns every generated coordinate; out-of-layout discovery fails atomically and interest replication exposes only durable chunks.",
       "unlocks": ["heterogeneous coordinate dispatch", "stable OMT rotation", "bounded traversal"]
     },
     {
       "id": "start-location-selection",
       "title": "Admitted server-authoritative start selection",
-      "state": "oracle_pending",
+      "state": "complete",
       "priority": 6,
       "depends_on": ["omt-identities-routing"],
       "upstream_sources": ["../Cataclysm-DDA/src/start_location.cpp", "../Cataclysm-DDA/src/overmap_terrain.cpp"],
       "rust_paths": ["crates/content/src/start_location.rs", "crates/protocol/src/lib.rs", "crates/sim/src/overmap.rs", "crates/sim/src/lib.rs", "crates/server/src/worldgen.rs", "crates/server/src/main.rs", "crates/conformance/src/lib.rs", "tools/cpp-oracle/mapgen_oracle_test.cpp"],
       "scenario_families": ["exact-type-subtype-prefix-contains-matching", "matching-only-character-spawn", "occupied-start-fallback", "direct-snapshot-sqlite-replay-starts"],
-      "differential_oracle": "active",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "The server chooses a durable matching OMT and deterministic free tile; clients cannot select ungenerated terrain and concurrent characters use stable fallback order.",
       "unlocks": ["persistent multiplayer character creation", "heterogeneous matching starts", "remote-start fail-closed admission"]
     },

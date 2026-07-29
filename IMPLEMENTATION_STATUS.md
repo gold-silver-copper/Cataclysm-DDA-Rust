@@ -6,10 +6,10 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 - Verified green commit: `0552ce841fd50dd48789b700170ddce9154284fb`
   (`Implement generalized item containment family`).
-- Active milestone: close the three existing mapgen/overmap oracle gates with
-  one reusable direct Rust-to-C++ comparator before expanding the ledger. The
-  batched containment dependency of `regional-terrain-base` is complete; field
-  admission resumes after those gates close.
+- Active milestone: `regional-terrain-base`. The three runnable mapgen/overmap
+  families now have their reusable direct Rust-to-C++ comparator and complete
+  six-part evidence; field admission resumes at the retained tool-charge
+  boundary.
 - Verified representation: protocol 87, worldgen algorithm 2, persistence
   schema/minimum recoverable schema 65, replay format 3, CanonicalStateV63, and
   CanonicalEventsV18.
@@ -19,10 +19,16 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 Mapgen/overmap progress is split into durable submilestones:
 
-- `atomic-static-mapgen`: `oracle_pending`; generalized runtime engine and four
-  recovery modes exist, but no shared direct Rust/C++ comparator yet.
-- `omt-identities-routing`: `oracle_pending` for the same comparator boundary.
-- `start-location-selection`: `oracle_pending` for the same comparator boundary.
+- `atomic-static-mapgen`: `complete`; pinned static-template characterization,
+  the generalized 24x24 engine, direct Rust/C++ execution, four recovery modes,
+  admitted LMOE runtime content, and the authoritative client view are linked
+  in the checked completion evidence.
+- `omt-identities-routing`: `complete`; the same direct run covers finalized
+  rotatable and linear identities while conformance covers durable coordinate
+  routing and bounded recovery.
+- `start-location-selection`: `complete`; every pinned match mode compares
+  directly, and normal server-authoritative character creation plus multiplayer
+  occupied-tile fallback agree through all four recovery modes.
 - `regional-terrain-base`: `in_progress`; the containment engine removes the
   `civilian_phones_case` blocker. The exact field closure now stops at
   `accesories_personal_unisex_child` because `wearable_light` tool charge
@@ -78,17 +84,19 @@ is not admitted until its entire loot/containment closure is exact.
 
 ## Measured progress
 
-Runtime evidence remains four core definitions and 44 weighted points. Each counted
+Runtime evidence remains four core definitions and 68 weighted points. Each counted
 definition is generated, authoritatively interacted with, persisted, and
 client-accessible. No production definition receives four-mode credit from a
 normalized semantic substitute. The three newly normalizable furniture bashes
 earn no points yet because the current playable LMOE mapgen does not place
-them. Parser inventory remains separate: 7,621 item groups, 9,520 mapgen
+them. The admitted mapgen generator, OMT identity, and start location now each
+carry exact four-mode credit; the structural-bash item group does not yet.
+Parser inventory remains separate: 7,621 item groups, 9,520 mapgen
 objects, 2,712 OMTs, and 150 starts earn no runtime credit merely for loading.
 
 The independently checked ordinary-gameplay denominator is split by source:
 core DDA has 13,865 target definitions and 263,435 possible weighted points,
-with 44 earned (0.0167%); selectable bundled mods have 5,967 target definitions
+with 68 earned (0.0258%); selectable bundled mods have 5,967 target definitions
 and 113,373 possible points, with zero earned. The bundled universe is the
 union of nonobsolete pinned mods that participate in at least one valid
 new-world selection; mutually exclusive configurations still contribute their
@@ -171,11 +179,25 @@ The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
 `210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
+The active comparator candidate adds no wire or persistence representation. Its
+generic exact comparator loads pinned production OMT identities, runs the Rust
+24x24 `WorldState` generator, and compares 8 matching cases, 8 concrete
+rotatable/linear identities, and one generated terrain/furniture template with
+the C++ output. Its checked trace covers every one of the 576 generated cells;
+the C++ test passes 1,172 assertions. This direct cycle exposed and
+fixed three stale linear marker expectations: the concrete `road_ns` and
+`road_ew` identities rotate by 0 and 3 respectively, not by the compass label
+used to request a peer. The existing heterogeneous start scenario supplies
+direct, per-tick snapshot, SQLite, and portable-replay evidence for all three
+families. Runtime progress is deliberately unbound until the implementation is
+committed and reviewed as a fixed tree. The candidate leaves `sim/lib.rs` at
+29,339 lines and `protocol/lib.rs` at 9,722; its Rust implementation growth is
+owned entirely by `crates/tools/src/cpp_oracle.rs` and the tools-only direct
+simulation dependency.
+
 ## Next dependency boundary
 
-Build the reusable direct Rust-to-C++ comparator and close `atomic-static-mapgen`,
-`omt-identities-routing`, and `start-location-selection` before adding ledger
-scope. Next admit the real field base and demonstrate ordinary client
+Admit the real field base and demonstrate ordinary client
 exploration and loot. Forest/city/road/river/special placement starts only after
 that playable base is exact and green; anatomy and EOCs remain behind the
 listed modularization milestones.

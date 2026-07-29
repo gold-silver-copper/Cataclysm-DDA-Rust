@@ -26,8 +26,8 @@
     ],
     "linear": [
       { "direction": "north", "terrain_id": "road_ns", "mapgen_id": "road_straight", "rotation": 0, "marker_x": 2, "marker_y": 5 },
-      { "direction": "east", "terrain_id": "road_ew", "mapgen_id": "road_straight", "rotation": 3, "marker_x": 18, "marker_y": 2 },
-      { "direction": "south", "terrain_id": "road_ns", "mapgen_id": "road_straight", "rotation": 0, "marker_x": 21, "marker_y": 18 },
+      { "direction": "east", "terrain_id": "road_ew", "mapgen_id": "road_straight", "rotation": 3, "marker_x": 5, "marker_y": 21 },
+      { "direction": "south", "terrain_id": "road_ns", "mapgen_id": "road_straight", "rotation": 0, "marker_x": 2, "marker_y": 5 },
       { "direction": "west", "terrain_id": "road_ew", "mapgen_id": "road_straight", "rotation": 3, "marker_x": 5, "marker_y": 21 }
     ],
     "palette": {
@@ -37,6 +37,46 @@
       "piece_phases": ["terrain", "furniture", "removal", "nested_mapgen"],
       "mapgen_size_x": 1,
       "mapgen_size_y": 1,
+      "setup_completed": true
+    },
+    "static_template": {
+      "width_tiles": 24,
+      "height_tiles": 24,
+      "source_marker_x": 2,
+      "source_marker_y": 5,
+      "background_terrain_id": "t_dirt",
+      "marker_terrain_id": "t_floor",
+      "marker_furniture_id": "f_table",
+      "generated_background_terrain_id": "t_dirt",
+      "generated_marker_terrain_id": "t_floor",
+      "generated_marker_furniture_id": "f_table",
+      "generated_rows": [
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "..X.....................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................"
+      ],
+      "piece_phases": ["terrain", "furniture"],
       "setup_completed": true
     }
   }
