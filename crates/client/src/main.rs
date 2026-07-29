@@ -2966,12 +2966,30 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
                 .and_then(|content| content.0.get(&item.type_id))
                 .map_or(item.type_id.as_str(), |definition| definition.name.as_str())
         });
+    let name = item.snippet.as_ref().map_or_else(
+        || name.to_owned(),
+        |snippet| format!("{name} — {}", snippet.text),
+    );
     let charges = if !item.ammunition_containers.is_empty() {
         Some(format!(
             " [{}]",
             item.ammunition_containers
                 .iter()
                 .map(|pocket| {
+                    if let Some(state) = &pocket.spawn_state {
+                        let kind = match state.rules.kind {
+                            cdda_protocol::SpawnPocketKindV1::Container => "items",
+                            cdda_protocol::SpawnPocketKindV1::EFileStorage => "e-files",
+                        };
+                        let sealed = if state.sealed { ", sealed" } else { "" };
+                        return format!(
+                            "p{} {} {}{}",
+                            pocket.pocket_index,
+                            pocket.contents.len(),
+                            kind,
+                            sealed
+                        );
+                    }
                     let stored = pocket
                         .contents
                         .iter()
@@ -3089,6 +3107,8 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.damage == right.damage
         && left.raw_damage == right.raw_damage
         && left.variant == right.variant
+        && left.snippet == right.snippet
+        && left.variables == right.variables
         && left.melee_damage_milli == right.melee_damage_milli
         && left.calories == right.calories
         && left.quench == right.quench
@@ -3103,6 +3123,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.residual_energy_millijoules == right.residual_energy_millijoules
         && left.powered_tool == right.powered_tool
         && left.creature_corpse == right.creature_corpse
+        && left.containment == right.containment
 }
 
 fn item_residual_power_millijoules(item: &ItemSnapshot) -> u32 {
@@ -5172,6 +5193,8 @@ mod tests {
                 damage: 0,
                 raw_damage: 0,
                 variant: None,
+                snippet: None,
+                variables: std::collections::BTreeMap::new(),
                 melee_damage_milli: std::collections::BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -5186,6 +5209,7 @@ mod tests {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
+                containment: Default::default(),
             }
         }
 
@@ -5221,6 +5245,21 @@ mod tests {
             item_menu_label(&variant_item, None).starts_with("weathered splinter x5"),
             "the authoritative selected variant should be visible in normal item menus"
         );
+        variant_item.snippet = Some(cdda_protocol::ItemSnippetV1 {
+            id: String::from("provenance"),
+            text: String::from("Found near the river"),
+        });
+        assert!(
+            item_menu_label(&variant_item, None)
+                .starts_with("weathered splinter — Found near the river x5"),
+            "authoritative snippet text should be visible without consulting live content"
+        );
+        let mut distinct_variables = variant_item.clone();
+        distinct_variables.variables.insert(
+            String::from("browsed"),
+            cdda_protocol::ItemVariableValueV1::String(String::from("false")),
+        );
+        assert!(!same_item_stack_state(&variant_item, &distinct_variables));
         let tick = cdda_protocol::SimTick(0);
         let snapshot = ReplicationSnapshotV1 {
             tick,
@@ -5399,6 +5438,7 @@ mod tests {
             pocket_id: String::from("RESERVE"),
             ammunition_type: String::from("battery"),
             capacity: 1,
+            rigid: true,
             reloadable: true,
             unloadable: true,
             loaded_ammunition: Some(Box::new(fractional_ammunition)),
@@ -5435,6 +5475,7 @@ mod tests {
             reloadable: true,
             unloadable: true,
             contents: Vec::new(),
+            spawn_state: None,
         }];
         let mut arrows = item(12, "arrow", "", None);
         arrows.type_id = String::from("arrow_wood");
@@ -5458,6 +5499,53 @@ mod tests {
         contained.charges = 6;
         quiver.ammunition_containers[0].contents.push(contained);
         battery_snapshot.controlled_actor.inventory = vec![bolts, arrows, quiver.clone()];
+        let quiver_snapshot = battery_snapshot.clone();
+        let mut phone_case = item(15, "", "", None);
+        phone_case.type_id = String::from("waterproof_smart_phone_case");
+        let mut phone = item(16, "", "", None);
+        phone.type_id = String::from("smart_phone");
+        phone_case.ammunition_containers =
+            vec![cdda_protocol::AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: 4,
+                pocket_id: String::from("PHONE"),
+                capacities: Vec::new(),
+                rigid: true,
+                access_moves: 100,
+                reloadable: false,
+                unloadable: true,
+                contents: vec![phone.clone()],
+                spawn_state: Some(cdda_protocol::SpawnPocketStateV1 {
+                    rules: cdda_protocol::SpawnPocketRulesV1 {
+                        kind: cdda_protocol::SpawnPocketKindV1::Container,
+                        max_contains_volume_milliliters: 111,
+                        max_contains_weight_milligrams: 233_000,
+                        max_item_volume_milliliters: 111,
+                        min_item_volume_milliliters: 0,
+                        max_item_length_millimeters: 150,
+                        item_restrictions: vec![String::from("smart_phone")],
+                        flag_restrictions: Vec::new(),
+                        access_moves: 100,
+                        rigid: true,
+                        watertight: true,
+                        transparent: true,
+                        forbidden: false,
+                        sealable: false,
+                    },
+                    sealed: false,
+                }),
+            }];
+        assert!(item_menu_label(&phone_case, None).contains("p4 1 items"));
+        battery_snapshot.controlled_actor.inventory = vec![phone_case.clone()];
+        assert!(matches!(
+            first_pocket_item_removal(&battery_snapshot),
+            Some(ClientAction::RemovePocketItem {
+                owner_item,
+                pocket_index: 4,
+                contained_item,
+            }) if owner_item == phone_case.id && contained_item == phone.id
+        ));
+        assert!(first_pocket_item_insertion(&battery_snapshot).is_none());
+        battery_snapshot = quiver_snapshot;
         assert!(item_menu_label(&quiver, None).contains("p3 arrow 6/20"));
         assert!(matches!(
             first_pocket_item_removal(&battery_snapshot),
@@ -5567,6 +5655,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -5581,6 +5671,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         let tick = cdda_protocol::SimTick(0);
         let mut snapshot = ReplicationSnapshotV1 {
@@ -6238,6 +6329,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: std::collections::BTreeMap::new(),
             melee_damage_milli: std::collections::BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -6260,6 +6353,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         let creature = |counter, x, hp| cdda_protocol::VisibleCreatureSnapshot {
             id: CreatureId::new(1, counter),

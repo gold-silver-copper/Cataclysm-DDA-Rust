@@ -41,6 +41,8 @@ const IMPLEMENTED_ENTRY_FIELDS: &[&str] = &[
     "variant",
     "entry-wrapper",
     "container-item",
+    "contents-item",
+    "contents-group",
     "sealed",
 ];
 
@@ -87,6 +89,15 @@ pub struct ItemGroupWrapper {
 pub struct ItemGroupEntryWrapper {
     pub item: String,
     pub variant: Option<String>,
+}
+
+/// One source retained by an upstream item modifier's `contents-*` fields.
+/// Item sources precede group sources regardless of JSON member order, which
+/// matches `Item_modifier::load` in the pinned snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ItemGroupContentsSource {
+    Item(String),
+    Group(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +153,9 @@ pub struct ItemGroupNode {
     /// Explicit modifier sealing policy. `None` means the field was absent;
     /// modifier-created containers otherwise use upstream's default `true`.
     pub modifier_sealed: Option<bool>,
+    /// Sources generated independently for every completed target item and
+    /// inserted through upstream's spawn-time pocket selection.
+    pub contents: Vec<ItemGroupContentsSource>,
     pub event: Option<ItemGroupEvent>,
     pub unsupported_fields: BTreeMap<String, Value>,
     pub source: String,
@@ -184,6 +198,7 @@ pub struct StrictItemGroupNode {
     pub direct_wrapper: Option<ItemGroupEntryWrapper>,
     pub modifier_container: Option<String>,
     pub modifier_sealed: Option<bool>,
+    pub contents: Vec<ItemGroupContentsSource>,
     pub event: Option<ItemGroupEvent>,
 }
 
@@ -629,6 +644,20 @@ impl ItemGroupRegistry {
                         })
                         .transpose()?,
                     modifier_sealed: node.modifier_sealed,
+                    contents: node
+                        .contents
+                        .iter()
+                        .map(|source| match source {
+                            ItemGroupContentsSource::Item(item) => {
+                                Ok(ItemGroupContentsSource::Item(
+                                    self.resolve_item(item, &definition.id)?,
+                                ))
+                            }
+                            ItemGroupContentsSource::Group(group) => {
+                                Ok(ItemGroupContentsSource::Group(group.clone()))
+                            }
+                        })
+                        .collect::<Result<_, ItemGroupRegistryError>>()?,
                     event: node.event,
                 })
             })
@@ -749,6 +778,38 @@ impl ItemGroupRegistry {
         let output = one
             .checked_mul(u64::from(node.count.maximum))
             .ok_or(ItemGroupRegistryError::NumericOverflow)?;
+        // `contents-*` is evaluated for every completed target item. `one`
+        // includes nested objects as well as top-level outputs, so using it as
+        // the multiplier is a deliberate safe upper bound for mixed wrapper
+        // graphs while remaining exact for direct leaves and the currently
+        // admitted regional phone family.
+        let contents_output = node
+            .contents
+            .iter()
+            .map(|source| match source {
+                ItemGroupContentsSource::Item(_) => Ok(1),
+                ItemGroupContentsSource::Group(group) => {
+                    let child = self.groups.get(group).ok_or_else(|| {
+                        ItemGroupRegistryError::MissingGroup {
+                            group: definition.id.clone(),
+                            target: group.clone(),
+                        }
+                    })?;
+                    self.maximum_definition_output(child, memo)
+                }
+            })
+            .try_fold(0_u64, |total, value| {
+                total
+                    .checked_add(value?)
+                    .ok_or(ItemGroupRegistryError::NumericOverflow)
+            })?;
+        let output = output
+            .checked_add(
+                one.checked_mul(u64::from(node.count.maximum))
+                    .and_then(|targets| targets.checked_mul(contents_output))
+                    .ok_or(ItemGroupRegistryError::NumericOverflow)?,
+            )
+            .ok_or(ItemGroupRegistryError::NumericOverflow)?;
         let output = if node
             .modifier_container
             .as_deref()
@@ -773,9 +834,17 @@ impl ItemGroupRegistry {
 
 impl ItemGroupDefinition {
     fn group_references(&self) -> impl Iterator<Item = &str> {
-        self.nodes.iter().filter_map(|node| match &node.kind {
-            ItemGroupNodeKind::Group(group) => Some(group.as_str()),
-            _ => None,
+        self.nodes.iter().flat_map(|node| {
+            let target = match &node.kind {
+                ItemGroupNodeKind::Group(group) => Some(group.as_str()),
+                _ => None,
+            };
+            target
+                .into_iter()
+                .chain(node.contents.iter().filter_map(|source| match source {
+                    ItemGroupContentsSource::Group(group) => Some(group.as_str()),
+                    ItemGroupContentsSource::Item(_) => None,
+                }))
         })
     }
 }
@@ -898,6 +967,7 @@ fn append_legacy_items(
                             direct_wrapper: None,
                             modifier_container: None,
                             modifier_sealed: None,
+                            contents: Vec::new(),
                             event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
@@ -955,6 +1025,7 @@ fn append_shortcut_array(
                     direct_wrapper: None,
                     modifier_container: None,
                     modifier_sealed: None,
+                    contents: Vec::new(),
                     event: None,
                     unsupported_fields: BTreeMap::new(),
                     source: location,
@@ -978,6 +1049,7 @@ fn append_shortcut_array(
                             direct_wrapper: None,
                             modifier_container: None,
                             modifier_sealed: None,
+                            contents: Vec::new(),
                             event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
@@ -1064,93 +1136,122 @@ fn parse_object_entry(
     );
     let mut unsupported_fields = BTreeMap::new();
     retain_unsupported(object, IMPLEMENTED_ENTRY_FIELDS, &mut unsupported_fields);
-    let (count, charges, damage, variant, direct_wrapper, modifier_container, modifier_sealed) =
-        if nested_group {
-            // Pinned add_entry returns immediately after building a local group;
-            // leaf modifiers on that object are not evaluated. Strict admission
-            // rejects their presence instead of executing divergent behavior.
-            for field in [
-                "count",
-                "charges",
-                "damage",
-                "variant",
-                "entry-wrapper",
-                "container-item",
-                "sealed",
-            ] {
-                if let Some(value) = object.get(field) {
-                    unsupported_fields.insert(field.to_owned(), value.clone());
-                }
+    let (
+        count,
+        charges,
+        damage,
+        variant,
+        direct_wrapper,
+        modifier_container,
+        modifier_sealed,
+        contents,
+    ) = if nested_group {
+        // Pinned add_entry returns immediately after building a local group;
+        // leaf modifiers on that object are not evaluated. Strict admission
+        // rejects their presence instead of executing divergent behavior.
+        for field in [
+            "count",
+            "charges",
+            "damage",
+            "variant",
+            "entry-wrapper",
+            "container-item",
+            "contents-item",
+            "contents-group",
+            "sealed",
+        ] {
+            if let Some(value) = object.get(field) {
+                unsupported_fields.insert(field.to_owned(), value.clone());
             }
-            (ItemGroupRange::ONE, None, None, None, None, None, None)
-        } else {
-            let count = admissible_range(
-                object.get("count"),
-                source,
-                "count",
-                &mut unsupported_fields,
-            )?
-            .unwrap_or(ItemGroupRange::ONE);
-            let charges =
-                admissible_charges_range(object.get("charges"), source, &mut unsupported_fields)?;
-            let variant = optional_string(object, "variant", source)?.map(str::to_owned);
-            let mut direct_wrapper =
-                optional_string(object, "entry-wrapper", source)?.map(|item| {
-                    ItemGroupEntryWrapper {
-                        item: item.to_owned(),
-                        variant: None,
-                    }
-                });
-            let mut modifier_container = None;
-            if let Some(value) = object.get("container-item") {
-                match value {
-                    Value::String(item) if !item.is_empty() => {
-                        modifier_container = Some(item.clone());
-                    }
-                    Value::Object(wrapper)
-                        if wrapper
-                            .keys()
-                            .all(|field| matches!(field.as_str(), "item" | "variant")) =>
-                    {
-                        direct_wrapper = Some(ItemGroupEntryWrapper {
-                            item: required_string(wrapper, "item", source)?.to_owned(),
-                            variant: Some(required_string(wrapper, "variant", source)?.to_owned()),
-                        });
-                    }
-                    _ => return Err(invalid(source, "container-item")),
+        }
+        (
+            ItemGroupRange::ONE,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+    } else {
+        let count = admissible_range(
+            object.get("count"),
+            source,
+            "count",
+            &mut unsupported_fields,
+        )?
+        .unwrap_or(ItemGroupRange::ONE);
+        let charges =
+            admissible_charges_range(object.get("charges"), source, &mut unsupported_fields)?;
+        let variant = optional_string(object, "variant", source)?.map(str::to_owned);
+        let mut direct_wrapper =
+            optional_string(object, "entry-wrapper", source)?.map(|item| ItemGroupEntryWrapper {
+                item: item.to_owned(),
+                variant: None,
+            });
+        let mut modifier_container = None;
+        if let Some(value) = object.get("container-item") {
+            match value {
+                Value::String(item) if !item.is_empty() => {
+                    modifier_container = Some(item.clone());
                 }
+                Value::Object(wrapper)
+                    if wrapper
+                        .keys()
+                        .all(|field| matches!(field.as_str(), "item" | "variant")) =>
+                {
+                    direct_wrapper = Some(ItemGroupEntryWrapper {
+                        item: required_string(wrapper, "item", source)?.to_owned(),
+                        variant: Some(required_string(wrapper, "variant", source)?.to_owned()),
+                    });
+                }
+                _ => return Err(invalid(source, "container-item")),
             }
-            let modifier_sealed = object
-                .get("sealed")
-                .map(|value| value.as_bool().ok_or_else(|| invalid(source, "sealed")))
-                .transpose()?;
-            let modifier_present = object.contains_key("count")
-                || object.contains_key("charges")
-                || object.contains_key("damage")
-                || variant.is_some()
-                || modifier_container.is_some()
-                || modifier_sealed.is_some();
-            let damage = if modifier_present {
-                Some(
-                    admissible_damage_range(object.get("damage"), source, &mut unsupported_fields)?
-                        .unwrap_or(ItemGroupRange {
-                            minimum: 0,
-                            maximum: 0,
-                        }),
-                )
-            } else {
-                None
-            };
-            (
-                count,
-                charges,
-                damage,
-                variant,
-                direct_wrapper,
-                modifier_container,
-                modifier_sealed,
+        }
+        let modifier_sealed = object
+            .get("sealed")
+            .map(|value| value.as_bool().ok_or_else(|| invalid(source, "sealed")))
+            .transpose()?;
+        let mut contents =
+            optional_string_or_strings(object.get("contents-item"), source, "contents-item")?
+                .into_iter()
+                .map(ItemGroupContentsSource::Item)
+                .collect::<Vec<_>>();
+        contents.extend(
+            optional_string_or_strings(object.get("contents-group"), source, "contents-group")?
+                .into_iter()
+                .map(ItemGroupContentsSource::Group),
+        );
+        let modifier_present = object.contains_key("count")
+            || object.contains_key("charges")
+            || object.contains_key("damage")
+            || variant.is_some()
+            || modifier_container.is_some()
+            || modifier_sealed.is_some()
+            || !contents.is_empty();
+        let damage = if modifier_present {
+            Some(
+                admissible_damage_range(object.get("damage"), source, &mut unsupported_fields)?
+                    .unwrap_or(ItemGroupRange {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
             )
+        } else {
+            None
         };
+        (
+            count,
+            charges,
+            damage,
+            variant,
+            direct_wrapper,
+            modifier_container,
+            modifier_sealed,
+            contents,
+        )
+    };
     Ok(Some(push_node(
         nodes,
         ItemGroupNode {
@@ -1163,6 +1264,7 @@ fn parse_object_entry(
             direct_wrapper,
             modifier_container,
             modifier_sealed,
+            contents,
             event,
             unsupported_fields,
             source: source.to_owned(),
@@ -1387,6 +1489,17 @@ fn string_or_strings(
             .collect(),
         _ => Err(invalid(source, field)),
     }
+}
+
+fn optional_string_or_strings(
+    value: Option<&Value>,
+    source: &str,
+    field: &str,
+) -> Result<Vec<String>, ItemGroupRegistryError> {
+    value.map_or_else(
+        || Ok(Vec::new()),
+        |value| string_or_strings(Some(value), source, field),
+    )
 }
 
 fn combine_outputs(

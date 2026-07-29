@@ -99,6 +99,7 @@ struct RuntimeProgress {
     replay_format_version: u16,
     evidence_weights: RuntimeEvidenceWeights,
     parser_inventory: Vec<ParserInventoryCategory>,
+    ordinary_gameplay_targets: Vec<RuntimeTargetScope>,
     categories: Vec<RuntimeProgressCategory>,
 }
 
@@ -122,8 +123,27 @@ struct ParserInventoryCategory {
 
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
+struct RuntimeTargetScope {
+    id: String,
+    parser_targets: Vec<RuntimeParserTarget>,
+    target_definitions: u64,
+    maximum_weighted_points: u64,
+    earned_weighted_points: u64,
+    evidence_paths: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeParserTarget {
+    id: String,
+    target_definitions: u64,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeProgressCategory {
     id: String,
+    target_scope: String,
     generated_definitions: u64,
     authoritatively_interacted_definitions: u64,
     persisted_definitions: u64,
@@ -151,6 +171,104 @@ enum DifferentialState {
     Active,
     Planned,
     NotApplicable,
+}
+
+fn runtime_target_inventory(
+    workspace: &Path,
+    parsers: &[ParserInventoryCategory],
+) -> Result<BTreeMap<(String, String), u64>, Box<dyn std::error::Error>> {
+    let manifest: ContentManifest = serde_json::from_slice(&fs::read(
+        workspace.join("vendor/cdda-content-manifest.json"),
+    )?)?;
+    if manifest.upstream_commit != BASELINE_COMMIT {
+        return Err("runtime target inventory manifest baseline mismatch".into());
+    }
+    let content_root = workspace.join("vendor");
+    let mods = ModCatalog::load(&manifest, &content_root)?;
+    let core_ids = mods
+        .iter()
+        .filter(|(_, information)| information.core && !information.obsolete)
+        .map(|(id, _)| id.to_owned())
+        .collect::<Vec<_>>();
+    let mut selectable_mod_files = BTreeSet::new();
+    for (id, information) in mods.iter().filter(|(_, information)| !information.obsolete) {
+        let mut requests = vec![vec![id.to_owned()]];
+        if !information.core {
+            requests.extend(
+                core_ids
+                    .iter()
+                    .map(|core| vec![core.clone(), id.to_owned()]),
+            );
+        }
+        let selected = requests.into_iter().find_map(|request| {
+            mods.resolve_new_world(&request)
+                .ok()
+                .and_then(|enabled| mods.selected_json_files(&manifest, &enabled).ok())
+        });
+        let Some(selected) = selected else {
+            continue;
+        };
+        selectable_mod_files.extend(
+            selected
+                .into_iter()
+                .filter(|file| file.upstream_path.starts_with("data/mods/"))
+                .map(|file| file.upstream_path),
+        );
+    }
+    let parser_ids = parsers
+        .iter()
+        .map(|parser| parser.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let scopes = [
+        "bundled-mod-ordinary-gameplay",
+        "core-dda-ordinary-gameplay",
+    ];
+    let mut counts = scopes
+        .iter()
+        .flat_map(|scope| {
+            parser_ids
+                .iter()
+                .map(move |parser| ((*scope).to_owned(), (*parser).to_owned()))
+        })
+        .map(|key| (key, 0_u64))
+        .collect::<BTreeMap<_, _>>();
+    for entry in manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.destination.ends_with(".json"))
+    {
+        if entry.upstream_path.starts_with("data/mods/")
+            && !selectable_mod_files.contains(&entry.upstream_path)
+        {
+            continue;
+        }
+        let bytes = fs::read(workspace.join("vendor").join(&entry.destination))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let objects = match &value {
+            serde_json::Value::Array(values) => values.as_slice(),
+            serde_json::Value::Object(_) => std::slice::from_ref(&value),
+            _ => &[],
+        };
+        let scope = if entry.upstream_path.starts_with("data/mods/") {
+            "bundled-mod-ordinary-gameplay"
+        } else {
+            "core-dda-ordinary-gameplay"
+        };
+        for object in objects {
+            let Some(kind) = object.get("type").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if parser_ids.contains(kind) {
+                let count = counts
+                    .get_mut(&(scope.to_owned(), kind.to_owned()))
+                    .ok_or("runtime target inventory lost a scoped parser")?;
+                *count = count
+                    .checked_add(1)
+                    .ok_or("runtime target inventory count overflow")?;
+            }
+        }
+    }
+    Ok(counts)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -186,7 +304,7 @@ fn runtime_progress_check() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("tools crate is not nested beneath the workspace")?;
     let progress: RuntimeProgress =
         serde_json::from_slice(&fs::read(workspace.join("docs/runtime-progress.json"))?)?;
-    if progress.format_version != 1
+    if progress.format_version != 2
         || progress.baseline_commit != BASELINE_COMMIT
         || progress.protocol_version != PROTOCOL_VERSION
         || progress.persistence_schema_version != SCHEMA_VERSION
@@ -252,12 +370,95 @@ fn runtime_progress_check() -> Result<(), Box<dyn std::error::Error>> {
         }
         previous = Some(parser.id.as_str());
     }
+    let maximum_points_per_definition = weights
+        .generated
+        .checked_add(weights.authoritative_interaction)
+        .and_then(|points| points.checked_add(weights.persisted))
+        .and_then(|points| points.checked_add(weights.client_accessible))
+        .and_then(|points| points.checked_add(weights.four_mode_conformance))
+        .ok_or("runtime progress maximum evidence weight overflow")?;
+    let scoped_inventory = runtime_target_inventory(workspace, &progress.parser_inventory)?;
+    let expected_scopes = [
+        "bundled-mod-ordinary-gameplay",
+        "core-dda-ordinary-gameplay",
+    ];
+    if progress.ordinary_gameplay_targets.len() != expected_scopes.len() {
+        return Err("runtime progress must separate core DDA and bundled-mod targets".into());
+    }
+    let mut target_maximums = BTreeMap::new();
+    let mut target_recorded_earned = BTreeMap::new();
+    for (target, expected_scope) in progress
+        .ordinary_gameplay_targets
+        .iter()
+        .zip(expected_scopes)
+    {
+        let expected_parsers = progress
+            .parser_inventory
+            .iter()
+            .map(|parser| parser.id.as_str())
+            .collect::<Vec<_>>();
+        let actual_parsers = target
+            .parser_targets
+            .iter()
+            .map(|parser| parser.id.as_str())
+            .collect::<Vec<_>>();
+        let target_definitions = target
+            .parser_targets
+            .iter()
+            .try_fold(0_u64, |total, parser| {
+                let expected = scoped_inventory
+                    .get(&(target.id.clone(), parser.id.clone()))
+                    .copied();
+                (expected == Some(parser.target_definitions))
+                    .then(|| total.checked_add(parser.target_definitions))
+                    .flatten()
+            });
+        let maximum = target_definitions
+            .and_then(|definitions| definitions.checked_mul(maximum_points_per_definition));
+        if target.id != expected_scope
+            || actual_parsers != expected_parsers
+            || target_definitions != Some(target.target_definitions)
+            || maximum != Some(target.maximum_weighted_points)
+            || target.earned_weighted_points > target.maximum_weighted_points
+            || target.evidence_paths.is_empty()
+            || target.evidence_paths.iter().any(|path| {
+                path.starts_with('/') || path.contains("..") || !workspace.join(path).is_file()
+            })
+        {
+            return Err(format!(
+                "runtime progress target scope {} is invalid: derived parser targets {:?}, derived definitions {:?}, recorded definitions {}, derived maximum {:?}, recorded maximum {}",
+                target.id,
+                target
+                    .parser_targets
+                    .iter()
+                    .map(|parser| (
+                        parser.id.as_str(),
+                        scoped_inventory
+                            .get(&(target.id.clone(), parser.id.clone()))
+                            .copied(),
+                    ))
+                    .collect::<Vec<_>>(),
+                target_definitions,
+                target.target_definitions,
+                maximum,
+                target.maximum_weighted_points,
+            )
+            .into());
+        }
+        target_maximums.insert(target.id.as_str(), target.maximum_weighted_points);
+        target_recorded_earned.insert(target.id.as_str(), target.earned_weighted_points);
+    }
     let mut previous = None;
     let mut total_definitions = 0_u64;
     let mut total_points = 0_u64;
+    let mut target_actual_earned = expected_scopes
+        .into_iter()
+        .map(|scope| (scope, 0_u64))
+        .collect::<BTreeMap<_, _>>();
     for category in &progress.categories {
         if category.id.is_empty()
             || previous.is_some_and(|previous| previous >= category.id.as_str())
+            || !target_maximums.contains_key(category.target_scope.as_str())
             || category.generated_definitions == 0
             || category.authoritatively_interacted_definitions > category.generated_definitions
             || category.persisted_definitions > category.generated_definitions
@@ -318,7 +519,20 @@ fn runtime_progress_check() -> Result<(), Box<dyn std::error::Error>> {
         total_points = total_points
             .checked_add(category.weighted_points)
             .ok_or("runtime progress point total overflow")?;
+        let earned = target_actual_earned
+            .get_mut(category.target_scope.as_str())
+            .ok_or("runtime progress category names an unknown target scope")?;
+        *earned = earned
+            .checked_add(category.weighted_points)
+            .ok_or("runtime progress target earned points overflow")?;
         previous = Some(category.id.as_str());
+    }
+    for (scope, actual) in &target_actual_earned {
+        if target_recorded_earned.get(scope).copied() != Some(*actual) {
+            return Err(
+                format!("runtime progress target scope {scope} has stale earned points").into(),
+            );
+        }
     }
     if let Some(verified_commit) = &progress.verified_commit {
         let git_show = |path: &str| -> Result<String, Box<dyn std::error::Error>> {
@@ -368,6 +582,12 @@ fn runtime_progress_check() -> Result<(), Box<dyn std::error::Error>> {
             .flat_map(|category| &category.evidence_paths)
             .chain(
                 progress
+                    .ordinary_gameplay_targets
+                    .iter()
+                    .flat_map(|target| &target.evidence_paths),
+            )
+            .chain(
+                progress
                     .categories
                     .iter()
                     .flat_map(|category| &category.evidence_paths),
@@ -403,9 +623,22 @@ fn runtime_progress_check() -> Result<(), Box<dyn std::error::Error>> {
             "runtime progress verified at {verified_commit}: {total_definitions} generated definitions, {total_points} weighted evidence points"
         );
     } else {
+        let target_summary = progress
+            .ordinary_gameplay_targets
+            .iter()
+            .map(|target| {
+                let percent = 100.0 * target.earned_weighted_points as f64
+                    / target.maximum_weighted_points as f64;
+                format!(
+                    "{} {}/{} ({percent:.4}%)",
+                    target.id, target.earned_weighted_points, target.maximum_weighted_points
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         println!(
-            "runtime progress measured in the active worktree above green parent {}: {} generated definitions, {} weighted evidence points; checkpoint binding pending",
-            progress.green_parent_commit, total_definitions, total_points
+            "runtime progress measured in the active worktree above green parent {}: {} generated definitions, {} weighted evidence points; {}; checkpoint binding pending",
+            progress.green_parent_commit, total_definitions, total_points, target_summary
         );
     }
     Ok(())

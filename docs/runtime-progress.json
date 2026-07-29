@@ -1,10 +1,10 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "green_parent_commit": "de09724a27064d293041ce1cf4df5e458ac403a7",
-  "verified_commit": "cc34f40d79f9323f395643b7fa4c3d23127eb9e7",
-  "protocol_version": 86,
-  "persistence_schema_version": 64,
+  "green_parent_commit": "cc34f40d79f9323f395643b7fa4c3d23127eb9e7",
+  "verified_commit": null,
+  "protocol_version": 87,
+  "persistence_schema_version": 65,
   "replay_format_version": 3,
   "evidence_weights": {
     "generated": 1,
@@ -35,9 +35,38 @@
       "evidence_paths": ["docs/content-schema-inventory.json"]
     }
   ],
+  "ordinary_gameplay_targets": [
+    {
+      "id": "bundled-mod-ordinary-gameplay",
+      "parser_targets": [
+        { "id": "item_group", "target_definitions": 2116 },
+        { "id": "mapgen", "target_definitions": 2413 },
+        { "id": "overmap_terrain", "target_definitions": 1401 },
+        { "id": "start_location", "target_definitions": 37 }
+      ],
+      "target_definitions": 5967,
+      "maximum_weighted_points": 113373,
+      "earned_weighted_points": 0,
+      "evidence_paths": ["docs/content-schema-inventory.json", "vendor/cdda-content-manifest.json"]
+    },
+    {
+      "id": "core-dda-ordinary-gameplay",
+      "parser_targets": [
+        { "id": "item_group", "target_definitions": 5457 },
+        { "id": "mapgen", "target_definitions": 7026 },
+        { "id": "overmap_terrain", "target_definitions": 1281 },
+        { "id": "start_location", "target_definitions": 101 }
+      ],
+      "target_definitions": 13865,
+      "maximum_weighted_points": 263435,
+      "earned_weighted_points": 44,
+      "evidence_paths": ["docs/content-schema-inventory.json", "vendor/cdda-content-manifest.json"]
+    }
+  ],
   "categories": [
     {
       "id": "admitted-mapgen-generator",
+      "target_scope": "core-dda-ordinary-gameplay",
       "generated_definitions": 1,
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,
@@ -49,6 +78,7 @@
     },
     {
       "id": "admitted-omt-identity",
+      "target_scope": "core-dda-ordinary-gameplay",
       "generated_definitions": 1,
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,
@@ -60,6 +90,7 @@
     },
     {
       "id": "admitted-start-location",
+      "target_scope": "core-dda-ordinary-gameplay",
       "generated_definitions": 1,
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,
@@ -71,6 +102,7 @@
     },
     {
       "id": "structural-bash-item-group",
+      "target_scope": "core-dda-ordinary-gameplay",
       "generated_definitions": 1,
       "authoritatively_interacted_definitions": 1,
       "persisted_definitions": 1,

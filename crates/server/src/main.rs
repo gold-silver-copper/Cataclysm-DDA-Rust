@@ -42,8 +42,8 @@ use cdda_protocol::{
     IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
     MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
     MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
-    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
-    adjusted_book_study_time_moves,
+    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, SpawnPocketKindV1, SpawnPocketRulesV1,
+    TerrainBashTypeV1, TerrainTileSnapshot, adjusted_book_study_time_moves,
 };
 #[cfg(test)]
 use cdda_protocol::{
@@ -1987,6 +1987,15 @@ fn craft_item_prototype_with_ammunition(
     } else {
         String::new()
     };
+    let charges = if integral_magazines.is_empty() {
+        charges
+    } else {
+        // Integral ammunition is represented only by the explicit pocket
+        // snapshots. Keeping the ordinary one-instance sentinel here would
+        // describe the same ammunition twice and cannot round-trip through
+        // canonical item validation.
+        0
+    };
     Ok(CraftItemPrototypeV1 {
         type_id: item.id.clone(),
         charges,
@@ -2002,6 +2011,26 @@ fn craft_item_prototype_with_ammunition(
         ammunition_containers: runtime_ammunition_containers(item),
         residual_energy_millijoules: 0,
         powered_tool: runtime_powered_tool(item, items)?,
+        containment: cdda_protocol::ItemContainmentProfileV1 {
+            weight_milligrams: u64::try_from(item.weight_milligrams)?,
+            volume_milliliters: u64::try_from(item.volume_milliliters)?,
+            longest_side_millimeters: item
+                .finalized_longest_side_millimeters()
+                .ok_or("item longest-side derivation overflowed")?,
+            flags: item.flags.iter().cloned().collect(),
+            estorable: item.subtypes.contains("BOOK")
+                || item.unsupported_fields.contains("ememory_size"),
+            phase: match item.phase.to_ascii_lowercase().as_str() {
+                "" | "solid" => cdda_protocol::ItemPhaseV1::Solid,
+                "liquid" => cdda_protocol::ItemPhaseV1::Liquid,
+                "gas" => cdda_protocol::ItemPhaseV1::Gas,
+                phase => {
+                    return Err(format!("item {} has unsupported phase {phase}", item.id).into());
+                }
+            },
+            count_by_charges: item.count_by_charges(),
+            stack_size: u32::try_from(item.stack_size)?,
+        },
     })
 }
 
@@ -2031,15 +2060,27 @@ fn runtime_magazine_storage(
 }
 
 fn runtime_integral_magazines(item: &ItemDefinition) -> Vec<IntegralMagazinePocketPrototypeV1> {
-    item.strict_magazine()
-        .into_iter()
-        .map(|magazine| IntegralMagazinePocketPrototypeV1 {
-            pocket_index: magazine.pocket_index,
-            pocket_id: magazine.pocket_id,
-            ammunition_type: magazine.ammunition_type,
-            capacity: magazine.capacity,
-            reloadable: !item.flags.contains("NO_RELOAD"),
-            unloadable: !item.flags.contains("NO_UNLOAD"),
+    item.pockets
+        .iter()
+        .filter_map(|pocket| {
+            let restrictions = pocket.strict_integral_magazine()?;
+            if restrictions.len() != 1 {
+                return None;
+            }
+            let (ammunition_type, capacity) = restrictions.first_key_value()?;
+            Some(IntegralMagazinePocketPrototypeV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: ammunition_type.clone(),
+                capacity: u32::try_from(*capacity).ok()?,
+                rigid: pocket
+                    .raw_fields
+                    .get("rigid")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                reloadable: !item.flags.contains("NO_RELOAD"),
+                unloadable: !item.flags.contains("NO_UNLOAD"),
+            })
         })
         .collect()
 }
@@ -2047,7 +2088,8 @@ fn runtime_integral_magazines(item: &ItemDefinition) -> Vec<IntegralMagazinePock
 fn runtime_ammunition_containers(
     item: &ItemDefinition,
 ) -> Vec<AmmunitionContainerPocketPrototypeV1> {
-    item.ammunition_containers
+    let mut pockets = item
+        .ammunition_containers
         .iter()
         .map(|pocket| AmmunitionContainerPocketPrototypeV1 {
             pocket_index: pocket.pocket_index,
@@ -2064,8 +2106,47 @@ fn runtime_ammunition_containers(
             access_moves: pocket.access_moves,
             reloadable: !item.flags.contains("NO_RELOAD"),
             unloadable: !item.flags.contains("NO_UNLOAD"),
+            spawn_rules: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    pockets.extend(
+        item.spawn_pockets
+            .iter()
+            .map(|pocket| AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                capacities: Vec::new(),
+                rigid: pocket.rigid,
+                access_moves: pocket.access_moves,
+                reloadable: false,
+                unloadable: !pocket.forbidden && !item.flags.contains("NO_UNLOAD"),
+                spawn_rules: Some(SpawnPocketRulesV1 {
+                    kind: match pocket.kind {
+                        cdda_content::SpawnPocketKindDefinition::Container => {
+                            SpawnPocketKindV1::Container
+                        }
+                        cdda_content::SpawnPocketKindDefinition::EFileStorage => {
+                            SpawnPocketKindV1::EFileStorage
+                        }
+                    },
+                    max_contains_volume_milliliters: pocket.max_contains_volume_milliliters,
+                    max_contains_weight_milligrams: pocket.max_contains_weight_milligrams,
+                    max_item_volume_milliliters: pocket.max_item_volume_milliliters,
+                    min_item_volume_milliliters: pocket.min_item_volume_milliliters,
+                    max_item_length_millimeters: pocket.max_item_length_millimeters,
+                    item_restrictions: pocket.item_restrictions.iter().cloned().collect(),
+                    flag_restrictions: pocket.flag_restrictions.iter().cloned().collect(),
+                    access_moves: pocket.access_moves,
+                    rigid: pocket.rigid,
+                    watertight: pocket.watertight,
+                    transparent: pocket.transparent,
+                    forbidden: pocket.forbidden,
+                    sealable: pocket.sealable,
+                }),
+            }),
+    );
+    pockets.sort_by_key(|pocket| pocket.pocket_index);
+    pockets
 }
 
 #[cfg(test)]
@@ -4309,19 +4390,47 @@ mod tests {
         let item_groups =
             ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("item groups should load");
-        let field_error = item_groups
+        let field_graph = item_groups
             .strict_graph("field")
-            .expect_err("field loot must retain the next unsupported semantic edge");
+            .expect("the complete field loot closure should retain every supported definition");
+        assert_eq!(field_graph.maximum_output, 760);
+        let next_field_runtime_blocker = field_graph
+            .groups
+            .values()
+            .find_map(|definition| {
+                runtime_item_group_graph(definition, &items)
+                    .err()
+                    .map(|error| (definition.id.as_str(), error.to_string()))
+            })
+            .expect("field loot must retain its next unsupported runtime semantic edge");
+        assert_eq!(
+            next_field_runtime_blocker,
+            (
+                "accesories_personal_unisex_child",
+                String::from(
+                    "item-group charges for wearable_light require unimplemented ammunition loading"
+                ),
+            )
+        );
+
+        let phone_case_graph = item_groups
+            .strict_graph("civilian_phones_case")
+            .expect("the phone-case containment family should parse as one strict closure");
+        assert_eq!(phone_case_graph.maximum_output, 11);
+        runtime_item_group_graph(&phone_case_graph.root, &items)
+            .expect("the phone-case root should normalize for the authoritative runtime");
+        let phone_case_runtime_errors = phone_case_graph
+            .groups
+            .values()
+            .filter_map(|definition| {
+                runtime_item_group_graph(definition, &items)
+                    .err()
+                    .map(|error| (definition.id.as_str(), error.to_string()))
+            })
+            .collect::<Vec<_>>();
         assert!(
-            matches!(
-            &field_error,
-            cdda_content::ItemGroupRegistryError::UnsupportedFields {
-                group,
-                fields,
-                ..
-            } if group == "civilian_phones_case" && fields == &[String::from("contents-group")]
-            ),
-            "unexpected next field-closure blocker: {field_error:?}"
+            phone_case_runtime_errors.is_empty(),
+            "phone-case closure should normalize for the authoritative runtime: {phone_case_runtime_errors:#?}"
         );
         let content_events = [
             ItemGroupEvent::NewYear,
@@ -4352,6 +4461,7 @@ mod tests {
                     direct_wrapper: None,
                     modifier_container: None,
                     modifier_sealed: None,
+                    contents: Vec::new(),
                     event: Some(event),
                 })
                 .collect(),
@@ -4389,15 +4499,41 @@ mod tests {
         );
         let mut entry_wrapper_definition = event_definition.clone();
         entry_wrapper_definition.nodes[0].direct_wrapper = Some(ItemGroupEntryWrapper {
-            item: String::from("rock"),
+            item: String::from("waterproof_smart_phone_case"),
             variant: None,
         });
-        assert!(
-            runtime_item_group_graph(&entry_wrapper_definition, &items)
-                .expect_err("entry containment must stay wire-closed")
-                .to_string()
-                .contains("entry containment")
+        entry_wrapper_definition.nodes[0].modifier_sealed = Some(false);
+        let entry_wrapper_graph = runtime_item_group_graph(&entry_wrapper_definition, &items)
+            .expect("entry containment should normalize through the generalized wrapper engine");
+        let entry_wrapper = entry_wrapper_graph.nodes[0].entries[0]
+            .direct_wrapper
+            .as_ref()
+            .expect("entry wrapper should be retained");
+        assert_eq!(
+            entry_wrapper.item.prototype.type_id,
+            "waterproof_smart_phone_case"
         );
+        assert_eq!(
+            entry_wrapper.overflow,
+            cdda_protocol::ItemGroupOverflowV1::None
+        );
+        assert!(
+            entry_wrapper.sealed,
+            "entry-wrapper sealing is independent from modifier sealing"
+        );
+        assert!(!entry_wrapper_graph.nodes[0].entries[0].seal_contents);
+        let mut contents_definition = entry_wrapper_definition.clone();
+        contents_definition.nodes[0].direct_wrapper = None;
+        contents_definition.nodes[0].contents = vec![cdda_content::ItemGroupContentsSource::Item(
+            String::from("rock"),
+        )];
+        let contents_graph = runtime_item_group_graph(&contents_definition, &items)
+            .expect("explicit unsealed modifier contents should normalize");
+        assert!(!contents_graph.nodes[0].entries[0].seal_contents);
+        contents_definition.nodes[0].modifier_sealed = None;
+        let default_sealed_contents = runtime_item_group_graph(&contents_definition, &items)
+            .expect("default-sealed modifier contents should normalize");
+        assert!(default_sealed_contents.nodes[0].entries[0].seal_contents);
         let mut variant_definition = event_definition.clone();
         variant_definition.nodes[0].variant = Some(String::from("oracle_variant"));
         let variant_graph = runtime_item_group_graph(&variant_definition, &items)
@@ -4415,16 +4551,24 @@ mod tests {
         );
         let mut wrapper_definition = event_definition;
         wrapper_definition.wrapper = Some(ItemGroupWrapper {
-            item: String::from("rock"),
+            item: String::from("waterproof_smart_phone_case"),
             variant: None,
             sealed: true,
             overflow: ItemGroupOverflow::Discard,
         });
-        assert!(
-            runtime_item_group_graph(&wrapper_definition, &items)
-                .expect_err("group containment must stay wire-closed")
-                .to_string()
-                .contains("group containment")
+        let wrapper_graph = runtime_item_group_graph(&wrapper_definition, &items)
+            .expect("whole-group containment should normalize through the generalized engine");
+        let wrapper = wrapper_graph
+            .wrapper
+            .as_ref()
+            .expect("whole-group wrapper should be retained");
+        assert_eq!(
+            wrapper.item.prototype.type_id,
+            "waterproof_smart_phone_case"
+        );
+        assert_eq!(
+            wrapper.overflow,
+            cdda_protocol::ItemGroupOverflowV1::Discard
         );
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
@@ -4881,7 +5025,15 @@ mod tests {
         let bash_snapshot = bash_validation.snapshot();
         let bash_snapshot_bytes = postcard::to_stdvec(&bash_snapshot)
             .expect("admitted furniture bash snapshot should encode");
-        assert!(bash_snapshot_bytes.len() <= 128 * 1024);
+        assert!(
+            // Protocol 87's generalized containment and constructor state add
+            // bounded fields to every retained item-group prototype. Against
+            // the pinned snapshot, the unchanged 524-definition catalog grows
+            // from 124_929 to 166_941 bytes.
+            bash_snapshot_bytes.len() <= 192 * 1024,
+            "admitted bash snapshot grew to {} bytes",
+            bash_snapshot_bytes.len()
+        );
         assert_eq!(
             bash_snapshot.furniture_bash_ids,
             furniture_bash_ids.into_iter().collect::<Vec<_>>()
@@ -5022,6 +5174,7 @@ mod tests {
                 access_moves: 20,
                 reloadable: true,
                 unloadable: true,
+                spawn_rules: None,
             }]
         );
         let mut sealed_quiver = quiver.clone();
@@ -5358,6 +5511,7 @@ mod tests {
                 pocket_id: String::new(),
                 ammunition_type: String::from("battery"),
                 capacity: 16,
+                rigid: true,
                 reloadable: false,
                 unloadable: false,
             }]
@@ -5454,6 +5608,7 @@ mod tests {
                 pocket_id: String::new(),
                 ammunition_type: String::from("battery"),
                 capacity: 56,
+                rigid: true,
                 reloadable: false,
                 unloadable: false,
             }]
@@ -5482,6 +5637,12 @@ mod tests {
             .expect("pinned reversible craft should normalize");
         assert!(rock_sock_craft.retain_components);
         assert_eq!(rock_sock_craft.components[1].len(), 2);
+        let crossbow = items.get("crossbow").expect("crossbow should load");
+        let crossbow_prototype =
+            craft_item_prototype(crossbow, default_instance_charges(crossbow), &items)
+                .expect("integral crossbow should normalize");
+        assert_eq!(crossbow_prototype.charges, 0);
+        assert_eq!(crossbow_prototype.integral_magazines.len(), 1);
         for (item_type_id, recipe) in disassembly.iter() {
             let target = items
                 .get(item_type_id)
@@ -5533,7 +5694,9 @@ mod tests {
                 },
             }))
             .unwrap_or_else(|error| {
-                panic!("disassembly recipe {item_type_id} must fit a control frame: {error}")
+                panic!(
+                    "disassembly recipe {item_type_id} must fit a control frame: {error}; {recipe:#?}"
+                )
             });
         }
         let client_visible = items

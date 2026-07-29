@@ -1,16 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    BashDefinition, BashItemGroupSource, ItemDefinition, ItemGroupEvent, ItemGroupRegistry,
-    ItemGroupSubtype, ItemRegistry, PocketTypeDefinition, StrictItemGroupDefinition,
+    BashDefinition, BashItemGroupSource, ItemDefinition, ItemGroupContentsSource, ItemGroupEvent,
+    ItemGroupOverflow, ItemGroupRegistry, ItemGroupSubtype, ItemRegistry,
+    ItemVariableValueDefinition, PocketTypeDefinition, StrictItemGroupDefinition,
     StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
-    CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemGroupVariantOptionV1, ItemVariantV1, MAX_ITEM_RAW_DAMAGE, item_group_catalog_is_valid,
-    item_group_source_max_outputs,
+    CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupContainerV1,
+    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
+    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupVariantOptionV1,
+    ItemSnippetV1, ItemVariableValueV1, ItemVariantV1, MAX_ITEM_RAW_DAMAGE,
+    item_group_catalog_is_valid, item_group_source_max_outputs,
 };
 
 use super::{craft_item_prototype, default_instance_charges};
@@ -140,13 +142,6 @@ pub(super) fn runtime_item_group_graph(
     definition: &StrictItemGroupDefinition,
     items: &ItemRegistry,
 ) -> Result<ItemGroupGraphV1, Box<dyn std::error::Error>> {
-    if definition.wrapper.is_some() {
-        return Err(format!(
-            "item group {} requires unimplemented group containment",
-            definition.id
-        )
-        .into());
-    }
     if definition.ammo_chance != 0 || definition.magazine_chance != 0 {
         return Err(format!(
             "item group {} requires unimplemented ammunition or magazine dressing",
@@ -208,6 +203,25 @@ pub(super) fn runtime_item_group_graph(
     Ok(ItemGroupGraphV1 {
         root_node: 0,
         nodes,
+        wrapper: definition
+            .wrapper
+            .as_ref()
+            .map(|wrapper| {
+                let item = items.get(&wrapper.item).ok_or_else(|| {
+                    format!(
+                        "item group {} references missing wrapper item {}",
+                        definition.id, wrapper.item
+                    )
+                })?;
+                runtime_item_group_container(
+                    item,
+                    wrapper.variant.clone(),
+                    wrapper.sealed,
+                    wrapper.overflow,
+                    items,
+                )
+            })
+            .transpose()?,
     })
 }
 
@@ -266,20 +280,6 @@ fn runtime_item_group_entry(
     items: &ItemRegistry,
 ) -> Result<ItemGroupEntryV1, Box<dyn std::error::Error>> {
     let node = strict_item_group_node(definition, node_id)?;
-    if node.direct_wrapper.is_some() || node.modifier_container.is_some() {
-        return Err(format!(
-            "item group {} requires unimplemented entry containment",
-            definition.id
-        )
-        .into());
-    }
-    if node.modifier_sealed.is_some() {
-        return Err(format!(
-            "item group {} requires unimplemented modifier sealing",
-            definition.id
-        )
-        .into());
-    }
     let raw_damage = node
         .damage
         .map(
@@ -305,49 +305,17 @@ fn runtime_item_group_entry(
                     definition.id
                 )
             })?;
-            let (charges, minimum_one_charge) = runtime_item_group_charges(item, node.charges)?;
-            let prototype = craft_item_prototype(item, default_instance_charges(item), items)?;
-            validate_item_group_item_spawn(item, &prototype, false)?;
-            let modifier_side_effects_supported =
-                validate_item_group_item_spawn(item, &prototype, true).is_ok();
-            let modifier_present = raw_damage.is_some() || node.variant.is_some();
-            if modifier_present && !modifier_side_effects_supported {
-                validate_item_group_item_spawn(item, &prototype, true)?;
-            }
-            ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
-                prototype,
-                maximum_raw_damage: if item.count_by_charges() {
-                    0
-                } else {
-                    MAX_ITEM_RAW_DAMAGE
-                },
-                variants: runtime_item_variants(item)?,
-                modifier_side_effects_supported,
-                charges,
-                minimum_one_charge,
-            }))
+            ItemGroupTargetV1::Item(Box::new(runtime_item_group_item(
+                item,
+                node.charges,
+                items,
+            )?))
         }
-        StrictItemGroupNodeKind::Group(group_id) => {
-            if node.charges.is_some() {
-                return Err(format!(
-                    "item group {} applies charges to nested group {group_id}, which the current protocol cannot represent",
-                    definition.id
-                )
-                .into());
-            }
-            ItemGroupTargetV1::Group(group_id.clone())
-        }
+        StrictItemGroupNodeKind::Group(group_id) => ItemGroupTargetV1::Group(group_id.clone()),
         StrictItemGroupNodeKind::Collection(_) | StrictItemGroupNodeKind::Distribution(_) => {
             if raw_damage.is_some() || node.variant.is_some() {
                 return Err(format!(
                     "item group {} applies a modifier to a local composite whose upstream modifier is not evaluated",
-                    definition.id
-                )
-                .into());
-            }
-            if node.charges.is_some() {
-                return Err(format!(
-                    "item group {} applies charges to a local nested group, which the current protocol cannot represent",
                     definition.id
                 )
                 .into());
@@ -367,7 +335,252 @@ fn runtime_item_group_entry(
         raw_damage,
         variant_id: node.variant.clone(),
         event: node.event.map(runtime_item_group_event),
+        modifier_charges: match &node.kind {
+            StrictItemGroupNodeKind::Group(_) => normalize_item_group_charges(node.charges)?,
+            StrictItemGroupNodeKind::Item(_)
+            | StrictItemGroupNodeKind::Collection(_)
+            | StrictItemGroupNodeKind::Distribution(_) => None,
+        },
+        contents: node
+            .contents
+            .iter()
+            .map(|contents| match contents {
+                ItemGroupContentsSource::Item(item_id) => {
+                    let item = items.get(item_id).ok_or_else(|| {
+                        format!(
+                            "item group {} references missing contents item {item_id}",
+                            definition.id
+                        )
+                    })?;
+                    Ok(ItemGroupContentsSourceV1::Item(Box::new(
+                        runtime_item_group_item(item, None, items)?,
+                    )))
+                }
+                ItemGroupContentsSource::Group(group_id) => {
+                    Ok(ItemGroupContentsSourceV1::Group(group_id.clone()))
+                }
+            })
+            .collect::<Result<_, Box<dyn std::error::Error>>>()?,
+        seal_contents: !node.contents.is_empty() && node.modifier_sealed.unwrap_or(true),
+        direct_wrapper: node
+            .direct_wrapper
+            .as_ref()
+            .map(|wrapper| {
+                let item = items.get(&wrapper.item).ok_or_else(|| {
+                    format!(
+                        "item group {} references missing entry wrapper {}",
+                        definition.id, wrapper.item
+                    )
+                })?;
+                runtime_item_group_container(
+                    item,
+                    wrapper.variant.clone(),
+                    // `Single_item_creator::sealed` is independent from the
+                    // modifier's JSON `sealed` member and defaults to true in
+                    // the pinned implementation.
+                    true,
+                    ItemGroupOverflow::None,
+                    items,
+                )
+            })
+            .transpose()?,
+        modifier_container: node
+            .modifier_container
+            .as_ref()
+            .filter(|item_id| item_id.as_str() != "null")
+            .map(|item_id| {
+                let item = items.get(item_id).ok_or_else(|| {
+                    format!(
+                        "item group {} references missing modifier container {item_id}",
+                        definition.id
+                    )
+                })?;
+                runtime_item_group_container(
+                    item,
+                    None,
+                    node.modifier_sealed.unwrap_or(true),
+                    ItemGroupOverflow::None,
+                    items,
+                )
+            })
+            .transpose()?,
         target,
+    })
+}
+
+fn runtime_item_group_item(
+    item: &ItemDefinition,
+    charges: Option<cdda_content::ItemGroupChargesRange>,
+    items: &ItemRegistry,
+) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
+    let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
+    let prototype = craft_item_prototype(item, default_instance_charges(item), items)?;
+    validate_item_group_item_spawn(item, &prototype, false)?;
+    let modifier_side_effects_supported =
+        validate_item_group_item_spawn(item, &prototype, true).is_ok();
+    let charges_supported = item_group_charges_supported(item);
+    if charges.is_some() && !charges_supported {
+        return Err(format!("item group item {} cannot retain charge modifiers", item.id).into());
+    }
+    let charge_ammunition = if charges_supported && item.subtypes.contains("TOOL") {
+        let [pocket] = prototype.integral_magazines.as_slice() else {
+            return Err(format!(
+                "item-group charges for tool {} require exactly one integral magazine",
+                item.id
+            )
+            .into());
+        };
+        let ammunition_definition = items.get(&pocket.ammunition_type).ok_or_else(|| {
+            format!(
+                "item-group tool {} has no concrete default ammunition {}",
+                item.id, pocket.ammunition_type
+            )
+        })?;
+        validate_charge_ammunition_constructor_state(ammunition_definition)?;
+        let mut ammunition = craft_item_prototype(ammunition_definition, 1, items)?;
+        validate_item_group_item_spawn(ammunition_definition, &ammunition, false)?;
+        if ammunition.ammunition_type != pocket.ammunition_type {
+            return Err(format!(
+                "item-group tool {} default ammunition does not match {}",
+                item.id, pocket.ammunition_type
+            )
+            .into());
+        }
+        ammunition.charges = 1;
+        Some(ammunition)
+    } else {
+        None
+    };
+    let contents_insertion_supported = item_group_contents_insertion_supported(item, &prototype);
+    Ok(ItemGroupItemPrototypeV1 {
+        prototype,
+        maximum_raw_damage: if item.count_by_charges() {
+            0
+        } else {
+            MAX_ITEM_RAW_DAMAGE
+        },
+        variants: runtime_item_variants(item)?,
+        snippets: item
+            .snippets
+            .iter()
+            .map(|snippet| ItemSnippetV1 {
+                id: snippet.id.clone(),
+                text: snippet.text.clone(),
+            })
+            .collect(),
+        initial_variables: item
+            .variables
+            .iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    ItemVariableValueDefinition::Integer(value) => {
+                        ItemVariableValueV1::Integer(*value)
+                    }
+                    ItemVariableValueDefinition::String(value) => {
+                        ItemVariableValueV1::String(value.clone())
+                    }
+                };
+                (key.clone(), value)
+            })
+            .collect(),
+        modifier_side_effects_supported,
+        charges,
+        minimum_one_charge,
+        charge_ammunition,
+        charges_supported,
+        modifier_container_capacity_applies: matches!(item.phase.as_str(), "LIQUID" | "liquid")
+            || !item
+                .subtypes
+                .iter()
+                .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE")),
+        contents_insertion_supported,
+    })
+}
+
+fn item_group_contents_insertion_supported(
+    item: &ItemDefinition,
+    prototype: &CraftItemPrototypeV1,
+) -> bool {
+    item.pockets.iter().all(|raw| {
+        if raw.strict_integral_magazine().is_some() {
+            return prototype
+                .integral_magazines
+                .iter()
+                .any(|pocket| pocket.pocket_index == raw.pocket_index);
+        }
+        if raw.strict_magazine_well() {
+            return prototype
+                .magazine_wells
+                .iter()
+                .any(|pocket| pocket.pocket_index == raw.pocket_index);
+        }
+        if raw.strict_ammunition_container().is_some() {
+            return prototype.ammunition_containers.iter().any(|pocket| {
+                pocket.pocket_index == raw.pocket_index && pocket.spawn_rules.is_none()
+            });
+        }
+        if raw.strict_spawn_pocket().is_some() {
+            return prototype.ammunition_containers.iter().any(|pocket| {
+                pocket.pocket_index == raw.pocket_index && pocket.spawn_rules.is_some()
+            });
+        }
+        false
+    })
+}
+
+fn validate_charge_ammunition_constructor_state(
+    ammunition: &ItemDefinition,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !runtime_item_variants(ammunition)?.is_empty()
+        || !ammunition.snippets.is_empty()
+        || !ammunition.variables.is_empty()
+    {
+        return Err(format!(
+            "charge ammunition {} has constructor variant, snippet, or variable state that is not represented by ItemGroupItemPrototypeV1::charge_ammunition",
+            ammunition.id
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn runtime_item_group_container(
+    item: &ItemDefinition,
+    variant_id: Option<String>,
+    sealed: bool,
+    overflow: ItemGroupOverflow,
+    items: &ItemRegistry,
+) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
+    let item = runtime_item_group_item(item, None, items)?;
+    let physical_pockets = item
+        .prototype
+        .ammunition_containers
+        .iter()
+        .filter_map(|pocket| pocket.spawn_rules.as_ref())
+        .filter(|rules| rules.kind == cdda_protocol::SpawnPocketKindV1::Container)
+        .collect::<Vec<_>>();
+    if physical_pockets.len() != 1 || !physical_pockets[0].rigid {
+        return Err(
+            "item-group wrappers require exactly one rigid physical container pocket".into(),
+        );
+    }
+    if variant_id.as_ref().is_some_and(|variant_id| {
+        !item
+            .variants
+            .iter()
+            .any(|option| option.variant.id == *variant_id)
+    }) {
+        return Err("item-group wrapper references an unavailable variant".into());
+    }
+    Ok(ItemGroupContainerV1 {
+        item: Box::new(item),
+        variant_id,
+        sealed,
+        overflow: match overflow {
+            ItemGroupOverflow::None => ItemGroupOverflowV1::None,
+            ItemGroupOverflow::Spill => ItemGroupOverflowV1::Spill,
+            ItemGroupOverflow::Discard => ItemGroupOverflowV1::Discard,
+        },
     })
 }
 
@@ -462,7 +675,7 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    const CONSTRUCTOR_STATE_FIELDS: &[&str] = &["countdown_interval", "variables", "relic_data"];
+    const CONSTRUCTOR_STATE_FIELDS: &[&str] = &["countdown_interval", "relic_data"];
     if let Some(field) = CONSTRUCTOR_STATE_FIELDS
         .iter()
         .find(|field| item.unsupported_fields.contains(**field))
@@ -508,7 +721,6 @@ fn validate_item_group_item_spawn(
         "trait_group",
         "built_in_mods",
         "default_mods",
-        "snippet_category",
         "expand_snippets",
     ];
     if let Some(field) = CONSTRUCTOR_RNG_FIELDS
@@ -517,6 +729,31 @@ fn validate_item_group_item_spawn(
     {
         return Err(format!(
             "item group item {} requires unimplemented constructor RNG field {field}",
+            item.id
+        )
+        .into());
+    }
+    if item.unsupported_fields.contains("variables") && item.variables.is_empty() {
+        return Err(format!(
+            "item group item {} has an unsupported empty variables field",
+            item.id
+        )
+        .into());
+    }
+    if let Some(variable) = item
+        .variables
+        .keys()
+        .find(|key| matches!(key.as_str(), "weight" | "integral_weight" | "volume"))
+    {
+        return Err(format!(
+            "item group item {} variable {variable} changes unimplemented physical dimensions",
+            item.id
+        )
+        .into());
+    }
+    if item.unsupported_fields.contains("snippet_category") && item.snippets.is_empty() {
+        return Err(format!(
+            "item group item {} requires an unsupported named or empty snippet category",
             item.id
         )
         .into());
@@ -578,9 +815,8 @@ pub(super) fn runtime_item_group_charges(
         minimum: charges.minimum.min(charges.maximum),
         maximum: charges.maximum,
     };
-    if item.subtypes.contains("TOOL")
-        || item.subtypes.contains("GUN")
-        || item.subtypes.contains("MAGAZINE")
+    if (item.subtypes.contains("GUN") || item.subtypes.contains("MAGAZINE"))
+        || (item.subtypes.contains("TOOL") && !item_group_charges_supported(item))
     {
         return Err(format!(
             "item-group charges for {} require unimplemented ammunition loading",
@@ -589,7 +825,7 @@ pub(super) fn runtime_item_group_charges(
         .into());
     }
     let liquid = matches!(item.phase.as_str(), "LIQUID" | "liquid");
-    if !item.count_by_charges() && !liquid && !item.flags.contains("CAN_HAVE_CHARGES") {
+    if !item_group_charges_supported(item) {
         if charges.minimum == charges.maximum {
             // Pinned Item_modifier computes the fixed value without consuming
             // RNG, then ignores it for an ordinary item.
@@ -610,10 +846,43 @@ pub(super) fn runtime_item_group_charges(
     ))
 }
 
+fn normalize_item_group_charges(
+    charges: Option<cdda_content::ItemGroupChargesRange>,
+) -> Result<Option<InclusiveI32RangeV1>, Box<dyn std::error::Error>> {
+    let Some(charges) = charges else {
+        return Ok(None);
+    };
+    if charges.minimum == -1 && charges.maximum == -1 {
+        return Ok(None);
+    }
+    if charges.minimum < 0 || charges.maximum < 0 {
+        return Err("nested item-group charges require unimplemented capacity sentinels".into());
+    }
+    Ok(Some(InclusiveI32RangeV1 {
+        minimum: charges.minimum.min(charges.maximum),
+        maximum: charges.maximum,
+    }))
+}
+
+fn item_group_charges_supported(item: &ItemDefinition) -> bool {
+    if item.count_by_charges() || matches!(item.phase.as_str(), "LIQUID" | "liquid") {
+        return true;
+    }
+    if item.subtypes.contains("TOOL") {
+        return item
+            .pockets
+            .iter()
+            .filter(|pocket| pocket.strict_integral_magazine().is_some())
+            .count()
+            == 1;
+    }
+    item.flags.contains("CAN_HAVE_CHARGES")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cdda_content::ItemVariantDefinition;
+    use cdda_content::{ItemVariantDefinition, PocketDefinition};
 
     #[test]
     fn finalized_variants_fall_back_to_base_text_and_art_before_append() {
@@ -661,5 +930,182 @@ mod tests {
             "base description  alternate description"
         );
         assert_eq!(variants[2].variant.ascii_picture, "alternate_art");
+    }
+
+    #[test]
+    fn charge_ammunition_constructor_state_fails_closed() {
+        let plain = ItemDefinition {
+            id: String::from("plain_ammunition"),
+            ..ItemDefinition::default()
+        };
+        assert!(validate_charge_ammunition_constructor_state(&plain).is_ok());
+
+        let mut variant = plain.clone();
+        variant.variants = vec![ItemVariantDefinition {
+            id: String::from("tracer"),
+            ..ItemVariantDefinition::default()
+        }];
+        assert!(validate_charge_ammunition_constructor_state(&variant).is_err());
+
+        let mut snippet = plain.clone();
+        snippet.snippets = vec![cdda_content::ItemSnippetDefinition {
+            id: String::from("marked"),
+            text: String::from("Marked lot"),
+        }];
+        assert!(validate_charge_ammunition_constructor_state(&snippet).is_err());
+
+        let mut variable = plain;
+        variable.variables.insert(
+            String::from("lot"),
+            cdda_content::ItemVariableValueDefinition::Integer(7),
+        );
+        assert!(validate_charge_ammunition_constructor_state(&variable).is_err());
+    }
+
+    #[test]
+    fn item_group_spawn_rejects_physical_override_variables() {
+        let prototype = CraftItemPrototypeV1 {
+            type_id: String::from("physical_override"),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            containment: Default::default(),
+        };
+        for reserved in ["weight", "integral_weight", "volume"] {
+            let mut item = ItemDefinition {
+                id: String::from("physical_override"),
+                ..ItemDefinition::default()
+            };
+            item.variables.insert(
+                reserved.to_owned(),
+                cdda_content::ItemVariableValueDefinition::Integer(1),
+            );
+            assert!(
+                validate_item_group_item_spawn(&item, &prototype, false).is_err(),
+                "reserved variable {reserved} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn contents_projection_distinguishes_no_pockets_from_lost_pockets() {
+        let empty_prototype = || CraftItemPrototypeV1 {
+            type_id: String::from("projection_target"),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            containment: Default::default(),
+        };
+        let no_pockets = ItemDefinition::default();
+        assert!(item_group_contents_insertion_supported(
+            &no_pockets,
+            &empty_prototype(),
+        ));
+
+        let unsupported = ItemDefinition {
+            pockets: vec![PocketDefinition {
+                pocket_index: 0,
+                pocket_type: PocketTypeDefinition::Corpse,
+                pocket_id: String::new(),
+                ammo_restrictions: BTreeMap::new(),
+                item_restrictions: BTreeSet::new(),
+                flag_restrictions: BTreeSet::new(),
+                default_magazine: String::new(),
+                raw_fields: BTreeMap::new(),
+            }],
+            ..ItemDefinition::default()
+        };
+        assert!(!item_group_contents_insertion_supported(
+            &unsupported,
+            &empty_prototype(),
+        ));
+
+        let multi_ammo_integral = ItemDefinition {
+            pockets: vec![PocketDefinition {
+                pocket_index: 0,
+                pocket_type: PocketTypeDefinition::Magazine,
+                pocket_id: String::from("POWER"),
+                ammo_restrictions: BTreeMap::from([
+                    (String::from("battery"), 10),
+                    (String::from("plutonium"), 5),
+                ]),
+                item_restrictions: BTreeSet::new(),
+                flag_restrictions: BTreeSet::new(),
+                default_magazine: String::new(),
+                raw_fields: BTreeMap::new(),
+            }],
+            ..ItemDefinition::default()
+        };
+        assert!(!item_group_contents_insertion_supported(
+            &multi_ammo_integral,
+            &empty_prototype(),
+        ));
+
+        let lost_well = ItemDefinition {
+            pockets: vec![PocketDefinition {
+                pocket_index: 3,
+                pocket_type: PocketTypeDefinition::MagazineWell,
+                pocket_id: String::from("MAGAZINE"),
+                ammo_restrictions: BTreeMap::new(),
+                item_restrictions: BTreeSet::from([String::from("test_magazine")]),
+                flag_restrictions: BTreeSet::new(),
+                default_magazine: String::new(),
+                raw_fields: BTreeMap::new(),
+            }],
+            ..ItemDefinition::default()
+        };
+        assert!(!item_group_contents_insertion_supported(
+            &lost_well,
+            &empty_prototype(),
+        ));
+
+        let one_ammo_integral = ItemDefinition {
+            pockets: vec![PocketDefinition {
+                pocket_index: 0,
+                pocket_type: PocketTypeDefinition::Magazine,
+                pocket_id: String::from("POWER"),
+                ammo_restrictions: BTreeMap::from([(String::from("battery"), 10)]),
+                item_restrictions: BTreeSet::new(),
+                flag_restrictions: BTreeSet::new(),
+                default_magazine: String::new(),
+                raw_fields: BTreeMap::new(),
+            }],
+            ..ItemDefinition::default()
+        };
+        let mut projected = empty_prototype();
+        projected.charges = 0;
+        projected.integral_magazines = vec![cdda_protocol::IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("POWER"),
+            ammunition_type: String::from("battery"),
+            capacity: 10,
+            rigid: false,
+            reloadable: true,
+            unloadable: true,
+        }];
+        assert!(item_group_contents_insertion_supported(
+            &one_ammo_integral,
+            &projected,
+        ));
     }
 }

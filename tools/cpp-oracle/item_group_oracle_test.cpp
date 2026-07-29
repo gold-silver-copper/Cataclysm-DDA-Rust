@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdint>
 #include <ctime>
 #include <cstdlib>
 #include <fstream>
@@ -16,11 +17,14 @@
 #include "cata_catch.h"
 #include "item.h"
 #include "item_group.h"
+#include "item_pocket.h"
 #include "itype.h"
 #include "json.h"
 #include "options.h"
+#include "pocket_type.h"
 #include "rng.h"
 #include "type_id.h"
+#include "units.h"
 
 namespace
 {
@@ -204,6 +208,45 @@ int create_with_charges( unsigned int seed, int minimum, int maximum )
     REQUIRE( items.size() == 1 );
     REQUIRE( items.front().count_by_charges() );
     return items.front().charges;
+}
+
+struct modifier_container_capacity_trace {
+    unsigned int seed = 0;
+    std::string container_type;
+    std::string payload_type;
+    int payload_charges = 0;
+    int downstream_draw = 0;
+};
+
+modifier_container_capacity_trace observe_modifier_container_capacity( unsigned int seed,
+        int minimum, int maximum )
+{
+    Single_item_creator creator( "water_clean", Single_item_creator::S_ITEM, 100,
+                                 "Rust modifier-container capacity oracle" );
+    creator.modifier.emplace();
+    creator.modifier->container = std::make_unique<Single_item_creator>(
+                                      "bottle_plastic", Single_item_creator::S_ITEM, 100,
+                                      "Rust modifier-container capacity oracle wrapper" );
+    creator.modifier->sealed = false;
+    if( minimum >= 0 || maximum >= 0 ) {
+        creator.modifier->charges = { minimum, maximum };
+    }
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    const item &container = items.front();
+    const std::list<const item *> contents = container.all_items_top();
+    REQUIRE( contents.size() == 1 );
+    const item &payload = **contents.begin();
+    return {
+        seed,
+        container.typeId().str(),
+        payload.typeId().str(),
+        payload.charges,
+        rng( 0, 9999 )
+    };
 }
 
 int downstream_after_fixed_count( unsigned int seed )
@@ -434,6 +477,32 @@ struct corpse_observation {
     std::vector<exact_trace> exact_traces;
 };
 
+struct phone_case_observation {
+    int seed_search_limit = 0;
+    bool valid_shapes = true;
+    std::set<std::string> phone_types;
+    bool observed_empty_efiles = false;
+    bool observed_many_efiles = false;
+    struct exact_trace {
+        std::string witness;
+        unsigned int seed = 0;
+        std::string wrapper_type;
+        std::string wrapper_variant;
+        bool wrapper_any_pocket_sealed = false;
+        std::int64_t wrapper_remaining_volume_ml = 0;
+        std::int64_t wrapper_remaining_weight_g = 0;
+        std::string phone_type;
+        int phone_charges = 0;
+        int phone_ammo_remaining = 0;
+        std::string phone_ammunition_type;
+        int phone_raw_damage = 0;
+        std::vector<std::string> efile_types;
+        std::vector<int> efile_raw_damage;
+        int downstream_draw = 0;
+    };
+    std::vector<exact_trace> exact_traces;
+};
+
 corpse_observation observe_everyday_corpses()
 {
     corpse_observation observation;
@@ -497,6 +566,93 @@ corpse_observation observe_everyday_corpses()
         if( observation.wrapper_types.size() == 3 && observation.wrapper_raw_damage.size() == 1 &&
             observation.wrapper_damage_levels.size() == 1 && observation.content_counts.size() > 1 &&
             observation.observed_pristine_content && observation.observed_damage_four_content ) {
+            break;
+        }
+    }
+    return observation;
+}
+
+phone_case_observation observe_civilian_phone_cases()
+{
+    phone_case_observation observation;
+    observation.seed_search_limit = maximum_seed_search;
+    std::set<std::string> retained_witnesses;
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item_group::ItemList items = item_group::items_from(
+                    item_group_id( "civilian_phones_case" ) );
+        if( items.size() != 1 || items.front().typeId() != itype_id( "waterproof_smart_phone_case" ) ) {
+            observation.valid_shapes = false;
+            break;
+        }
+        const item &wrapper = items.front();
+        const std::list<const item *> wrapper_contents = wrapper.all_items_top(
+                    pocket_type::CONTAINER );
+        const std::vector<const item_pocket *> wrapper_pockets = wrapper.get_pockets(
+                    []( const item_pocket & pocket ) {
+            return pocket.is_type( pocket_type::CONTAINER );
+        } );
+        if( wrapper_contents.size() != 1 || wrapper_pockets.size() != 1 ) {
+            observation.valid_shapes = false;
+            break;
+        }
+        const item &phone = **wrapper_contents.begin();
+        if( phone.typeId() != itype_id( "smart_phone" ) &&
+            phone.typeId() != itype_id( "smart_phone_locked" ) ) {
+            observation.valid_shapes = false;
+            break;
+        }
+        const bool first_phone_type = observation.phone_types.insert( phone.typeId().str() ).second;
+        const std::list<const item *> efiles = phone.all_items_top( pocket_type::E_FILE_STORAGE );
+        std::vector<std::string> efile_types;
+        std::vector<int> efile_raw_damage;
+        for( const item *efile : efiles ) {
+            efile_types.push_back( efile->typeId().str() );
+            efile_raw_damage.push_back( efile->damage() );
+        }
+        const bool first_empty = efiles.empty() && !observation.observed_empty_efiles;
+        const bool first_many = efiles.size() >= 5 && !observation.observed_many_efiles;
+        observation.observed_empty_efiles = observation.observed_empty_efiles || efiles.empty();
+        observation.observed_many_efiles = observation.observed_many_efiles || efiles.size() >= 5;
+        std::vector<std::string> witnesses;
+        if( seed == 1 ) {
+            witnesses.emplace_back( "fixed_seed:1" );
+        }
+        if( first_phone_type ) {
+            witnesses.emplace_back( "first_phone_type:" + phone.typeId().str() );
+        }
+        if( first_empty ) {
+            witnesses.emplace_back( "first_empty_efiles" );
+        }
+        if( first_many ) {
+            witnesses.emplace_back( "first_five_or_more_efiles" );
+        }
+        const item_pocket &wrapper_pocket = *wrapper_pockets.front();
+        const int downstream_draw = rng( 0, 9999 );
+        for( const std::string &witness : witnesses ) {
+            if( !retained_witnesses.insert( witness ).second ) {
+                continue;
+            }
+            observation.exact_traces.push_back( {
+                witness,
+                seed,
+                wrapper.typeId().str(),
+                wrapper.has_itype_variant() ? wrapper.itype_variant().id : "",
+                wrapper.any_pockets_sealed(),
+                units::to_milliliter( wrapper_pocket.remaining_volume() ),
+                units::to_gram( wrapper_pocket.remaining_weight() ),
+                phone.typeId().str(),
+                phone.charges,
+                phone.ammo_remaining(),
+                phone.ammo_current().str(),
+                phone.damage(),
+                efile_types,
+                efile_raw_damage,
+                downstream_draw
+            } );
+        }
+        if( observation.phone_types.size() == 2 && observation.observed_empty_efiles &&
+            observation.observed_many_efiles && retained_witnesses.size() == 5 ) {
             break;
         }
     }
@@ -611,6 +767,27 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     const container_observation spilled = observe_container_group(
                 "spill", item_group_id( "test_spilling_from_container" ) );
     const corpse_observation corpses = observe_everyday_corpses();
+    const phone_case_observation phone_cases = observe_civilian_phone_cases();
+    REQUIRE( phone_cases.valid_shapes );
+    REQUIRE( phone_cases.phone_types == std::set<std::string>{ "smart_phone", "smart_phone_locked" } );
+    REQUIRE( phone_cases.observed_empty_efiles );
+    REQUIRE( phone_cases.observed_many_efiles );
+
+    constexpr unsigned int modifier_container_capacity_seed = 31415;
+    const modifier_container_capacity_trace explicit_container_capacity =
+        observe_modifier_container_capacity( modifier_container_capacity_seed, 50, 80 );
+    const modifier_container_capacity_trace default_container_capacity =
+        observe_modifier_container_capacity( modifier_container_capacity_seed, -1, -1 );
+    const modifier_container_capacity_trace fixed_container_capacity =
+        observe_modifier_container_capacity( modifier_container_capacity_seed,
+                explicit_container_capacity.payload_charges,
+                explicit_container_capacity.payload_charges );
+    REQUIRE( explicit_container_capacity.container_type == "bottle_plastic" );
+    REQUIRE( explicit_container_capacity.payload_type == "water_clean" );
+    REQUIRE( explicit_container_capacity.payload_charges ==
+             default_container_capacity.payload_charges );
+    REQUIRE( explicit_container_capacity.downstream_draw ==
+             fixed_container_capacity.downstream_draw );
 
     std::set<std::string> event_types;
     std::vector<std::pair<int, std::string>> event_distribution_results;
@@ -776,6 +953,22 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "integral_remaining_capacity", dressed_integral_tool.remaining_ammo_capacity() );
         json.end_object();
 
+        json.member( "modifier_container_capacity" );
+        json.start_object();
+        json.member( "seed", explicit_container_capacity.seed );
+        json.member( "container_type", explicit_container_capacity.container_type );
+        json.member( "payload_type", explicit_container_capacity.payload_type );
+        json.member( "explicit_minimum", 50 );
+        json.member( "explicit_maximum", 80 );
+        json.member( "explicit_charges", explicit_container_capacity.payload_charges );
+        json.member( "default_charges", default_container_capacity.payload_charges );
+        json.member( "explicit_downstream_draw", explicit_container_capacity.downstream_draw );
+        json.member( "fixed_downstream_draw", fixed_container_capacity.downstream_draw );
+        json.member( "downstream_draw_matches",
+                     explicit_container_capacity.downstream_draw ==
+                     fixed_container_capacity.downstream_draw );
+        json.end_object();
+
         json.member( "containers" );
         json.start_array();
         for( const container_observation *observation : { &discarded, &spilled } ) {
@@ -852,6 +1045,44 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
                 json.write( level );
             }
             json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+        json.end_object();
+
+        json.member( "civilian_phone_case" );
+        json.start_object();
+        json.member( "seed_search_limit", phone_cases.seed_search_limit );
+        json.member( "valid_shapes", phone_cases.valid_shapes );
+        json.member( "phone_types" );
+        write_strings( json, phone_cases.phone_types );
+        json.member( "observed_empty_efiles", phone_cases.observed_empty_efiles );
+        json.member( "observed_many_efiles", phone_cases.observed_many_efiles );
+        json.member( "exact_traces" );
+        json.start_array();
+        for( const phone_case_observation::exact_trace &trace : phone_cases.exact_traces ) {
+            json.start_object();
+            json.member( "witness", trace.witness );
+            json.member( "seed", trace.seed );
+            json.member( "wrapper_type", trace.wrapper_type );
+            json.member( "wrapper_variant", trace.wrapper_variant );
+            json.member( "wrapper_any_pocket_sealed", trace.wrapper_any_pocket_sealed );
+            json.member( "wrapper_remaining_volume_ml", trace.wrapper_remaining_volume_ml );
+            json.member( "wrapper_remaining_weight_g", trace.wrapper_remaining_weight_g );
+            json.member( "phone_type", trace.phone_type );
+            json.member( "phone_charges", trace.phone_charges );
+            json.member( "phone_ammo_remaining", trace.phone_ammo_remaining );
+            json.member( "phone_ammunition_type", trace.phone_ammunition_type );
+            json.member( "phone_raw_damage", trace.phone_raw_damage );
+            json.member( "efile_types" );
+            write_trace( json, trace.efile_types );
+            json.member( "efile_raw_damage" );
+            json.start_array();
+            for( const int damage : trace.efile_raw_damage ) {
+                json.write( damage );
+            }
+            json.end_array();
+            json.member( "downstream_draw", trace.downstream_draw );
             json.end_object();
         }
         json.end_array();

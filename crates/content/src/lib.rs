@@ -29,13 +29,14 @@ pub use field::{
 };
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
 pub use item::{
-    ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemVariantDefinition,
-    PocketDefinition, PocketTypeDefinition, StrictMagazineDefinition,
+    ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemSnippetDefinition,
+    ItemVariableValueDefinition, ItemVariantDefinition, PocketDefinition, PocketTypeDefinition,
+    SpawnPocketKindDefinition, StrictMagazineDefinition, StrictSpawnPocketDefinition,
 };
 pub use item_group::{
-    ItemGroupChargesRange, ItemGroupDefinition, ItemGroupEntryWrapper, ItemGroupEvent,
-    ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind, ItemGroupOverflow, ItemGroupRange,
-    ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype, ItemGroupWrapper,
+    ItemGroupChargesRange, ItemGroupContentsSource, ItemGroupDefinition, ItemGroupEntryWrapper,
+    ItemGroupEvent, ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind, ItemGroupOverflow,
+    ItemGroupRange, ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype, ItemGroupWrapper,
     MAX_ITEM_GROUP_LOCAL_DEPTH, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUT,
     MAX_ITEM_GROUP_QUANTITY, MAX_ITEM_GROUP_REFERENCE_DEPTH, StrictItemGroupDefinition,
     StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
@@ -575,6 +576,15 @@ impl ModCatalog {
 
     pub fn get(&self, id: &str) -> Option<&ModInfo> {
         self.mods.get(id)
+    }
+
+    /// Iterates every pinned mod definition in stable ID order. Callers that
+    /// construct new-world choices must still use `resolve_new_world`, which
+    /// rejects obsolete, conflicting, cyclic, and invalid-core selections.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ModInfo)> {
+        self.mods
+            .iter()
+            .map(|(id, information)| (id.as_str(), information))
     }
 
     pub fn recommended_new_world(&self) -> Result<Vec<String>, ModCatalogError> {

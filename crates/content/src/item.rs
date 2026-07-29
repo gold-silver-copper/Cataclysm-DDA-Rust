@@ -18,6 +18,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "category",
     "weight",
     "volume",
+    "longest_side",
     "price",
     "price_postapoc",
     "symbol",
@@ -74,6 +75,11 @@ pub struct ItemDefinition {
     pub category: String,
     pub weight_milligrams: i64,
     pub volume_milliliters: i64,
+    /// Explicit or inherited longest item dimension in integer millimeters.
+    /// When the source never sets this field, `finalized_longest_side_millimeters`
+    /// derives the pinned volume-based default.
+    pub longest_side_millimeters: i64,
+    pub longest_side_is_explicit: bool,
     pub price_cents: i64,
     pub price_postapoc_cents: i64,
     pub symbol: String,
@@ -138,6 +144,10 @@ pub struct ItemDefinition {
     /// Mixed layouts remain closed so projecting these pockets cannot silently
     /// discard unsupported sibling pocket behavior.
     pub ammunition_containers: Vec<StrictAmmunitionContainerDefinition>,
+    /// Strict general spawn-time pockets used by item-group containment. This
+    /// is separate from ammunition pockets so existing reload semantics stay
+    /// fail-closed while wrapper/contents insertion gains a reusable engine.
+    pub spawn_pockets: Vec<StrictSpawnPocketDefinition>,
     pub count: i32,
     pub range: i32,
     pub dispersion: i32,
@@ -164,6 +174,12 @@ pub struct ItemDefinition {
     /// per-variant behavior is retained explicitly for strict admission.
     pub variants: Vec<ItemVariantDefinition>,
     pub variant_type: String,
+    /// Strict inline snippet choices retained in source order. Named snippet
+    /// categories and expansion remain explicitly unsupported.
+    pub snippets: Vec<ItemSnippetDefinition>,
+    /// Typed default item variables copied into every new instance. The raw
+    /// field remains unsupported outside constructors that explicitly opt in.
+    pub variables: BTreeMap<String, ItemVariableValueDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -179,6 +195,18 @@ pub struct ItemVariantDefinition {
     pub weight: u32,
     pub append: bool,
     pub unsupported_fields: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemSnippetDefinition {
+    pub id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ItemVariableValueDefinition {
+    Integer(i64),
+    String(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -243,6 +271,47 @@ pub struct StrictAmmunitionContainerDefinition {
     pub capacities: BTreeMap<String, u32>,
     pub access_moves: u16,
     pub rigid: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpawnPocketKindDefinition {
+    Container,
+    EFileStorage,
+}
+
+const DEFAULT_SPAWN_POCKET_VOLUME_MILLILITERS: u64 = 200_000_000;
+const DEFAULT_SPAWN_POCKET_WEIGHT_MILLIGRAMS: u64 = 2_000_000_000_000;
+
+fn default_spawn_pocket_max_item_length_millimeters(volume_milliliters: u64) -> Option<u64> {
+    // Pinned `pocket_data::load`: round the cubic side to centimeters, convert
+    // to millimeters, multiply by sqrt(2), then truncate into integer length.
+    let length = (volume_milliliters as f64).cbrt().round() * 10.0 * std::f64::consts::SQRT_2;
+    if !length.is_finite() || length < 0.0 || length > u64::MAX as f64 {
+        return None;
+    }
+    Some(length as u64)
+}
+
+/// A pocket shape whose spawn-time compatibility, capacity, sealing, and
+/// access state can be represented without consulting live JSON.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictSpawnPocketDefinition {
+    pub pocket_index: u16,
+    pub pocket_id: String,
+    pub kind: SpawnPocketKindDefinition,
+    pub max_contains_volume_milliliters: u64,
+    pub max_contains_weight_milligrams: u64,
+    pub max_item_volume_milliliters: u64,
+    pub min_item_volume_milliliters: u64,
+    pub max_item_length_millimeters: u64,
+    pub item_restrictions: BTreeSet<String>,
+    pub flag_restrictions: BTreeSet<String>,
+    pub access_moves: u16,
+    pub rigid: bool,
+    pub watertight: bool,
+    pub transparent: bool,
+    pub forbidden: bool,
+    pub sealable: bool,
 }
 
 impl PocketDefinition {
@@ -322,6 +391,141 @@ impl PocketDefinition {
             capacities,
             access_moves,
             rigid,
+        })
+    }
+
+    /// Strict spawn-time projection for ordinary physical containers and
+    /// electronic-file storage. Reload-only ammunition containers keep using
+    /// their dedicated interpreter.
+    #[must_use]
+    pub fn strict_spawn_pocket(&self) -> Option<StrictSpawnPocketDefinition> {
+        const FIELDS: &[&str] = &[
+            "//",
+            "ememory_max",
+            "flag_restriction",
+            "forbidden",
+            "id",
+            "item_restriction",
+            "max_contains_volume",
+            "max_contains_weight",
+            "max_item_length",
+            "max_item_volume",
+            "min_item_volume",
+            "moves",
+            "pocket_type",
+            "rigid",
+            "sealed_data",
+            "transparent",
+            "watertight",
+            "weight_multiplier",
+        ];
+        let kind = match self.pocket_type {
+            PocketTypeDefinition::Container if self.ammo_restrictions.is_empty() => {
+                SpawnPocketKindDefinition::Container
+            }
+            PocketTypeDefinition::EFileStorage => SpawnPocketKindDefinition::EFileStorage,
+            _ => return None,
+        };
+        if !self
+            .raw_fields
+            .keys()
+            .all(|field| FIELDS.contains(&field.as_str()) || field.starts_with("//"))
+        {
+            return None;
+        }
+        let weight_multiplier = match self.raw_fields.get("weight_multiplier") {
+            Some(value) => Some(value.as_f64()?),
+            None => None,
+        };
+        if (kind == SpawnPocketKindDefinition::EFileStorage
+            && (weight_multiplier != Some(0.0)
+                || self.raw_fields.get("rigid").and_then(Value::as_bool) != Some(true)))
+            || (kind == SpawnPocketKindDefinition::Container
+                && weight_multiplier.is_some_and(|multiplier| multiplier != 1.0))
+        {
+            return None;
+        }
+        if kind == SpawnPocketKindDefinition::EFileStorage {
+            self.raw_fields
+                .get("ememory_max")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())?;
+        }
+        let quantity = |field, quantity_kind, default| {
+            self.raw_fields.get(field).map_or(Some(default), |value| {
+                u64::try_from(parse_quantity(value, quantity_kind, "pocket_data", field).ok()?).ok()
+            })
+        };
+        let boolean = |field, default| {
+            self.raw_fields
+                .get(field)
+                .map_or(Some(default), Value::as_bool)
+        };
+        let access_moves = match self.raw_fields.get("moves") {
+            Some(value) => u16::try_from(value.as_i64()?)
+                .ok()
+                .filter(|moves| *moves > 0)?,
+            None => 100,
+        };
+        let sealable = match self.raw_fields.get("sealed_data") {
+            None => false,
+            Some(Value::Object(data))
+                if data.keys().all(|field| field == "spoil_multiplier")
+                    && data
+                        .get("spoil_multiplier")
+                        .and_then(Value::as_f64)
+                        .is_some_and(|value| value.is_finite() && value >= 0.0) =>
+            {
+                true
+            }
+            Some(_) => return None,
+        };
+        let max_contains_volume_milliliters = quantity(
+            "max_contains_volume",
+            QuantityKind::Volume,
+            DEFAULT_SPAWN_POCKET_VOLUME_MILLILITERS,
+        )?;
+        let max_contains_weight_milligrams = quantity(
+            "max_contains_weight",
+            QuantityKind::Mass,
+            DEFAULT_SPAWN_POCKET_WEIGHT_MILLIGRAMS,
+        )?;
+        let max_item_length_millimeters = match self.raw_fields.get("max_item_length") {
+            Some(value) => u64::try_from(
+                parse_quantity(
+                    value,
+                    QuantityKind::Length,
+                    "pocket_data",
+                    "max_item_length",
+                )
+                .ok()?,
+            )
+            .ok()?,
+            None => {
+                default_spawn_pocket_max_item_length_millimeters(max_contains_volume_milliliters)?
+            }
+        };
+        Some(StrictSpawnPocketDefinition {
+            pocket_index: self.pocket_index,
+            pocket_id: self.pocket_id.clone(),
+            kind,
+            max_contains_volume_milliliters,
+            max_contains_weight_milligrams,
+            max_item_volume_milliliters: quantity(
+                "max_item_volume",
+                QuantityKind::Volume,
+                u64::MAX,
+            )?,
+            min_item_volume_milliliters: quantity("min_item_volume", QuantityKind::Volume, 0)?,
+            max_item_length_millimeters,
+            item_restrictions: self.item_restrictions.clone(),
+            flag_restrictions: self.flag_restrictions.clone(),
+            access_moves,
+            rigid: boolean("rigid", false)?,
+            watertight: boolean("watertight", false)?,
+            transparent: boolean("transparent", false)?,
+            forbidden: boolean("forbidden", false)?,
+            sealable,
         })
     }
 }
@@ -457,6 +661,24 @@ impl ItemRegistry {
 }
 
 impl ItemDefinition {
+    /// Pinned `Item_factory::finalize_pre` default: round the cube root of the
+    /// effective one-charge volume to whole centimeters.
+    #[must_use]
+    pub fn finalized_longest_side_millimeters(&self) -> Option<u64> {
+        if self.longest_side_is_explicit {
+            return u64::try_from(self.longest_side_millimeters).ok();
+        }
+        let mut effective_volume = u64::try_from(self.volume_milliliters).ok()?;
+        if self.count_by_charges() && self.stack_size > 0 {
+            effective_volume /= u64::try_from(self.stack_size).ok()?;
+        }
+        let centimeters = (effective_volume as f64).cbrt().round();
+        if !centimeters.is_finite() || centimeters < 0.0 {
+            return None;
+        }
+        (centimeters as u64).checked_mul(10)
+    }
+
     /// Returns the generalized runtime shape for a concrete, single-pocket
     /// magazine. Multiple ammunition categories and pockets with extra
     /// behavior remain unavailable rather than being projected lossily.
@@ -653,6 +875,21 @@ fn apply_common_fields(
         QuantityKind::Volume,
         source,
     )?;
+    let longest_side_is_modified = object.contains_key("longest_side")
+        || ["relative", "proportional"].into_iter().any(|modifier| {
+            object
+                .get(modifier)
+                .and_then(Value::as_object)
+                .is_some_and(|fields| fields.contains_key("longest_side"))
+        });
+    apply_quantity(
+        object,
+        "longest_side",
+        &mut item.longest_side_millimeters,
+        QuantityKind::Length,
+        source,
+    )?;
+    item.longest_side_is_explicit |= longest_side_is_modified;
     apply_quantity(
         object,
         "price",
@@ -761,6 +998,8 @@ fn apply_common_fields(
     apply_duration_moves(object, "time", &mut item.book_time_moves, source)?;
     apply_string(object, "variant_type", &mut item.variant_type, source)?;
     apply_item_variants(object, item, source)?;
+    apply_inline_snippets(object, item, source)?;
+    apply_item_variables(object, item, source)?;
     if item.book_required_level < 0 {
         return Err(invalid_field(source, "required_level"));
     }
@@ -801,6 +1040,86 @@ fn apply_common_fields(
             }
         }
     }
+    Ok(())
+}
+
+fn apply_inline_snippets(
+    object: &Map<String, Value>,
+    item: &mut ItemDefinition,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    let Some(Value::Array(values)) = object.get("snippet_category") else {
+        if object.contains_key("snippet_category") {
+            item.snippets.clear();
+        }
+        return Ok(());
+    };
+    let mut ids = BTreeSet::new();
+    item.snippets = values
+        .iter()
+        .map(|value| {
+            let snippet = value
+                .as_object()
+                .ok_or_else(|| invalid_field(source, "snippet_category"))?;
+            if snippet
+                .keys()
+                .any(|field| !matches!(field.as_str(), "//" | "id" | "text"))
+            {
+                return Err(invalid_field(source, "snippet_category"));
+            }
+            let id = snippet
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| invalid_field(source, "snippet_category"))?
+                .to_owned();
+            if !ids.insert(id.clone()) {
+                return Err(invalid_field(source, "snippet_category"));
+            }
+            let text = snippet
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| invalid_field(source, "snippet_category"))?
+                .to_owned();
+            Ok(ItemSnippetDefinition { id, text })
+        })
+        .collect::<Result<Vec<_>, ItemRegistryError>>()?;
+    if item.snippets.is_empty() {
+        return Err(invalid_field(source, "snippet_category"));
+    }
+    Ok(())
+}
+
+fn apply_item_variables(
+    object: &Map<String, Value>,
+    item: &mut ItemDefinition,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    let Some(value) = object.get("variables") else {
+        return Ok(());
+    };
+    let variables = value
+        .as_object()
+        .ok_or_else(|| invalid_field(source, "variables"))?;
+    item.variables = variables
+        .iter()
+        .map(|(key, value)| {
+            if key.is_empty() {
+                return Err(invalid_field(source, "variables"));
+            }
+            let value = match value {
+                Value::String(value) => ItemVariableValueDefinition::String(value.clone()),
+                Value::Number(value) => ItemVariableValueDefinition::Integer(
+                    value
+                        .as_i64()
+                        .ok_or_else(|| invalid_field(source, "variables"))?,
+                ),
+                _ => return Err(invalid_field(source, "variables")),
+            };
+            Ok((key.clone(), value))
+        })
+        .collect::<Result<BTreeMap<_, _>, ItemRegistryError>>()?;
     Ok(())
 }
 
@@ -863,17 +1182,18 @@ fn parse_item_variant(
     let mut unsupported_fields = object
         .keys()
         .filter(|field| {
-            !matches!(
-                field.as_str(),
-                "id" | "name"
-                    | "description"
-                    | "symbol"
-                    | "color"
-                    | "ascii_picture"
-                    | "weight"
-                    | "append"
-                    | "expand_snippets"
-            )
+            !field.starts_with("//")
+                && !matches!(
+                    field.as_str(),
+                    "id" | "name"
+                        | "description"
+                        | "symbol"
+                        | "color"
+                        | "ascii_picture"
+                        | "weight"
+                        | "append"
+                        | "expand_snippets"
+                )
         })
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -1001,6 +1321,7 @@ fn apply_power_pocket_projections(
         pocket.strict_integral_magazine().is_some()
             || pocket.strict_magazine_well()
             || pocket.strict_ammunition_container().is_some()
+            || pocket.strict_spawn_pocket().is_some()
     });
     let ammunition_containers = if all_pockets_have_supported_shapes {
         normalized_pockets
@@ -1010,10 +1331,19 @@ fn apply_power_pocket_projections(
     } else {
         Vec::new()
     };
+    let spawn_pockets = if all_pockets_have_supported_shapes {
+        normalized_pockets
+            .iter()
+            .filter_map(PocketDefinition::strict_spawn_pocket)
+            .collect()
+    } else {
+        Vec::new()
+    };
     item.pockets = normalized_pockets;
     item.magazine_wells = magazine_wells;
     item.integral_magazines = integral_magazines;
     item.ammunition_containers = ammunition_containers;
+    item.spawn_pockets = spawn_pockets;
     Ok(())
 }
 
@@ -1747,6 +2077,7 @@ fn string_set(
 enum QuantityKind {
     Mass,
     Volume,
+    Length,
     Money,
     Power,
 }
@@ -1808,6 +2139,9 @@ fn parse_quantity(
             (QuantityKind::Mass, "kg") => 1_000_000,
             (QuantityKind::Volume, "ml") => 1,
             (QuantityKind::Volume, "L") => 1_000,
+            (QuantityKind::Length, "mm") => 1,
+            (QuantityKind::Length, "cm") => 10,
+            (QuantityKind::Length, "m" | "meter" | "meters") => 1_000,
             (QuantityKind::Money, "cent" | "cents") => 1,
             (QuantityKind::Money, "USD" | "dollar" | "dollars") => 100,
             (QuantityKind::Money, "kUSD") => 100_000,
@@ -2220,6 +2554,52 @@ mod tests {
         assert_eq!(item.charged_qualities["FILE"].level, 1);
         assert!(!item.charged_qualities.contains_key("DRILL"));
         assert_eq!(item.charges_per_use, 7);
+    }
+
+    #[test]
+    fn missing_longest_side_uses_pinned_finalized_volume_derivation() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        for definition in [
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "derived_cube",
+                "name": "derived cube",
+                "volume": "1 L"
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "derived_charge",
+                "subtypes": ["AMMO"],
+                "name": "derived charge",
+                "volume": "1 L",
+                "stack_size": 8
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "explicit_zero",
+                "name": "explicit zero",
+                "volume": "1 L",
+                "longest_side": "0 mm"
+            }),
+        ] {
+            assert!(
+                load_one(&raw(definition), &mut items, &mut abstracts)
+                    .expect("length fixture should load")
+            );
+        }
+        assert_eq!(
+            items["derived_cube"].finalized_longest_side_millimeters(),
+            Some(100)
+        );
+        assert_eq!(
+            items["derived_charge"].finalized_longest_side_millimeters(),
+            Some(50)
+        );
+        assert_eq!(
+            items["explicit_zero"].finalized_longest_side_millimeters(),
+            Some(0)
+        );
     }
 
     #[test]
@@ -2835,7 +3215,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_ammunition_container_projection_fails_closed_for_mixed_hosts() {
+    fn supported_ammunition_and_spawn_pockets_coexist_by_index() {
         let mut items = BTreeMap::new();
         let mut abstracts = BTreeMap::new();
         let mixed = raw(serde_json::json!({
@@ -2858,7 +3238,154 @@ mod tests {
                 .strict_ammunition_container()
                 .is_some()
         );
-        assert!(items["test_mixed_quiver"].ammunition_containers.is_empty());
+        assert_eq!(items["test_mixed_quiver"].ammunition_containers.len(), 1);
+        assert_eq!(
+            items["test_mixed_quiver"].ammunition_containers[0].pocket_index,
+            0
+        );
+        assert_eq!(items["test_mixed_quiver"].spawn_pockets.len(), 1);
+        assert_eq!(items["test_mixed_quiver"].spawn_pockets[0].pocket_index, 1);
+        assert_eq!(
+            items["test_mixed_quiver"].spawn_pockets[0].kind,
+            SpawnPocketKindDefinition::Container
+        );
+    }
+
+    #[test]
+    fn strict_spawn_pockets_preserve_physical_and_efile_boundaries() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let host = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_phone_case",
+            "name": "test phone case",
+            "pocket_data": [
+                {
+                    "id": "physical",
+                    "pocket_type": "CONTAINER",
+                    "max_contains_volume": "2 L",
+                    "max_contains_weight": "3 kg",
+                    "max_item_volume": "1500 ml",
+                    "min_item_volume": "5 ml",
+                    "max_item_length": "30 cm",
+                    "item_restriction": ["test_phone"],
+                    "flag_restriction": ["ELECTRONIC"],
+                    "moves": 80,
+                    "rigid": true,
+                    "watertight": true,
+                    "transparent": true,
+                    "sealed_data": {"spoil_multiplier": 0.0}
+                },
+                {
+                    "id": "efiles",
+                    "pocket_type": "E_FILE_STORAGE",
+                    "ememory_max": "1 GB",
+                    "weight_multiplier": 0,
+                    "rigid": true
+                }
+            ]
+        }));
+        assert!(load_one(&host, &mut items, &mut abstracts).expect("host should load"));
+
+        let pockets = &items["test_phone_case"].spawn_pockets;
+        assert_eq!(pockets.len(), 2);
+        assert_eq!(
+            pockets[0],
+            StrictSpawnPocketDefinition {
+                pocket_index: 0,
+                pocket_id: String::from("physical"),
+                kind: SpawnPocketKindDefinition::Container,
+                max_contains_volume_milliliters: 2_000,
+                max_contains_weight_milligrams: 3_000_000,
+                max_item_volume_milliliters: 1_500,
+                min_item_volume_milliliters: 5,
+                max_item_length_millimeters: 300,
+                item_restrictions: BTreeSet::from([String::from("test_phone")]),
+                flag_restrictions: BTreeSet::from([String::from("ELECTRONIC")]),
+                access_moves: 80,
+                rigid: true,
+                watertight: true,
+                transparent: true,
+                forbidden: false,
+                sealable: true,
+            }
+        );
+        assert_eq!(pockets[1].kind, SpawnPocketKindDefinition::EFileStorage);
+        assert_eq!(
+            pockets[1].max_contains_volume_milliliters,
+            DEFAULT_SPAWN_POCKET_VOLUME_MILLILITERS
+        );
+        assert_eq!(
+            pockets[1].max_contains_weight_milligrams,
+            DEFAULT_SPAWN_POCKET_WEIGHT_MILLIGRAMS
+        );
+        assert_eq!(pockets[1].max_item_length_millimeters, 8_273);
+        assert_eq!(
+            default_spawn_pocket_max_item_length_millimeters(250),
+            Some(84)
+        );
+
+        let unsupported = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_bad_efile",
+            "name": "test bad efile",
+            "pocket_data": [{
+                "pocket_type": "E_FILE_STORAGE",
+                "ememory_max": "1 GB",
+                "weight_multiplier": 0.5
+            }]
+        }));
+        assert!(
+            load_one(&unsupported, &mut items, &mut abstracts)
+                .expect("unsupported pocket should remain inventoried")
+        );
+        assert!(items["test_bad_efile"].spawn_pockets.is_empty());
+        assert!(
+            items["test_bad_efile"]
+                .unsupported_fields
+                .contains("pocket_data")
+        );
+
+        for (id, pocket) in [
+            (
+                "test_missing_efile_multiplier",
+                serde_json::json!({
+                    "pocket_type": "E_FILE_STORAGE",
+                    "ememory_max": "1 GB"
+                }),
+            ),
+            (
+                "test_bad_container_multiplier",
+                serde_json::json!({
+                    "pocket_type": "CONTAINER",
+                    "max_contains_volume": "1 L",
+                    "max_contains_weight": "1 kg",
+                    "weight_multiplier": 0.5
+                }),
+            ),
+            (
+                "test_nonrigid_efile",
+                serde_json::json!({
+                    "pocket_type": "E_FILE_STORAGE",
+                    "ememory_max": "1 GB",
+                    "weight_multiplier": 0,
+                    "rigid": false
+                }),
+            ),
+        ] {
+            let unsupported = raw(serde_json::json!({
+                "type": "ITEM",
+                "id": id,
+                "name": id,
+                "pocket_data": [pocket]
+            }));
+            assert!(
+                load_one(&unsupported, &mut items, &mut abstracts)
+                    .expect("unsupported pocket should remain inventoried")
+            );
+            assert!(items[id].spawn_pockets.is_empty());
+            assert!(items[id].unsupported_fields.contains("pocket_data"));
+        }
     }
 
     #[test]
@@ -3052,6 +3579,87 @@ mod tests {
                 .unsupported_fields
                 .contains("variants")
         );
+    }
+
+    #[test]
+    fn inline_snippets_and_typed_variables_finalize_without_hiding_raw_markers() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let base = raw(serde_json::json!({
+            "type": "ITEM",
+            "abstract": "constructor_state_base",
+            "name": "constructor state base",
+            "snippet_category": [
+                { "id": "hello", "text": "Hello" },
+                { "id": "map_note", "text": "North\nthen east", "//": "ordered" }
+            ],
+            "variables": { "browsed": "false", "attempts": 2 }
+        }));
+        assert!(load_one(&base, &mut items, &mut abstracts).expect("base should load"));
+        let inherited = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "constructor_state_item",
+            "copy-from": "constructor_state_base",
+            "name": "constructor state item"
+        }));
+        assert!(
+            load_one(&inherited, &mut items, &mut abstracts).expect("derived item should load")
+        );
+        let item = &items["constructor_state_item"];
+        assert_eq!(
+            item.snippets
+                .iter()
+                .map(|snippet| (snippet.id.as_str(), snippet.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("hello", "Hello"), ("map_note", "North\nthen east")]
+        );
+        assert_eq!(
+            item.variables,
+            BTreeMap::from([
+                (
+                    String::from("attempts"),
+                    ItemVariableValueDefinition::Integer(2)
+                ),
+                (
+                    String::from("browsed"),
+                    ItemVariableValueDefinition::String(String::from("false"))
+                ),
+            ])
+        );
+        assert!(item.unsupported_fields.contains("snippet_category"));
+        assert!(item.unsupported_fields.contains("variables"));
+
+        let named = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "named_snippet_item",
+            "copy-from": "constructor_state_base",
+            "name": "named snippet item",
+            "snippet_category": "external_category",
+            "variables": { "browsed": "true" }
+        }));
+        assert!(load_one(&named, &mut items, &mut abstracts).expect("named marker should load"));
+        assert!(items["named_snippet_item"].snippets.is_empty());
+        assert_eq!(
+            items["named_snippet_item"].variables,
+            BTreeMap::from([(
+                String::from("browsed"),
+                ItemVariableValueDefinition::String(String::from("true"))
+            )])
+        );
+
+        let duplicate = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "duplicate_snippets",
+            "name": "duplicate snippets",
+            "snippet_category": [
+                { "id": "same", "text": "first" },
+                { "id": "same", "text": "second" }
+            ]
+        }));
+        assert!(matches!(
+            load_one(&duplicate, &mut items, &mut abstracts),
+            Err(ItemRegistryError::InvalidField { field, .. }) if field == "snippet_category"
+        ));
     }
 
     #[test]

@@ -5197,6 +5197,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
             retain_components: false,
             byproducts: Vec::new(),
@@ -5252,6 +5253,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 },
                 output_state: None,
             }],
@@ -5388,6 +5390,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         });
         let catalog = DisassemblyCatalog::new(BTreeMap::from([(
             String::from("known_item"),
@@ -6396,6 +6399,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -6417,6 +6422,8 @@ mod tests {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -6431,6 +6438,7 @@ mod tests {
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
+                    containment: Default::default(),
                 })),
             }],
             ammunition_containers: Vec::new(),
@@ -6446,6 +6454,7 @@ mod tests {
                 active: true,
             }),
             creature_corpse: None,
+            containment: Default::default(),
         };
         let mut personally_lit = world.snapshot();
         personally_lit.tick = SimTick(13 * 60 * 60 * SimTick::HZ);
@@ -6515,6 +6524,8 @@ mod tests {
                 damage: 0,
                 raw_damage: 0,
                 variant: None,
+                snippet: None,
+                variables: BTreeMap::new(),
                 melee_damage_milli: BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -6536,6 +6547,8 @@ mod tests {
                         damage: 0,
                         raw_damage: 0,
                         variant: None,
+                        snippet: None,
+                        variables: BTreeMap::new(),
                         melee_damage_milli: BTreeMap::new(),
                         calories: 0,
                         quench: 0,
@@ -6550,6 +6563,7 @@ mod tests {
                         residual_energy_millijoules: 998_440,
                         powered_tool: None,
                         creature_corpse: None,
+                        containment: Default::default(),
                     })),
                 }],
                 ammunition_containers: Vec::new(),
@@ -6565,6 +6579,7 @@ mod tests {
                     active: true,
                 }),
                 creature_corpse: None,
+                containment: Default::default(),
             });
         assert_eq!(
             externally_lit

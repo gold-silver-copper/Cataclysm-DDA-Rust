@@ -733,6 +733,25 @@ downstream RNG values. General wrapper contents, stable nested ownership, and
 overflow remain fail-closed at `civilian_phones_case.contents-group`. Databases
 below schema 64 that contain serialized state are rejected before mutation.
 
+Protocol 87 advances to schema 65 and CanonicalStateV63 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Item-group
+definitions now preserve whole-group wrappers, entry wrappers, modifier
+containers, `contents-item`, `contents-group`, sealing, and explicit
+spill/discard overflow. A recursive authoritative planner materializes rigid
+physical and E-file pockets in preorder so every wrapper, contained item,
+integral battery, and E-file receives a stable identity that survives snapshot,
+SQLite recovery, and portable replay. ITEM normalization also retains exact
+longest-side fit, inline snippet choices, and typed constructor variables;
+selected snippets and per-instance variables are self-contained canonical item
+state and appear in the ordinary client item menu. The complete pinned
+`civilian_phones_case` closure now normalizes, including case variants, phone
+battery charges, locked/unlocked selection, and generated E-files. Flexible
+physical wrappers and constructor semantics outside the represented strict
+pocket shapes remain fail-closed. The structural-bash conformance scenario now
+places its drops inside a sealed rigid wrapper and proves identical nested IDs
+and item state through all four execution modes. Databases below schema 65 that
+contain serialized state are rejected before mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -1044,7 +1063,15 @@ not-applicable rationale) are coherent. `docs/runtime-progress.json` separately
 records raw parser inventory and weighted runtime evidence. Only definitions
 that are generated, authoritatively interacted with, persisted,
 client-accessible, and four-mode verified earn the corresponding points; loaded
-JSON alone earns none. The leaf `cdda-conformance` crate runs versioned
+JSON alone earns none. The denominator is independently derived from the pinned
+manifest and split between core-DDA ordinary gameplay (13,865 definitions,
+263,435 possible weighted points; currently 44, or 0.0167%) and selectable
+bundled mods (5,967 definitions, 113,373 possible points; currently zero).
+The mod target is the union of nonobsolete pinned mods that can participate in
+at least one valid new-world selection; mutually exclusive configurations still
+contribute their distinct playable definitions. Ordinary playable loops are
+tracked separately from both parser coverage and weighted evidence.
+The leaf `cdda-conformance` crate runs versioned
 item-flow, indexed multi-well, and item-backed split/removal scenarios plus
 checked-in semantic/hash expectations through direct headless simulation,
 per-tick snapshot restoration, SQLite recovery, and portable replay

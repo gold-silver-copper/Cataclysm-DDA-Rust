@@ -11,15 +11,18 @@ mod item_groups;
 
 use item_groups::item_group_sources_have_exact_named_closure;
 pub use item_groups::{
-    InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
-    ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupVariantOptionV1, ItemVariantV1,
-    MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES,
-    MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIANTS, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_group_sources_are_valid, item_variant_is_valid,
+    InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
+    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1,
+    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
+    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupVariantOptionV1, ItemSnippetV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH,
+    MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_SNIPPETS,
+    MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, item_group_catalog_is_valid,
+    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
+    item_variant_is_valid, valid_item_variables,
 };
 
-pub const PROTOCOL_VERSION: u16 = 86;
+pub const PROTOCOL_VERSION: u16 = 87;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -954,6 +957,8 @@ pub struct IntegralMagazinePocketPrototypeV1 {
     pub pocket_id: String,
     pub ammunition_type: String,
     pub capacity: u32,
+    /// Whether contents occupy no additional external volume.
+    pub rigid: bool,
     /// False when the owning item carries pinned `NO_RELOAD`.
     pub reloadable: bool,
     /// False when the owning item carries pinned `NO_UNLOAD`.
@@ -964,6 +969,39 @@ pub struct IntegralMagazinePocketPrototypeV1 {
 pub struct AmmunitionCapacityV1 {
     pub ammunition_type: String,
     pub capacity: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum SpawnPocketKindV1 {
+    Container,
+    EFileStorage,
+}
+
+/// Immutable spawn-time containment rules retained in canonical prototypes.
+/// Runtime reload-only ammunition pockets use `None` and continue to be
+/// interpreted by their category capacities.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpawnPocketRulesV1 {
+    pub kind: SpawnPocketKindV1,
+    pub max_contains_volume_milliliters: u64,
+    pub max_contains_weight_milligrams: u64,
+    pub max_item_volume_milliliters: u64,
+    pub min_item_volume_milliliters: u64,
+    pub max_item_length_millimeters: u64,
+    pub item_restrictions: Vec<String>,
+    pub flag_restrictions: Vec<String>,
+    pub access_moves: u16,
+    pub rigid: bool,
+    pub watertight: bool,
+    pub transparent: bool,
+    pub forbidden: bool,
+    pub sealable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpawnPocketStateV1 {
+    pub rules: SpawnPocketRulesV1,
+    pub sealed: bool,
 }
 
 /// An item-owned `CONTAINER` pocket whose admitted contents are restricted by
@@ -980,6 +1018,11 @@ pub struct AmmunitionContainerPocketPrototypeV1 {
     pub access_moves: u16,
     pub reloadable: bool,
     pub unloadable: bool,
+    /// `Some` turns this existing stable pocket boundary into a generalized
+    /// physical or E-file spawn pocket. `None` retains ammunition-container
+    /// behavior for older canonical fixtures and reload gameplay.
+    #[serde(default)]
+    pub spawn_rules: Option<SpawnPocketRulesV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -996,6 +1039,265 @@ pub struct PoweredToolStateV1 {
     /// Canonical pocket index of the detachable magazine that supplies power.
     pub power_pocket_index: u16,
     pub active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemPhaseV1 {
+    #[default]
+    Solid,
+    Liquid,
+    Gas,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemContainmentProfileV1 {
+    /// Finalized type weight. Upstream multiplies this by live charges only
+    /// for count-by-charges items.
+    pub weight_milligrams: u64,
+    /// Finalized type volume. Charge-scaled volume divides this value by
+    /// `stack_size` with integer ceiling, matching pinned `item::volume`.
+    pub volume_milliliters: u64,
+    pub longest_side_millimeters: u64,
+    pub flags: Vec<String>,
+    pub estorable: bool,
+    pub phase: ItemPhaseV1,
+    pub count_by_charges: bool,
+    pub stack_size: u32,
+}
+
+#[must_use]
+pub fn item_containment_weight_milligrams(
+    profile: &ItemContainmentProfileV1,
+    charges: i32,
+) -> Option<u64> {
+    if profile
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("NO_DROP"))
+        .is_ok()
+    {
+        return Some(0);
+    }
+    let weight = if profile.count_by_charges {
+        profile
+            .weight_milligrams
+            .checked_mul(u64::try_from(charges).ok()?)
+    } else {
+        Some(profile.weight_milligrams)
+    }?;
+    if profile
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("REDUCED_WEIGHT"))
+        .is_ok()
+    {
+        weight.checked_mul(3).map(|weight| weight / 4)
+    } else {
+        Some(weight)
+    }
+}
+
+#[must_use]
+pub fn item_containment_volume_milliliters(
+    profile: &ItemContainmentProfileV1,
+    charges: i32,
+) -> Option<u64> {
+    if !profile.count_by_charges && profile.phase != ItemPhaseV1::Liquid {
+        return Some(profile.volume_milliliters);
+    }
+    let numerator = profile
+        .volume_milliliters
+        .checked_mul(u64::try_from(charges).ok()?)?;
+    if profile.stack_size == 0 {
+        return Some(numerator);
+    }
+    numerator
+        .checked_add(u64::from(profile.stack_size) - 1)
+        .map(|rounded| rounded / u64::from(profile.stack_size))
+}
+
+#[must_use]
+pub fn item_containment_single_charge_volume_milliliters(
+    profile: &ItemContainmentProfileV1,
+) -> Option<u64> {
+    item_containment_volume_milliliters(profile, 1)
+}
+
+#[must_use]
+pub fn item_snapshot_has_no_contained_items(item: &ItemSnapshot) -> bool {
+    item.integral_magazines
+        .iter()
+        .all(|pocket| pocket.loaded_ammunition.is_none())
+        && item
+            .magazine_wells
+            .iter()
+            .all(|pocket| pocket.installed_magazine.is_none())
+        && item
+            .ammunition_containers
+            .iter()
+            .all(|pocket| pocket.contents.is_empty())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ItemSoftnessProjection {
+    Soft,
+    Hard,
+    Unknown,
+}
+
+fn item_softness_projection(profile: &ItemContainmentProfileV1) -> ItemSoftnessProjection {
+    if profile
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("SOFT"))
+        .is_ok()
+    {
+        ItemSoftnessProjection::Soft
+    } else if profile
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("HARD"))
+        .is_ok()
+    {
+        ItemSoftnessProjection::Hard
+    } else {
+        // Pinned `item::is_soft` falls back to material definitions. Material
+        // softness is not canonical state yet, so compatibility below requires
+        // both the soft and hard interpretations whenever neither override is
+        // present.
+        ItemSoftnessProjection::Unknown
+    }
+}
+
+fn item_snapshot_standard_contents(item: &ItemSnapshot) -> Vec<&ItemSnapshot> {
+    item.integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+        .chain(
+            item.magazine_wells
+                .iter()
+                .filter_map(|pocket| pocket.installed_magazine.as_deref()),
+        )
+        .chain(item.ammunition_containers.iter().flat_map(|pocket| {
+            let is_e_file = pocket
+                .spawn_state
+                .as_ref()
+                .is_some_and(|state| state.rules.kind == SpawnPocketKindV1::EFileStorage);
+            (!is_e_file)
+                .then_some(pocket.contents.iter())
+                .into_iter()
+                .flatten()
+        }))
+        .collect()
+}
+
+/// Exact physical length projection for the represented canonical pocket
+/// family. E-file children do not contribute to upstream item length.
+#[must_use]
+pub fn item_snapshot_containment_length_millimeters(item: &ItemSnapshot) -> Option<u64> {
+    if item.containment.phase == ItemPhaseV1::Liquid
+        || (item_softness_projection(&item.containment) == ItemSoftnessProjection::Soft
+            && item_snapshot_has_no_contained_items(item))
+    {
+        return Some(0);
+    }
+    let own = if item_softness_projection(&item.containment) == ItemSoftnessProjection::Soft {
+        0
+    } else {
+        item.containment.longest_side_millimeters
+    };
+    item_snapshot_standard_contents(item)
+        .into_iter()
+        .try_fold(own, |longest, child| {
+            Some(longest.max(item_snapshot_containment_length_millimeters(child)?))
+        })
+}
+
+fn item_snapshot_soft_volume_fits(item: &ItemSnapshot, maximum: u64) -> Option<bool> {
+    item_snapshot_standard_contents(item)
+        .into_iter()
+        .try_fold(true, |fits, child| {
+            Some(fits && item_snapshot_max_item_volume_fits(child, maximum)?)
+        })
+}
+
+fn item_snapshot_max_item_volume_fits(item: &ItemSnapshot, maximum: u64) -> Option<bool> {
+    if matches!(
+        item.containment.phase,
+        ItemPhaseV1::Liquid | ItemPhaseV1::Gas
+    ) {
+        return Some(true);
+    }
+    let hard_fits = if item.containment.count_by_charges {
+        item_containment_single_charge_volume_milliliters(&item.containment)
+    } else {
+        item_snapshot_containment_volume_milliliters(item)
+    }? <= maximum;
+    let soft_fits = item_snapshot_soft_volume_fits(item, maximum)?;
+    Some(match item_softness_projection(&item.containment) {
+        ItemSoftnessProjection::Soft => soft_fits,
+        ItemSoftnessProjection::Hard => hard_fits,
+        ItemSoftnessProjection::Unknown => hard_fits && soft_fits,
+    })
+}
+
+/// Pinned `item_pocket::is_compatible` projection for generalized spawn
+/// pockets. Callers validate the snapshot structure separately.
+#[must_use]
+pub fn item_snapshot_is_compatible_with_spawn_rules(
+    rules: &SpawnPocketRulesV1,
+    content: &ItemSnapshot,
+) -> bool {
+    if rules.kind == SpawnPocketKindV1::EFileStorage {
+        return content.containment.estorable;
+    }
+    let profile = &content.containment;
+    let restricted = !rules.item_restrictions.is_empty() || !rules.flag_restrictions.is_empty();
+    let accepted_restriction = rules
+        .item_restrictions
+        .binary_search(&content.type_id)
+        .is_ok()
+        || rules
+            .flag_restrictions
+            .iter()
+            .any(|flag| profile.flags.binary_search(flag).is_ok());
+    let compatibility_volume = if profile.count_by_charges {
+        item_containment_single_charge_volume_milliliters(profile)
+    } else {
+        item_snapshot_containment_volume_milliliters(content)
+    };
+    profile.phase != ItemPhaseV1::Gas
+        && profile
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("NO_UNWIELD"))
+            .is_err()
+        && (!profile.count_by_charges || item_snapshot_has_no_contained_items(content))
+        && (profile.phase != ItemPhaseV1::Liquid || rules.watertight)
+        && (!restricted || accepted_restriction)
+        && compatibility_volume.is_some_and(|volume| volume >= rules.min_item_volume_milliliters)
+        && item_snapshot_max_item_volume_fits(content, rules.max_item_volume_milliliters)
+            == Some(true)
+        && item_snapshot_containment_length_millimeters(content)
+            .is_some_and(|length| length <= rules.max_item_length_millimeters)
+}
+
+/// Conservative, self-contained projection of pinned `item::can_combine` for
+/// canonical containment. Every represented item property must match except
+/// the stable identity and charge count, and neither item may own contents.
+#[must_use]
+pub fn item_snapshots_can_combine_for_containment(
+    left: &ItemSnapshot,
+    right: &ItemSnapshot,
+) -> bool {
+    if !left.containment.count_by_charges
+        || !right.containment.count_by_charges
+        || !item_snapshot_has_no_contained_items(left)
+        || !item_snapshot_has_no_contained_items(right)
+    {
+        return false;
+    }
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.id = right.id;
+    left.charges = 0;
+    right.charges = 0;
+    left == right
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1023,6 +1325,11 @@ pub struct CraftItemPrototypeV1 {
     pub residual_energy_millijoules: u32,
     #[serde(default)]
     pub powered_tool: Option<PoweredToolStateV1>,
+    /// Self-contained physical identity used by authoritative pocket fit
+    /// checks. Zero dimensions retain older fixtures that never participate in
+    /// generalized containment.
+    #[serde(default)]
+    pub containment: ItemContainmentProfileV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1985,6 +2292,13 @@ pub struct ItemSnapshot {
     /// self-contained so snapshot/replay recovery never consults live content.
     #[serde(default)]
     pub variant: Option<ItemVariantV1>,
+    /// Selected inline snippet, retained independently of live content.
+    #[serde(default)]
+    pub snippet: Option<ItemSnippetV1>,
+    /// Typed per-instance variables initialized from content and later owned
+    /// by canonical simulation state.
+    #[serde(default)]
+    pub variables: BTreeMap<String, ItemVariableValueV1>,
     pub melee_damage_milli: BTreeMap<String, i32>,
     pub calories: i32,
     pub quench: i32,
@@ -2026,6 +2340,8 @@ pub struct ItemSnapshot {
     /// `Some` turns the ordinary `corpse` item into a creature-specific corpse.
     #[serde(default)]
     pub creature_corpse: Option<CreatureCorpseSnapshotV1>,
+    #[serde(default)]
+    pub containment: ItemContainmentProfileV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2043,6 +2359,7 @@ pub struct IntegralMagazinePocketSnapshotV1 {
     pub pocket_id: String,
     pub ammunition_type: String,
     pub capacity: u32,
+    pub rigid: bool,
     pub reloadable: bool,
     pub unloadable: bool,
     pub loaded_ammunition: Option<Box<ItemSnapshot>>,
@@ -2062,6 +2379,8 @@ pub struct AmmunitionContainerPocketSnapshotV1 {
     pub reloadable: bool,
     pub unloadable: bool,
     pub contents: Vec<ItemSnapshot>,
+    #[serde(default)]
+    pub spawn_state: Option<SpawnPocketStateV1>,
 }
 
 /// A component item retained inside a crafted result. It intentionally has no
@@ -2076,6 +2395,10 @@ pub struct ItemComponentSnapshotV1 {
     pub raw_damage: u16,
     #[serde(default)]
     pub variant: Option<ItemVariantV1>,
+    #[serde(default)]
+    pub snippet: Option<ItemSnippetV1>,
+    #[serde(default)]
+    pub variables: BTreeMap<String, ItemVariableValueV1>,
     pub melee_damage_milli: BTreeMap<String, i32>,
     pub calories: i32,
     pub quench: i32,
@@ -2102,6 +2425,8 @@ pub struct ItemComponentSnapshotV1 {
     pub residual_energy_millijoules: u32,
     #[serde(default)]
     pub powered_tool: Option<PoweredToolStateV1>,
+    #[serde(default)]
+    pub containment: ItemContainmentProfileV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3609,6 +3934,8 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
         damage: 0,
         raw_damage: 0,
         variant: None,
+        snippet: None,
+        variables: BTreeMap::new(),
         melee_damage_milli: item.melee_damage_milli.clone(),
         calories: item.calories,
         quench: item.quench,
@@ -3625,6 +3952,7 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
                 pocket_id: pocket.pocket_id.clone(),
                 ammunition_type: pocket.ammunition_type.clone(),
                 capacity: pocket.capacity,
+                rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 loaded_ammunition: None,
@@ -3653,12 +3981,17 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
                 access_moves: pocket.access_moves,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
+                spawn_state: pocket.spawn_rules.clone().map(|rules| SpawnPocketStateV1 {
+                    rules,
+                    sealed: false,
+                }),
                 contents: Vec::new(),
             })
             .collect(),
         residual_energy_millijoules: item.residual_energy_millijoules,
         powered_tool: item.powered_tool.clone(),
         creature_corpse: None,
+        containment: item.containment.clone(),
     };
     valid_item_snapshot(&snapshot)
 }
@@ -4259,10 +4592,18 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
         && item.raw_damage <= MAX_ITEM_RAW_DAMAGE
         && item.damage == item_damage_level(item.raw_damage)
         && item.variant.as_ref().is_none_or(item_variant_is_valid)
+        && item.snippet.as_ref().is_none_or(item_snippet_is_valid)
+        && valid_item_variables(&item.variables)
         && item
             .type_id
             .chars()
             .all(|character| !character.is_control())
+        && valid_item_containment_profile(&item.containment)
+        && (!item.containment.count_by_charges
+            || item.charges > 0
+            || (item.ammunition_type == "battery"
+                && item.charges == 0
+                && item.residual_energy_millijoules > 0))
         && item.melee_damage_milli.len() <= 32
         && item.melee_damage_milli.iter().all(|(damage_type, value)| {
             !damage_type.is_empty()
@@ -4339,6 +4680,7 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
         && valid_integral_magazine_snapshots(&item.integral_magazines, depth)
         && valid_magazine_well_snapshots(&item.magazine_wells, depth)
         && valid_ammunition_container_snapshots(&item.ammunition_containers, depth)
+        && item_snapshot_sealing_is_valid(item)
         && item.integral_magazines.iter().all(|magazine| {
             item.magazine_wells
                 .iter()
@@ -4380,6 +4722,12 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
                 && (!corpse.revivable || corpse.prototype.revives)
                 && (!corpse.revive_special || corpse.prototype.revives)
         })
+}
+
+fn valid_item_containment_profile(profile: &ItemContainmentProfileV1) -> bool {
+    profile.flags.len() <= 256
+        && profile.flags.iter().all(|flag| valid_recipe_id(flag))
+        && profile.flags.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn valid_creature_corpse_prototype(prototype: &CreatureCorpsePrototypeV1) -> bool {
@@ -4446,6 +4794,7 @@ fn valid_integral_magazine_snapshot(
         pocket_id: pocket.pocket_id.clone(),
         ammunition_type: pocket.ammunition_type.clone(),
         capacity: pocket.capacity,
+        rigid: pocket.rigid,
         reloadable: pocket.reloadable,
         unloadable: pocket.unloadable,
     }) && (pocket.residual_energy_millijoules == 0
@@ -4508,16 +4857,55 @@ fn valid_ammunition_capacity(capacity: &AmmunitionCapacityV1) -> bool {
 }
 
 fn valid_ammunition_container_prototype(pocket: &AmmunitionContainerPocketPrototypeV1) -> bool {
-    pocket.pocket_id.len() <= 512
+    let base = pocket.pocket_id.len() <= 512
         && !pocket.pocket_id.chars().any(char::is_control)
-        && pocket.access_moves > 0
-        && !pocket.capacities.is_empty()
-        && pocket.capacities.len() <= MAX_AMMUNITION_CONTAINER_TYPES
-        && pocket.capacities.iter().all(valid_ammunition_capacity)
-        && pocket
-            .capacities
+        && pocket.access_moves > 0;
+    if !base {
+        return false;
+    }
+    match &pocket.spawn_rules {
+        None => {
+            !pocket.capacities.is_empty()
+                && pocket.capacities.len() <= MAX_AMMUNITION_CONTAINER_TYPES
+                && pocket.capacities.iter().all(valid_ammunition_capacity)
+                && pocket
+                    .capacities
+                    .windows(2)
+                    .all(|pair| pair[0].ammunition_type < pair[1].ammunition_type)
+        }
+        Some(rules) => {
+            pocket.capacities.is_empty()
+                && pocket.rigid == rules.rigid
+                && pocket.access_moves == rules.access_moves
+                && valid_spawn_pocket_rules(rules)
+        }
+    }
+}
+
+fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
+    rules.access_moves > 0
+        && rules.item_restrictions.len() <= 256
+        && rules.flag_restrictions.len() <= 256
+        && rules.item_restrictions.iter().all(|id| valid_recipe_id(id))
+        && rules.flag_restrictions.iter().all(|id| valid_recipe_id(id))
+        && rules
+            .item_restrictions
             .windows(2)
-            .all(|pair| pair[0].ammunition_type < pair[1].ammunition_type)
+            .all(|pair| pair[0] < pair[1])
+        && rules
+            .flag_restrictions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && rules.min_item_volume_milliliters <= rules.max_item_volume_milliliters
+        && match rules.kind {
+            SpawnPocketKindV1::Container => {
+                rules.max_contains_volume_milliliters > 0
+                    && rules.max_contains_weight_milligrams > 0
+                    && rules.max_item_volume_milliliters > 0
+                    && rules.max_item_length_millimeters > 0
+            }
+            SpawnPocketKindV1::EFileStorage => rules.rigid,
+        }
 }
 
 fn valid_ammunition_container_snapshot(
@@ -4532,6 +4920,7 @@ fn valid_ammunition_container_snapshot(
         access_moves: pocket.access_moves,
         reloadable: pocket.reloadable,
         unloadable: pocket.unloadable,
+        spawn_rules: pocket.spawn_state.as_ref().map(|state| state.rules.clone()),
     };
     valid_ammunition_container_prototype(&prototype)
         && pocket.contents.len() <= MAX_AMMUNITION_CONTAINER_CONTENTS
@@ -4539,13 +4928,22 @@ fn valid_ammunition_container_snapshot(
             .contents
             .windows(2)
             .all(|pair| pair[0].id < pair[1].id)
-        && pocket.contents.first().is_none_or(|first| {
-            pocket
-                .contents
-                .iter()
-                .all(|content| content.ammunition_type == first.ammunition_type)
+        && pocket.spawn_state.as_ref().is_none_or(|state| {
+            (!state.sealed || state.rules.sealable)
+                && state.rules.rigid == pocket.rigid
+                && state.rules.access_moves == pocket.access_moves
         })
+        && (pocket.spawn_state.is_some()
+            || pocket.contents.first().is_none_or(|first| {
+                pocket
+                    .contents
+                    .iter()
+                    .all(|content| content.ammunition_type == first.ammunition_type)
+            }))
         && pocket.contents.iter().all(|content| {
+            if let Some(state) = &pocket.spawn_state {
+                return valid_spawn_pocket_content(&state.rules, content, depth);
+            }
             content.charges > 0
                 && !content.ammunition_type.is_empty()
                 && content.comestible_type.is_empty()
@@ -4566,18 +4964,225 @@ fn valid_ammunition_container_snapshot(
                     .is_ok()
                 && valid_item_snapshot_at(content, depth + 1)
         })
-        && pocket.capacities.iter().all(|capacity| {
+        && pocket.spawn_state.as_ref().is_none_or(|state| {
+            state.rules.kind == SpawnPocketKindV1::EFileStorage
+                || pocket.contents.first().is_none_or(|first| {
+                    if first.containment.phase == ItemPhaseV1::Liquid {
+                        pocket.contents.iter().all(|content| {
+                            content.containment.phase == ItemPhaseV1::Liquid
+                                && item_snapshots_can_combine_for_containment(first, content)
+                        })
+                    } else {
+                        pocket
+                            .contents
+                            .iter()
+                            .all(|content| content.containment.phase != ItemPhaseV1::Liquid)
+                    }
+                })
+        })
+        && pocket.spawn_state.as_ref().is_none_or(|state| {
+            state.rules.kind == SpawnPocketKindV1::EFileStorage
+                || pocket
+                    .contents
+                    .iter()
+                    .try_fold((0_u64, 0_u64), |(volume, weight), content| {
+                        Some((
+                            volume.checked_add(item_snapshot_containment_volume_milliliters(
+                                content,
+                            )?)?,
+                            weight.checked_add(item_snapshot_containment_weight_milligrams(
+                                content,
+                            )?)?,
+                        ))
+                    })
+                    .is_some_and(|(volume, weight)| {
+                        volume <= state.rules.max_contains_volume_milliliters
+                            && weight <= state.rules.max_contains_weight_milligrams
+                    })
+        })
+        && (pocket.spawn_state.is_some()
+            || pocket.capacities.iter().all(|capacity| {
+                pocket
+                    .contents
+                    .iter()
+                    .filter(|content| content.ammunition_type == capacity.ammunition_type)
+                    .try_fold(0_u32, |total, content| {
+                        u32::try_from(content.charges)
+                            .ok()
+                            .and_then(|charges| total.checked_add(charges))
+                    })
+                    .is_some_and(|total| total <= capacity.capacity)
+            }))
+}
+
+#[must_use]
+pub fn item_snapshot_sealing_is_valid(item: &ItemSnapshot) -> bool {
+    let sealed_pockets = item.ammunition_containers.iter().filter(|pocket| {
+        pocket
+            .spawn_state
+            .as_ref()
+            .is_some_and(|state| state.sealed)
+    });
+    if sealed_pockets
+        .clone()
+        .any(|pocket| pocket.contents.is_empty())
+    {
+        return false;
+    }
+    if sealed_pockets.count() == 0 {
+        return true;
+    }
+    item_snapshot_is_container_full(item).unwrap_or(false)
+}
+
+fn item_snapshot_is_container_full(item: &ItemSnapshot) -> Option<bool> {
+    for pocket in &item.ammunition_containers {
+        let Some(rules) = pocket
+            .spawn_state
+            .as_ref()
+            .map(|state| &state.rules)
+            .filter(|rules| rules.kind == SpawnPocketKindV1::Container)
+        else {
+            continue;
+        };
+        let Some(first) = pocket.contents.first() else {
+            return Some(false);
+        };
+        let (used_volume, used_weight) =
             pocket
                 .contents
                 .iter()
-                .filter(|content| content.ammunition_type == capacity.ammunition_type)
-                .try_fold(0_u32, |total, content| {
-                    u32::try_from(content.charges)
-                        .ok()
-                        .and_then(|charges| total.checked_add(charges))
-                })
-                .is_some_and(|total| total <= capacity.capacity)
-        })
+                .try_fold((0_u64, 0_u64), |(volume, weight), content| {
+                    Some((
+                        volume
+                            .checked_add(item_snapshot_containment_volume_milliliters(content)?)?,
+                        weight
+                            .checked_add(item_snapshot_containment_weight_milligrams(content)?)?,
+                    ))
+                })?;
+        if used_volume == rules.max_contains_volume_milliliters {
+            continue;
+        }
+        let same_type = pocket
+            .contents
+            .iter()
+            .all(|content| content.type_id == first.type_id);
+        let (one_more_volume, one_more_weight) = if first.containment.count_by_charges {
+            (
+                item_containment_single_charge_volume_milliliters(&first.containment)?,
+                item_containment_weight_milligrams(&first.containment, 1)?,
+            )
+        } else {
+            (
+                item_snapshot_containment_volume_milliliters(first)?,
+                item_snapshot_containment_weight_milligrams(first)?,
+            )
+        };
+        let can_fit_one_more = used_volume
+            .checked_add(one_more_volume)
+            .is_some_and(|volume| volume <= rules.max_contains_volume_milliliters)
+            && used_weight
+                .checked_add(one_more_weight)
+                .is_some_and(|weight| weight <= rules.max_contains_weight_milligrams);
+        if !same_type || can_fit_one_more {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+fn valid_spawn_pocket_content(
+    rules: &SpawnPocketRulesV1,
+    content: &ItemSnapshot,
+    depth: usize,
+) -> bool {
+    if !valid_item_snapshot_at(content, depth + 1) {
+        return false;
+    }
+    item_snapshot_is_compatible_with_spawn_rules(rules, content)
+}
+
+#[must_use]
+pub fn item_snapshot_containment_weight_milligrams(item: &ItemSnapshot) -> Option<u64> {
+    if item
+        .containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("NO_DROP"))
+        .is_ok()
+    {
+        return Some(0);
+    }
+    let own = item_containment_weight_milligrams(&item.containment, item.charges)?;
+    let integral = item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+        .try_fold(0_u64, |total, content| {
+            total.checked_add(item_snapshot_containment_weight_milligrams(content)?)
+        })?;
+    let wells = item
+        .magazine_wells
+        .iter()
+        .filter_map(|pocket| pocket.installed_magazine.as_deref())
+        .try_fold(0_u64, |total, content| {
+            total.checked_add(item_snapshot_containment_weight_milligrams(content)?)
+        })?;
+    let containers = item
+        .ammunition_containers
+        .iter()
+        .try_fold(0_u64, |total, pocket| {
+            if pocket
+                .spawn_state
+                .as_ref()
+                .is_some_and(|state| state.rules.kind == SpawnPocketKindV1::EFileStorage)
+            {
+                return Some(total);
+            }
+            pocket.contents.iter().try_fold(total, |total, content| {
+                total.checked_add(item_snapshot_containment_weight_milligrams(content)?)
+            })
+        })?;
+    own.checked_add(integral)?
+        .checked_add(wells)?
+        .checked_add(containers)
+}
+
+#[must_use]
+pub fn item_snapshot_containment_volume_milliliters(item: &ItemSnapshot) -> Option<u64> {
+    // The strict generalized spawn path never installs detachable magazines.
+    // Their well-volume displacement is not represented yet, so a nested
+    // installed well remains fail-closed instead of being estimated.
+    if item
+        .magazine_wells
+        .iter()
+        .any(|well| well.installed_magazine.is_some())
+    {
+        return None;
+    }
+    let own = item_containment_volume_milliliters(&item.containment, item.charges)?;
+    let integral = item
+        .integral_magazines
+        .iter()
+        .try_fold(0_u64, |total, pocket| {
+            match pocket.loaded_ammunition.as_deref() {
+                Some(content) if !pocket.rigid => {
+                    total.checked_add(item_snapshot_containment_volume_milliliters(content)?)
+                }
+                Some(_) | None => Some(total),
+            }
+        })?;
+    let containers = item
+        .ammunition_containers
+        .iter()
+        .try_fold(0_u64, |total, pocket| {
+            if pocket.rigid {
+                return Some(total);
+            }
+            pocket.contents.iter().try_fold(total, |total, content| {
+                total.checked_add(item_snapshot_containment_volume_milliliters(content)?)
+            })
+        })?;
+    own.checked_add(integral)?.checked_add(containers)
 }
 
 fn valid_ammunition_container_prototypes(pockets: &[AmmunitionContainerPocketPrototypeV1]) -> bool {
@@ -4688,6 +5293,7 @@ fn component_state_matches_prototype(
         && state.ammunition_containers == prototype.ammunition_containers
         && state.residual_energy_millijoules == prototype.residual_energy_millijoules
         && state.powered_tool == prototype.powered_tool
+        && state.containment == prototype.containment
 }
 
 fn valid_component_provenance(provenance: &Option<Vec<ItemComponentSnapshotV1>>) -> bool {
@@ -4722,6 +5328,10 @@ fn valid_item_component(
         && component.raw_damage <= MAX_ITEM_RAW_DAMAGE
         && component.damage == item_damage_level(component.raw_damage)
         && component.variant.as_ref().is_none_or(item_variant_is_valid)
+        && component.snippet.as_ref().is_none_or(item_snippet_is_valid)
+        && valid_item_variables(&component.variables)
+        && valid_item_containment_profile(&component.containment)
+        && component.count_by_charges == component.containment.count_by_charges
         && (!component.count_by_charges || component.charges > 0)
         && component.melee_damage_milli.len() <= 32
         && component
@@ -5261,6 +5871,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
             retain_components: true,
             byproducts: Vec::new(),
@@ -5366,6 +5977,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 },
                 output_state: Some(ItemComponentSnapshotV1 {
                     type_id: String::from("scrap"),
@@ -5373,6 +5985,8 @@ mod tests {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -5388,6 +6002,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 }),
             }],
             tools: Vec::new(),
@@ -5402,9 +6017,15 @@ mod tests {
             prototype,
             maximum_raw_damage: 0,
             variants: Vec::new(),
+            snippets: Vec::new(),
+            initial_variables: BTreeMap::new(),
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
+            charge_ammunition: None,
+            charges_supported: true,
+            modifier_container_capacity_applies: true,
+            contents_insertion_supported: true,
         }))
     }
 
@@ -5422,6 +6043,11 @@ mod tests {
             variant_id: None,
             event: None,
             target,
+            modifier_charges: None,
+            contents: Vec::new(),
+            seal_contents: false,
+            direct_wrapper: None,
+            modifier_container: None,
         }
     }
 
@@ -5436,7 +6062,49 @@ mod tests {
                 minimum: 0,
                 maximum: 0,
             }),
+            modifier_charges: None,
+            contents: Vec::new(),
+            seal_contents: false,
+            direct_wrapper: None,
+            modifier_container: None,
             ..item_group_entry(probability, count_min, count_max, target)
+        }
+    }
+
+    fn item_group_wrapper(type_id: &str, overflow: ItemGroupOverflowV1) -> ItemGroupContainerV1 {
+        let ItemGroupTargetV1::Item(mut item) = item_group_item(type_id) else {
+            unreachable!("fixture is a direct item")
+        };
+        item.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("CONTENTS"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind: SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: u64::MAX,
+                max_contains_weight_milligrams: u64::MAX,
+                max_item_volume_milliliters: u64::MAX,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: u64::MAX,
+                item_restrictions: Vec::new(),
+                flag_restrictions: Vec::new(),
+                access_moves: 100,
+                rigid: true,
+                watertight: false,
+                transparent: false,
+                forbidden: false,
+                sealable: false,
+            }),
+        }];
+        ItemGroupContainerV1 {
+            item,
+            variant_id: None,
+            sealed: false,
+            overflow,
         }
     }
 
@@ -5467,6 +6135,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: Vec::new(),
                 }],
+                wrapper: None,
             },
         }]
     }
@@ -5896,6 +6565,7 @@ mod tests {
             graph: ItemGroupGraphV1 {
                 root_node: 0,
                 nodes,
+                wrapper: None,
             },
         }
     }
@@ -5920,6 +6590,7 @@ mod tests {
                     kind: ItemGroupKindV1::Distribution,
                     entries: vec![item_group_modifier_entry(250, 1, 3, charged_leaf)],
                 }],
+                wrapper: None,
             },
         };
         let root = ItemGroupDefinitionV1 {
@@ -5952,6 +6623,7 @@ mod tests {
                         entries: vec![item_group_entry(1, 1, 1, item_group_item("splinter"))],
                     },
                 ],
+                wrapper: None,
             },
         };
         let holidays = [
@@ -5979,6 +6651,7 @@ mod tests {
                         })
                         .collect(),
                 }],
+                wrapper: None,
             },
         };
         let catalog = vec![leaf, root, holiday_group];
@@ -6002,6 +6675,7 @@ mod tests {
                     ItemGroupTargetV1::Group(String::from("b_root")),
                 )],
             }],
+            wrapper: None,
         });
         assert_eq!(item_group_source_max_outputs(&inline, &catalog), Some(7));
 
@@ -6010,6 +6684,34 @@ mod tests {
         let decoded: (Vec<ItemGroupDefinitionV1>, ItemGroupSourceV1) =
             postcard::from_bytes(&encoded).expect("bounded item-group graph should decode");
         assert_eq!(decoded, (catalog, inline));
+    }
+
+    #[test]
+    fn item_group_variables_cannot_override_unprojected_physical_dimensions() {
+        for reserved in ["weight", "integral_weight", "volume"] {
+            let mut target = item_group_item("reserved_variable");
+            let ItemGroupTargetV1::Item(item) = &mut target else {
+                unreachable!("fixture is a direct item")
+            };
+            item.initial_variables
+                .insert(reserved.to_owned(), ItemVariableValueV1::Integer(1));
+            let catalog = vec![ItemGroupDefinitionV1 {
+                group_id: String::from("reserved_variable_group"),
+                graph: ItemGroupGraphV1 {
+                    root_node: 0,
+                    nodes: vec![ItemGroupNodeV1 {
+                        node_id: 0,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![item_group_entry(100, 1, 1, target)],
+                    }],
+                    wrapper: None,
+                },
+            }];
+            assert!(
+                !item_group_catalog_is_valid(&catalog),
+                "reserved variable {reserved} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -6023,6 +6725,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, ItemGroupTargetV1::Node(0))],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(&[local_cycle]));
@@ -6041,6 +6744,7 @@ mod tests {
                         ItemGroupTargetV1::Group(target.to_owned()),
                     )],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(&[
@@ -6068,6 +6772,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, invalid_charges)],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(&[invalid_charges]));
@@ -6081,6 +6786,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
                 }],
+                wrapper: None,
             },
         };
         fixed_zero_damage.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
@@ -6103,6 +6809,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, target)],
                 }],
+                wrapper: None,
             },
         };
         let mut exact_damage_cap = item_group_item("damageable");
@@ -6194,6 +6901,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 2, item_group_item("rock"))],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(
@@ -6222,6 +6930,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, missing_charge_marker)],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(&[
@@ -6242,6 +6951,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, item_group_item("null"))],
                 }],
+                wrapper: None,
             },
         };
         assert!(
@@ -6265,6 +6975,7 @@ mod tests {
                         entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
                     },
                 ],
+                wrapper: None,
             },
         };
         assert!(item_group_catalog_is_valid(&[local_modifier.clone()]));
@@ -6291,6 +7002,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
                 }],
+                wrapper: None,
             },
         };
         assert!(
@@ -6329,6 +7041,7 @@ mod tests {
                         kind: ItemGroupKindV1::Collection,
                         entries: vec![item_group_entry(100, 1, 1, target)],
                     }],
+                    wrapper: None,
                 },
             };
             definition.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
@@ -6359,6 +7072,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: vec![item_group_entry(100, 1, 1, overfilled_magazine)],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(&[overfilled_magazine]));
@@ -6375,9 +7089,306 @@ mod tests {
                         item_group_entry(1, 1, 1, item_group_item("stick")),
                     ],
                 }],
+                wrapper: None,
             },
         };
         assert!(!item_group_catalog_is_valid(&[overflowed_weights]));
+    }
+
+    #[test]
+    fn named_item_group_metrics_follow_charge_candidates_and_result_wrappers() {
+        let definition = |group_id: &str, entry: ItemGroupEntryV1| ItemGroupDefinitionV1 {
+            group_id: group_id.to_owned(),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![entry],
+                }],
+                wrapper: None,
+            },
+        };
+
+        let mut charged_tool = item_group_item("charged_tool");
+        let ItemGroupTargetV1::Item(tool) = &mut charged_tool else {
+            unreachable!("fixture is a direct item")
+        };
+        tool.prototype.charges = 0;
+        tool.modifier_container_capacity_applies = false;
+        tool.prototype.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("BATTERY"),
+            ammunition_type: String::from("battery"),
+            capacity: 5,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+        }];
+        let ItemGroupTargetV1::Item(ammunition) = item_group_item("battery") else {
+            unreachable!("fixture is a direct item")
+        };
+        let mut ammunition = ammunition.prototype;
+        ammunition.ammunition_type = String::from("battery");
+        tool.charge_ammunition = Some(ammunition);
+        let charged_child =
+            definition("a_charged_child", item_group_entry(100, 1, 1, charged_tool));
+        let mut charge_modifier = item_group_modifier_entry(
+            100,
+            1,
+            1,
+            ItemGroupTargetV1::Group(String::from("a_charged_child")),
+        );
+        charge_modifier.modifier_charges = Some(InclusiveI32RangeV1 {
+            minimum: 2,
+            maximum: 2,
+        });
+        let charge_parent = definition("b_charge_parent", charge_modifier);
+        let charge_catalog = vec![charged_child, charge_parent];
+        let charge_source = ItemGroupSourceV1::Group(String::from("b_charge_parent"));
+        assert_eq!(
+            item_groups::item_group_source_metrics_for_test(&charge_source, &charge_catalog),
+            Some((2, 1, 1)),
+            "a parent charge modifier materializes one nested ammunition object"
+        );
+        let malformed_charge_catalog = |mutate: fn(&mut CraftItemPrototypeV1)| {
+            let mut malformed = charge_catalog[0].clone();
+            let ItemGroupTargetV1::Item(tool) = &mut malformed.graph.nodes[0].entries[0].target
+            else {
+                unreachable!("fixture is a direct item")
+            };
+            mutate(
+                tool.charge_ammunition
+                    .as_mut()
+                    .expect("charge ammunition exists"),
+            );
+            malformed
+        };
+        assert!(!item_group_catalog_is_valid(&[malformed_charge_catalog(
+            |ammunition| ammunition.ammunition_type = String::from("plutonium"),
+        )]));
+        assert!(!item_group_catalog_is_valid(&[malformed_charge_catalog(
+            |ammunition| ammunition.magazine_capacity = 1,
+        )]));
+
+        let mut unsupported_payload = item_group_item("unsupported_payload");
+        let ItemGroupTargetV1::Item(payload) = &mut unsupported_payload else {
+            unreachable!("fixture is a direct item")
+        };
+        payload.modifier_side_effects_supported = false;
+        payload.charges_supported = false;
+        let mut wrapped_entry = item_group_entry(100, 1, 1, unsupported_payload.clone());
+        wrapped_entry.direct_wrapper = Some(item_group_wrapper(
+            "safe_direct_case",
+            ItemGroupOverflowV1::None,
+        ));
+        let wrapped_child = definition("a_wrapped_child", wrapped_entry.clone());
+        let wrapped_parent = definition(
+            "b_wrapped_parent",
+            item_group_modifier_entry(
+                100,
+                1,
+                1,
+                ItemGroupTargetV1::Group(String::from("a_wrapped_child")),
+            ),
+        );
+        assert!(
+            item_group_catalog_is_valid(&[wrapped_child.clone(), wrapped_parent.clone()]),
+            "a non-spill direct wrapper replaces the modified top-level item"
+        );
+
+        wrapped_entry
+            .direct_wrapper
+            .as_mut()
+            .expect("direct wrapper exists")
+            .overflow = ItemGroupOverflowV1::Spill;
+        let spill_child = definition("a_wrapped_child", wrapped_entry);
+        assert!(
+            !item_group_catalog_is_valid(&[spill_child, wrapped_parent.clone()]),
+            "spill results retain the unsupported payload beside the safe wrapper"
+        );
+
+        let mut unsafe_wrapper =
+            item_group_wrapper("unsafe_modifier_case", ItemGroupOverflowV1::None);
+        unsafe_wrapper.item.modifier_side_effects_supported = false;
+        let mut modifier_wrapped_entry =
+            item_group_modifier_entry(100, 1, 1, item_group_item("safe_payload"));
+        modifier_wrapped_entry.modifier_container = Some(unsafe_wrapper);
+        let modifier_wrapped_child = definition("a_wrapped_child", modifier_wrapped_entry);
+        assert!(
+            !item_group_catalog_is_valid(&[modifier_wrapped_child, wrapped_parent]),
+            "a modifier container becomes the completed top-level child"
+        );
+
+        let mut charge_unsafe_wrapper =
+            item_group_wrapper("charge_unsafe_case", ItemGroupOverflowV1::None);
+        charge_unsafe_wrapper.item.charges_supported = false;
+        let mut graph_wrapped_child = definition(
+            "a_graph_wrapped_child",
+            item_group_entry(100, 1, 1, item_group_item("charge_safe_payload")),
+        );
+        graph_wrapped_child.graph.wrapper = Some(charge_unsafe_wrapper);
+        let mut graph_charge_modifier = item_group_modifier_entry(
+            100,
+            1,
+            1,
+            ItemGroupTargetV1::Group(String::from("a_graph_wrapped_child")),
+        );
+        graph_charge_modifier.modifier_charges = Some(InclusiveI32RangeV1 {
+            minimum: 1,
+            maximum: 1,
+        });
+        let graph_charge_parent = definition("b_graph_charge_parent", graph_charge_modifier);
+        assert!(
+            !item_group_catalog_is_valid(&[graph_wrapped_child, graph_charge_parent]),
+            "a whole-group wrapper supplies the authoritative charge capability"
+        );
+
+        let mut ignored_direct_charge =
+            item_group_modifier_entry(100, 1, 1, item_group_item("direct_charge_target"));
+        ignored_direct_charge.modifier_charges = Some(InclusiveI32RangeV1 {
+            minimum: 1,
+            maximum: 1,
+        });
+        assert!(
+            !item_group_catalog_is_valid(&[definition(
+                "ignored_direct_charge",
+                ignored_direct_charge,
+            )]),
+            "direct charges belong on the item prototype and cannot be silently ignored"
+        );
+    }
+
+    #[test]
+    fn item_group_contents_projection_fails_closed_without_rejecting_true_no_pocket_items() {
+        let definition = |target, contents: ItemGroupItemPrototypeV1| ItemGroupDefinitionV1 {
+            group_id: String::from("contents_projection"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        contents: vec![ItemGroupContentsSourceV1::Item(Box::new(contents))],
+                        ..item_group_modifier_entry(100, 1, 1, target)
+                    }],
+                }],
+                wrapper: None,
+            },
+        };
+        let direct_item = |type_id| match item_group_item(type_id) {
+            ItemGroupTargetV1::Item(item) => *item,
+            ItemGroupTargetV1::Group(_) | ItemGroupTargetV1::Node(_) => {
+                unreachable!("fixture is a direct item")
+            }
+        };
+
+        let no_pocket = item_group_item("true_no_pocket");
+        assert!(item_group_catalog_is_valid(&[definition(
+            no_pocket,
+            direct_item("payload"),
+        )]));
+
+        let mut lost_projection = item_group_item("lost_projection");
+        let ItemGroupTargetV1::Item(item) = &mut lost_projection else {
+            unreachable!("fixture is a direct item")
+        };
+        item.contents_insertion_supported = false;
+        assert!(
+            !item_group_catalog_is_valid(&[definition(lost_projection, direct_item("payload"),)]),
+            "an empty strict projection cannot impersonate a true no-pocket item"
+        );
+
+        let mut ammunition_container = item_group_item("quiver");
+        let ItemGroupTargetV1::Item(quiver) = &mut ammunition_container else {
+            unreachable!("fixture is a direct item")
+        };
+        quiver.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("ARROWS"),
+            capacities: vec![AmmunitionCapacityV1 {
+                ammunition_type: String::from("arrow"),
+                capacity: 20,
+            }],
+            rigid: true,
+            access_moves: 100,
+            reloadable: true,
+            unloadable: true,
+            spawn_rules: None,
+        }];
+        assert!(
+            !item_group_catalog_is_valid(&[
+                definition(ammunition_container, direct_item("arrow"),)
+            ]),
+            "non-estorable contents must not enter an unimplemented ammunition-container path"
+        );
+
+        let mut phone = item_group_item("phone");
+        let ItemGroupTargetV1::Item(phone_item) = &mut phone else {
+            unreachable!("fixture is a direct item")
+        };
+        phone_item.prototype.ammunition_containers = vec![
+            AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("BATTERY"),
+                capacities: vec![AmmunitionCapacityV1 {
+                    ammunition_type: String::from("battery"),
+                    capacity: 1,
+                }],
+                rigid: true,
+                access_moves: 100,
+                reloadable: true,
+                unloadable: true,
+                spawn_rules: None,
+            },
+            AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: 1,
+                pocket_id: String::from("EFILES"),
+                capacities: Vec::new(),
+                rigid: true,
+                access_moves: 100,
+                reloadable: false,
+                unloadable: true,
+                spawn_rules: Some(SpawnPocketRulesV1 {
+                    kind: SpawnPocketKindV1::EFileStorage,
+                    max_contains_volume_milliliters: u64::MAX,
+                    max_contains_weight_milligrams: u64::MAX,
+                    max_item_volume_milliliters: u64::MAX,
+                    min_item_volume_milliliters: 0,
+                    max_item_length_millimeters: u64::MAX,
+                    item_restrictions: Vec::new(),
+                    flag_restrictions: Vec::new(),
+                    access_moves: 100,
+                    rigid: true,
+                    watertight: false,
+                    transparent: false,
+                    forbidden: false,
+                    sealable: false,
+                }),
+            },
+        ];
+        let mut efile = direct_item("efile");
+        efile.prototype.containment.estorable = true;
+        assert!(valid_craft_item_prototype(&phone_item.prototype));
+        assert!(valid_craft_item_prototype(&efile.prototype));
+        assert!(
+            item_group_catalog_is_valid(&[definition(phone.clone(), efile.clone())]),
+            "estorable contents choose EFILE before the phone-like reload pocket"
+        );
+        let ItemGroupTargetV1::Item(non_rigid_phone) = &mut phone else {
+            unreachable!("fixture is a direct item")
+        };
+        let non_rigid_pocket = &mut non_rigid_phone.prototype.ammunition_containers[1];
+        non_rigid_pocket.rigid = false;
+        non_rigid_pocket
+            .spawn_rules
+            .as_mut()
+            .expect("EFILE spawn rules")
+            .rigid = false;
+        assert!(
+            !item_group_catalog_is_valid(&[definition(phone, efile)]),
+            "canonical catalogs must reject unattainable non-rigid EFILE pockets"
+        );
     }
 
     #[test]
@@ -6394,9 +7405,15 @@ mod tests {
                             minimum: 0,
                             maximum: 0,
                         }),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                         ..item_group_entry(100, 0, count_max, item_group_item("rock"))
                     }],
                 }],
+                wrapper: None,
             },
         };
         assert!(item_group_catalog_is_valid(&[output_group(
@@ -6406,12 +7423,117 @@ mod tests {
             u16::try_from(MAX_ITEM_GROUP_OUTPUTS + 1).expect("test bound fits u16"),
         )]));
 
+        let mut wrapped_outputs = output_group(2);
+        let ItemGroupTargetV1::Item(mut wrapper_item) = item_group_item("counted_case") else {
+            unreachable!("fixture is a direct item")
+        };
+        wrapper_item.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("CONTENTS"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind: SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: u64::MAX,
+                max_contains_weight_milligrams: u64::MAX,
+                max_item_volume_milliliters: u64::MAX,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: u64::MAX,
+                item_restrictions: Vec::new(),
+                flag_restrictions: Vec::new(),
+                access_moves: 100,
+                rigid: true,
+                watertight: false,
+                transparent: false,
+                forbidden: false,
+                sealable: false,
+            }),
+        }];
+        wrapped_outputs.graph.nodes[0].entries[0].direct_wrapper = Some(ItemGroupContainerV1 {
+            item: wrapper_item,
+            variant_id: None,
+            sealed: false,
+            overflow: ItemGroupOverflowV1::Spill,
+        });
+        let wrapped_source = ItemGroupSourceV1::Inline(wrapped_outputs.graph);
+        assert_eq!(
+            item_group_source_max_outputs(&wrapped_source, &[]),
+            Some(3),
+            "two payloads plus one shared spill wrapper is the exact output bound"
+        );
+
         assert!(item_group_catalog_is_valid(&[item_group_chain(
             MAX_ITEM_GROUP_DEPTH,
         )]));
         assert!(!item_group_catalog_is_valid(&[item_group_chain(
             MAX_ITEM_GROUP_DEPTH + 1,
         )]));
+
+        let containment_catalog = |edges: usize| {
+            (0..=edges)
+                .map(|index| {
+                    let target = item_group_item(&format!("carrier_{index:02}"));
+                    let mut entry = item_group_modifier_entry(100, 1, 1, target);
+                    if index < edges {
+                        let rules = SpawnPocketRulesV1 {
+                            kind: SpawnPocketKindV1::Container,
+                            max_contains_volume_milliliters: u64::MAX,
+                            max_contains_weight_milligrams: u64::MAX,
+                            max_item_volume_milliliters: u64::MAX,
+                            min_item_volume_milliliters: 0,
+                            max_item_length_millimeters: u64::MAX,
+                            item_restrictions: Vec::new(),
+                            flag_restrictions: Vec::new(),
+                            access_moves: 100,
+                            rigid: true,
+                            watertight: false,
+                            transparent: false,
+                            forbidden: false,
+                            sealable: false,
+                        };
+                        let ItemGroupTargetV1::Item(item) = &mut entry.target else {
+                            unreachable!("fixture is a direct item")
+                        };
+                        item.prototype.ammunition_containers =
+                            vec![AmmunitionContainerPocketPrototypeV1 {
+                                pocket_index: 0,
+                                pocket_id: String::from("CONTENTS"),
+                                capacities: Vec::new(),
+                                rigid: true,
+                                access_moves: 100,
+                                reloadable: false,
+                                unloadable: true,
+                                spawn_rules: Some(rules),
+                            }];
+                        entry.contents = vec![ItemGroupContentsSourceV1::Group(format!(
+                            "depth_{:02}",
+                            index + 1
+                        ))];
+                    }
+                    ItemGroupDefinitionV1 {
+                        group_id: format!("depth_{index:02}"),
+                        graph: ItemGroupGraphV1 {
+                            root_node: 0,
+                            nodes: vec![ItemGroupNodeV1 {
+                                node_id: 0,
+                                kind: ItemGroupKindV1::Collection,
+                                entries: vec![entry],
+                            }],
+                            wrapper: None,
+                        },
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(item_group_catalog_is_valid(&containment_catalog(
+            MAX_ITEM_COMPONENT_DEPTH,
+        )));
+        assert!(!item_group_catalog_is_valid(&containment_catalog(
+            MAX_ITEM_COMPONENT_DEPTH + 1,
+        )));
 
         let empty_group = |index: usize| ItemGroupDefinitionV1 {
             group_id: format!("group_{index:04}"),
@@ -6422,6 +7544,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: Vec::new(),
                 }],
+                wrapper: None,
             },
         };
         let maximum_catalog = (0..MAX_ITEM_GROUP_DEFINITIONS)
@@ -6454,6 +7577,7 @@ mod tests {
                 entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
             }))
             .collect(),
+            wrapper: None,
         });
         assert!(item_group_sources_are_valid(
             &maximum_catalog,
@@ -6466,6 +7590,7 @@ mod tests {
                 kind: ItemGroupKindV1::Collection,
                 entries: Vec::new(),
             }],
+            wrapper: None,
         });
         assert!(!item_group_sources_are_valid(
             &maximum_catalog,
@@ -6637,6 +7762,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
         };
         let mut with_byproducts = protocol_test_recipe();
@@ -6999,6 +8125,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         });
         assert_eq!(
             encode_control(&command(Some(Box::new(invalid_unload)))),
@@ -7020,6 +8147,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         });
         contradictory.requires_empty_charges = true;
         assert_eq!(
@@ -7040,6 +8168,8 @@ mod tests {
                 damage: 0,
                 raw_damage: 0,
                 variant: None,
+                snippet: None,
+                variables: BTreeMap::new(),
                 melee_damage_milli: BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -7054,6 +8184,7 @@ mod tests {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
+                containment: Default::default(),
             },
             split_from: None,
         };
@@ -7087,6 +8218,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
         }];
         assert!(!valid_craft_activity(&activity, actor_id));
@@ -7326,6 +8458,8 @@ mod tests {
                 damage: MAX_ITEM_DAMAGE_LEVEL,
                 raw_damage: MAX_ITEM_RAW_DAMAGE,
                 variant: None,
+                snippet: None,
+                variables: BTreeMap::new(),
                 melee_damage_milli: melee_damage_milli.clone(),
                 calories: i32::MAX,
                 quench: i32::MAX,
@@ -7348,6 +8482,7 @@ mod tests {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
+                containment: Default::default(),
             })
             .collect::<Vec<_>>();
         encode_control(&ControlMessage::AdminResponse(
@@ -7499,6 +8634,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7513,6 +8650,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         assert!(valid_item_snapshot(&magazine));
         let mut tool = ItemSnapshot {
@@ -7522,6 +8660,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7542,6 +8682,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         let mut second_magazine = magazine.clone();
         second_magazine.id = ItemId::new(1, 3);
@@ -7562,6 +8703,7 @@ mod tests {
         );
         let duplicate_root = ItemSnapshot {
             id: ItemId::new(1, 4),
+            containment: Default::default(),
             ..tool.clone()
         };
         assert!(!collect_stable_item_ids(&duplicate_root, 1, &mut ids));
@@ -7650,6 +8792,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7664,11 +8808,17 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         let mut loose_fractional_battery = ammunition.clone();
         loose_fractional_battery.charges = 0;
         loose_fractional_battery.residual_energy_millijoules = MILLIJOULES_PER_BATTERY_CHARGE - 1;
+        loose_fractional_battery.containment.count_by_charges = true;
+        loose_fractional_battery.containment.stack_size = 1;
         assert!(valid_item_snapshot(&loose_fractional_battery));
+        loose_fractional_battery.residual_energy_millijoules = 0;
+        assert!(!valid_item_snapshot(&loose_fractional_battery));
+        loose_fractional_battery.residual_energy_millijoules = MILLIJOULES_PER_BATTERY_CHARGE - 1;
         loose_fractional_battery.ammunition_type = String::from("9mm");
         assert!(!valid_item_snapshot(&loose_fractional_battery));
         loose_fractional_battery.ammunition_type = String::from("battery");
@@ -7681,6 +8831,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7694,6 +8846,7 @@ mod tests {
                 pocket_id: String::from("PRIMARY"),
                 ammunition_type: String::from("battery"),
                 capacity: 6,
+                rigid: true,
                 reloadable: true,
                 unloadable: true,
                 loaded_ammunition: Some(Box::new(ammunition)),
@@ -7704,6 +8857,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         assert!(valid_item_snapshot(&magazine));
         let mut ids = BTreeSet::new();
@@ -7748,6 +8902,7 @@ mod tests {
                 pocket_id: String::from("DUPLICATE"),
                 ammunition_type: String::from("battery"),
                 capacity: 1,
+                rigid: true,
                 reloadable: true,
                 unloadable: true,
                 loaded_ammunition: None,
@@ -7765,6 +8920,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7779,6 +8936,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         let pocket = AmmunitionContainerPocketSnapshotV1 {
             pocket_index: 4,
@@ -7792,6 +8950,7 @@ mod tests {
             reloadable: true,
             unloadable: true,
             contents: vec![ammunition(2, "9mm", 10), ammunition(3, "9mm", 20)],
+            spawn_state: None,
         };
         let owner = ItemSnapshot {
             id: ItemId::new(1, 1),
@@ -7800,6 +8959,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7814,6 +8975,7 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         };
         assert!(valid_item_snapshot(&owner));
         let mut ids = BTreeSet::new();
@@ -7930,6 +9092,7 @@ mod tests {
             access_moves: too_many_types.access_moves,
             reloadable: too_many_types.reloadable,
             unloadable: too_many_types.unloadable,
+            spawn_rules: None,
         };
         assert!(!valid_ammunition_container_prototype(&prototype));
         let mut zero_access_moves = prototype.clone();
@@ -7952,10 +9115,302 @@ mod tests {
             .map(|index| AmmunitionContainerPocketSnapshotV1 {
                 pocket_index: u16::try_from(index).expect("small pocket index"),
                 contents: Vec::new(),
+                spawn_state: None,
                 ..pocket.clone()
             })
             .collect();
         assert!(!valid_item_snapshot(&too_many_pockets));
+
+        let mut phone = ammunition(2, "", 1);
+        phone.type_id = String::from("smart_phone");
+        phone.ammunition_type.clear();
+        phone.snippet = Some(ItemSnippetV1 {
+            id: String::from("greeting"),
+            text: String::from("Hello\nworld"),
+        });
+        phone.variables.insert(
+            String::from("browsed"),
+            ItemVariableValueV1::String(String::from("false")),
+        );
+        phone.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 233_000,
+            volume_milliliters: 111,
+            longest_side_millimeters: 150,
+            flags: Vec::new(),
+            estorable: false,
+            ..ItemContainmentProfileV1::default()
+        };
+        let rules = SpawnPocketRulesV1 {
+            kind: SpawnPocketKindV1::Container,
+            max_contains_volume_milliliters: 111,
+            max_contains_weight_milligrams: 233_000,
+            max_item_volume_milliliters: 111,
+            min_item_volume_milliliters: 0,
+            max_item_length_millimeters: 150,
+            item_restrictions: vec![String::from("smart_phone")],
+            flag_restrictions: Vec::new(),
+            access_moves: 100,
+            rigid: true,
+            watertight: true,
+            transparent: true,
+            forbidden: false,
+            sealable: true,
+        };
+        let mut generic_owner = owner.clone();
+        generic_owner.ammunition_containers = vec![AmmunitionContainerPocketSnapshotV1 {
+            pocket_index: 4,
+            pocket_id: String::from("PHONE"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            contents: vec![phone],
+            spawn_state: Some(SpawnPocketStateV1 {
+                rules: rules.clone(),
+                sealed: true,
+            }),
+        }];
+        assert!(valid_item_snapshot(&generic_owner));
+        let mut empty_sealed = generic_owner.clone();
+        empty_sealed.ammunition_containers[0].contents.clear();
+        assert!(
+            !valid_item_snapshot(&empty_sealed),
+            "a canonical snapshot cannot inject an impossible sealed-empty pocket"
+        );
+        let mut partial_sealed = generic_owner.clone();
+        let partial_rules = &mut partial_sealed.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules;
+        partial_rules.max_contains_volume_milliliters = 222;
+        partial_rules.max_contains_weight_milligrams = 466_000;
+        partial_rules.max_item_volume_milliliters = 222;
+        assert!(
+            !valid_item_snapshot(&partial_sealed),
+            "a canonical snapshot cannot inject an impossible sealed-partial pocket"
+        );
+        partial_sealed.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .sealed = false;
+        assert!(valid_item_snapshot(&partial_sealed));
+        let mut any_restriction = generic_owner.clone();
+        let any_rules = &mut any_restriction.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules;
+        any_rules.item_restrictions = vec![String::from("different_item")];
+        any_rules.flag_restrictions = vec![String::from("FORM_A"), String::from("FORM_B")];
+        any_restriction.ammunition_containers[0].contents[0]
+            .containment
+            .flags = vec![String::from("FORM_B")];
+        assert!(valid_item_snapshot(&any_restriction));
+        any_restriction.ammunition_containers[0].contents[0]
+            .containment
+            .flags = vec![String::from("FORM_C")];
+        assert!(!valid_item_snapshot(&any_restriction));
+        let mut no_unwield = generic_owner.clone();
+        no_unwield.ammunition_containers[0].contents[0]
+            .containment
+            .flags = vec![String::from("NO_UNWIELD")];
+        assert!(!valid_item_snapshot(&no_unwield));
+
+        let mut charged_overflow = generic_owner.clone();
+        let charged = &mut charged_overflow.ammunition_containers[0].contents[0];
+        charged.charges = 2;
+        charged.containment.weight_milligrams = 1;
+        charged.containment.volume_milliliters = 1_000;
+        charged.containment.count_by_charges = true;
+        charged.containment.stack_size = 10;
+        assert!(
+            charged.containment.volume_milliliters
+                > charged_overflow.ammunition_containers[0]
+                    .spawn_state
+                    .as_ref()
+                    .expect("spawn state")
+                    .rules
+                    .max_contains_volume_milliliters
+        );
+        assert!(!valid_item_snapshot(&charged_overflow));
+        charged_overflow.ammunition_containers[0].contents[0].charges = 1;
+        assert!(valid_item_snapshot(&charged_overflow));
+        charged_overflow.ammunition_containers[0].contents[0].charges = 0;
+        assert!(
+            !valid_item_snapshot(&charged_overflow),
+            "canonical count-by-charges items must retain a positive charge count"
+        );
+
+        let mut leaking_liquid = generic_owner.clone();
+        let liquid = &mut leaking_liquid.ammunition_containers[0].contents[0];
+        liquid.charges = 5;
+        liquid.containment.phase = ItemPhaseV1::Liquid;
+        liquid.containment.count_by_charges = true;
+        liquid.containment.stack_size = 10;
+        liquid.containment.weight_milligrams = 1;
+        liquid.containment.volume_milliliters = 100;
+        leaking_liquid.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules
+            .watertight = false;
+        leaking_liquid.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .sealed = false;
+        assert!(!valid_item_snapshot(&leaking_liquid));
+        leaking_liquid.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules
+            .watertight = true;
+        assert!(valid_item_snapshot(&leaking_liquid));
+        let mut matching_liquids = leaking_liquid.clone();
+        let mut matching_liquid = matching_liquids.ammunition_containers[0].contents[0].clone();
+        matching_liquid.id = ItemId::new(1, 3);
+        matching_liquids.ammunition_containers[0]
+            .contents
+            .push(matching_liquid);
+        assert!(valid_item_snapshot(&matching_liquids));
+        matching_liquids.ammunition_containers[0].contents[1]
+            .variables
+            .insert(
+                String::from("browsed"),
+                ItemVariableValueV1::String(String::from("different")),
+            );
+        assert!(
+            !valid_item_snapshot(&matching_liquids),
+            "same-type liquids with different represented stack state cannot combine"
+        );
+        let encoded = postcard::to_stdvec(&generic_owner)
+            .expect("generalized containment snapshot should encode");
+        assert_eq!(
+            postcard::from_bytes::<ItemSnapshot>(&encoded)
+                .expect("generalized containment snapshot should decode"),
+            generic_owner.clone()
+        );
+        let mut too_long = generic_owner.clone();
+        too_long.ammunition_containers[0].contents[0]
+            .containment
+            .longest_side_millimeters = 151;
+        assert!(!valid_item_snapshot(&too_long));
+
+        let mut empty_soft = generic_owner.clone();
+        empty_soft.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .sealed = false;
+        let soft = &mut empty_soft.ammunition_containers[0].contents[0];
+        soft.containment.flags = vec![String::from("SOFT")];
+        soft.containment.volume_milliliters = 500;
+        soft.containment.longest_side_millimeters = 500;
+        let soft_rules = &mut empty_soft.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules;
+        soft_rules.max_contains_volume_milliliters = 500;
+        soft_rules.max_item_volume_milliliters = 100;
+        soft_rules.max_item_length_millimeters = 100;
+        assert!(
+            valid_item_snapshot(&empty_soft),
+            "an empty explicit SOFT item bypasses max-item volume and has zero length upstream"
+        );
+        empty_soft.ammunition_containers[0].contents[0]
+            .containment
+            .flags
+            .clear();
+        assert!(
+            !valid_item_snapshot(&empty_soft),
+            "material-derived softness is fail-closed when the hard interpretation fails"
+        );
+
+        let mut nested_length = generic_owner.clone();
+        nested_length.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .sealed = false;
+        let nested_rules = &mut nested_length.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules;
+        nested_rules.max_contains_volume_milliliters = 1_000;
+        nested_rules.max_contains_weight_milligrams = 1_000_000;
+        nested_rules.max_item_volume_milliliters = 1_000;
+        nested_rules.max_item_length_millimeters = 100;
+        let inner = &mut nested_length.ammunition_containers[0].contents[0];
+        inner.containment.flags = vec![String::from("HARD")];
+        inner.containment.longest_side_millimeters = 50;
+        let mut long_child = inner.clone();
+        long_child.id = ItemId::new(1, 3);
+        long_child.type_id = String::from("long_child");
+        long_child.snippet = None;
+        long_child.variables.clear();
+        long_child.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 1,
+            volume_milliliters: 1,
+            longest_side_millimeters: 150,
+            flags: vec![String::from("HARD")],
+            ..ItemContainmentProfileV1::default()
+        };
+        long_child.ammunition_containers.clear();
+        inner.ammunition_containers = vec![AmmunitionContainerPocketSnapshotV1 {
+            pocket_index: 0,
+            pocket_id: String::from("INNER"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            contents: vec![long_child],
+            spawn_state: Some(SpawnPocketStateV1 {
+                rules: SpawnPocketRulesV1 {
+                    kind: SpawnPocketKindV1::Container,
+                    max_contains_volume_milliliters: 1_000,
+                    max_contains_weight_milligrams: 1_000_000,
+                    max_item_volume_milliliters: 1_000,
+                    min_item_volume_milliliters: 0,
+                    max_item_length_millimeters: 200,
+                    item_restrictions: Vec::new(),
+                    flag_restrictions: Vec::new(),
+                    access_moves: 100,
+                    rigid: true,
+                    watertight: false,
+                    transparent: false,
+                    forbidden: false,
+                    sealable: false,
+                },
+                sealed: false,
+            }),
+        }];
+        assert!(
+            !valid_item_snapshot(&nested_length),
+            "a physical child contributes its recursive length to the wrapper"
+        );
+        let mut invalid_seal = generic_owner.clone();
+        invalid_seal.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules
+            .sealable = false;
+        assert!(!valid_item_snapshot(&invalid_seal));
+        let mut invalid_snippet = generic_owner.clone();
+        invalid_snippet.ammunition_containers[0].contents[0]
+            .snippet
+            .as_mut()
+            .expect("snippet")
+            .text = String::from("bad\u{0000}text");
+        assert!(!valid_item_snapshot(&invalid_snippet));
 
         let mut colliding_index = owner;
         colliding_index.magazine_wells = vec![MagazineWellSnapshotV1 {
@@ -7966,6 +9421,84 @@ mod tests {
             installed_magazine: None,
         }];
         assert!(!valid_item_snapshot(&colliding_index));
+    }
+
+    #[test]
+    fn containment_weight_honors_no_drop_and_reduced_weight_flags() {
+        let ammunition = |counter: u64, ammunition_type: &str, charges: i32| ItemSnapshot {
+            id: ItemId::new(1, counter),
+            type_id: format!("{ammunition_type}_round_{counter}"),
+            charges,
+            damage: 0,
+            raw_damage: 0,
+            variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: ammunition_type.to_owned(),
+            ranged_weapon: None,
+            component_provenance: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            creature_corpse: None,
+            containment: Default::default(),
+        };
+        let mut reduced = ammunition(2, "test", 3);
+        reduced.containment.weight_milligrams = 5;
+        reduced.containment.count_by_charges = true;
+        reduced.containment.flags = vec![String::from("REDUCED_WEIGHT")];
+        assert_eq!(
+            item_snapshot_containment_weight_milligrams(&reduced),
+            Some(11),
+            "pinned integer mass truncates 5 * 3 * 0.75"
+        );
+
+        let mut no_drop = ammunition(2, "", 1);
+        no_drop.containment.weight_milligrams = 100;
+        no_drop.containment.flags = vec![String::from("NO_DROP")];
+        let mut child = ammunition(3, "", 1);
+        child.containment.weight_milligrams = 900;
+        no_drop.ammunition_containers = vec![AmmunitionContainerPocketSnapshotV1 {
+            pocket_index: 0,
+            pocket_id: String::from("PHYSICAL"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            contents: vec![child],
+            spawn_state: Some(SpawnPocketStateV1 {
+                rules: SpawnPocketRulesV1 {
+                    kind: SpawnPocketKindV1::Container,
+                    max_contains_volume_milliliters: 1_000,
+                    max_contains_weight_milligrams: 1_000,
+                    max_item_volume_milliliters: 1_000,
+                    min_item_volume_milliliters: 0,
+                    max_item_length_millimeters: 1_000,
+                    item_restrictions: Vec::new(),
+                    flag_restrictions: Vec::new(),
+                    access_moves: 100,
+                    rigid: true,
+                    watertight: false,
+                    transparent: false,
+                    forbidden: false,
+                    sealable: false,
+                },
+                sealed: false,
+            }),
+        }];
+        assert_eq!(
+            item_snapshot_containment_weight_milligrams(&no_drop),
+            Some(0),
+            "NO_DROP returns before physical child weight upstream"
+        );
     }
 
     #[test]
@@ -8004,6 +9537,8 @@ mod tests {
             damage: 1,
             raw_damage: 1,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -8023,6 +9558,7 @@ mod tests {
                 revive_special: false,
                 revivable: true,
             }),
+            containment: Default::default(),
         };
         assert!(valid_item_snapshot(&corpse));
         let mut disguised = corpse.clone();
@@ -8079,6 +9615,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -8094,6 +9632,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         };
         let mut deepest = component();
         for _ in 1..MAX_ITEM_COMPONENT_DEPTH {
@@ -8105,6 +9644,9 @@ mod tests {
         let mut too_deep = component();
         too_deep.component_provenance = Some(vec![deepest]);
         assert!(!valid_item_component_root(&too_deep));
+        let mut mismatched_charge_mode = component();
+        mismatched_charge_mode.containment.count_by_charges = true;
+        assert!(!valid_item_component_root(&mismatched_charge_mode));
         assert!(!valid_component_provenance(&Some(vec![
             component();
             MAX_ITEM_COMPONENTS

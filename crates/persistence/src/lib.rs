@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 64;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 86
-/// added exact item damage and selected-variant state. Metadata-only databases
-/// may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 64;
+pub const SCHEMA_VERSION: i64 = 65;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 87
+/// added generalized containment plus snippet and typed-variable item state.
+/// Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 65;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -7272,6 +7272,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
             retain_components: true,
             byproducts: vec![cdda_protocol::CraftByproductV1 {
@@ -7291,6 +7292,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 },
             }],
             components: vec![
@@ -10793,6 +10795,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             }),
             requires_empty_charges: false,
             components: vec![DisassemblyComponentV1 {
@@ -10813,6 +10816,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 },
                 output_state: None,
             }],
@@ -11018,6 +11022,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             }),
             requires_empty_charges: false,
             components: vec![DisassemblyComponentV1 {
@@ -11038,6 +11043,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 },
                 output_state: None,
             }],

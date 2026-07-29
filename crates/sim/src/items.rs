@@ -1,12 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
-    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemVariantV1, MAX_ITEM_GROUP_DEPTH,
+    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupContainerV1,
+    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
+    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupOverflowV1, ItemGroupSourceV1,
+    ItemGroupTargetV1, ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH,
     MAX_ITEM_GROUP_OUTPUTS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1,
-    PoweredToolStateV1, RangedWeaponSnapshot,
+    PoweredToolStateV1, RangedWeaponSnapshot, SpawnPocketKindV1,
+    item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
+    item_containment_weight_milligrams,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -26,6 +30,8 @@ pub(super) struct ItemInstance {
     pub(super) damage: u16,
     pub(super) raw_damage: u16,
     pub(super) variant: Option<ItemVariantV1>,
+    pub(super) snippet: Option<ItemSnippetV1>,
+    pub(super) variables: BTreeMap<String, ItemVariableValueV1>,
     pub(super) melee_damage_milli: BTreeMap<String, i32>,
     pub(super) calories: i32,
     pub(super) quench: i32,
@@ -40,6 +46,7 @@ pub(super) struct ItemInstance {
     pub(super) residual_energy_millijoules: u32,
     pub(super) powered_tool: Option<PoweredToolStateV1>,
     pub(super) creature_corpse: Option<CreatureCorpseSnapshotV1>,
+    pub(super) containment: cdda_protocol::ItemContainmentProfileV1,
 }
 
 impl ItemInstance {
@@ -281,6 +288,8 @@ impl ItemInstance {
             damage: self.damage,
             raw_damage: self.raw_damage,
             variant: self.variant.clone(),
+            snippet: self.snippet.clone(),
+            variables: self.variables.clone(),
             melee_damage_milli: self.melee_damage_milli.clone(),
             calories: self.calories,
             quench: self.quench,
@@ -295,6 +304,7 @@ impl ItemInstance {
             residual_energy_millijoules: self.residual_energy_millijoules,
             powered_tool: self.powered_tool.clone(),
             creature_corpse: self.creature_corpse.clone(),
+            containment: self.containment.clone(),
         }
     }
 
@@ -307,6 +317,8 @@ impl ItemInstance {
             damage: snapshot.damage,
             raw_damage: snapshot.raw_damage,
             variant: snapshot.variant.clone(),
+            snippet: snapshot.snippet.clone(),
+            variables: snapshot.variables.clone(),
             melee_damage_milli: snapshot.melee_damage_milli.clone(),
             calories: snapshot.calories,
             quench: snapshot.quench,
@@ -321,6 +333,7 @@ impl ItemInstance {
             residual_energy_millijoules: snapshot.residual_energy_millijoules,
             powered_tool: snapshot.powered_tool.clone(),
             creature_corpse: snapshot.creature_corpse.clone(),
+            containment: snapshot.containment.clone(),
         })
     }
 }
@@ -332,7 +345,17 @@ pub(super) struct PlannedItemSpawn {
     pub(super) variant: Option<ItemVariantV1>,
     maximum_raw_damage: u16,
     variants: Vec<ItemGroupVariantOptionV1>,
+    pub(super) snippet: Option<ItemSnippetV1>,
+    pub(super) initial_variables: BTreeMap<String, ItemVariableValueV1>,
     modifier_side_effects_supported: bool,
+    charges_supported: bool,
+    modifier_container_capacity_applies: bool,
+    charge_ammunition: Option<CraftItemPrototypeV1>,
+    minimum_one_charge: bool,
+    default_charge_range: Option<cdda_protocol::InclusiveI32RangeV1>,
+    pub(super) pocket_contents: BTreeMap<u16, Vec<PlannedItemSpawn>>,
+    pub(super) sealed_pockets: BTreeSet<u16>,
+    pub(super) integral_ammunition: BTreeMap<u16, Box<PlannedItemSpawn>>,
 }
 
 pub(super) fn plan_item_group_source(
@@ -342,6 +365,12 @@ pub(super) fn plan_item_group_source(
 ) -> Result<Vec<PlannedItemSpawn>, SimError> {
     let mut output = Vec::new();
     plan_item_group_source_into(source, item_groups, rng, &mut output, 0)?;
+    if output.iter().any(|item| {
+        item.containment_depth()
+            .is_none_or(|depth| depth > MAX_ITEM_COMPONENT_DEPTH)
+    }) {
+        return Err(SimError::InvalidItem);
+    }
     Ok(output)
 }
 
@@ -361,7 +390,12 @@ fn plan_item_group_source_into(
         }
         ItemGroupSourceV1::Inline(graph) => graph,
     };
-    plan_item_group_node(graph, graph.root_node, item_groups, rng, output, depth)
+    let output_start = output.len();
+    plan_item_group_node(graph, graph.root_node, item_groups, rng, output, depth)?;
+    if let Some(wrapper) = &graph.wrapper {
+        wrap_item_group_output(output, output_start, wrapper, rng)?;
+    }
+    validate_planned_output_bound(output)
 }
 
 fn plan_item_group_node(
@@ -429,7 +463,12 @@ fn plan_item_group_entry(
     output: &mut Vec<PlannedItemSpawn>,
     depth: usize,
 ) -> Result<(), SimError> {
-    let modifier_present = entry.raw_damage.is_some() || entry.variant_id.is_some();
+    let modifier_present = entry.raw_damage.is_some()
+        || entry.variant_id.is_some()
+        || entry.modifier_charges.is_some()
+        || !entry.contents.is_empty()
+        || entry.seal_contents
+        || entry.modifier_container.is_some();
     if modifier_present && matches!(&entry.target, ItemGroupTargetV1::Node(_)) {
         return Err(SimError::InvalidItem);
     }
@@ -438,8 +477,9 @@ fn plan_item_group_entry(
     } else {
         inclusive_rng_u64(rng, u64::from(entry.count_min), u64::from(entry.count_max))
     };
+    let wrapped_output_start = output.len();
     for _ in 0..count {
-        let output_start = output.len();
+        let iteration_output_start = output.len();
         plan_item_group_target(
             graph,
             &entry.target,
@@ -450,12 +490,23 @@ fn plan_item_group_entry(
             entry,
         )?;
         if modifier_present && matches!(&entry.target, ItemGroupTargetV1::Group(_)) {
-            for planned in &mut output[output_start..] {
-                apply_item_group_modifier(planned, entry, rng)?;
+            for planned in &mut output[iteration_output_start..] {
+                apply_item_group_modifier(
+                    planned,
+                    entry,
+                    entry.modifier_charges,
+                    item_groups,
+                    rng,
+                )?;
             }
         }
     }
-    Ok(())
+    if let Some(wrapper) = &entry.direct_wrapper {
+        // Pinned `Single_item_creator::create` wraps the complete count result
+        // once, including the zero-count case where it emits one empty wrapper.
+        wrap_item_group_output(output, wrapped_output_start, wrapper, rng)?;
+    }
+    validate_planned_output_bound(output)
 }
 
 fn plan_item_group_target(
@@ -472,62 +523,18 @@ fn plan_item_group_target(
     }
     match target {
         ItemGroupTargetV1::Item(item) => {
-            let prototype = item.prototype.clone();
-            // Every upstream item initializes its per-instance presentation
-            // seed before the constructor body. Rust does not expose the
-            // presentation feature yet, but the shared generation stream must
-            // retain its phase.
-            let _ = rng.next_u64();
-            // item::select_itype_variant calls weighted_int_list::pick even
-            // when the finalized item type has no variants, so construction
-            // always consumes one full-width draw before item-group logic.
-            let variant_draw = rng.next_u64();
-            let variant = select_constructor_variant(&item.variants, variant_draw)?;
-            // Single_item_creator always evaluates one_in(3) before testing
-            // VARSIZE. Runtime admission excludes VARSIZE until FIT is stored,
-            // but the draw is still part of every concrete leaf's RNG phase.
-            let _ = rng.next_u64();
-            let mut planned = PlannedItemSpawn {
-                prototype,
-                raw_damage: 0,
-                variant,
-                maximum_raw_damage: item.maximum_raw_damage,
-                variants: item.variants.clone(),
-                modifier_side_effects_supported: item.modifier_side_effects_supported,
-            };
-            let modifier_present = entry.raw_damage.is_some() || entry.variant_id.is_some();
+            let mut planned = construct_item_group_item(item, rng)?;
+            let modifier_present = entry.raw_damage.is_some()
+                || entry.variant_id.is_some()
+                || item.charges.is_some()
+                || !entry.contents.is_empty()
+                || entry.seal_contents
+                || entry.modifier_container.is_some();
             if modifier_present {
-                apply_item_group_modifier_state(&mut planned, entry, rng)?;
-            }
-            if let Some(charges) = item.charges {
-                let rolled = if charges.minimum == charges.maximum {
-                    charges.minimum
-                } else {
-                    i32::try_from(inclusive_rng_u64(
-                        rng,
-                        u64::try_from(charges.minimum).map_err(|_| SimError::InvalidItem)?,
-                        u64::try_from(charges.maximum).map_err(|_| SimError::InvalidItem)?,
-                    ))
-                    .map_err(|_| SimError::NumericOverflow)?
-                };
-                planned.prototype.charges = if item.minimum_one_charge {
-                    rolled.max(1)
-                } else {
-                    rolled
-                };
-            }
-            if modifier_present {
-                consume_item_group_modifier_dressing(&planned, rng);
-            }
-            if output.len()
-                >= usize::try_from(MAX_ITEM_GROUP_OUTPUTS).map_err(|_| SimError::NumericOverflow)?
-            {
-                return Err(SimError::InvalidItem);
-            }
-            if validate_craft_item_prototype(&planned.prototype).is_err() {
-                return Err(SimError::InvalidItem);
+                apply_item_group_modifier(&mut planned, entry, item.charges, item_groups, rng)?;
             }
             output.push(planned);
+            validate_planned_output_bound(output)?;
         }
         ItemGroupTargetV1::Group(group_id) => {
             plan_item_group_source_into(
@@ -570,14 +577,252 @@ fn select_constructor_variant(
         .ok_or(SimError::InvalidItem)
 }
 
+fn construct_item_group_item(
+    item: &ItemGroupItemPrototypeV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<PlannedItemSpawn, SimError> {
+    construct_item_group_item_with_fit_phase(item, rng, true)
+}
+
+fn construct_item_group_item_with_fit_phase(
+    item: &ItemGroupItemPrototypeV1,
+    rng: &mut ChaCha8Rng,
+    consumes_fit_phase: bool,
+) -> Result<PlannedItemSpawn, SimError> {
+    if validate_craft_item_prototype(&item.prototype).is_err() {
+        return Err(SimError::InvalidItem);
+    }
+    // Every item constructor retains presentation and finalized-variant RNG.
+    // Only the item-group creator layer performs the later variable-size FIT
+    // phase; raw wrapper construction does not.
+    let _ = rng.next_u64();
+    let variant = select_constructor_variant(&item.variants, rng.next_u64())?;
+    let snippet = if item.snippets.is_empty() {
+        None
+    } else {
+        let index = usize::try_from(rng.next_u64() % item.snippets.len() as u64)
+            .map_err(|_| SimError::NumericOverflow)?;
+        Some(
+            item.snippets
+                .get(index)
+                .ok_or(SimError::InvalidItem)?
+                .clone(),
+        )
+    };
+    if consumes_fit_phase {
+        let _ = rng.next_u64();
+    }
+    Ok(PlannedItemSpawn {
+        prototype: item.prototype.clone(),
+        raw_damage: 0,
+        variant,
+        maximum_raw_damage: item.maximum_raw_damage,
+        variants: item.variants.clone(),
+        snippet,
+        initial_variables: item.initial_variables.clone(),
+        modifier_side_effects_supported: item.modifier_side_effects_supported,
+        charges_supported: item.charges_supported,
+        modifier_container_capacity_applies: item.modifier_container_capacity_applies,
+        charge_ammunition: item.charge_ammunition.clone(),
+        minimum_one_charge: item.minimum_one_charge,
+        default_charge_range: item.charges,
+        pocket_contents: BTreeMap::new(),
+        sealed_pockets: BTreeSet::new(),
+        integral_ammunition: BTreeMap::new(),
+    })
+}
+
+fn construct_charge_ammunition(
+    prototype: &CraftItemPrototypeV1,
+    charges: i32,
+    rng: &mut ChaCha8Rng,
+) -> Result<PlannedItemSpawn, SimError> {
+    let _ = rng.next_u64();
+    let _ = rng.next_u64();
+    let mut prototype = prototype.clone();
+    prototype.charges = charges;
+    if validate_craft_item_prototype(&prototype).is_err() {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(PlannedItemSpawn {
+        prototype,
+        raw_damage: 0,
+        variant: None,
+        maximum_raw_damage: 0,
+        variants: Vec::new(),
+        snippet: None,
+        initial_variables: BTreeMap::new(),
+        modifier_side_effects_supported: true,
+        charges_supported: true,
+        modifier_container_capacity_applies: false,
+        charge_ammunition: None,
+        minimum_one_charge: true,
+        default_charge_range: None,
+        pocket_contents: BTreeMap::new(),
+        sealed_pockets: BTreeSet::new(),
+        integral_ammunition: BTreeMap::new(),
+    })
+}
+
 fn apply_item_group_modifier(
     planned: &mut PlannedItemSpawn,
     entry: &ItemGroupEntryV1,
+    charges: Option<cdda_protocol::InclusiveI32RangeV1>,
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
     rng: &mut ChaCha8Rng,
 ) -> Result<(), SimError> {
+    // Pinned `Item_modifier::modify` applies item state first, constructs the
+    // modifier container before charge/dressing RNG, and inserts the payload
+    // only after those phases have completed.
     apply_item_group_modifier_state(planned, entry, rng)?;
+    let modifier_container = entry
+        .modifier_container
+        .as_ref()
+        .map(|container| construct_item_group_container(container, rng, true))
+        .transpose()?;
+    let modifier_container_capacity = modifier_container
+        .as_ref()
+        .map(|container| modifier_container_charge_capacity(planned, container))
+        .transpose()?
+        .flatten();
+    apply_item_group_charges(planned, charges, modifier_container_capacity, rng)?;
     consume_item_group_modifier_dressing(planned, rng);
+    if let (Some(container), Some(wrapper)) = (modifier_container, &entry.modifier_container) {
+        wrap_single_item(planned, container, wrapper)?;
+    }
+    insert_item_group_contents(planned, &entry.contents, item_groups, rng)?;
+    if entry.seal_contents && !planned.prototype.comestible_type.is_empty() {
+        seal_planned_item(planned)?;
+    }
     Ok(())
+}
+
+fn apply_item_group_charges(
+    planned: &mut PlannedItemSpawn,
+    charges: Option<cdda_protocol::InclusiveI32RangeV1>,
+    modifier_container_capacity: Option<i32>,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    let Some(mut charges) = charges else {
+        if planned.prototype.containment.phase == cdda_protocol::ItemPhaseV1::Liquid
+            && let Some(capacity) = modifier_container_capacity
+        {
+            planned.prototype.charges = capacity.max(1);
+        }
+        return Ok(());
+    };
+    if !planned.charges_supported || charges.minimum < 0 || charges.maximum < charges.minimum {
+        return Err(SimError::InvalidItem);
+    }
+    if let Some(capacity) = modifier_container_capacity {
+        charges.maximum = charges.maximum.min(capacity);
+        charges.minimum = charges.minimum.min(charges.maximum);
+    }
+    let rolled = if charges.minimum == charges.maximum {
+        charges.minimum
+    } else {
+        i32::try_from(inclusive_rng_u64(
+            rng,
+            u64::try_from(charges.minimum).map_err(|_| SimError::InvalidItem)?,
+            u64::try_from(charges.maximum).map_err(|_| SimError::InvalidItem)?,
+        ))
+        .map_err(|_| SimError::NumericOverflow)?
+    };
+    // Pinned Item_modifier clamps every count-by-charges item and every
+    // liquid to one even when the charge range belongs to an outer named
+    // group entry. `minimum_one_charge` only records the equivalent rule for
+    // a leaf-local default range; it cannot describe later modifiers.
+    let rolled = if planned.minimum_one_charge
+        || planned.prototype.containment.count_by_charges
+        || planned.prototype.containment.phase == cdda_protocol::ItemPhaseV1::Liquid
+    {
+        rolled.max(1)
+    } else {
+        rolled
+    };
+    if let Some(ammunition) = &planned.charge_ammunition {
+        let [pocket] = planned.prototype.integral_magazines.as_slice() else {
+            return Err(SimError::InvalidItem);
+        };
+        planned.integral_ammunition.remove(&pocket.pocket_index);
+        if rolled > 0 {
+            let capacity = i32::try_from(pocket.capacity).map_err(|_| SimError::NumericOverflow)?;
+            let loaded = construct_charge_ammunition(ammunition, rolled.min(capacity), rng)?;
+            planned
+                .integral_ammunition
+                .insert(pocket.pocket_index, Box::new(loaded));
+        }
+    } else {
+        planned.prototype.charges = rolled;
+    }
+    Ok(())
+}
+
+fn modifier_container_charge_capacity(
+    planned: &PlannedItemSpawn,
+    container: &PlannedItemSpawn,
+) -> Result<Option<i32>, SimError> {
+    if !planned.modifier_container_capacity_applies || planned.charge_ammunition.is_some() {
+        // Tool ammunition capacity is owned by the tool/magazine rather than
+        // by the modifier container in pinned Item_modifier.
+        return Ok(None);
+    }
+    let mut physical = container
+        .prototype
+        .ammunition_containers
+        .iter()
+        .filter_map(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .filter(|rules| rules.kind == SpawnPocketKindV1::Container)
+        });
+    let rules = physical.next().ok_or(SimError::InvalidItem)?;
+    if physical.next().is_some() {
+        return Err(SimError::InvalidItem);
+    }
+    let profile = &planned.prototype.containment;
+    let volume_capacity = if profile.count_by_charges {
+        match profile.volume_milliliters {
+            0 => u64::try_from(i32::MAX).expect("i32::MAX fits u64"),
+            divisor => {
+                rules
+                    .max_contains_volume_milliliters
+                    .checked_mul(u64::from(profile.stack_size))
+                    .ok_or(SimError::NumericOverflow)?
+                    / divisor
+            }
+        }
+    } else {
+        let volume = planned
+            .total_volume_milliliters()
+            .ok_or(SimError::NumericOverflow)?;
+        rules
+            .max_contains_volume_milliliters
+            .checked_div(volume)
+            .unwrap_or_else(|| u64::try_from(i32::MAX).expect("i32::MAX fits u64"))
+    };
+    let weight_capacity = if profile.weight_milligrams == 0 {
+        u64::try_from(i32::MAX).expect("i32::MAX fits u64")
+    } else {
+        let weight = if profile.count_by_charges {
+            profile.weight_milligrams
+        } else {
+            planned
+                .total_weight_milligrams()
+                .ok_or(SimError::NumericOverflow)?
+        };
+        rules
+            .max_contains_weight_milligrams
+            .checked_div(weight)
+            .unwrap_or_else(|| u64::try_from(i32::MAX).expect("i32::MAX fits u64"))
+    };
+    let capacity = volume_capacity
+        .min(weight_capacity)
+        .min(u64::try_from(i32::MAX).expect("i32::MAX fits u64"));
+    Ok(Some(
+        i32::try_from(capacity).map_err(|_| SimError::NumericOverflow)?,
+    ))
 }
 
 fn apply_item_group_modifier_state(
@@ -641,14 +886,575 @@ fn prototype_uses_magazine_dressing(prototype: &CraftItemPrototypeV1) -> bool {
         || !prototype.magazine_wells.is_empty()
 }
 
+fn construct_item_group_container(
+    wrapper: &ItemGroupContainerV1,
+    rng: &mut ChaCha8Rng,
+    consumes_fit_phase: bool,
+) -> Result<PlannedItemSpawn, SimError> {
+    if wrapper.item.charges.is_some() || wrapper.item.charge_ammunition.is_some() {
+        return Err(SimError::InvalidItem);
+    }
+    let mut container =
+        construct_item_group_item_with_fit_phase(&wrapper.item, rng, consumes_fit_phase)?;
+    if let Some(variant_id) = &wrapper.variant_id {
+        container.variant = container
+            .variants
+            .iter()
+            .find(|option| option.variant.id == *variant_id)
+            .map(|option| option.variant.clone())
+            .ok_or(SimError::InvalidItem)?
+            .into();
+    }
+    Ok(container)
+}
+
+fn wrap_single_item(
+    planned: &mut PlannedItemSpawn,
+    container: PlannedItemSpawn,
+    wrapper: &ItemGroupContainerV1,
+) -> Result<(), SimError> {
+    let payload = std::mem::replace(planned, container);
+    let _ = insert_planned_item(planned, payload)?;
+    if wrapper.sealed {
+        seal_planned_item(planned)?;
+    }
+    Ok(())
+}
+
+fn wrap_item_group_output(
+    output: &mut Vec<PlannedItemSpawn>,
+    output_start: usize,
+    wrapper: &ItemGroupContainerV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    if output_start > output.len() {
+        return Err(SimError::InvalidItem);
+    }
+    let mut payloads = output.split_off(output_start);
+    for index in (1..payloads.len()).rev() {
+        let selected = usize::try_from(inclusive_rng_u64(rng, 0, index as u64))
+            .map_err(|_| SimError::NumericOverflow)?;
+        payloads.swap(index, selected);
+    }
+    // Pinned `put_into_container` uses the direct item constructor. Modifier
+    // containers use `create_single` above and retain the additional FIT draw.
+    let mut container = construct_item_group_container(wrapper, rng, false)?;
+    let mut excess = Vec::new();
+    for payload in payloads {
+        if let Err(payload) = insert_planned_item(&mut container, payload)? {
+            match wrapper.overflow {
+                ItemGroupOverflowV1::Spill => excess.push(payload),
+                ItemGroupOverflowV1::None | ItemGroupOverflowV1::Discard => {}
+            }
+        }
+    }
+    if wrapper.sealed {
+        seal_planned_item(&mut container)?;
+    }
+    output.extend(excess);
+    output.push(container);
+    validate_planned_output_bound(output)
+}
+
+fn insert_item_group_contents(
+    target: &mut PlannedItemSpawn,
+    sources: &[ItemGroupContentsSourceV1],
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    for source in sources {
+        if sources.len() > 1 {
+            // Pinned `load_sub_ref` wraps multiple contents sources in a
+            // probability-100 collection, whose range-100 check still
+            // consumes one RNG draw per source. A single source remains a
+            // direct creator and has no outer collection draw.
+            let _ = rng.next_u64();
+        }
+        let mut contents = match source {
+            ItemGroupContentsSourceV1::Item(item) => {
+                let mut item = construct_item_group_item(item, rng)?;
+                if let Some(charges) = item.default_charge_range {
+                    apply_item_group_charges(&mut item, Some(charges), None, rng)?;
+                }
+                vec![item]
+            }
+            ItemGroupContentsSourceV1::Group(group_id) => {
+                let mut contents = Vec::new();
+                plan_item_group_source_into(
+                    &ItemGroupSourceV1::Group(group_id.clone()),
+                    item_groups,
+                    rng,
+                    &mut contents,
+                    0,
+                )?;
+                contents
+            }
+        };
+        for content in contents.drain(..) {
+            let _ = insert_planned_item(target, content)?;
+        }
+    }
+    Ok(())
+}
+
+impl PlannedItemSpawn {
+    pub(super) fn object_count(&self) -> Option<u64> {
+        self.pocket_contents
+            .values()
+            .flatten()
+            .chain(self.integral_ammunition.values().map(Box::as_ref))
+            .try_fold(1_u64, |total, child| {
+                total.checked_add(child.object_count()?)
+            })
+    }
+
+    fn containment_depth(&self) -> Option<usize> {
+        self.pocket_contents
+            .values()
+            .flatten()
+            .chain(self.integral_ammunition.values().map(Box::as_ref))
+            .try_fold(0_usize, |depth, child| {
+                child
+                    .containment_depth()?
+                    .checked_add(1)
+                    .map(|child_depth| depth.max(child_depth))
+            })
+    }
+
+    fn total_weight_milligrams(&self) -> Option<u64> {
+        if self
+            .prototype
+            .containment
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("NO_DROP"))
+            .is_ok()
+        {
+            return Some(0);
+        }
+        let own = item_containment_weight_milligrams(
+            &self.prototype.containment,
+            self.prototype.charges,
+        )?;
+        let integral = self
+            .integral_ammunition
+            .values()
+            .try_fold(0_u64, |total, child| {
+                total.checked_add(child.total_weight_milligrams()?)
+            })?;
+        let pocketed =
+            self.pocket_contents
+                .iter()
+                .try_fold(0_u64, |total, (pocket_index, contents)| {
+                    let pocket = self
+                        .prototype
+                        .ammunition_containers
+                        .iter()
+                        .find(|pocket| pocket.pocket_index == *pocket_index)?;
+                    if pocket
+                        .spawn_rules
+                        .as_ref()
+                        .is_some_and(|rules| rules.kind == SpawnPocketKindV1::EFileStorage)
+                    {
+                        return Some(total);
+                    }
+                    contents.iter().try_fold(total, |total, child| {
+                        total.checked_add(child.total_weight_milligrams()?)
+                    })
+                })?;
+        own.checked_add(integral)?.checked_add(pocketed)
+    }
+
+    fn total_volume_milliliters(&self) -> Option<u64> {
+        let own = item_containment_volume_milliliters(
+            &self.prototype.containment,
+            self.prototype.charges,
+        )?;
+        let integral =
+            self.integral_ammunition
+                .iter()
+                .try_fold(0_u64, |total, (pocket_index, child)| {
+                    let pocket = self
+                        .prototype
+                        .integral_magazines
+                        .iter()
+                        .find(|pocket| pocket.pocket_index == *pocket_index)?;
+                    if pocket.rigid {
+                        Some(total)
+                    } else {
+                        total.checked_add(child.total_volume_milliliters()?)
+                    }
+                })?;
+        let pocketed =
+            self.pocket_contents
+                .iter()
+                .try_fold(0_u64, |total, (pocket_index, contents)| {
+                    let pocket = self
+                        .prototype
+                        .ammunition_containers
+                        .iter()
+                        .find(|pocket| pocket.pocket_index == *pocket_index)?;
+                    if pocket.rigid {
+                        return Some(total);
+                    }
+                    contents.iter().try_fold(total, |total, child| {
+                        total.checked_add(child.total_volume_milliliters()?)
+                    })
+                })?;
+        own.checked_add(integral)?.checked_add(pocketed)
+    }
+
+    fn has_no_contained_items(&self) -> bool {
+        self.integral_ammunition.is_empty()
+            && self.pocket_contents.values().all(std::vec::Vec::is_empty)
+    }
+
+    fn standard_contents(&self) -> Option<Vec<&PlannedItemSpawn>> {
+        let mut contents = self
+            .integral_ammunition
+            .values()
+            .map(Box::as_ref)
+            .collect::<Vec<_>>();
+        for (pocket_index, pocket_contents) in &self.pocket_contents {
+            let pocket = self
+                .prototype
+                .ammunition_containers
+                .iter()
+                .find(|pocket| pocket.pocket_index == *pocket_index)?;
+            if pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.kind == SpawnPocketKindV1::EFileStorage)
+            {
+                continue;
+            }
+            contents.extend(pocket_contents);
+        }
+        Some(contents)
+    }
+
+    fn containment_length_millimeters(&self) -> Option<u64> {
+        let profile = &self.prototype.containment;
+        let soft = profile
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("SOFT"))
+            .is_ok();
+        if profile.phase == cdda_protocol::ItemPhaseV1::Liquid
+            || (soft && self.has_no_contained_items())
+        {
+            return Some(0);
+        }
+        self.standard_contents()?.into_iter().try_fold(
+            if soft {
+                0
+            } else {
+                profile.longest_side_millimeters
+            },
+            |longest, child| Some(longest.max(child.containment_length_millimeters()?)),
+        )
+    }
+
+    fn soft_volume_fits(&self, maximum: u64) -> Option<bool> {
+        self.standard_contents()?
+            .into_iter()
+            .try_fold(true, |fits, child| {
+                Some(fits && child.max_item_volume_fits(maximum)?)
+            })
+    }
+
+    fn max_item_volume_fits(&self, maximum: u64) -> Option<bool> {
+        let profile = &self.prototype.containment;
+        if matches!(
+            profile.phase,
+            cdda_protocol::ItemPhaseV1::Liquid | cdda_protocol::ItemPhaseV1::Gas
+        ) {
+            return Some(true);
+        }
+        let hard_fits = if profile.count_by_charges {
+            item_containment_single_charge_volume_milliliters(profile)
+        } else {
+            self.total_volume_milliliters()
+        }? <= maximum;
+        let soft_fits = self.soft_volume_fits(maximum)?;
+        let soft = profile
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("SOFT"))
+            .is_ok();
+        let hard = profile
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("HARD"))
+            .is_ok();
+        Some(if soft {
+            soft_fits
+        } else if hard {
+            hard_fits
+        } else {
+            // Material-derived softness is not projected yet. Requiring both
+            // interpretations prevents ambiguous definitions from being
+            // admitted with behavior that differs from pinned C++.
+            hard_fits && soft_fits
+        })
+    }
+}
+
+fn insert_planned_item(
+    target: &mut PlannedItemSpawn,
+    payload: PlannedItemSpawn,
+) -> Result<Result<(), PlannedItemSpawn>, SimError> {
+    let preferred_kind = if payload.prototype.containment.estorable
+        && target.prototype.ammunition_containers.iter().any(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.kind == SpawnPocketKindV1::EFileStorage)
+        }) {
+        SpawnPocketKindV1::EFileStorage
+    } else {
+        SpawnPocketKindV1::Container
+    };
+    let pocket = target
+        .prototype
+        .ammunition_containers
+        .iter()
+        .find(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.kind == preferred_kind)
+        });
+    let Some(pocket) = pocket else {
+        return Ok(Err(payload));
+    };
+    let rules = pocket.spawn_rules.as_ref().ok_or(SimError::InvalidItem)?;
+    if rules.kind == SpawnPocketKindV1::Container && !rules.rigid {
+        return Err(SimError::InvalidItem);
+    }
+    if !spawn_pocket_accepts(target, pocket.pocket_index, rules, &payload)? {
+        return Ok(Err(payload));
+    }
+    if payload
+        .containment_depth()
+        .and_then(|depth| depth.checked_add(1))
+        .is_none_or(|depth| depth > MAX_ITEM_COMPONENT_DEPTH)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    let contents = target
+        .pocket_contents
+        .entry(pocket.pocket_index)
+        .or_default();
+    let mut payload = payload;
+    if payload.prototype.containment.count_by_charges {
+        let combined_charges = contents
+            .iter()
+            .filter(|existing| planned_items_can_combine_for_containment(existing, &payload))
+            .try_fold(payload.prototype.charges, |charges, existing| {
+                charges.checked_add(existing.prototype.charges)
+            })
+            .ok_or(SimError::NumericOverflow)?;
+        contents.retain(|existing| !planned_items_can_combine_for_containment(existing, &payload));
+        payload.prototype.charges = combined_charges;
+    }
+    contents.insert(0, payload);
+    Ok(Ok(()))
+}
+
+fn spawn_pocket_accepts(
+    target: &PlannedItemSpawn,
+    pocket_index: u16,
+    rules: &cdda_protocol::SpawnPocketRulesV1,
+    payload: &PlannedItemSpawn,
+) -> Result<bool, SimError> {
+    let profile = &payload.prototype.containment;
+    if rules.kind == SpawnPocketKindV1::EFileStorage {
+        return Ok(profile.estorable);
+    }
+    if profile.count_by_charges
+        && (!payload.pocket_contents.is_empty() || !payload.integral_ammunition.is_empty())
+    {
+        // Pinned max-item-volume recursively inspects soft count-by-charge
+        // contents. Rigidity/charge apportionment for that shape is not in the
+        // canonical profile yet, so retain it explicitly but fail closed.
+        return Ok(false);
+    }
+    let restricted = !rules.item_restrictions.is_empty() || !rules.flag_restrictions.is_empty();
+    let accepted_restriction = rules
+        .item_restrictions
+        .binary_search(&payload.prototype.type_id)
+        .is_ok()
+        || rules
+            .flag_restrictions
+            .iter()
+            .any(|flag| profile.flags.binary_search(flag).is_ok());
+    let compatibility_volume = if profile.count_by_charges {
+        item_containment_single_charge_volume_milliliters(profile)
+    } else {
+        payload.total_volume_milliliters()
+    }
+    .ok_or(SimError::NumericOverflow)?;
+    let compatibility_length = payload
+        .containment_length_millimeters()
+        .ok_or(SimError::NumericOverflow)?;
+    if profile.phase == cdda_protocol::ItemPhaseV1::Gas
+        || profile
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("NO_UNWIELD"))
+            .is_ok()
+        || (profile.phase == cdda_protocol::ItemPhaseV1::Liquid && !rules.watertight)
+        || (restricted && !accepted_restriction)
+        || compatibility_volume < rules.min_item_volume_milliliters
+        || payload.max_item_volume_fits(rules.max_item_volume_milliliters) != Some(true)
+        || compatibility_length > rules.max_item_length_millimeters
+    {
+        return Ok(false);
+    }
+    let existing = target
+        .pocket_contents
+        .get(&pocket_index)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if profile.phase == cdda_protocol::ItemPhaseV1::Liquid
+        && existing.iter().any(|item| {
+            item.prototype.containment.phase != cdda_protocol::ItemPhaseV1::Liquid
+                || !planned_items_can_combine_for_containment(item, payload)
+        })
+        || profile.phase != cdda_protocol::ItemPhaseV1::Liquid
+            && existing
+                .iter()
+                .any(|item| item.prototype.containment.phase == cdda_protocol::ItemPhaseV1::Liquid)
+    {
+        return Ok(false);
+    }
+    let (volume, weight) = target
+        .pocket_contents
+        .get(&pocket_index)
+        .into_iter()
+        .flatten()
+        .try_fold((0_u64, 0_u64), |(volume, weight), item| {
+            Some((
+                volume.checked_add(item.total_volume_milliliters()?)?,
+                weight.checked_add(item.total_weight_milligrams()?)?,
+            ))
+        })
+        .ok_or(SimError::NumericOverflow)?;
+    let payload_volume = payload
+        .total_volume_milliliters()
+        .ok_or(SimError::NumericOverflow)?;
+    let payload_weight = payload
+        .total_weight_milligrams()
+        .ok_or(SimError::NumericOverflow)?;
+    Ok(volume
+        .checked_add(payload_volume)
+        .is_some_and(|volume| volume <= rules.max_contains_volume_milliliters)
+        && weight
+            .checked_add(payload_weight)
+            .is_some_and(|weight| weight <= rules.max_contains_weight_milligrams))
+}
+
+fn planned_items_can_combine_for_containment(
+    left: &PlannedItemSpawn,
+    right: &PlannedItemSpawn,
+) -> bool {
+    if !left.prototype.containment.count_by_charges
+        || !right.prototype.containment.count_by_charges
+        || !left.pocket_contents.is_empty()
+        || !right.pocket_contents.is_empty()
+        || !left.integral_ammunition.is_empty()
+        || !right.integral_ammunition.is_empty()
+    {
+        return false;
+    }
+    let mut left_prototype = left.prototype.clone();
+    let mut right_prototype = right.prototype.clone();
+    left_prototype.charges = 0;
+    right_prototype.charges = 0;
+    left_prototype == right_prototype
+        && left.raw_damage == right.raw_damage
+        && left.variant == right.variant
+        && left.snippet == right.snippet
+        && left.initial_variables == right.initial_variables
+        && left.sealed_pockets == right.sealed_pockets
+}
+
+fn seal_planned_item(item: &mut PlannedItemSpawn) -> Result<(), SimError> {
+    if !planned_item_is_container_full(item)? {
+        return Ok(());
+    }
+    for pocket in &item.prototype.ammunition_containers {
+        if pocket
+            .spawn_rules
+            .as_ref()
+            .is_some_and(|rules| rules.sealable)
+            && item
+                .pocket_contents
+                .get(&pocket.pocket_index)
+                .is_some_and(|contents| !contents.is_empty())
+        {
+            item.sealed_pockets.insert(pocket.pocket_index);
+        }
+    }
+    Ok(())
+}
+
+fn planned_item_is_container_full(item: &PlannedItemSpawn) -> Result<bool, SimError> {
+    for pocket in &item.prototype.ammunition_containers {
+        let Some(rules) = pocket
+            .spawn_rules
+            .as_ref()
+            .filter(|rules| rules.kind == SpawnPocketKindV1::Container)
+        else {
+            continue;
+        };
+        let Some(contents) = item
+            .pocket_contents
+            .get(&pocket.pocket_index)
+            .filter(|contents| !contents.is_empty())
+        else {
+            return Ok(false);
+        };
+        let used_volume = contents.iter().try_fold(0_u64, |total, content| {
+            total.checked_add(content.total_volume_milliliters()?)
+        });
+        if used_volume.is_some_and(|volume| volume == rules.max_contains_volume_milliliters) {
+            continue;
+        }
+        let first = contents.first().ok_or(SimError::InvalidItem)?;
+        let same_type = contents
+            .iter()
+            .all(|content| content.prototype.type_id == first.prototype.type_id);
+        let mut one_more = first.clone();
+        if one_more.prototype.containment.count_by_charges {
+            one_more.prototype.charges = 1;
+        }
+        if !same_type || spawn_pocket_accepts(item, pocket.pocket_index, rules, &one_more)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_planned_output_bound(output: &[PlannedItemSpawn]) -> Result<(), SimError> {
+    let objects = output
+        .iter()
+        .try_fold(0_u64, |total, item| total.checked_add(item.object_count()?));
+    if objects.is_none_or(|objects| objects > MAX_ITEM_GROUP_OUTPUTS) {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cdda_protocol::{ItemGroupEventV1, ItemGroupItemPrototypeV1, ItemGroupNodeV1};
+    use cdda_protocol::{
+        AmmunitionContainerPocketPrototypeV1, IntegralMagazinePocketPrototypeV1,
+        ItemContainmentProfileV1, ItemGroupEventV1, ItemGroupItemPrototypeV1, ItemGroupNodeV1,
+        ItemPhaseV1, SpawnPocketRulesV1,
+    };
     use rand_core::SeedableRng;
 
-    fn leaf(type_id: &str) -> ItemGroupTargetV1 {
-        ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
+    fn leaf_item(type_id: &str) -> ItemGroupItemPrototypeV1 {
+        ItemGroupItemPrototypeV1 {
             prototype: CraftItemPrototypeV1 {
                 type_id: type_id.to_owned(),
                 charges: 1,
@@ -664,13 +1470,59 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
             maximum_raw_damage: 0,
             variants: Vec::new(),
+            snippets: Vec::new(),
+            initial_variables: BTreeMap::new(),
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
-        }))
+            charge_ammunition: None,
+            charges_supported: true,
+            modifier_container_capacity_applies: true,
+            contents_insertion_supported: true,
+        }
+    }
+
+    fn leaf(type_id: &str) -> ItemGroupTargetV1 {
+        ItemGroupTargetV1::Item(Box::new(leaf_item(type_id)))
+    }
+
+    fn spawn_pocket(
+        kind: SpawnPocketKindV1,
+        rigid: bool,
+        maximum_volume: u64,
+        maximum_length: u64,
+        restrictions: Vec<String>,
+        sealable: bool,
+    ) -> AmmunitionContainerPocketPrototypeV1 {
+        AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("SPAWN"),
+            capacities: Vec::new(),
+            rigid,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind,
+                max_contains_volume_milliliters: maximum_volume,
+                max_contains_weight_milligrams: u64::MAX,
+                max_item_volume_milliliters: maximum_volume,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: maximum_length,
+                item_restrictions: restrictions,
+                flag_restrictions: Vec::new(),
+                access_moves: 100,
+                rigid,
+                watertight: false,
+                transparent: false,
+                forbidden: false,
+                sealable,
+            }),
+        }
     }
 
     fn entry(probability: u32, event: Option<ItemGroupEventV1>, type_id: &str) -> ItemGroupEntryV1 {
@@ -682,6 +1534,11 @@ mod tests {
             variant_id: None,
             event,
             target: leaf(type_id),
+            modifier_charges: None,
+            contents: Vec::new(),
+            seal_contents: false,
+            direct_wrapper: None,
+            modifier_container: None,
         }
     }
 
@@ -723,8 +1580,14 @@ mod tests {
                     variant_id: Some(String::from("green")),
                     event: None,
                     target,
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let mut rng = ChaCha8Rng::seed_from_u64(41);
         let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut rng)
@@ -761,8 +1624,14 @@ mod tests {
                     variant_id: None,
                     event: None,
                     target,
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let mut expected_rng = ChaCha8Rng::seed_from_u64(2);
         let _collection_roll = expected_rng.next_u64();
@@ -816,8 +1685,14 @@ mod tests {
                     variant_id: None,
                     event: None,
                     target,
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let seed = 2;
         let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
@@ -845,6 +1720,276 @@ mod tests {
     }
 
     #[test]
+    fn integral_tool_charge_ammunition_uses_the_two_draw_direct_constructor() {
+        let mut target = leaf_item("charged_tool");
+        target.prototype.charges = 0;
+        target.prototype.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("BATTERY"),
+            ammunition_type: String::from("battery"),
+            capacity: 5,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+        }];
+        target.maximum_raw_damage = cdda_protocol::MAX_ITEM_RAW_DAMAGE;
+        target.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+            minimum: 1,
+            maximum: 4,
+        });
+        let mut ammunition = leaf_item("battery").prototype;
+        ammunition.ammunition_type = String::from("battery");
+        ammunition.containment = ItemContainmentProfileV1 {
+            count_by_charges: true,
+            stack_size: 1,
+            ..ItemContainmentProfileV1::default()
+        };
+        target.charge_ammunition = Some(ammunition);
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Item(Box::new(target)),
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: None,
+        });
+
+        let seed = 37;
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        let _collection = expected_rng.next_u64();
+        for _ in 0..3 {
+            let _tool_constructor = expected_rng.next_u64();
+        }
+        let _fixed_damage = expected_rng.next_u64();
+        let expected_charges = 1 + expected_rng.next_u64() % 4;
+        let _ammunition_presentation = expected_rng.next_u64();
+        let _ammunition_variant = expected_rng.next_u64();
+        let _ammunition_dressing = expected_rng.next_u64();
+        let _magazine_dressing = expected_rng.next_u64();
+
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
+            .expect("integral-tool charge modifier should plan");
+        assert_eq!(
+            planned[0].integral_ammunition[&0].prototype.charges,
+            expected_charges as i32
+        );
+        assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn modifier_state_precedes_container_construction_and_charge_dressing() {
+        let seed = (1_u64..100)
+            .find(|seed| {
+                let mut rng = ChaCha8Rng::seed_from_u64(*seed);
+                let draws = (0..12).map(|_| rng.next_u64()).collect::<Vec<_>>();
+                draws[6] % 2 != draws[5] % 2
+            })
+            .expect("a distinguishing deterministic seed should exist");
+        let mut target = leaf_item("charged_magazine");
+        target.prototype.ammunition_type = String::from("9mm");
+        target.prototype.magazine_capacity = 10;
+        target.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+            minimum: 1,
+            maximum: 4,
+        });
+        let mut container = leaf_item("magazine_case");
+        container.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            100,
+            100,
+            Vec::new(),
+            false,
+        )];
+        container.variants = vec![variant("red_case", 1), variant("blue_case", 1)];
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Item(Box::new(target)),
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: Some(ItemGroupContainerV1 {
+                        item: Box::new(container),
+                        variant_id: None,
+                        sealed: false,
+                        overflow: ItemGroupOverflowV1::None,
+                    }),
+                }],
+            }],
+            wrapper: None,
+        });
+
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        let _collection = expected_rng.next_u64();
+        for _ in 0..3 {
+            let _target_constructor = expected_rng.next_u64();
+        }
+        let _fixed_damage = expected_rng.next_u64();
+        let _container_presentation = expected_rng.next_u64();
+        let container_variant = expected_rng.next_u64();
+        let _container_fit = expected_rng.next_u64();
+        let expected_charges = 1 + expected_rng.next_u64() % 4;
+        let _ammunition_dressing = expected_rng.next_u64();
+        let _magazine_dressing = expected_rng.next_u64();
+
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
+            .expect("modifier container should plan");
+        let [case] = planned.as_slice() else {
+            panic!("one modifier container should remain")
+        };
+        assert_eq!(case.prototype.type_id, "magazine_case");
+        assert_eq!(
+            case.variant.as_ref().map(|variant| variant.id.as_str()),
+            Some(if container_variant % 2 == 0 {
+                "red_case"
+            } else {
+                "blue_case"
+            })
+        );
+        assert_eq!(
+            case.pocket_contents[&0][0].prototype.charges,
+            expected_charges as i32
+        );
+        assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn modifier_container_capacity_clamps_ranges_and_fills_liquids() {
+        let source = |charges| {
+            let mut liquid = leaf_item("liquid_payload");
+            liquid.prototype.charges = 1;
+            liquid.prototype.containment = ItemContainmentProfileV1 {
+                weight_milligrams: 100,
+                volume_milliliters: 1_000,
+                longest_side_millimeters: 1,
+                flags: Vec::new(),
+                phase: ItemPhaseV1::Liquid,
+                count_by_charges: true,
+                stack_size: 10,
+                ..ItemContainmentProfileV1::default()
+            };
+            liquid.charges = charges;
+            liquid.minimum_one_charge = charges.is_some();
+            liquid.charges_supported = true;
+
+            let mut container = leaf_item("bottle");
+            container.prototype.ammunition_containers = vec![spawn_pocket(
+                SpawnPocketKindV1::Container,
+                true,
+                500,
+                100,
+                Vec::new(),
+                false,
+            )];
+            let rules = container.prototype.ammunition_containers[0]
+                .spawn_rules
+                .as_mut()
+                .expect("spawn rules");
+            rules.max_contains_weight_milligrams = 1_000;
+            rules.watertight = true;
+
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        variant_id: None,
+                        event: None,
+                        target: ItemGroupTargetV1::Item(Box::new(liquid)),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: Some(ItemGroupContainerV1 {
+                            item: Box::new(container),
+                            variant_id: None,
+                            sealed: false,
+                            overflow: ItemGroupOverflowV1::None,
+                        }),
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+
+        for charges in [
+            Some(cdda_protocol::InclusiveI32RangeV1 {
+                minimum: 50,
+                maximum: 80,
+            }),
+            None,
+        ] {
+            let mut rng = ChaCha8Rng::seed_from_u64(73);
+            let planned = plan_item_group_source(&source(charges), &BTreeMap::new(), &mut rng)
+                .expect("capacity-coupled liquid should plan");
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].prototype.type_id, "bottle");
+            assert_eq!(planned[0].pocket_contents[&0][0].prototype.charges, 5);
+        }
+
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(73);
+        let _ = plan_item_group_source(
+            &source(Some(cdda_protocol::InclusiveI32RangeV1 {
+                minimum: 50,
+                maximum: 80,
+            })),
+            &BTreeMap::new(),
+            &mut actual_rng,
+        )
+        .expect("clamped range should plan");
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(73);
+        for _ in 0..8 {
+            let _fixed_phase = expected_rng.next_u64();
+        }
+        assert_eq!(
+            actual_rng.next_u64(),
+            expected_rng.next_u64(),
+            "clamping the explicit range to one value consumes no charge RNG draw"
+        );
+    }
+
+    #[test]
     fn any_variant_modifier_performs_a_second_weighted_selection() {
         let mut target = leaf("variant_item");
         let ItemGroupTargetV1::Item(item) = &mut target else {
@@ -868,8 +2013,14 @@ mod tests {
                     variant_id: Some(String::from("<any>")),
                     event: None,
                     target,
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let seed = 2;
         let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
@@ -926,8 +2077,14 @@ mod tests {
                             variant_id: Some(String::from("blue")),
                             event: None,
                             target,
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
                         }],
                     }],
+                    wrapper: None,
                 },
             },
         )]);
@@ -947,8 +2104,14 @@ mod tests {
                     variant_id: Some(String::from("<any>")),
                     event: None,
                     target: ItemGroupTargetV1::Group(String::from("child")),
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let seed = 97;
         let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
@@ -1001,6 +2164,11 @@ mod tests {
                                 variant_id: None,
                                 event: None,
                                 target: damageable,
+                                modifier_charges: None,
+                                contents: Vec::new(),
+                                seal_contents: false,
+                                direct_wrapper: None,
+                                modifier_container: None,
                             },
                             ItemGroupEntryV1 {
                                 probability: 100,
@@ -1010,9 +2178,15 @@ mod tests {
                                 variant_id: None,
                                 event: None,
                                 target: undamageable,
+                                modifier_charges: None,
+                                contents: Vec::new(),
+                                seal_contents: false,
+                                direct_wrapper: None,
+                                modifier_container: None,
                             },
                         ],
                     }],
+                    wrapper: None,
                 },
             },
         )]);
@@ -1032,8 +2206,14 @@ mod tests {
                     variant_id: Some(String::from("worn")),
                     event: None,
                     target: ItemGroupTargetV1::Group(String::from("child")),
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let mut rng = ChaCha8Rng::seed_from_u64(73);
         let planned = plan_item_group_source(&source, &catalog, &mut rng)
@@ -1069,6 +2249,939 @@ mod tests {
     }
 
     #[test]
+    fn named_group_zero_charge_modifier_clamps_count_by_charges_leaf_to_one() {
+        let mut count_by_charges = leaf_item("nail");
+        count_by_charges.prototype.charges = 1;
+        count_by_charges.prototype.containment.count_by_charges = true;
+        count_by_charges.prototype.containment.stack_size = 1;
+        count_by_charges.charges = None;
+        count_by_charges.minimum_one_charge = false;
+        let catalog = BTreeMap::from([(
+            String::from("counted_child"),
+            ItemGroupDefinitionV1 {
+                group_id: String::from("counted_child"),
+                graph: ItemGroupGraphV1 {
+                    root_node: 0,
+                    nodes: vec![ItemGroupNodeV1 {
+                        node_id: 0,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            raw_damage: None,
+                            variant_id: None,
+                            event: None,
+                            target: ItemGroupTargetV1::Item(Box::new(count_by_charges)),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                        }],
+                    }],
+                    wrapper: None,
+                },
+            },
+        )]);
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: None,
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Group(String::from("counted_child")),
+                    modifier_charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: None,
+        });
+
+        let mut rng = ChaCha8Rng::seed_from_u64(113);
+        let planned = plan_item_group_source(&source, &catalog, &mut rng)
+            .expect("outer charge modifier should plan");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].prototype.charges, 1);
+    }
+
+    #[test]
+    fn nested_phone_family_retains_wrapper_contents_snippet_and_variables() {
+        let mut phone = leaf_item("smart_phone");
+        phone.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 233_000,
+            volume_milliliters: 111,
+            longest_side_millimeters: 150,
+            flags: Vec::new(),
+            estorable: false,
+            ..ItemContainmentProfileV1::default()
+        };
+        phone.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::EFileStorage,
+            true,
+            u64::MAX,
+            u64::MAX,
+            Vec::new(),
+            false,
+        )];
+        phone.snippets = vec![
+            ItemSnippetV1 {
+                id: String::from("greeting_a"),
+                text: String::from("Hello"),
+            },
+            ItemSnippetV1 {
+                id: String::from("greeting_b"),
+                text: String::from("Hi"),
+            },
+        ];
+        phone.initial_variables.insert(
+            String::from("browsed"),
+            ItemVariableValueV1::String(String::from("false")),
+        );
+
+        let phone_group = ItemGroupDefinitionV1 {
+            group_id: String::from("phone_choice"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Distribution,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 1,
+                        count_min: 1,
+                        count_max: 1,
+                        raw_damage: None,
+                        variant_id: None,
+                        event: None,
+                        target: ItemGroupTargetV1::Item(Box::new(phone)),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
+                    }],
+                }],
+                wrapper: None,
+            },
+        };
+        let efiles = ["efile_map", "efile_lore", "efile_recipes"]
+            .into_iter()
+            .map(|type_id| {
+                let mut efile = leaf_item(type_id);
+                efile.prototype.containment.estorable = true;
+                ItemGroupContentsSourceV1::Item(Box::new(efile))
+            })
+            .collect();
+        let mut case = leaf_item("waterproof_smart_phone_case");
+        case.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            111,
+            150,
+            vec![String::from("smart_phone")],
+            false,
+        )];
+        case.variants = vec![variant("black_smart_phone_case", 1)];
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: None,
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Group(String::from("phone_choice")),
+                    modifier_charges: None,
+                    contents: efiles,
+                    seal_contents: true,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: Some(ItemGroupContainerV1 {
+                item: Box::new(case),
+                variant_id: Some(String::from("black_smart_phone_case")),
+                sealed: false,
+                overflow: ItemGroupOverflowV1::None,
+            }),
+        });
+        let catalog = BTreeMap::from([(String::from("phone_choice"), phone_group)]);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let planned = plan_item_group_source(&source, &catalog, &mut rng)
+            .expect("the generalized nested phone family should plan");
+        let [case] = planned.as_slice() else {
+            panic!("the family should emit exactly one case");
+        };
+        assert_eq!(case.prototype.type_id, "waterproof_smart_phone_case");
+        assert_eq!(
+            case.variant.as_ref().map(|variant| variant.id.as_str()),
+            Some("black_smart_phone_case")
+        );
+        let [phone] = case
+            .pocket_contents
+            .get(&0)
+            .expect("the case should contain its phone")
+            .as_slice()
+        else {
+            panic!("the case should contain exactly one phone");
+        };
+        assert_eq!(phone.prototype.type_id, "smart_phone");
+        assert!(matches!(
+            phone.snippet.as_ref().map(|snippet| snippet.id.as_str()),
+            Some("greeting_a" | "greeting_b")
+        ));
+        assert_eq!(
+            phone.initial_variables.get("browsed"),
+            Some(&ItemVariableValueV1::String(String::from("false")))
+        );
+        assert_eq!(
+            phone
+                .pocket_contents
+                .get(&0)
+                .expect("the phone should retain generated E-files")
+                .iter()
+                .map(|item| item.prototype.type_id.as_str())
+                .collect::<Vec<_>>(),
+            ["efile_recipes", "efile_lore", "efile_map"]
+        );
+        assert!(
+            phone.sealed_pockets.is_empty(),
+            "upstream seals modifier contents only when the modified item is comestible"
+        );
+    }
+
+    #[test]
+    fn physical_pockets_use_or_restrictions_and_recursive_dynamic_capacity() {
+        let mut target_definition = leaf_item("rigid_case");
+        target_definition.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            100,
+            100,
+            vec![String::from("different_item")],
+            false,
+        )];
+        let rules = target_definition.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("spawn rules exist");
+        rules.flag_restrictions = vec![String::from("FORM_A"), String::from("FORM_B")];
+        rules.max_contains_weight_milligrams = 70;
+
+        let mut payload_definition = leaf_item("smart_phone");
+        payload_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 20,
+            volume_milliliters: 10,
+            longest_side_millimeters: 10,
+            flags: vec![String::from("FORM_B")],
+            ..ItemContainmentProfileV1::default()
+        };
+        payload_definition.prototype.charges = 0;
+        payload_definition.prototype.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("BATTERY"),
+            ammunition_type: String::from("battery"),
+            capacity: 5,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+        }];
+        let mut battery_definition = leaf_item("battery");
+        battery_definition.prototype.charges = 5;
+        battery_definition.prototype.ammunition_type = String::from("battery");
+        battery_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 10,
+            volume_milliliters: 100,
+            longest_side_millimeters: 10,
+            phase: ItemPhaseV1::Solid,
+            count_by_charges: true,
+            stack_size: 10,
+            ..ItemContainmentProfileV1::default()
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(17);
+        let mut target = construct_item_group_item(&target_definition, &mut rng)
+            .expect("target should construct");
+        let mut payload = construct_item_group_item(&payload_definition, &mut rng)
+            .expect("payload should construct");
+        let battery = construct_item_group_item(&battery_definition, &mut rng)
+            .expect("battery should construct");
+        payload.integral_ammunition.insert(0, Box::new(battery));
+        assert!(matches!(
+            insert_planned_item(&mut target, payload.clone()),
+            Ok(Ok(()))
+        ));
+        assert_eq!(
+            target.pocket_contents[&0][0].total_weight_milligrams(),
+            Some(70),
+            "the integral battery must count toward the phone's carried weight"
+        );
+
+        let mut no_unwield_payload = payload.clone();
+        no_unwield_payload
+            .prototype
+            .containment
+            .flags
+            .push(String::from("NO_UNWIELD"));
+        let mut no_unwield_target = construct_item_group_item(&target_definition, &mut rng)
+            .expect("NO_UNWIELD target should construct");
+        assert!(matches!(
+            insert_planned_item(&mut no_unwield_target, no_unwield_payload),
+            Ok(Err(_))
+        ));
+
+        let mut too_small = construct_item_group_item(&target_definition, &mut rng)
+            .expect("second target should construct");
+        too_small.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("spawn rules exist")
+            .max_contains_weight_milligrams = 69;
+        assert!(matches!(
+            insert_planned_item(&mut too_small, payload),
+            Ok(Err(_))
+        ));
+    }
+
+    #[test]
+    fn liquid_requires_watertight_capacity_and_uses_charge_scaled_volume() {
+        let mut target_definition = leaf_item("bottle");
+        target_definition.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            100,
+            100,
+            Vec::new(),
+            false,
+        )];
+        let mut liquid_definition = leaf_item("water");
+        liquid_definition.prototype.charges = 5;
+        liquid_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 10,
+            volume_milliliters: 100,
+            longest_side_millimeters: 50,
+            phase: ItemPhaseV1::Liquid,
+            count_by_charges: true,
+            stack_size: 10,
+            ..ItemContainmentProfileV1::default()
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(23);
+        let liquid = construct_item_group_item(&liquid_definition, &mut rng)
+            .expect("liquid should construct");
+        assert_eq!(liquid.total_volume_milliliters(), Some(50));
+
+        let mut leaking = construct_item_group_item(&target_definition, &mut rng)
+            .expect("leaking target should construct");
+        assert!(matches!(
+            insert_planned_item(&mut leaking, liquid.clone()),
+            Ok(Err(_))
+        ));
+
+        target_definition.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("spawn rules exist")
+            .watertight = true;
+        let mut watertight = construct_item_group_item(&target_definition, &mut rng)
+            .expect("watertight target should construct");
+        assert!(matches!(
+            insert_planned_item(&mut watertight, liquid.clone()),
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            insert_planned_item(&mut watertight, liquid.clone()),
+            Ok(Ok(()))
+        ));
+        assert_eq!(watertight.pocket_contents[&0].len(), 1);
+        assert_eq!(watertight.pocket_contents[&0][0].prototype.charges, 10);
+        let mut mismatched_state = liquid.clone();
+        mismatched_state.initial_variables.insert(
+            String::from("source"),
+            ItemVariableValueV1::String(String::from("different")),
+        );
+        let mut mixed = construct_item_group_item(&target_definition, &mut rng)
+            .expect("mixed-state target should construct");
+        assert!(matches!(
+            insert_planned_item(&mut mixed, liquid.clone()),
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            insert_planned_item(&mut mixed, mismatched_state),
+            Ok(Err(_))
+        ));
+        let mut too_small = construct_item_group_item(&target_definition, &mut rng)
+            .expect("small target should construct");
+        too_small.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("spawn rules exist")
+            .max_contains_volume_milliliters = 49;
+        assert!(matches!(
+            insert_planned_item(&mut too_small, liquid),
+            Ok(Err(_))
+        ));
+    }
+
+    #[test]
+    fn planned_containment_depth_matches_the_canonical_snapshot_boundary() {
+        let mut container_definition = leaf_item("nested_case");
+        container_definition.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            u64::MAX,
+            u64::MAX,
+            Vec::new(),
+            false,
+        )];
+        let mut rng = ChaCha8Rng::seed_from_u64(31);
+        let mut nested = construct_item_group_item(&leaf_item("payload"), &mut rng)
+            .expect("payload should construct");
+        for _ in 0..MAX_ITEM_COMPONENT_DEPTH {
+            let mut container = construct_item_group_item(&container_definition, &mut rng)
+                .expect("container should construct");
+            assert!(matches!(
+                insert_planned_item(&mut container, nested),
+                Ok(Ok(()))
+            ));
+            nested = container;
+        }
+        assert_eq!(nested.containment_depth(), Some(MAX_ITEM_COMPONENT_DEPTH));
+
+        let mut one_too_deep = construct_item_group_item(&container_definition, &mut rng)
+            .expect("outer container should construct");
+        assert!(matches!(
+            insert_planned_item(&mut one_too_deep, nested),
+            Err(SimError::InvalidItem)
+        ));
+        assert!(one_too_deep.pocket_contents.is_empty());
+    }
+
+    #[test]
+    fn multiple_modifier_contents_sources_consume_implicit_collection_rolls() {
+        let seed = (1_u64..100)
+            .find(|seed| {
+                let mut rng = ChaCha8Rng::seed_from_u64(*seed);
+                let draws = (0..13).map(|_| rng.next_u64()).collect::<Vec<_>>();
+                draws[10] % 2 != draws[8] % 2
+            })
+            .expect("a distinguishing deterministic seed should exist");
+        let mut target = leaf_item("case");
+        target.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            100,
+            100,
+            Vec::new(),
+            false,
+        )];
+        let first = leaf_item("first_payload");
+        let mut second = leaf_item("second_payload");
+        second.variants = vec![variant("red", 1), variant("blue", 1)];
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: None,
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Item(Box::new(target)),
+                    modifier_charges: None,
+                    contents: vec![
+                        ItemGroupContentsSourceV1::Item(Box::new(first)),
+                        ItemGroupContentsSourceV1::Item(Box::new(second)),
+                    ],
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: None,
+        });
+
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        let draws = (0..12).map(|_| expected_rng.next_u64()).collect::<Vec<_>>();
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
+            .expect("multiple direct contents should plan");
+        let second = planned[0]
+            .pocket_contents
+            .get(&0)
+            .and_then(|contents| contents.first())
+            .expect("second source is inserted at the front");
+        assert_eq!(second.prototype.type_id, "second_payload");
+        assert_eq!(
+            second.variant.as_ref().map(|variant| variant.id.as_str()),
+            Some(if draws[10] % 2 == 0 { "red" } else { "blue" })
+        );
+        assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn named_contents_group_starts_an_independent_recursion_budget() {
+        let nodes = (0..MAX_ITEM_GROUP_DEPTH)
+            .map(|index| ItemGroupNodeV1 {
+                node_id: u16::try_from(index).expect("bounded depth fits u16"),
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![entry(
+                    100,
+                    None,
+                    if index + 1 == MAX_ITEM_GROUP_DEPTH {
+                        "chain_leaf"
+                    } else {
+                        "unused"
+                    },
+                )],
+            })
+            .collect::<Vec<_>>();
+        let mut definition = ItemGroupDefinitionV1 {
+            group_id: String::from("depth_chain"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes,
+                wrapper: None,
+            },
+        };
+        for index in 0..MAX_ITEM_GROUP_DEPTH - 1 {
+            definition.graph.nodes[index].entries[0].target =
+                ItemGroupTargetV1::Node(u16::try_from(index + 1).expect("bounded depth fits u16"));
+        }
+        let catalog = BTreeMap::from([(definition.group_id.clone(), definition)]);
+        let mut case = leaf_item("depth_case");
+        case.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            u64::MAX,
+            u64::MAX,
+            Vec::new(),
+            false,
+        )];
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Item(Box::new(case)),
+                    modifier_charges: None,
+                    contents: vec![ItemGroupContentsSourceV1::Group(String::from(
+                        "depth_chain",
+                    ))],
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: None,
+        });
+
+        let planned = plan_item_group_source(&source, &catalog, &mut ChaCha8Rng::seed_from_u64(73))
+            .expect("contents group should receive the same root recursion budget as any source");
+        assert_eq!(
+            planned[0].pocket_contents[&0][0].prototype.type_id,
+            "chain_leaf"
+        );
+    }
+
+    #[test]
+    fn modifier_contents_seal_only_comestible_spawn_pockets() {
+        let mut food = leaf_item("jarred_food");
+        food.prototype.comestible_type = String::from("FOOD");
+        food.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            10,
+            10,
+            Vec::new(),
+            true,
+        )];
+        let mut contents = leaf_item("seasoning");
+        contents.prototype.containment.volume_milliliters = 10;
+        let source = |seal_contents| {
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        variant_id: None,
+                        event: None,
+                        target: ItemGroupTargetV1::Item(Box::new(food.clone())),
+                        modifier_charges: None,
+                        contents: vec![ItemGroupContentsSourceV1::Item(Box::new(contents.clone()))],
+                        seal_contents,
+                        direct_wrapper: None,
+                        modifier_container: None,
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+
+        let mut sealed_rng = ChaCha8Rng::seed_from_u64(27);
+        let sealed = plan_item_group_source(&source(true), &BTreeMap::new(), &mut sealed_rng)
+            .expect("default-sealed comestible contents should plan");
+        assert_eq!(sealed[0].sealed_pockets, BTreeSet::from([0]));
+        assert_eq!(sealed[0].pocket_contents[&0].len(), 1);
+        let mut expected_single_source_rng = ChaCha8Rng::seed_from_u64(27);
+        for _ in 0..8 {
+            let _ = expected_single_source_rng.next_u64();
+        }
+        assert_eq!(
+            sealed_rng.next_u64(),
+            expected_single_source_rng.next_u64(),
+            "one contents source stays a direct creator without a collection roll"
+        );
+
+        let mut unsealed_rng = ChaCha8Rng::seed_from_u64(27);
+        let unsealed = plan_item_group_source(&source(false), &BTreeMap::new(), &mut unsealed_rng)
+            .expect("explicitly unsealed comestible contents should plan");
+        assert!(unsealed[0].sealed_pockets.is_empty());
+    }
+
+    #[test]
+    fn direct_entry_wrapper_contains_the_complete_count_and_exists_when_empty() {
+        let source = |count| {
+            let mut wrapper = leaf_item("counted_case");
+            wrapper.prototype.ammunition_containers = vec![spawn_pocket(
+                SpawnPocketKindV1::Container,
+                true,
+                10,
+                100,
+                Vec::new(),
+                false,
+            )];
+            wrapper.variants = vec![variant("red_case", 1), variant("blue_case", 1)];
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: count,
+                        count_max: count,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        variant_id: None,
+                        event: None,
+                        target: ItemGroupTargetV1::Item(Box::new(leaf_item("payload"))),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: Some(ItemGroupContainerV1 {
+                            item: Box::new(wrapper),
+                            variant_id: None,
+                            sealed: true,
+                            overflow: ItemGroupOverflowV1::None,
+                        }),
+                        modifier_container: None,
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+
+        let mut counted_rng = ChaCha8Rng::seed_from_u64(41);
+        let counted = plan_item_group_source(&source(2), &BTreeMap::new(), &mut counted_rng)
+            .expect("two payloads should share one direct wrapper");
+        assert_eq!(counted.len(), 1);
+        assert_eq!(counted[0].prototype.type_id, "counted_case");
+        assert_eq!(counted[0].pocket_contents[&0].len(), 2);
+        assert!(
+            counted[0].sealed_pockets.is_empty(),
+            "a partially filled wrapper remains unsealed"
+        );
+        let mut expected_counted_rng = ChaCha8Rng::seed_from_u64(41);
+        let _collection = expected_counted_rng.next_u64();
+        for _ in 0..2 {
+            for _ in 0..3 {
+                let _payload_constructor = expected_counted_rng.next_u64();
+            }
+            let _fixed_damage = expected_counted_rng.next_u64();
+        }
+        let _payload_shuffle = expected_counted_rng.next_u64();
+        let _wrapper_presentation = expected_counted_rng.next_u64();
+        let counted_wrapper_variant = expected_counted_rng.next_u64();
+        assert_eq!(
+            counted[0]
+                .variant
+                .as_ref()
+                .map(|variant| variant.id.as_str()),
+            Some(if counted_wrapper_variant % 2 == 0 {
+                "red_case"
+            } else {
+                "blue_case"
+            })
+        );
+        assert_eq!(counted_rng.next_u64(), expected_counted_rng.next_u64());
+
+        let mut empty_rng = ChaCha8Rng::seed_from_u64(41);
+        let empty = plan_item_group_source(&source(0), &BTreeMap::new(), &mut empty_rng)
+            .expect("zero count should still construct its direct wrapper");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].prototype.type_id, "counted_case");
+        assert!(empty[0].pocket_contents.is_empty());
+        assert!(
+            empty[0].sealed_pockets.is_empty(),
+            "an empty wrapper remains unsealed"
+        );
+        let mut expected_empty_rng = ChaCha8Rng::seed_from_u64(41);
+        let _collection = expected_empty_rng.next_u64();
+        let _wrapper_presentation = expected_empty_rng.next_u64();
+        let empty_wrapper_variant = expected_empty_rng.next_u64();
+        assert_eq!(
+            empty[0].variant.as_ref().map(|variant| variant.id.as_str()),
+            Some(if empty_wrapper_variant % 2 == 0 {
+                "red_case"
+            } else {
+                "blue_case"
+            })
+        );
+        assert_eq!(empty_rng.next_u64(), expected_empty_rng.next_u64());
+    }
+
+    #[test]
+    fn rigid_wrapper_boundaries_spill_or_discard_without_losing_the_container() {
+        let payload = |type_id: &str, length: u64| {
+            let mut item = leaf_item(type_id);
+            item.prototype.containment = ItemContainmentProfileV1 {
+                weight_milligrams: 1,
+                volume_milliliters: 1,
+                longest_side_millimeters: length,
+                flags: Vec::new(),
+                estorable: false,
+                ..ItemContainmentProfileV1::default()
+            };
+            item
+        };
+        let source = |overflow| {
+            let mut wrapper = leaf_item("rigid_case");
+            wrapper.prototype.ammunition_containers = vec![spawn_pocket(
+                SpawnPocketKindV1::Container,
+                true,
+                2,
+                10,
+                Vec::new(),
+                true,
+            )];
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![
+                        ItemGroupEntryV1 {
+                            target: ItemGroupTargetV1::Item(Box::new(payload("short_a", 10))),
+                            ..entry(100, None, "unused")
+                        },
+                        ItemGroupEntryV1 {
+                            target: ItemGroupTargetV1::Item(Box::new(payload("short_b", 9))),
+                            ..entry(100, None, "unused")
+                        },
+                        ItemGroupEntryV1 {
+                            target: ItemGroupTargetV1::Item(Box::new(payload("too_long", 11))),
+                            ..entry(100, None, "unused")
+                        },
+                    ],
+                }],
+                wrapper: Some(ItemGroupContainerV1 {
+                    item: Box::new(wrapper),
+                    variant_id: None,
+                    sealed: true,
+                    overflow,
+                }),
+            })
+        };
+
+        let mut spill_rng = ChaCha8Rng::seed_from_u64(9);
+        let spilled = plan_item_group_source(
+            &source(ItemGroupOverflowV1::Spill),
+            &BTreeMap::new(),
+            &mut spill_rng,
+        )
+        .expect("spill overflow should plan");
+        assert_eq!(spilled.len(), 2);
+        assert_eq!(spilled[0].prototype.type_id, "too_long");
+        assert_eq!(spilled[1].prototype.type_id, "rigid_case");
+        assert_eq!(
+            spilled[1]
+                .pocket_contents
+                .get(&0)
+                .expect("the rigid case should contain both fitting items")
+                .len(),
+            2
+        );
+        assert_eq!(spilled[1].sealed_pockets, BTreeSet::from([0]));
+
+        let mut discard_rng = ChaCha8Rng::seed_from_u64(9);
+        let discarded = plan_item_group_source(
+            &source(ItemGroupOverflowV1::Discard),
+            &BTreeMap::new(),
+            &mut discard_rng,
+        )
+        .expect("discard overflow should plan");
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(discarded[0].prototype.type_id, "rigid_case");
+
+        let mut non_rigid = leaf_item("bag");
+        non_rigid.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            false,
+            2,
+            10,
+            Vec::new(),
+            false,
+        )];
+        let invalid = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![entry(100, None, "payload")],
+            }],
+            wrapper: Some(ItemGroupContainerV1 {
+                item: Box::new(non_rigid),
+                variant_id: None,
+                sealed: false,
+                overflow: ItemGroupOverflowV1::None,
+            }),
+        });
+        let mut invalid_rng = ChaCha8Rng::seed_from_u64(1);
+        assert!(
+            matches!(
+                plan_item_group_source(&invalid, &BTreeMap::new(), &mut invalid_rng),
+                Err(SimError::InvalidItem)
+            ),
+            "unsupported flexible-container semantics must fail closed"
+        );
+    }
+
+    #[test]
+    fn spawn_pockets_use_soft_and_recursive_length_compatibility() {
+        let planned = |definition: &ItemGroupItemPrototypeV1| {
+            let mut rng = ChaCha8Rng::seed_from_u64(1);
+            construct_item_group_item(definition, &mut rng).expect("fixture should construct")
+        };
+        let mut outer_definition = leaf_item("outer");
+        outer_definition.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            1_000,
+            100,
+            Vec::new(),
+            false,
+        )];
+        outer_definition.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("spawn rules")
+            .max_item_volume_milliliters = 100;
+
+        let mut soft_definition = leaf_item("soft_bundle");
+        soft_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 1,
+            volume_milliliters: 500,
+            longest_side_millimeters: 500,
+            flags: vec![String::from("SOFT")],
+            ..ItemContainmentProfileV1::default()
+        };
+        let mut soft_outer = planned(&outer_definition);
+        assert!(
+            insert_planned_item(&mut soft_outer, planned(&soft_definition))
+                .expect("compatibility should evaluate")
+                .is_ok(),
+            "an empty explicit SOFT item bypasses max-item volume and has zero length upstream"
+        );
+
+        let mut ambiguous_definition = soft_definition.clone();
+        ambiguous_definition.prototype.type_id = String::from("material_softness_unknown");
+        ambiguous_definition.prototype.containment.flags.clear();
+        let mut ambiguous_outer = planned(&outer_definition);
+        assert!(
+            insert_planned_item(&mut ambiguous_outer, planned(&ambiguous_definition))
+                .expect("compatibility should evaluate")
+                .is_err(),
+            "material-derived softness remains fail-closed when the hard interpretation fails"
+        );
+
+        let mut inner_definition = leaf_item("inner");
+        inner_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 1,
+            volume_milliliters: 1,
+            longest_side_millimeters: 50,
+            flags: vec![String::from("HARD")],
+            ..ItemContainmentProfileV1::default()
+        };
+        inner_definition.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            1_000,
+            200,
+            Vec::new(),
+            false,
+        )];
+        let mut child_definition = leaf_item("long_child");
+        child_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 1,
+            volume_milliliters: 1,
+            longest_side_millimeters: 150,
+            flags: vec![String::from("HARD")],
+            ..ItemContainmentProfileV1::default()
+        };
+        let mut inner = planned(&inner_definition);
+        assert!(
+            insert_planned_item(&mut inner, planned(&child_definition))
+                .expect("inner compatibility should evaluate")
+                .is_ok()
+        );
+        let mut nested_outer = planned(&outer_definition);
+        assert!(
+            insert_planned_item(&mut nested_outer, inner)
+                .expect("outer compatibility should evaluate")
+                .is_err(),
+            "the physical child makes its wrapper longer than the outer pocket limit"
+        );
+    }
+
+    #[test]
     fn disabled_event_collection_still_consumes_its_probability_roll() {
         let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
             root_node: 0,
@@ -1080,6 +3193,7 @@ mod tests {
                     entry(100, None, "ordinary"),
                 ],
             }],
+            wrapper: None,
         });
         let mut actual_rng = ChaCha8Rng::seed_from_u64(19);
         let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
@@ -1113,6 +3227,7 @@ mod tests {
                     entry(2, None, "ordinary"),
                 ],
             }],
+            wrapper: None,
         });
         for ticket in 1..=5 {
             let seed = (0..100_000)

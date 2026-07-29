@@ -30,7 +30,13 @@ empty-variant, fit, and default zero-damage modifier draws against the exact
 downstream RNG state. It also covers raw/display damage, variants, detachable
 and integral ammunition dressing, randomized general-container insertion with
 discard/spill overflow, the selected-content `everyday_corpse` wrappers, and
-both collection and distribution event filtering outside their holiday. The static mapgen
+both collection and distribution event filtering outside their holiday. Exact
+modifier-container traces prove ranged charges clamp to physical capacity,
+default liquids fill that capacity, and a fixed post-clamp range consumes no
+extra charge draw. Exact
+phone-case witnesses retain the case variant, locked/unlocked phone, battery
+charges, ordered E-files, sealing/capacity state, and downstream RNG draw for
+empty and many-E-file boundaries. The static mapgen
 kernel covers exact/type/subtype/prefix/contains OMT matching, rotatable and
 linear OMT routing, 24x24 coordinate rotation, palette piece phases, and
 successful setup of a one-cell nested JSON mapgen. Run them with:

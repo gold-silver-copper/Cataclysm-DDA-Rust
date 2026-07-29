@@ -100,8 +100,10 @@ struct ItemGroupOracleObservationV1 {
     constructor_variants: Vec<ItemGroupConstructorVariantTraceV1>,
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
+    modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
     containers: Vec<ItemGroupContainerObservationV1>,
     everyday_corpse: ItemGroupCorpseObservationV1,
+    civilian_phone_case: ItemGroupPhoneCaseObservationV1,
     nonholiday_event_types: Vec<String>,
     event_distribution: Vec<ItemGroupDistributionObservationV1>,
 }
@@ -181,6 +183,21 @@ struct ItemGroupModifierObservationV1 {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ItemGroupModifierContainerCapacityObservationV1 {
+    seed: u32,
+    container_type: String,
+    payload_type: String,
+    explicit_minimum: i32,
+    explicit_maximum: i32,
+    explicit_charges: i32,
+    default_charges: i32,
+    explicit_downstream_draw: i32,
+    fixed_downstream_draw: i32,
+    downstream_draw_matches: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ItemGroupContainerObservationV1 {
     case_id: String,
     seed_search_limit: u32,
@@ -228,6 +245,37 @@ struct ItemGroupCorpseTraceV1 {
     content_types: Vec<String>,
     content_raw_damage: Vec<i32>,
     content_damage_levels: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupPhoneCaseObservationV1 {
+    seed_search_limit: u32,
+    valid_shapes: bool,
+    phone_types: Vec<String>,
+    observed_empty_efiles: bool,
+    observed_many_efiles: bool,
+    exact_traces: Vec<ItemGroupPhoneCaseTraceV1>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupPhoneCaseTraceV1 {
+    witness: String,
+    seed: u32,
+    wrapper_type: String,
+    wrapper_variant: String,
+    wrapper_any_pocket_sealed: bool,
+    wrapper_remaining_volume_ml: i64,
+    wrapper_remaining_weight_g: i64,
+    phone_type: String,
+    phone_charges: i32,
+    phone_ammo_remaining: i32,
+    phone_ammunition_type: String,
+    phone_raw_damage: i32,
+    efile_types: Vec<String>,
+    efile_raw_damage: Vec<i32>,
+    downstream_draw: i32,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -645,6 +693,30 @@ fn validate_item_group_observation(
     {
         return Err("item-group modifier characterization is incomplete".into());
     }
+    if observation.modifier_container_capacity.seed != 31_415
+        || observation.modifier_container_capacity.container_type != "bottle_plastic"
+        || observation.modifier_container_capacity.payload_type != "water_clean"
+        || observation.modifier_container_capacity.explicit_minimum != 50
+        || observation.modifier_container_capacity.explicit_maximum != 80
+        || observation.modifier_container_capacity.explicit_charges <= 0
+        || observation.modifier_container_capacity.explicit_charges
+            != observation.modifier_container_capacity.default_charges
+        || observation
+            .modifier_container_capacity
+            .explicit_downstream_draw
+            != 8_831
+        || observation
+            .modifier_container_capacity
+            .explicit_downstream_draw
+            != observation
+                .modifier_container_capacity
+                .fixed_downstream_draw
+        || !observation
+            .modifier_container_capacity
+            .downstream_draw_matches
+    {
+        return Err("modifier-container capacity characterization is incomplete".into());
+    }
     let expected_containers = [
         ("discard", 1, 1, Vec::<String>::new()),
         (
@@ -724,6 +796,116 @@ fn validate_item_group_observation(
         || observation.nonholiday_event_types != ["test_rock"]
     {
         return Err("item-group corpse or event characterization is incomplete".into());
+    }
+    struct ExpectedPhoneTrace<'a> {
+        witness: &'a str,
+        seed: u32,
+        wrapper_variant: &'a str,
+        phone_type: &'a str,
+        phone_ammo_remaining: i32,
+        efile_types: &'a [&'a str],
+        downstream_draw: i32,
+    }
+    let expected_phone_traces = [
+        ExpectedPhoneTrace {
+            witness: "fixed_seed:1",
+            seed: 1,
+            wrapper_variant: "hello_kitty_case",
+            phone_type: "smart_phone_locked",
+            phone_ammo_remaining: 3,
+            efile_types: &["efile_recipes", "efile_lore", "efile_map"],
+            downstream_draw: 9_907,
+        },
+        ExpectedPhoneTrace {
+            witness: "first_phone_type:smart_phone_locked",
+            seed: 1,
+            wrapper_variant: "hello_kitty_case",
+            phone_type: "smart_phone_locked",
+            phone_ammo_remaining: 3,
+            efile_types: &["efile_recipes", "efile_lore", "efile_map"],
+            downstream_draw: 9_907,
+        },
+        ExpectedPhoneTrace {
+            witness: "first_five_or_more_efiles",
+            seed: 2,
+            wrapper_variant: "violet_smart_phone_case",
+            phone_type: "smart_phone_locked",
+            phone_ammo_remaining: 7,
+            efile_types: &[
+                "essay_book",
+                "essay_book",
+                "essay_book",
+                "novel_swash",
+                "novel_satire",
+                "book_fict_hard_sports_omni",
+                "efile_lore",
+                "efile_map",
+            ],
+            downstream_draw: 9_375,
+        },
+        ExpectedPhoneTrace {
+            witness: "first_phone_type:smart_phone",
+            seed: 3,
+            wrapper_variant: "brown_smart_phone_case",
+            phone_type: "smart_phone",
+            phone_ammo_remaining: 7,
+            efile_types: &[
+                "plays_book",
+                "essay_book",
+                "poetry_book",
+                "novel_coa",
+                "novel_war2",
+                "novel_road",
+                "efile_lore",
+                "efile_map",
+            ],
+            downstream_draw: 4_342,
+        },
+        ExpectedPhoneTrace {
+            witness: "first_empty_efiles",
+            seed: 5,
+            wrapper_variant: "black_smart_phone_case",
+            phone_type: "smart_phone_locked",
+            phone_ammo_remaining: 12,
+            efile_types: &[],
+            downstream_draw: 4_586,
+        },
+    ];
+    if observation.civilian_phone_case.seed_search_limit != 100_000
+        || !observation.civilian_phone_case.valid_shapes
+        || observation.civilian_phone_case.phone_types != ["smart_phone", "smart_phone_locked"]
+        || !observation.civilian_phone_case.observed_empty_efiles
+        || !observation.civilian_phone_case.observed_many_efiles
+        || observation.civilian_phone_case.exact_traces.len() != expected_phone_traces.len()
+        || observation
+            .civilian_phone_case
+            .exact_traces
+            .iter()
+            .zip(expected_phone_traces)
+            .any(|(trace, expected)| {
+                trace.witness != expected.witness
+                    || trace.seed != expected.seed
+                    || trace.wrapper_type != "waterproof_smart_phone_case"
+                    || trace.wrapper_variant != expected.wrapper_variant
+                    || trace.wrapper_any_pocket_sealed
+                    || trace.wrapper_remaining_volume_ml != 0
+                    || trace.wrapper_remaining_weight_g != 0
+                    || trace.phone_type != expected.phone_type
+                    || trace.phone_charges != 0
+                    || trace.phone_ammo_remaining != expected.phone_ammo_remaining
+                    || trace.phone_ammunition_type != "battery"
+                    || trace.phone_raw_damage != 0
+                    || trace
+                        .efile_types
+                        .iter()
+                        .map(String::as_str)
+                        .ne(expected.efile_types.iter().copied())
+                    || trace.efile_raw_damage.len() != expected.efile_types.len()
+                    || trace.efile_raw_damage.iter().any(|damage| *damage != 0)
+                    || trace.downstream_draw != expected.downstream_draw
+            })
+    {
+        return Err("civilian phone nested containment characterization is incomplete".into());
     }
     let event_distribution = [(1, "none"), (3, "none"), (4, "ordinary"), (5, "ordinary")];
     if observation.event_distribution.len() != event_distribution.len()

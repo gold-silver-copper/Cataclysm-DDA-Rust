@@ -754,7 +754,7 @@
           "occurrences": 185
         },
         "longest_side": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 2376
         },
         "looks_like": {

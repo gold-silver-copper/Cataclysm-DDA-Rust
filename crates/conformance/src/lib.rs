@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x8f, 0x87, 0x10, 0xe0, 0x69, 0x37, 0xa5, 0x0c, 0x14, 0xbc, 0xad, 0x35, 0xa1,
-                    0x7d, 0xbc, 0x41, 0xa0, 0x59, 0x12, 0x80, 0x61, 0xf4, 0xbe, 0x93, 0x16, 0xc4,
-                    0xc6, 0x44, 0x93, 0x58, 0xdc, 0x66,
+                    0x80, 0xe0, 0x72, 0xe7, 0x55, 0xe6, 0x8b, 0xe0, 0xaa, 0xd7, 0x82, 0x13, 0x2f,
+                    0x71, 0x18, 0xf4, 0x26, 0x9b, 0x5f, 0x66, 0x4e, 0xad, 0x99, 0xbc, 0x50, 0xa1,
+                    0xb1, 0xcd, 0x8b, 0x27, 0xd3, 0x35,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1246,15 +1246,60 @@ mod tests {
                         ammunition_containers: Vec::new(),
                         residual_energy_millijoules: 0,
                         powered_tool: None,
+                        containment: cdda_protocol::ItemContainmentProfileV1 {
+                            volume_milliliters: match type_id {
+                                "splinter" => 250,
+                                "nail" => 500,
+                                _ => 0,
+                            },
+                            ..Default::default()
+                        },
                     },
                     maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
                     variants: Vec::new(),
+                    snippets: Vec::new(),
+                    initial_variables: BTreeMap::new(),
                     modifier_side_effects_supported: true,
                     minimum_one_charge: charges.is_some(),
                     charges,
+                    charge_ammunition: None,
+                    charges_supported: true,
+                    modifier_container_capacity_applies: true,
+                    contents_insertion_supported: true,
                 },
             ))
         };
+        let cdda_protocol::ItemGroupTargetV1::Item(mut wrapper_item) =
+            item_leaf("rigid_salvage_box", None)
+        else {
+            unreachable!("wrapper fixture is a direct item")
+        };
+        wrapper_item.prototype.ammunition_containers =
+            vec![cdda_protocol::AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("SALVAGE"),
+                capacities: Vec::new(),
+                rigid: true,
+                access_moves: 100,
+                reloadable: false,
+                unloadable: true,
+                spawn_rules: Some(cdda_protocol::SpawnPocketRulesV1 {
+                    kind: cdda_protocol::SpawnPocketKindV1::Container,
+                    max_contains_volume_milliliters: 1_000,
+                    max_contains_weight_milligrams: 10_000,
+                    max_item_volume_milliliters: 1_000,
+                    min_item_volume_milliliters: 0,
+                    max_item_length_millimeters: 1_000,
+                    item_restrictions: Vec::new(),
+                    flag_restrictions: Vec::new(),
+                    access_moves: 100,
+                    rigid: true,
+                    watertight: false,
+                    transparent: false,
+                    forbidden: false,
+                    sealable: true,
+                }),
+            }];
         let mut item_groups = vec![ItemGroupDefinitionV1 {
             group_id: String::from("wall_bash_results"),
             graph: cdda_protocol::ItemGroupGraphV1 {
@@ -1271,6 +1316,11 @@ mod tests {
                             variant_id: None,
                             event: Some(cdda_protocol::ItemGroupEventV1::Christmas),
                             target: item_leaf("holiday_token", None),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
                         },
                         cdda_protocol::ItemGroupEntryV1 {
                             probability: 100,
@@ -1283,6 +1333,11 @@ mod tests {
                             variant_id: None,
                             event: None,
                             target: item_leaf("splinter", None),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
                         },
                         cdda_protocol::ItemGroupEntryV1 {
                             probability: 100,
@@ -1301,9 +1356,20 @@ mod tests {
                                     maximum: 6,
                                 }),
                             ),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
                         },
                     ],
                 }],
+                wrapper: Some(cdda_protocol::ItemGroupContainerV1 {
+                    item: wrapper_item,
+                    variant_id: None,
+                    sealed: true,
+                    overflow: cdda_protocol::ItemGroupOverflowV1::Spill,
+                }),
             },
         }];
         let splinter = &mut item_groups[0].graph.nodes[0].entries[1];
@@ -1327,6 +1393,14 @@ mod tests {
             },
             weight: 1,
         }];
+        splinter_item.snippets = vec![cdda_protocol::ItemSnippetV1 {
+            id: String::from("salvage_note"),
+            text: String::from("Recovered from the wall"),
+        }];
+        splinter_item.initial_variables.insert(
+            String::from("browsed"),
+            cdda_protocol::ItemVariableValueV1::String(String::from("false")),
+        );
         let floor = TerrainTileSnapshot {
             terrain_id: String::from("t_floor"),
             move_cost: 2,
@@ -1457,31 +1531,60 @@ mod tests {
             );
         }
         assert_eq!(direct.final_snapshot.item_groups, scenario.item_groups);
-        assert_eq!(
-            direct
-                .final_snapshot
-                .ground_items
-                .iter()
-                .map(|item| (item.item.type_id.as_str(), item.item.charges))
-                .collect::<Vec<_>>(),
-            [("splinter", 1), ("splinter", 1), ("nail", 4)],
-            "the fixed seed must include each generated item's constructor, variant, and fit phases"
+        let [salvage_box] = direct.final_snapshot.ground_items.as_slice() else {
+            panic!("the group wrapper should leave one top-level salvage box");
+        };
+        assert_eq!(salvage_box.item.type_id, "rigid_salvage_box");
+        let [pocket] = salvage_box.item.ammunition_containers.as_slice() else {
+            panic!("the salvage box should retain one physical pocket");
+        };
+        assert!(
+            pocket
+                .spawn_state
+                .as_ref()
+                .is_some_and(|state| state.sealed),
+            "the group-level seal must survive every recovery mode"
         );
-        let splinters = direct
-            .final_snapshot
-            .ground_items
+        assert_eq!(pocket.contents.len(), 3);
+        assert!(
+            pocket
+                .contents
+                .iter()
+                .all(|item| item.id > salvage_box.item.id),
+            "preorder materialization must allocate the wrapper before every nested item"
+        );
+        let mut contained = pocket
+            .contents
             .iter()
-            .filter(|item| item.item.type_id == "splinter")
+            .map(|item| (item.type_id.as_str(), item.charges))
+            .collect::<Vec<_>>();
+        contained.sort_unstable();
+        assert_eq!(
+            contained,
+            [("nail", 6), ("splinter", 1), ("splinter", 1)],
+            "the fixed seed must include each generated item's constructor, variant, fit, and wrapper phases"
+        );
+        let splinters = pocket
+            .contents
+            .iter()
+            .filter(|item| item.type_id == "splinter")
             .collect::<Vec<_>>();
         assert_eq!(splinters.len(), 2);
         assert!(splinters.iter().all(|item| {
-            item.item.raw_damage == 1_000
-                && item.item.damage == 2
+            item.raw_damage == 1_000
+                && item.damage == 2
                 && item
-                    .item
                     .variant
                     .as_ref()
                     .is_some_and(|variant| variant.id == "weathered")
+                && item
+                    .snippet
+                    .as_ref()
+                    .is_some_and(|snippet| snippet.id == "salvage_note")
+                && item.variables.get("browsed")
+                    == Some(&cdda_protocol::ItemVariableValueV1::String(String::from(
+                        "false",
+                    )))
         }));
         let (coord, local) = wall_position.chunk_and_local();
         let chunk = direct
@@ -1755,6 +1858,7 @@ mod tests {
                         pocket_id: String::from("PRIMARY"),
                         ammunition_type: String::from("battery"),
                         capacity: 6,
+                        rigid: true,
                         reloadable: true,
                         unloadable: true,
                     }],
@@ -1946,6 +2050,7 @@ mod tests {
                 access_moves: 20,
                 reloadable: true,
                 unloadable: true,
+                spawn_rules: None,
             }];
             item
         };

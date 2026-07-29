@@ -41,7 +41,8 @@ use cdda_protocol::{
     SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
     WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
     adjusted_book_study_time_moves, item_group_catalog_is_valid, item_group_source_max_outputs,
-    item_group_sources_are_valid, worldgen_catalog_is_valid,
+    item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
+    item_snapshots_can_combine_for_containment, worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -954,6 +955,11 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
             .variant
             .as_ref()
             .is_some_and(|variant| !cdda_protocol::item_variant_is_valid(variant))
+        || snapshot
+            .snippet
+            .as_ref()
+            .is_some_and(|snippet| !cdda_protocol::item_snippet_is_valid(snippet))
+        || !cdda_protocol::valid_item_variables(&snapshot.variables)
         || snapshot.melee_damage_milli.len() > 32
         || snapshot.melee_damage_milli.iter().any(|(kind, damage)| {
             kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) || *damage < 0
@@ -1008,6 +1014,22 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
             .ranged_weapon
             .as_ref()
             .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+        || snapshot.containment.flags.len() > 256
+        || snapshot
+            .containment
+            .flags
+            .iter()
+            .any(|flag| validate_item_type_id(flag).is_err())
+        || snapshot
+            .containment
+            .flags
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || (snapshot.containment.count_by_charges
+            && snapshot.charges <= 0
+            && !(snapshot.ammunition_type == "battery"
+                && snapshot.charges == 0
+                && snapshot.residual_energy_millijoules > 0))
     {
         return Err(SimError::InvalidItem);
     }
@@ -1016,6 +1038,9 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
     validate_integral_magazine_snapshots(&snapshot.integral_magazines, depth)?;
     validate_magazine_well_snapshots(&snapshot.magazine_wells, depth)?;
     validate_ammunition_container_snapshots(&snapshot.ammunition_containers, depth)?;
+    if !cdda_protocol::item_snapshot_sealing_is_valid(snapshot) {
+        return Err(SimError::InvalidItem);
+    }
     if pocket_indices_collide(
         snapshot
             .integral_magazines
@@ -1158,6 +1183,7 @@ fn validate_integral_magazine_snapshot(
         pocket_id: pocket.pocket_id.clone(),
         ammunition_type: pocket.ammunition_type.clone(),
         capacity: pocket.capacity,
+        rigid: pocket.rigid,
         reloadable: pocket.reloadable,
         unloadable: pocket.unloadable,
     })?;
@@ -1288,7 +1314,18 @@ fn validate_ammunition_container_prototype(
     if pocket.pocket_id.len() > 512
         || pocket.pocket_id.chars().any(char::is_control)
         || pocket.access_moves == 0
-        || pocket.capacities.is_empty()
+    {
+        return Err(SimError::InvalidItem);
+    }
+    if let Some(rules) = &pocket.spawn_rules {
+        if !pocket.capacities.is_empty()
+            || pocket.rigid != rules.rigid
+            || pocket.access_moves != rules.access_moves
+            || !valid_spawn_pocket_rules(rules)
+        {
+            return Err(SimError::InvalidItem);
+        }
+    } else if pocket.capacities.is_empty()
         || pocket.capacities.len() > MAX_AMMUNITION_CONTAINER_TYPES
         || pocket.capacities.iter().any(|capacity| {
             validate_item_type_id(&capacity.ammunition_type).is_err()
@@ -1303,6 +1340,35 @@ fn validate_ammunition_container_prototype(
         return Err(SimError::InvalidItem);
     }
     Ok(())
+}
+
+fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
+    rules.access_moves > 0
+        && rules.item_restrictions.len() <= 256
+        && rules.flag_restrictions.len() <= 256
+        && rules
+            .item_restrictions
+            .iter()
+            .chain(&rules.flag_restrictions)
+            .all(|id| validate_item_type_id(id).is_ok())
+        && rules
+            .item_restrictions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && rules
+            .flag_restrictions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && rules.min_item_volume_milliliters <= rules.max_item_volume_milliliters
+        && match rules.kind {
+            cdda_protocol::SpawnPocketKindV1::Container => {
+                rules.max_contains_volume_milliliters > 0
+                    && rules.max_contains_weight_milligrams > 0
+                    && rules.max_item_volume_milliliters > 0
+                    && rules.max_item_length_millimeters > 0
+            }
+            cdda_protocol::SpawnPocketKindV1::EFileStorage => rules.rigid,
+        }
 }
 
 fn validate_ammunition_container_prototypes(
@@ -1331,6 +1397,7 @@ fn ammunition_container_prototype_from_snapshot(
         rigid: pocket.rigid,
         reloadable: pocket.reloadable,
         unloadable: pocket.unloadable,
+        spawn_rules: pocket.spawn_state.as_ref().map(|state| state.rules.clone()),
     }
 }
 
@@ -1346,6 +1413,61 @@ fn validate_ammunition_container_snapshot(
             .any(|pair| pair[0].id >= pair[1].id)
     {
         return Err(SimError::InvalidItem);
+    }
+    if let Some(state) = &pocket.spawn_state {
+        if (state.sealed && !state.rules.sealable)
+            || state.rules.rigid != pocket.rigid
+            || state.rules.access_moves != pocket.access_moves
+        {
+            return Err(SimError::InvalidItem);
+        }
+        let mut volume = 0_u64;
+        let mut weight = 0_u64;
+        let mut first_liquid = None::<&ItemSnapshot>;
+        let mut contains_non_liquid = false;
+        for item in &pocket.contents {
+            validate_item_snapshot_at(item, depth + 1)?;
+            let profile = &item.containment;
+            if !item_snapshot_is_compatible_with_spawn_rules(&state.rules, item) {
+                return Err(SimError::InvalidItem);
+            }
+            if state.rules.kind == cdda_protocol::SpawnPocketKindV1::Container {
+                if profile.phase == cdda_protocol::ItemPhaseV1::Liquid {
+                    if contains_non_liquid
+                        || first_liquid.is_some_and(|first| {
+                            !item_snapshots_can_combine_for_containment(first, item)
+                        })
+                    {
+                        return Err(SimError::InvalidItem);
+                    }
+                    first_liquid = Some(item);
+                } else {
+                    if first_liquid.is_some() {
+                        return Err(SimError::InvalidItem);
+                    }
+                    contains_non_liquid = true;
+                }
+            }
+            volume = volume
+                .checked_add(
+                    cdda_protocol::item_snapshot_containment_volume_milliliters(item)
+                        .ok_or(SimError::InvalidItem)?,
+                )
+                .ok_or(SimError::NumericOverflow)?;
+            weight = weight
+                .checked_add(
+                    cdda_protocol::item_snapshot_containment_weight_milligrams(item)
+                        .ok_or(SimError::InvalidItem)?,
+                )
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        if state.rules.kind == cdda_protocol::SpawnPocketKindV1::Container
+            && (volume > state.rules.max_contains_volume_milliliters
+                || weight > state.rules.max_contains_weight_milligrams)
+        {
+            return Err(SimError::InvalidItem);
+        }
+        return Ok(());
     }
     let active_type = pocket
         .contents
@@ -1503,6 +1625,12 @@ fn validate_item_component(
             .variant
             .as_ref()
             .is_some_and(|variant| !cdda_protocol::item_variant_is_valid(variant))
+        || component
+            .snippet
+            .as_ref()
+            .is_some_and(|snippet| !cdda_protocol::item_snippet_is_valid(snippet))
+        || !cdda_protocol::valid_item_variables(&component.variables)
+        || component.count_by_charges != component.containment.count_by_charges
         || (component.count_by_charges && component.charges <= 0)
         || component.melee_damage_milli.len() > 32
         || component.melee_damage_milli.iter().any(|(kind, damage)| {
@@ -1545,6 +1673,17 @@ fn validate_item_component(
             .ranged_weapon
             .as_ref()
             .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+        || component.containment.flags.len() > 256
+        || component
+            .containment
+            .flags
+            .iter()
+            .any(|flag| validate_item_type_id(flag).is_err())
+        || component
+            .containment
+            .flags
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
     {
         return Err(SimError::InvalidItem);
     }
@@ -1613,6 +1752,7 @@ fn component_state_matches_prototype(
         && state.ammunition_containers == prototype.ammunition_containers
         && state.residual_energy_millijoules == prototype.residual_energy_millijoules
         && state.powered_tool == prototype.powered_tool
+        && state.containment == prototype.containment
 }
 
 fn valid_ranged_weapon(weapon: &RangedWeaponSnapshot) -> bool {
@@ -1890,6 +2030,22 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
             .ranged_weapon
             .as_ref()
             .is_some_and(|weapon| !valid_ranged_weapon(weapon))
+        || item.containment.flags.len() > 256
+        || item
+            .containment
+            .flags
+            .iter()
+            .any(|flag| validate_item_type_id(flag).is_err())
+        || item
+            .containment
+            .flags
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || (item.containment.count_by_charges
+            && item.charges <= 0
+            && !(item.ammunition_type == "battery"
+                && item.charges == 0
+                && item.residual_energy_millijoules > 0))
     {
         return Err(SimError::InvalidCraft);
     }
@@ -2863,6 +3019,8 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.damage == right.damage
         && left.raw_damage == right.raw_damage
         && left.variant == right.variant
+        && left.snippet == right.snippet
+        && left.variables == right.variables
         && left.melee_damage_milli == right.melee_damage_milli
         && left.calories == right.calories
         && left.quench == right.quench
@@ -2877,6 +3035,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.residual_energy_millijoules == right.residual_energy_millijoules
         && left.powered_tool == right.powered_tool
         && left.creature_corpse == right.creature_corpse
+        && left.containment == right.containment
 }
 
 fn plain_ammunition_container_content(item: &ItemSnapshot) -> bool {
@@ -2973,6 +3132,8 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
         damage: 0,
         raw_damage: 0,
         variant: None,
+        snippet: None,
+        variables: BTreeMap::new(),
         melee_damage_milli: prototype.melee_damage_milli.clone(),
         calories: prototype.calories,
         quench: prototype.quench,
@@ -2989,6 +3150,7 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
                 pocket_id: pocket.pocket_id.clone(),
                 ammunition_type: pocket.ammunition_type.clone(),
                 capacity: pocket.capacity,
+                rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 loaded_ammunition: None,
@@ -3017,21 +3179,79 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
                 rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
+                spawn_state: pocket.spawn_rules.clone().map(|rules| {
+                    cdda_protocol::SpawnPocketStateV1 {
+                        rules,
+                        sealed: false,
+                    }
+                }),
                 contents: Vec::new(),
             })
             .collect(),
         residual_energy_millijoules: prototype.residual_energy_millijoules,
         powered_tool: prototype.powered_tool.clone(),
         creature_corpse: None,
+        containment: prototype.containment.clone(),
     }
 }
 
-fn item_from_planned_spawn(id: ItemId, planned: &PlannedItemSpawn) -> ItemInstance {
+fn item_from_planned_spawn(
+    id: ItemId,
+    planned: &PlannedItemSpawn,
+    allocator: &mut IdAllocator,
+) -> Result<ItemInstance, SimError> {
     let mut item = item_from_craft_prototype(id, &planned.prototype);
     item.raw_damage = planned.raw_damage;
     item.damage = cdda_protocol::item_damage_level(planned.raw_damage);
     item.variant.clone_from(&planned.variant);
-    item
+    item.snippet.clone_from(&planned.snippet);
+    item.variables.clone_from(&planned.initial_variables);
+    for (pocket_index, ammunition) in &planned.integral_ammunition {
+        let pocket = item
+            .integral_magazines
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .ok_or(SimError::InvalidItem)?;
+        let ammunition_id = allocator.allocate_item()?;
+        pocket.loaded_ammunition = Some(Box::new(
+            item_from_planned_spawn(ammunition_id, ammunition, allocator)?.snapshot(),
+        ));
+    }
+    for (pocket_index, contents) in &planned.pocket_contents {
+        let pocket = item
+            .ammunition_containers
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .ok_or(SimError::InvalidItem)?;
+        for content in contents {
+            let content_id = allocator.allocate_item()?;
+            pocket
+                .contents
+                .push(item_from_planned_spawn(content_id, content, allocator)?.snapshot());
+        }
+    }
+    for pocket_index in &planned.sealed_pockets {
+        let state = item
+            .ammunition_containers
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .and_then(|pocket| pocket.spawn_state.as_mut())
+            .ok_or(SimError::InvalidItem)?;
+        if !state.rules.sealable {
+            return Err(SimError::InvalidItem);
+        }
+        state.sealed = true;
+    }
+    validate_item_snapshot(&item.snapshot())?;
+    Ok(item)
+}
+
+fn planned_item_count(planned: &[PlannedItemSpawn]) -> Result<u64, SimError> {
+    planned.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.object_count().ok_or(SimError::NumericOverflow)?)
+            .ok_or(SimError::NumericOverflow)
+    })
 }
 
 fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemInstance {
@@ -3042,6 +3262,8 @@ fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemI
         damage: component.damage,
         raw_damage: component.raw_damage,
         variant: component.variant.clone(),
+        snippet: component.snippet.clone(),
+        variables: component.variables.clone(),
         melee_damage_milli: component.melee_damage_milli.clone(),
         calories: component.calories,
         quench: component.quench,
@@ -3058,6 +3280,7 @@ fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemI
                 pocket_id: pocket.pocket_id.clone(),
                 ammunition_type: pocket.ammunition_type.clone(),
                 capacity: pocket.capacity,
+                rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 loaded_ammunition: None,
@@ -3086,12 +3309,19 @@ fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemI
                 rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
+                spawn_state: pocket.spawn_rules.clone().map(|rules| {
+                    cdda_protocol::SpawnPocketStateV1 {
+                        rules,
+                        sealed: false,
+                    }
+                }),
                 contents: Vec::new(),
             })
             .collect(),
         residual_energy_millijoules: component.residual_energy_millijoules,
         powered_tool: component.powered_tool.clone(),
         creature_corpse: None,
+        containment: component.containment.clone(),
     }
 }
 
@@ -3111,6 +3341,7 @@ fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftI
         ammunition_containers: component.ammunition_containers.clone(),
         residual_energy_millijoules: component.residual_energy_millijoules,
         powered_tool: component.powered_tool.clone(),
+        containment: component.containment.clone(),
     }
 }
 
@@ -3125,6 +3356,8 @@ fn component_from_consumed(
         damage: consumed.item.damage,
         raw_damage: consumed.item.raw_damage,
         variant: consumed.item.variant.clone(),
+        snippet: consumed.item.snippet.clone(),
+        variables: consumed.item.variables.clone(),
         melee_damage_milli: consumed.item.melee_damage_milli.clone(),
         calories: consumed.item.calories,
         quench: consumed.item.quench,
@@ -3144,6 +3377,7 @@ fn component_from_consumed(
                 pocket_id: pocket.pocket_id.clone(),
                 ammunition_type: pocket.ammunition_type.clone(),
                 capacity: pocket.capacity,
+                rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
             })
@@ -3167,6 +3401,7 @@ fn component_from_consumed(
             .collect(),
         residual_energy_millijoules: consumed.item.residual_energy_millijoules,
         powered_tool: consumed.item.powered_tool.clone(),
+        containment: consumed.item.containment.clone(),
     }
 }
 
@@ -4874,6 +5109,8 @@ impl WorldState {
                 damage: 0,
                 raw_damage: 0,
                 variant: None,
+                snippet: None,
+                variables: BTreeMap::new(),
                 melee_damage_milli: ammunition.melee_damage_milli,
                 calories: ammunition.calories,
                 quench: ammunition.quench,
@@ -4888,6 +5125,7 @@ impl WorldState {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
+                containment: cdda_protocol::ItemContainmentProfileV1::default(),
             };
             validate_item_snapshot(&snapshot)?;
             preloaded.insert(pocket_index, snapshot);
@@ -4926,6 +5164,7 @@ impl WorldState {
                 pocket_id: pocket.pocket_id,
                 ammunition_type: pocket.ammunition_type,
                 capacity: pocket.capacity,
+                rigid: pocket.rigid,
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 loaded_ammunition,
@@ -4942,6 +5181,8 @@ impl WorldState {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: spawn.melee_damage_milli,
                     calories: spawn.calories,
                     quench: spawn.quench,
@@ -4971,12 +5212,19 @@ impl WorldState {
                             rigid: pocket.rigid,
                             reloadable: pocket.reloadable,
                             unloadable: pocket.unloadable,
+                            spawn_state: pocket.spawn_rules.map(|rules| {
+                                cdda_protocol::SpawnPocketStateV1 {
+                                    rules,
+                                    sealed: false,
+                                }
+                            }),
                             contents: Vec::new(),
                         })
                         .collect(),
                     residual_energy_millijoules,
                     powered_tool,
                     creature_corpse: None,
+                    containment: cdda_protocol::ItemContainmentProfileV1::default(),
                 },
                 position: spawn.position,
             },
@@ -7979,7 +8227,11 @@ impl WorldState {
                     .contents
                     .binary_search_by_key(&contained_item, |contained| contained.id)
                     .map_err(|_| SimError::UnknownItem)?;
-                Box::new(pocket.contents.remove(position))
+                let detached = Box::new(pocket.contents.remove(position));
+                if let Some(state) = &mut pocket.spawn_state {
+                    state.sealed = false;
+                }
+                detached
             }
         };
         if detached.id != contained_item {
@@ -8719,9 +8971,12 @@ impl WorldState {
         else {
             return Ok(false);
         };
-        if self.allocator.remaining()
-            < u64::try_from(planned.items.len()).map_err(|_| SimError::NumericOverflow)?
-        {
+        let required_item_ids = planned.items.iter().try_fold(0_u64, |total, (_, item)| {
+            total
+                .checked_add(item.object_count().ok_or(SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)
+        })?;
+        if self.allocator.remaining() < required_item_ids {
             return Err(SimError::IdReservationExhausted);
         }
         for chunk in planned.chunks {
@@ -8736,7 +8991,7 @@ impl WorldState {
                 .insert(
                     item_id,
                     GroundItem {
-                        item: item_from_planned_spawn(item_id, &prototype),
+                        item: item_from_planned_spawn(item_id, &prototype, &mut self.allocator)?,
                         position,
                     },
                 )
@@ -8948,6 +9203,8 @@ impl WorldState {
                     damage: cdda_protocol::item_damage_level(raw_damage),
                     raw_damage,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -8967,6 +9224,7 @@ impl WorldState {
                         death_tick: self.tick,
                         revive_special,
                     }),
+                    containment: cdda_protocol::ItemContainmentProfileV1::default(),
                 },
                 position,
             },
@@ -9570,8 +9828,7 @@ impl WorldState {
         let drop_position = self.bash_drop_position(target, &bash);
         let can_materialize = planned.is_empty()
             || (drop_position.is_some()
-                && self.allocator.remaining()
-                    >= u64::try_from(planned.len()).map_err(|_| SimError::NumericOverflow)?);
+                && self.allocator.remaining() >= planned_item_count(&planned)?);
         let success = total >= hp && can_materialize;
         let accumulated_damage = if success {
             0
@@ -9601,7 +9858,7 @@ impl WorldState {
                 self.ground_items.insert(
                     item_id,
                     GroundItem {
-                        item: item_from_planned_spawn(item_id, &prototype),
+                        item: item_from_planned_spawn(item_id, &prototype, &mut self.allocator)?,
                         position: drop_position,
                     },
                 );
@@ -13504,7 +13761,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV62");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV63");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13706,6 +13963,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         }
     }
 
@@ -13718,9 +13976,15 @@ mod tests {
             prototype: test_craft_item_prototype(type_id),
             maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
             variants: Vec::new(),
+            snippets: Vec::new(),
+            initial_variables: BTreeMap::new(),
             modifier_side_effects_supported: true,
             charges,
             minimum_one_charge,
+            charge_ammunition: None,
+            charges_supported: true,
+            modifier_container_capacity_applies: true,
+            contents_insertion_supported: true,
         }))
     }
 
@@ -13860,6 +14124,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -13884,6 +14150,8 @@ mod tests {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -13898,6 +14166,7 @@ mod tests {
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
+                    containment: Default::default(),
                 })),
             }],
             ammunition_containers: Vec::new(),
@@ -13913,6 +14182,7 @@ mod tests {
                 active: true,
             }),
             creature_corpse: None,
+            containment: Default::default(),
         })
         .expect("low-output powered light should be valid");
         world
@@ -13990,6 +14260,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
             retain_components: false,
             byproducts: Vec::new(),
@@ -14068,6 +14339,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 },
                 output_state: Some(ItemComponentSnapshotV1 {
                     type_id: String::from("test_component"),
@@ -14075,6 +14347,8 @@ mod tests {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -14090,6 +14364,7 @@ mod tests {
                     ammunition_containers: Vec::new(),
                     residual_energy_millijoules: 0,
                     powered_tool: None,
+                    containment: Default::default(),
                 }),
             }],
             tools: Vec::new(),
@@ -14773,6 +15048,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         });
 
         let mut exhausted = world.clone();
@@ -15052,6 +15328,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         });
         let mut contradictory = recipe.clone();
         contradictory.requires_empty_charges = true;
@@ -15798,6 +16075,8 @@ mod tests {
             damage: 1,
             raw_damage: 1,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::from([(String::from("cut"), 250)]),
             calories: 0,
             quench: 0,
@@ -15813,6 +16092,11 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: cdda_protocol::ItemContainmentProfileV1 {
+                count_by_charges: true,
+                stack_size: 1,
+                ..cdda_protocol::ItemContainmentProfileV1::default()
+            },
         };
         {
             let component = world
@@ -15862,6 +16146,8 @@ mod tests {
             damage: 2,
             raw_damage: 1_000,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::from([(String::from("bash"), 1_750)]),
             calories: 0,
             quench: 0,
@@ -15877,6 +16163,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         };
         assert_eq!(
             crafted.component_provenance,
@@ -15903,6 +16190,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
             output_state: None,
         }];
@@ -15993,6 +16281,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -16008,6 +16298,7 @@ mod tests {
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
+            containment: Default::default(),
         };
         let mut deepest = component();
         for _ in 1..MAX_ITEM_COMPONENT_DEPTH {
@@ -17838,6 +18129,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
         }];
         world
@@ -18164,6 +18456,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
         }];
         world
@@ -18296,6 +18589,7 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
+                containment: Default::default(),
             },
         }];
         let rejected = world
@@ -19507,6 +19801,145 @@ mod tests {
     }
 
     #[test]
+    fn item_snapshot_and_component_metadata_fail_closed() {
+        let (mut world, actor_id, _) = world_with_two_actors();
+        let position = world
+            .actor_snapshot(actor_id)
+            .expect("actor exists")
+            .position;
+        let item_id = world
+            .spawn_ground_item(ItemSpawn {
+                position,
+                type_id: String::from("metadata_fixture"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+            })
+            .expect("metadata fixture should spawn");
+        let base = world
+            .ground_item_snapshot(item_id)
+            .expect("metadata fixture should remain")
+            .item;
+
+        let mut valid = base.clone();
+        valid.snippet = Some(cdda_protocol::ItemSnippetV1 {
+            id: String::from("note_fixture"),
+            text: String::from("first line\nsecond line"),
+        });
+        valid.variables.insert(
+            String::from("owner"),
+            cdda_protocol::ItemVariableValueV1::String(String::from("survivor")),
+        );
+        assert!(validate_item_snapshot(&valid).is_ok());
+        assert!(
+            !same_item_stack_state(&base, &valid),
+            "stacking must not discard canonical snippet or variable state"
+        );
+        let mut distinct_containment = base.clone();
+        distinct_containment.containment.weight_milligrams = 1;
+        assert!(
+            !same_item_stack_state(&base, &distinct_containment),
+            "self-contained physical state also participates in stack identity"
+        );
+
+        let mut empty_snippet = valid.clone();
+        empty_snippet
+            .snippet
+            .as_mut()
+            .expect("snippet exists")
+            .text
+            .clear();
+        assert!(matches!(
+            validate_item_snapshot(&empty_snippet),
+            Err(SimError::InvalidItem)
+        ));
+        let mut invalid_variable = valid.clone();
+        invalid_variable.variables.insert(
+            String::from("bad\0key"),
+            cdda_protocol::ItemVariableValueV1::Integer(1),
+        );
+        assert!(matches!(
+            validate_item_snapshot(&invalid_variable),
+            Err(SimError::InvalidItem)
+        ));
+        let mut duplicate_flags = valid.clone();
+        duplicate_flags.containment.flags = vec![String::from("RIGID"), String::from("RIGID")];
+        assert!(matches!(
+            validate_item_snapshot(&duplicate_flags),
+            Err(SimError::InvalidItem)
+        ));
+        let mut empty_charge_stack = valid.clone();
+        empty_charge_stack.charges = 0;
+        empty_charge_stack.containment.count_by_charges = true;
+        assert!(matches!(
+            validate_item_snapshot(&empty_charge_stack),
+            Err(SimError::InvalidItem)
+        ));
+
+        let consumed = CraftConsumedItemV1 {
+            item: valid,
+            split_from: None,
+        };
+        let component = component_from_consumed(&consumed, false, true);
+        assert!(validate_item_component_root(&component).is_ok());
+
+        let mut component_empty_snippet = component.clone();
+        component_empty_snippet
+            .snippet
+            .as_mut()
+            .expect("snippet exists")
+            .text
+            .clear();
+        assert!(matches!(
+            validate_item_component_root(&component_empty_snippet),
+            Err(SimError::InvalidItem)
+        ));
+        let mut component_invalid_variable = component.clone();
+        component_invalid_variable.variables.insert(
+            String::new(),
+            cdda_protocol::ItemVariableValueV1::Integer(1),
+        );
+        assert!(matches!(
+            validate_item_component_root(&component_invalid_variable),
+            Err(SimError::InvalidItem)
+        ));
+        let mut component_duplicate_flags = component.clone();
+        component_duplicate_flags.containment.flags =
+            vec![String::from("RIGID"), String::from("RIGID")];
+        assert!(matches!(
+            validate_item_component_root(&component_duplicate_flags),
+            Err(SimError::InvalidItem)
+        ));
+        let mut component_charge_mode_mismatch = component.clone();
+        component_charge_mode_mismatch.containment.count_by_charges = true;
+        assert!(matches!(
+            validate_item_component_root(&component_charge_mode_mismatch),
+            Err(SimError::InvalidItem)
+        ));
+
+        let mut prototype = test_craft_item_prototype("metadata_fixture");
+        prototype.containment = component.containment.clone();
+        validate_craft_item_prototype(&prototype).expect("prototype should be valid");
+        let reconstructed = item_from_craft_prototype(ItemId::new(1, 99), &prototype);
+        validate_item_snapshot(&reconstructed.snapshot())
+            .expect("an admitted prototype must reconstruct a valid item");
+        let mut empty_charge_prototype = prototype.clone();
+        empty_charge_prototype.charges = 0;
+        empty_charge_prototype.containment.count_by_charges = true;
+        assert!(matches!(
+            validate_craft_item_prototype(&empty_charge_prototype),
+            Err(SimError::InvalidCraft)
+        ));
+        assert!(component_state_matches_prototype(&component, &prototype));
+        prototype.containment.weight_milligrams = 1;
+        assert!(!component_state_matches_prototype(&component, &prototype));
+    }
+
+    #[test]
     fn furniture_blocks_authoritative_movement_and_survives_snapshot_round_trip() {
         let mut world = WorldState::new(39, [31; 32]);
         world
@@ -20102,6 +20535,8 @@ mod tests {
             damage: 0,
             raw_damage: 0,
             variant: None,
+            snippet: None,
+            variables: BTreeMap::new(),
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -20123,6 +20558,8 @@ mod tests {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -20137,12 +20574,14 @@ mod tests {
                     residual_energy_millijoules: 0,
                     powered_tool: None,
                     creature_corpse: None,
+                    containment: Default::default(),
                 })),
             }],
             ammunition_containers: Vec::new(),
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
+            containment: Default::default(),
         }];
         powered_actor.wielded = Some(ItemId::new(13, 2));
         powered_world
@@ -21693,6 +22132,8 @@ mod tests {
                     damage: 0,
                     raw_damage: 0,
                     variant: None,
+                    snippet: None,
+                    variables: BTreeMap::new(),
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -21738,6 +22179,7 @@ mod tests {
                         revive_special: false,
                         revivable: true,
                     }),
+                    containment: Default::default(),
                 },
                 position,
             },
@@ -23070,6 +23512,7 @@ mod tests {
                 pocket_id: String::new(),
                 ammunition_type: String::from("battery"),
                 capacity: 10,
+                rigid: true,
                 reloadable: false,
                 unloadable: false,
             }],
@@ -23113,6 +23556,7 @@ mod tests {
                     pocket_id: String::new(),
                     ammunition_type: String::from("battery"),
                     capacity: 10,
+                    rigid: true,
                     reloadable: false,
                     unloadable: false,
                 }],
@@ -23234,6 +23678,8 @@ mod tests {
                 damage: 0,
                 raw_damage: 0,
                 variant: None,
+                snippet: None,
+                variables: BTreeMap::new(),
                 melee_damage_milli: BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -23248,6 +23694,7 @@ mod tests {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
                 creature_corpse: None,
+                containment: Default::default(),
             })
             .expect("filler item should be valid");
             world
@@ -23287,6 +23734,126 @@ mod tests {
     }
 
     #[test]
+    fn removing_generalized_contents_unseals_the_physical_pocket() {
+        let (mut world, actor_id, _) = world_with_two_actors();
+        make_actor_act_each_tick(&mut world, actor_id);
+        let owner_id = world
+            .allocator
+            .allocate_item()
+            .expect("owner ID should allocate");
+        let content_id = world
+            .allocator
+            .allocate_item()
+            .expect("content ID should allocate");
+        let mut owner_prototype = test_craft_item_prototype("sealed_case");
+        owner_prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("CONTENTS"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 1,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(cdda_protocol::SpawnPocketRulesV1 {
+                kind: cdda_protocol::SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: 1,
+                max_contains_weight_milligrams: 1,
+                max_item_volume_milliliters: 1,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: 1,
+                item_restrictions: vec![String::from("note")],
+                flag_restrictions: Vec::new(),
+                access_moves: 1,
+                rigid: true,
+                watertight: false,
+                transparent: false,
+                forbidden: false,
+                sealable: true,
+            }),
+        }];
+        let mut non_rigid_efile = owner_prototype.ammunition_containers[0].clone();
+        non_rigid_efile.rigid = false;
+        let non_rigid_rules = non_rigid_efile
+            .spawn_rules
+            .as_mut()
+            .expect("spawn rules should exist");
+        non_rigid_rules.kind = cdda_protocol::SpawnPocketKindV1::EFileStorage;
+        non_rigid_rules.rigid = false;
+        assert!(matches!(
+            validate_ammunition_container_prototype(&non_rigid_efile),
+            Err(SimError::InvalidItem)
+        ));
+        let mut content_prototype = test_craft_item_prototype("note");
+        content_prototype.containment = cdda_protocol::ItemContainmentProfileV1 {
+            weight_milligrams: 1,
+            volume_milliliters: 1,
+            longest_side_millimeters: 1,
+            ..cdda_protocol::ItemContainmentProfileV1::default()
+        };
+        let content = item_from_craft_prototype(content_id, &content_prototype).snapshot();
+        let mut owner = item_from_craft_prototype(owner_id, &owner_prototype);
+        owner.ammunition_containers[0].contents.push(content);
+        owner.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state should exist")
+            .sealed = true;
+        validate_item_snapshot(&owner.snapshot()).expect("sealed owner should be valid");
+        let mut impossible_partial = owner.snapshot();
+        let partial_rules = &mut impossible_partial.ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state")
+            .rules;
+        partial_rules.max_contains_volume_milliliters = 2;
+        partial_rules.max_contains_weight_milligrams = 2;
+        partial_rules.max_item_volume_milliliters = 2;
+        assert!(
+            matches!(
+                validate_item_snapshot(&impossible_partial),
+                Err(SimError::InvalidItem)
+            ),
+            "simulation recovery must reject impossible sealed-partial state"
+        );
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .inventory
+            .insert(owner_id, owner);
+
+        let outcome = world
+            .advance_tick(vec![ClientCommand {
+                actor_id,
+                sequence: CommandSequence(1),
+                client_tick: world.tick(),
+                kind: CommandKind::RemovePocketItem {
+                    owner_item: owner_id,
+                    pocket_index: 0,
+                    contained_item: content_id,
+                },
+            }])
+            .expect("sealed content removal should resolve");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event.kind,
+            WorldEventKind::PocketItemRemoved {
+                contained_item,
+                ..
+            } if contained_item == content_id
+        )));
+        let actor = world.actor_snapshot(actor_id).expect("actor remains");
+        assert!(actor.inventory.iter().any(|item| item.id == content_id));
+        let owner = actor
+            .inventory
+            .iter()
+            .find(|item| item.id == owner_id)
+            .expect("owner remains");
+        let pocket = &owner.ammunition_containers[0];
+        assert!(pocket.contents.is_empty());
+        assert!(!pocket.spawn_state.as_ref().expect("spawn state").sealed);
+    }
+
+    #[test]
     fn ammunition_container_transfers_are_bounded_atomic_and_identity_preserving() {
         let (mut world, actor, _other) = world_with_two_actors();
         make_actor_act_each_tick(&mut world, actor);
@@ -23321,6 +23888,7 @@ mod tests {
                     access_moves: 20,
                     reloadable: true,
                     unloadable: true,
+                    spawn_rules: None,
                 }],
             )
             .expect("strict quiver should spawn");
@@ -23573,6 +24141,7 @@ mod tests {
                         pocket_id: String::from("PRIMARY"),
                         ammunition_type: String::from("battery"),
                         capacity,
+                        rigid: true,
                         reloadable,
                         unloadable: true,
                     }],
@@ -23988,6 +24557,7 @@ mod tests {
                     pocket_id: String::from("PRIMARY"),
                     ammunition_type: String::from("battery"),
                     capacity: 4,
+                    rigid: true,
                     reloadable: true,
                     unloadable: true,
                 }],
@@ -24179,6 +24749,7 @@ mod tests {
                         pocket_id: String::from("PRIMARY"),
                         ammunition_type: String::from("battery"),
                         capacity: 1,
+                        rigid: true,
                         reloadable: true,
                         unloadable: true,
                     },
@@ -24187,6 +24758,7 @@ mod tests {
                         pocket_id: String::from("RESERVE"),
                         ammunition_type: String::from("battery"),
                         capacity: 1,
+                        rigid: true,
                         reloadable: true,
                         unloadable: true,
                     },
@@ -24208,6 +24780,12 @@ mod tests {
                 ranged_weapon: None,
             })
             .expect("battery ammunition should spawn");
+        let ammunition_instance = world
+            .ground_items
+            .get_mut(&ammunition)
+            .expect("spawned battery should remain on the ground");
+        ammunition_instance.item.containment.count_by_charges = true;
+        ammunition_instance.item.containment.stack_size = 1;
         let commands = [
             CommandKind::PickUp { item_id: tool },
             CommandKind::PickUp { item_id: cell },
@@ -26222,6 +26800,11 @@ mod tests {
                             variant_id: None,
                             event: None,
                             target: test_item_group_leaf("beta", None, false),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
                         },
                         ItemGroupEntryV1 {
                             probability: 2,
@@ -26231,9 +26814,15 @@ mod tests {
                             variant_id: None,
                             event: None,
                             target: test_item_group_leaf("gamma", None, false),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
                         },
                     ],
                 }],
+                wrapper: None,
             },
         }];
         let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
@@ -26253,6 +26842,11 @@ mod tests {
                         variant_id: None,
                         event: None,
                         target: test_item_group_leaf("alpha", None, false),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     },
                     ItemGroupEntryV1 {
                         probability: 100,
@@ -26262,6 +26856,11 @@ mod tests {
                         variant_id: None,
                         event: None,
                         target: ItemGroupTargetV1::Group(String::from("weighted_child")),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     },
                     ItemGroupEntryV1 {
                         probability: 100,
@@ -26281,9 +26880,15 @@ mod tests {
                             }),
                             true,
                         ),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     },
                 ],
             }],
+            wrapper: None,
         });
         let catalog_map = catalog
             .iter()
@@ -26329,8 +26934,14 @@ mod tests {
                         variant_id: None,
                         event: None,
                         target: test_item_group_leaf("rock", None, false),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     }],
                 }],
+                wrapper: None,
             },
         }];
         let mut world = WorldState::new(83, [83; 32]);
@@ -26372,6 +26983,7 @@ mod tests {
                     kind: ItemGroupKindV1::Collection,
                     entries: Vec::new(),
                 }],
+                wrapper: None,
             },
         });
         assert!(matches!(
@@ -26424,8 +27036,14 @@ mod tests {
                         }),
                         false,
                     ),
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
                 }],
             }],
+            wrapper: None,
         });
         let seed = [91; 32];
         let mut actual_rng = ChaCha8Rng::from_seed(seed);
@@ -26512,16 +27130,29 @@ mod tests {
                                     ammunition_containers: Vec::new(),
                                     residual_energy_millijoules: 0,
                                     powered_tool: None,
+                                    containment: Default::default(),
                                 },
                                 maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
                                 variants: Vec::new(),
+                                snippets: Vec::new(),
+                                initial_variables: BTreeMap::new(),
                                 modifier_side_effects_supported: true,
                                 charges: None,
                                 minimum_one_charge: false,
+                                charge_ammunition: None,
+                                charges_supported: true,
+                                modifier_container_capacity_applies: true,
+                                contents_insertion_supported: true,
                             },
                         )),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     }],
                 }],
+                wrapper: None,
             })),
             hit_field: Some(cdda_protocol::BashFieldEffectV1 {
                 field_type_id: String::from("fd_dust"),
@@ -28126,8 +28757,14 @@ mod tests {
                         variant_id: None,
                         event: None,
                         target: test_item_group_leaf("marker_item", None, false),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     }],
                 }],
+                wrapper: None,
             },
         };
         let mut catalog = test_worldgen_catalog(test_terrain("t_a"), None);
@@ -28548,8 +29185,14 @@ mod tests {
                         variant_id: None,
                         event: None,
                         target: test_item_group_leaf("rock", None, false),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
                     }],
                 }],
+                wrapper: None,
             },
         };
         let catalog = test_worldgen_catalog(test_terrain("t_grass"), Some("field_loot"));

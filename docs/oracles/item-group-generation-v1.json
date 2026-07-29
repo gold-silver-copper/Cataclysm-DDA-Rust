@@ -77,6 +77,18 @@
       "integral_ammunition_type": "match",
       "integral_remaining_capacity": 0
     },
+    "modifier_container_capacity": {
+      "seed": 31415,
+      "container_type": "bottle_plastic",
+      "payload_type": "water_clean",
+      "explicit_minimum": 50,
+      "explicit_maximum": 80,
+      "explicit_charges": 2,
+      "default_charges": 2,
+      "explicit_downstream_draw": 8831,
+      "fixed_downstream_draw": 8831,
+      "downstream_draw_matches": true
+    },
     "containers": [
       {
         "case_id": "discard",
@@ -220,6 +232,118 @@
           "content_types": ["tank_top", "blister_pack_small", "socks_ankle", "b_shorts", "wrapper", "wrapper", "portable_game", "comb_pocket", "mp3", "jacket_flannel", "pockknife", "boxer_briefs", "comb_pocket", "leathersandals", "teleumbrella", "heavy_flashlight", "smart_phone_locked", "smart_phone"],
           "content_raw_damage": [3015, 0, 4000, 1601, 0, 0, 0, 0, 0, 3542, 0, 1772, 0, 3296, 0, 0, 0, 0],
           "content_damage_levels": [4, 0, 5, 2, 0, 0, 0, 0, 0, 4, 0, 2, 0, 4, 0, 0, 0, 0]
+        }
+      ]
+    },
+    "civilian_phone_case": {
+      "seed_search_limit": 100000,
+      "valid_shapes": true,
+      "phone_types": ["smart_phone", "smart_phone_locked"],
+      "observed_empty_efiles": true,
+      "observed_many_efiles": true,
+      "exact_traces": [
+        {
+          "witness": "fixed_seed:1",
+          "seed": 1,
+          "wrapper_type": "waterproof_smart_phone_case",
+          "wrapper_variant": "hello_kitty_case",
+          "wrapper_any_pocket_sealed": false,
+          "wrapper_remaining_volume_ml": 0,
+          "wrapper_remaining_weight_g": 0,
+          "phone_type": "smart_phone_locked",
+          "phone_charges": 0,
+          "phone_ammo_remaining": 3,
+          "phone_ammunition_type": "battery",
+          "phone_raw_damage": 0,
+          "efile_types": ["efile_recipes", "efile_lore", "efile_map"],
+          "efile_raw_damage": [0, 0, 0],
+          "downstream_draw": 9907
+        },
+        {
+          "witness": "first_phone_type:smart_phone_locked",
+          "seed": 1,
+          "wrapper_type": "waterproof_smart_phone_case",
+          "wrapper_variant": "hello_kitty_case",
+          "wrapper_any_pocket_sealed": false,
+          "wrapper_remaining_volume_ml": 0,
+          "wrapper_remaining_weight_g": 0,
+          "phone_type": "smart_phone_locked",
+          "phone_charges": 0,
+          "phone_ammo_remaining": 3,
+          "phone_ammunition_type": "battery",
+          "phone_raw_damage": 0,
+          "efile_types": ["efile_recipes", "efile_lore", "efile_map"],
+          "efile_raw_damage": [0, 0, 0],
+          "downstream_draw": 9907
+        },
+        {
+          "witness": "first_five_or_more_efiles",
+          "seed": 2,
+          "wrapper_type": "waterproof_smart_phone_case",
+          "wrapper_variant": "violet_smart_phone_case",
+          "wrapper_any_pocket_sealed": false,
+          "wrapper_remaining_volume_ml": 0,
+          "wrapper_remaining_weight_g": 0,
+          "phone_type": "smart_phone_locked",
+          "phone_charges": 0,
+          "phone_ammo_remaining": 7,
+          "phone_ammunition_type": "battery",
+          "phone_raw_damage": 0,
+          "efile_types": [
+            "essay_book",
+            "essay_book",
+            "essay_book",
+            "novel_swash",
+            "novel_satire",
+            "book_fict_hard_sports_omni",
+            "efile_lore",
+            "efile_map"
+          ],
+          "efile_raw_damage": [0, 0, 0, 0, 0, 0, 0, 0],
+          "downstream_draw": 9375
+        },
+        {
+          "witness": "first_phone_type:smart_phone",
+          "seed": 3,
+          "wrapper_type": "waterproof_smart_phone_case",
+          "wrapper_variant": "brown_smart_phone_case",
+          "wrapper_any_pocket_sealed": false,
+          "wrapper_remaining_volume_ml": 0,
+          "wrapper_remaining_weight_g": 0,
+          "phone_type": "smart_phone",
+          "phone_charges": 0,
+          "phone_ammo_remaining": 7,
+          "phone_ammunition_type": "battery",
+          "phone_raw_damage": 0,
+          "efile_types": [
+            "plays_book",
+            "essay_book",
+            "poetry_book",
+            "novel_coa",
+            "novel_war2",
+            "novel_road",
+            "efile_lore",
+            "efile_map"
+          ],
+          "efile_raw_damage": [0, 0, 0, 0, 0, 0, 0, 0],
+          "downstream_draw": 4342
+        },
+        {
+          "witness": "first_empty_efiles",
+          "seed": 5,
+          "wrapper_type": "waterproof_smart_phone_case",
+          "wrapper_variant": "black_smart_phone_case",
+          "wrapper_any_pocket_sealed": false,
+          "wrapper_remaining_volume_ml": 0,
+          "wrapper_remaining_weight_g": 0,
+          "phone_type": "smart_phone_locked",
+          "phone_charges": 0,
+          "phone_ammo_remaining": 12,
+          "phone_ammunition_type": "battery",
+          "phone_raw_damage": 0,
+          "efile_types": [],
+          "efile_raw_damage": [],
+          "downstream_draw": 4586
         }
       ]
     },

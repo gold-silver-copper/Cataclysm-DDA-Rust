@@ -6,12 +6,14 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 - Verified green commit: `cc34f40d79f9323f395643b7fa4c3d23127eb9e7`
   (`Represent exact item damage and variants`).
-- Active milestone: `regional-terrain-base`. Protocol item-group ownership and
-  simulation item-instance ownership are extracted; the broader protocol and
-  simulation item module milestones remain in progress.
-- Checkpoint representation: protocol 86, worldgen algorithm 2, persistence
+- Active worktree: the single batched containment-family implementation under
+  `regional-terrain-base`; it is not a verified checkpoint until the complete
+  gate and fixed-tree review finish.
+- Verified representation: protocol 86, worldgen algorithm 2, persistence
   schema/minimum recoverable schema 64, replay format 3, CanonicalStateV62, and
-  CanonicalEventsV18.
+  CanonicalEventsV18. The active worktree deliberately batches wrappers,
+  contents groups, sealing, overflow, snippets, and variables into protocol 87,
+  schema 65, and CanonicalStateV63.
 - Conformance: scenario 7 and observation 6.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only. The server and
   simulation are plain Rust; iroh 1.0.3 owns networking and authentication.
@@ -22,8 +24,10 @@ Mapgen/overmap progress is split into durable submilestones:
   recovery modes exist, but no shared direct Rust/C++ comparator yet.
 - `omt-identities-routing`: `oracle_pending` for the same comparator boundary.
 - `start-location-selection`: `oracle_pending` for the same comparator boundary.
-- `regional-terrain-base`: `in_progress`; exact field closure currently stops
-  at general `civilian_phones_case.contents-group` ownership.
+- `regional-terrain-base`: `in_progress`; the containment engine removes the
+  `civilian_phones_case` blocker. The exact field closure now stops at
+  `accesories_personal_unisex_child` because `wearable_light` tool charge
+  modifiers still require an unrepresented ammunition-loading path.
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
@@ -47,53 +51,35 @@ terrain/furniture/item rotation, matching start selection, durable chunks, and
 ordinary blocked layout edges are implemented. The real default `field` layer
 is not admitted until its entire loot/containment closure is exact.
 
-## Protocol 86 family
+## Active Protocol 87 containment family
 
-- ITEM content normalization finalizes source-ordered generic variants through
-  replacement, inheritance, `extend`, and `delete`. Missing or empty alternate
-  text and art use the finalized base ITEM before append, while unsupported
-  variant fields and visibility policies remain fail-closed.
-- Canonical items and component provenance store exact raw damage, its derived
-  display level, and a self-contained selected variant. Snapshot/replay recovery
-  never consults live content to reconstruct appearance metadata.
-- The generalized item-group planner preserves constructor variant and FIT RNG
-  phases, applies direct or named-group raw damage/explicit variants after
-  completed child generation, clamps damage per leaf, rolls ranged charges
-  before magazine dressing, and implements `<any>` reselection including the
-  zero-weight retain-existing boundary.
-- Named modifiers are valid only when every possible output leaf has no
-  unrepresented modifier side effect. The protocol graph evaluator computes
-  this through its memoized closure; simulation checks it again defensively.
-  Local-composite modifiers, degradation, gun fouling/faults, unsupported
-  constructor state, unsupported variant policy, and general containment fail
-  closed.
-- The pinned C++ oracle now has 51 assertions. It adds exact constructor-variant
-  witnesses for both weighted choices and exact downstream RNG values. Existing
-  exact container witnesses cover all six first-observed orders; exact corpse
-  witnesses cover fixed seed 1 and the first maximum-damage-content boundary,
-  so aggregate minima/maxima cannot satisfy the oracle alone.
-- The structural-bash scenario emits two raw-damage-1000/display-level-2
-  `weathered` splinters and retains their complete variant metadata identically
-  in direct, per-tick snapshot, SQLite, and portable-replay modes. The ordinary
-  client item menu displays the authoritative selected variant.
-- Ordinary monster corpses now retain the exact pinned float32-derived raw
-  overkill damage rather than reconstructing a display-level minimum. A
-  non-boundary death is asserted live, after SQLite recovery, and after portable
-  replay; the 625-HP/251-overflow raw-1003 rounding witness is explicit.
-- Exact production admission rises from 521 to 524 furniture bashes. The three
-  audited additions are `f_cardboard_door_o`, `f_cardboard_roof`, and
-  `f_pallet_brick_adobe`; all other prior exclusions remain explicit.
-- The fixed item-flow scenario remains at tick 80 with identical actors,
-  inventory, ground items, and CanonicalEventsV18. Its CanonicalState root
-  changes only from
-  `2aae0f859788b6e83bd4c03972f32a6a78963a63c1cedf5774b6b1e895e37820`
-  to
-  `8f8710e06937a50c14bcad35a17dbc41a059128061f4be9316c4c6449358dc66`,
-  isolating the new serialized defaults and CanonicalStateV62 domain.
+- One generalized planner covers whole-group, direct-entry, and modifier-owned
+  wrappers; `contents-item` and `contents-group`; sealing; spill/discard;
+  snippets; typed variables; and recursive preorder stable-ID allocation.
+- Strict ITEM projections retain physical/E-file spawn pockets, phase,
+  count-by-charge mass and volume, longest side, restrictions, watertight and
+  sealable state, wrapper capacity, and represented item flags. Unsupported
+  pocket shapes and ambiguous material-derived softness remain explicit and
+  fail closed.
+- Capacity checks use recursive weight, volume, and length. `NO_DROP`,
+  `REDUCED_WEIGHT`, explicit `SOFT`/`HARD`, liquid stacking, E-file exclusion,
+  item-or-flag restrictions, `NO_UNWIELD`, and exact full-container sealing are
+  characterized. Reserved physical variables cannot overwrite canonical
+  weight or volume.
+- Charge modifiers preserve constructor/dressing RNG order, clamp liquids and
+  count-by-charge items to at least one even through outer named groups, and
+  apply modifier-container capacity/default liquid fill before insertion.
+- The pinned item-group oracle has 65 exact assertions, including representative
+  traces and boundary/downstream-RNG witnesses rather than aggregate ranges
+  alone. The server normalization admits the complete
+  `civilian_phones_case` closure and 524 furniture-bash definitions.
+- The structural-bash conformance path now generates a sealed rigid wrapper
+  with contained drops and proves its nested ownership through direct,
+  per-tick snapshot, SQLite, portable replay, and the ordinary Bevy item view.
 
 ## Measured progress
 
-Runtime evidence remains four definitions and 44 weighted points. Each counted
+Runtime evidence remains four core definitions and 44 weighted points. Each counted
 definition is generated, authoritatively interacted with, persisted, and
 client-accessible. No production definition receives four-mode credit from a
 normalized semantic substitute. The three newly normalizable furniture bashes
@@ -101,10 +87,29 @@ earn no points yet because the current playable LMOE mapgen does not place
 them. Parser inventory remains separate: 7,621 item groups, 9,520 mapgen
 objects, 2,712 OMTs, and 150 starts earn no runtime credit merely for loading.
 
-Current ownership sizes are 28,696 lines in `sim/lib.rs`, 1,150 in
-`sim/items.rs`, 8,180 in `protocol/lib.rs`, 640 in
-`protocol/item_groups.rs`, 13,058 in persistence, 8,776 in the server library,
-6,377 in the server binary root, and 665 in server item-group normalization.
+The independently checked ordinary-gameplay denominator is split by source:
+core DDA has 13,865 target definitions and 263,435 possible weighted points,
+with 44 earned (0.0167%); selectable bundled mods have 5,967 target definitions
+and 113,373 possible points, with zero earned. The bundled universe is the
+union of nonobsolete pinned mods that participate in at least one valid
+new-world selection; mutually exclusive configurations still contribute their
+distinct playable definitions. Ordinary playable loops remain listed separately
+from parser and weighted coverage.
+
+Current ownership sizes are 29,339 lines in `sim/lib.rs`, 3,265 in
+`sim/items.rs`, 9,722 in `protocol/lib.rs`, 1,192 in
+`protocol/item_groups.rs`, 13,064 in persistence, 8,791 in the server library,
+and 1,111 in server item-group normalization. Against the green implementation,
+the containment family primarily grows the three bounded owners:
+`sim/items.rs` +2,115 net lines, `protocol/item_groups.rs` +552, and
+`server/item_groups.rs` +446. Central growth is limited to canonical/wire
+integration: `sim/lib.rs` +643, `protocol/lib.rs` +1,542, server `lib.rs` +15,
+and persistence +6. The protocol exception is large because item snapshots and
+their validators have not yet been mechanically extracted; after this
+checkpoint, further item-group behavior has a zero-growth budget in central
+`lib.rs` files unless a review record identifies an unavoidable schema-only
+integration. New behavior belongs in the three bounded owners.
+
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain explicit
 mechanical extraction milestones before anatomy or EOC expansion.
@@ -113,10 +118,13 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 - Production overmap population is still LMOE, not an upstream regional
   forest/city/road/river/special layout.
-- General `contents-group` materialization, wrapper stable IDs, recursive item
-  ownership, sealing, spill/discard overflow, and complete pocket capacity
-  semantics remain unavailable. The regional-field closure rejects this exact
-  boundary rather than dropping rare content.
+- Flexible physical spawn pockets, arbitrary player-driven general containment,
+  material-derived softness, and unprojected constructor/pocket semantics remain
+  unavailable. They are retained explicitly and rejected rather than guessed.
+- The real field base is not normalization-ready yet: its next exact retained
+  blocker is the `wearable_light` tool charge path. It remains outside the
+  production surface until the full closure, exploration/loot client proof,
+  and fixed-tree review are green.
 - Adjacent overmaps, additional generated z-levels, cities, forests, roads,
   rivers, specials, extras, spawn groups/populations, zones, vehicles, and
   mapgen monsters remain unavailable.
@@ -128,8 +136,8 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Latest verification
 
-The exact verified commit `cc34f40d79f9323f395643b7fa4c3d23127eb9e7`
-passes formatting, all-target
+The exact verified implementation commit
+`cc34f40d79f9323f395643b7fa4c3d23127eb9e7` passes formatting, all-target
 workspace checking, strict Clippy, 346 workspace tests, doc-tests, and
 warning-free rustdoc. All six dependency/parity/progress/astronomy/content
 gates pass; runtime progress remains four definitions and 44 points. The three
@@ -139,8 +147,25 @@ fresh full-diff review against `f882a5d46e8d27163399b97c5ffaf6f0bda67320`
 found and resolved charge/dressing order, variant fallback/`<any>`, float32
 corpse damage, bounds, duplicate-validation complexity, and stale-documentation
 issues; its final pass found no remaining P0/P1. The bound runtime record names
-this exact implementation, and the durable review record is
+that exact implementation, and the durable review record is
 [docs/reviews/protocol-86-item-damage-variants.md](docs/reviews/protocol-86-item-damage-variants.md).
+
+The active Protocol 87 worktree passes formatting, all-target checking, strict
+Clippy, 373 workspace tests plus doc-tests, warning-free rustdoc, all six
+repository gates, the 8/65/17-assertion pinned C++ oracles, and the production
+content admission test. Focused regressions cover recursive softness/length,
+reserved variables, modifier-container capacity, containment weight flags,
+named-group zero-charge clamping, and protocol/simulator Node-modifier
+consistency.
+
+The only checked canonical fixture hash changed from
+`8f8710e06937a50c14bcad35a17dbc41a059128061f4be9316c4c6449358dc66` to
+`80e072e755e68be0aad782132f7118f4269b5f664ead99bc50a1b1cd8b27d335`.
+This is the expected CanonicalStateV62-to-V63 domain change plus serialized
+containment defaults; the tick, actors, inventory, ground items, commands, and
+CanonicalEventsV18 trace/hash remain unchanged. No other checked canonical hash
+was edited. The worktree is not called a green checkpoint until it is committed
+and independently reviewed as that exact immutable tree.
 
 The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
@@ -148,11 +173,10 @@ The fixed upstream checkout remains
 
 ## Next dependency boundary
 
-Resume `regional-terrain-base` by implementing generalized `contents-group` and
-wrapper ownership in the extracted item modules, with nested stable IDs and
-explicit overflow. Require a pinned exact characterization, generalized engine,
-direct-comparison disposition, all four recovery modes, runtime admission, and
-ordinary server/client access before replacing the LMOE production fill with
-the real field base. Forest/city/road/river/special placement begins only after
-that base is exact and green; anatomy and EOCs remain behind the listed
-modularization milestones.
+Finish and review the single Protocol 87 containment checkpoint. Then build the
+reusable direct Rust-to-C++ comparator and close `atomic-static-mapgen`,
+`omt-identities-routing`, and `start-location-selection` before adding ledger
+scope. Next admit the real field base and demonstrate ordinary client
+exploration and loot. Forest/city/road/river/special placement starts only after
+that playable base is exact and green; anatomy and EOCs remain behind the
+listed modularization milestones.
