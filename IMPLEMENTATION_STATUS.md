@@ -4,16 +4,15 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `cc34f40d79f9323f395643b7fa4c3d23127eb9e7`
-  (`Represent exact item damage and variants`).
-- Active worktree: the single batched containment-family implementation under
-  `regional-terrain-base`; it is not a verified checkpoint until the complete
-  gate and fixed-tree review finish.
-- Verified representation: protocol 86, worldgen algorithm 2, persistence
-  schema/minimum recoverable schema 64, replay format 3, CanonicalStateV62, and
-  CanonicalEventsV18. The active worktree deliberately batches wrappers,
-  contents groups, sealing, overflow, snippets, and variables into protocol 87,
-  schema 65, and CanonicalStateV63.
+- Verified green commit: `0552ce841fd50dd48789b700170ddce9154284fb`
+  (`Implement generalized item containment family`).
+- Active milestone: close the three existing mapgen/overmap oracle gates with
+  one reusable direct Rust-to-C++ comparator before expanding the ledger. The
+  batched containment dependency of `regional-terrain-base` is complete; field
+  admission resumes after those gates close.
+- Verified representation: protocol 87, worldgen algorithm 2, persistence
+  schema/minimum recoverable schema 65, replay format 3, CanonicalStateV63, and
+  CanonicalEventsV18.
 - Conformance: scenario 7 and observation 6.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only. The server and
   simulation are plain Rust; iroh 1.0.3 owns networking and authentication.
@@ -51,7 +50,7 @@ terrain/furniture/item rotation, matching start selection, durable chunks, and
 ordinary blocked layout edges are implemented. The real default `field` layer
 is not admitted until its entire loot/containment closure is exact.
 
-## Active Protocol 87 containment family
+## Verified Protocol 87 containment family
 
 - One generalized planner covers whole-group, direct-entry, and modifier-owned
   wrappers; `contents-item` and `contents-group`; sealing; spill/discard;
@@ -137,26 +136,27 @@ mechanical extraction milestones before anatomy or EOC expansion.
 ## Latest verification
 
 The exact verified implementation commit
-`cc34f40d79f9323f395643b7fa4c3d23127eb9e7` passes formatting, all-target
-workspace checking, strict Clippy, 346 workspace tests, doc-tests, and
+`0552ce841fd50dd48789b700170ddce9154284fb`, parent
+`2a3ab9d42b61e0ed90d167650bfb1ee2e2512277`, passes formatting, all-target
+workspace checking, strict Clippy, 373 workspace tests plus doc-tests, and
 warning-free rustdoc. All six dependency/parity/progress/astronomy/content
 gates pass; runtime progress remains four definitions and 44 points. The three
-pinned C++ oracles pass 8 pocket, 51 item-group, and 17 mapgen assertions. The
-production content test confirms exactly 524 admitted furniture bashes. A
-fresh full-diff review against `f882a5d46e8d27163399b97c5ffaf6f0bda67320`
-found and resolved charge/dressing order, variant fallback/`<any>`, float32
-corpse damage, bounds, duplicate-validation complexity, and stale-documentation
-issues; its final pass found no remaining P0/P1. The bound runtime record names
-that exact implementation, and the durable review record is
-[docs/reviews/protocol-86-item-damage-variants.md](docs/reviews/protocol-86-item-damage-variants.md).
+pinned C++ oracles pass 8 pocket, 65 item-group, and 17 mapgen assertions. The
+production content test confirms exactly 524 admitted furniture bashes and the
+7,992-file manifest hash
+`45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
 
-The active Protocol 87 worktree passes formatting, all-target checking, strict
-Clippy, 373 workspace tests plus doc-tests, warning-free rustdoc, all six
-repository gates, the 8/65/17-assertion pinned C++ oracles, and the production
-content admission test. Focused regressions cover recursive softness/length,
-reserved variables, modifier-container capacity, containment weight flags,
-named-group zero-charge clamping, and protocol/simulator Node-modifier
-consistency.
+An independent fresh-context review used detached worktree
+`/tmp/cdda-item-group-final.R8yg77` and fixed tree
+`372f320a7123ae7c54b926f4bcbbc95aecb669d1`. It reproduced stable patch ID
+`fec84981a56457fd6a4ae0bcc4a4540bb36c592c`, reviewed all 24 changed files, and
+found no remaining P0-P3 issue. Confirmed review findings corrected rigid E-file
+validation, the legitimate fractional loose-battery state, and consistency
+between recipe, containment, prototype, and reconstructed snapshot
+count-by-charge metadata. The exact review scope, earlier findings and
+resolutions, rejected concerns, verification, and residual risks are recorded
+in
+[docs/reviews/protocol-87-item-containment.md](docs/reviews/protocol-87-item-containment.md).
 
 The only checked canonical fixture hash changed from
 `8f8710e06937a50c14bcad35a17dbc41a059128061f4be9316c4c6449358dc66` to
@@ -164,8 +164,8 @@ The only checked canonical fixture hash changed from
 This is the expected CanonicalStateV62-to-V63 domain change plus serialized
 containment defaults; the tick, actors, inventory, ground items, commands, and
 CanonicalEventsV18 trace/hash remain unchanged. No other checked canonical hash
-was edited. The worktree is not called a green checkpoint until it is committed
-and independently reviewed as that exact immutable tree.
+was edited. The direct, per-tick snapshot, SQLite, and portable-replay modes all
+reproduce this representation.
 
 The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
@@ -173,8 +173,7 @@ The fixed upstream checkout remains
 
 ## Next dependency boundary
 
-Finish and review the single Protocol 87 containment checkpoint. Then build the
-reusable direct Rust-to-C++ comparator and close `atomic-static-mapgen`,
+Build the reusable direct Rust-to-C++ comparator and close `atomic-static-mapgen`,
 `omt-identities-routing`, and `start-location-selection` before adding ledger
 scope. Next admit the real field base and demonstrate ordinary client
 exploration and loot. Forest/city/road/river/special placement starts only after
