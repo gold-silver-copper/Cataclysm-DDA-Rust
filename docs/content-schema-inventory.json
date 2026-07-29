@@ -302,7 +302,7 @@
           "occurrences": 1874
         },
         "ascii_picture": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 454
         },
         "barrel_length": {
@@ -1214,11 +1214,11 @@
           "occurrences": 14
         },
         "variant_type": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 455
         },
         "variants": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 662
         },
         "vitamins": {

@@ -677,9 +677,10 @@ The production layout deliberately remains filled with `lmoe_north` so the
 existing playable bootstrap stays exact to its admitted content. The real
 regional z=0 base is `field`, but its reachable loot closure enters
 `civilian_phones_case.contents-group`; strict runtime admission records and
-rejects that boundary instead of omitting rare results. Earlier raw-damage,
-signed-charge, variant, and group/entry-wrapper shapes are retained explicitly,
-but nonzero damage and containment remain unavailable at runtime.
+rejects that boundary instead of omitting rare results. Exact raw damage, its
+derived display level, signed charges, and immutable selected variants are
+retained at runtime. Group/entry-wrapper shapes remain explicit, but general
+containment is still unavailable.
 Forest/city/road/river/special population and adjacent overmaps remain later
 work. Databases below schema 61 that contain serialized state are rejected
 before mutation.
@@ -712,6 +713,25 @@ preloaded-magazine construction, temperature-bearing comestibles,
 constructor-owned state, and definitions whose nonzero raw damage, variants,
 sealing, or containment cannot yet be stored remain fail-closed. Databases
 below schema 63 that contain serialized state are rejected before mutation.
+
+Protocol 86 advances to schema 64 and CanonicalStateV62 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Canonical items
+and retained components now store exact raw damage and a self-contained
+selected variant. The selected-content ITEM importer finalizes ordered generic
+variants through replacement, inheritance, extension, and deletion, including
+base ITEM fallback for missing or empty alternate text and art. Direct and
+named-group modifiers apply damage and explicit variants after constructor/FIT
+phases; ranged charges precede magazine dressing and `<any>` performs exact
+weighted reselection. Named modifiers are admitted only when every possible
+child leaf has no unrepresented modifier side effects. Ordinary corpses retain
+the pinned float32-derived raw overkill value through recovery and replay. The
+shared structural-bash scenario
+retains two raw-damaged, explicitly variant-selected drops through direct,
+per-tick snapshot, SQLite, portable replay, and ordinary Bevy item-menu access.
+The pinned C++ oracle also records exact constructor-variant choices and
+downstream RNG values. General wrapper contents, stable nested ownership, and
+overflow remain fail-closed at `civilian_phones_case.contents-group`. Databases
+below schema 64 that contain serialized state are rejected before mutation.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned

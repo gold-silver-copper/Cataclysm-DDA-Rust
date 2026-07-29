@@ -97,6 +97,7 @@ struct ItemGroupOracleObservationV1 {
     counts: Vec<ItemGroupRangeObservationV1>,
     charges: Vec<ItemGroupRangeObservationV1>,
     modifier_rng_phase: ItemGroupModifierRngPhaseObservationV1,
+    constructor_variants: Vec<ItemGroupConstructorVariantTraceV1>,
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
     containers: Vec<ItemGroupContainerObservationV1>,
@@ -140,6 +141,16 @@ struct ItemGroupModifierRngPhaseObservationV1 {
     expected_downstream: i32,
     actual_downstream: i32,
     downstream_draw_matches: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupConstructorVariantTraceV1 {
+    seed: u32,
+    selected: String,
+    name: String,
+    description: String,
+    downstream_draw: i32,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -578,6 +589,38 @@ fn validate_item_group_observation(
             observation.modifier_rng_phase.actual_downstream
         )
         .into());
+    }
+    let base_description = "A rock the size of a baseball.  Makes a decent melee weapon, and is also good for throwing at enemies.";
+    let expected_constructor_variants = [
+        (
+            3,
+            "test_rock_blue",
+            "blue test_rock",
+            format!("{base_description}  It's a blue test rock"),
+            9_862,
+        ),
+        (
+            1,
+            "test_rock_green",
+            "green test_rock",
+            format!("{base_description}  It's a green test rock"),
+            6_855,
+        ),
+    ];
+    if observation.constructor_variants.len() != expected_constructor_variants.len()
+        || observation
+            .constructor_variants
+            .iter()
+            .zip(expected_constructor_variants)
+            .any(|(trace, expected)| {
+                trace.seed != expected.0
+                    || trace.selected != expected.1
+                    || trace.name != expected.2
+                    || trace.description != expected.3
+                    || trace.downstream_draw != expected.4
+            })
+    {
+        return Err("item-group constructor variant traces are incomplete".into());
     }
     let nested_trace = ["child_conditional", "child_always", "root_last"];
     if observation.nested.rolls_consumed != 4

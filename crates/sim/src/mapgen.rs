@@ -1,7 +1,7 @@
 use cdda_protocol::{
-    ChunkCoord, CraftItemPrototypeV1, FurnitureTileSnapshot, ItemGroupDefinitionV1,
-    ItemGroupSourceV1, WorldPosition, WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1,
-    WorldgenFurnitureTargetV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1, WorldPosition,
+    WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
+    WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
     WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
     WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_omt_identity_at,
     worldgen_omt_matches, worldgen_overmap_contains,
@@ -10,7 +10,8 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
 
 use super::{
-    Chunk, ID_RESERVATION_SIZE, SUBMAP_SIZE, SimError, inclusive_rng_u64, plan_item_group_source,
+    Chunk, ID_RESERVATION_SIZE, PlannedItemSpawn, SUBMAP_SIZE, SimError, inclusive_rng_u64,
+    plan_item_group_source,
 };
 
 const OMT_SUBMAP_WIDTH: i32 = 2;
@@ -51,7 +52,7 @@ pub(super) fn catalog_fits_one_id_reservation(
 
 pub(super) struct PlannedBubble {
     pub chunks: Vec<Chunk>,
-    pub items: Vec<(WorldPosition, CraftItemPrototypeV1)>,
+    pub items: Vec<(WorldPosition, PlannedItemSpawn)>,
 }
 
 pub(super) fn catalog_initial_bubble_is_admissible(

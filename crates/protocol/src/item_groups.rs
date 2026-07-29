@@ -3,7 +3,31 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{CraftItemPrototypeV1, valid_craft_item_prototype, valid_recipe_id};
+use super::{
+    CraftItemPrototypeV1, MAX_ITEM_RAW_DAMAGE, valid_craft_item_prototype, valid_recipe_id,
+};
+
+pub const MAX_ITEM_VARIANTS: usize = 256;
+
+/// A selected cosmetic item variant retained in canonical state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemVariantV1 {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub symbol: String,
+    pub color: String,
+    pub ascii_picture: String,
+}
+
+/// One source-ordered constructor choice. Zero-weight variants remain
+/// addressable by explicit item-group modifiers but are never selected at
+/// construction.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupVariantOptionV1 {
+    pub variant: ItemVariantV1,
+    pub weight: u32,
+}
 
 /// Maximum number of named item groups retained by one canonical world.
 /// Runtime catalogs contain only the transitive closure used by canonical
@@ -58,6 +82,15 @@ pub struct InclusiveU16RangeV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItemGroupItemPrototypeV1 {
     pub prototype: CraftItemPrototypeV1,
+    /// Zero for count-by-charge/otherwise undamageable leaves; otherwise the
+    /// pinned exact maximum raw damage.
+    pub maximum_raw_damage: u16,
+    /// Source-ordered finalized generic variants.
+    pub variants: Vec<ItemGroupVariantOptionV1>,
+    /// Whether applying an upstream item-group modifier to this leaf has no
+    /// authoritative side effects beyond the raw damage, selected variant,
+    /// and magazine-dressing RNG phases represented by the protocol.
+    pub modifier_side_effects_supported: bool,
     pub charges: Option<InclusiveI32RangeV1>,
     /// Count-by-charge items clamp an explicit zero charge roll to one in the
     /// pinned implementation. Non-charge items leave this false.
@@ -81,9 +114,10 @@ pub struct ItemGroupEntryV1 {
     pub count_max: u16,
     /// Presence preserves upstream `Item_modifier` construction even for the
     /// fixed-zero damage range, whose RNG evaluation precedes charge dressing.
-    /// Protocol 85 admits only `0..=0`; nonzero raw damage remains fail-closed
-    /// until item snapshots retain the exact raw value.
     pub raw_damage: Option<InclusiveU16RangeV1>,
+    /// Explicit variant applied after construction. On named-group targets it
+    /// is applied to every generated child item in output order.
+    pub variant_id: Option<String>,
     pub event: Option<ItemGroupEventV1>,
     pub target: ItemGroupTargetV1,
 }
@@ -119,6 +153,7 @@ pub enum ItemGroupSourceV1 {
 struct ItemGroupMetrics {
     outputs: u64,
     depth: usize,
+    modifier_side_effects_supported: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,9 +258,10 @@ impl<'a> ItemGroupEvaluator<'a> {
             .clone();
         let metrics =
             self.evaluate_entries(node.kind, &node.entries, |evaluator, target| match target {
-                ItemGroupTargetV1::Item(_) => Some(ItemGroupMetrics {
+                ItemGroupTargetV1::Item(item) => Some(ItemGroupMetrics {
                     outputs: 1,
                     depth: 0,
+                    modifier_side_effects_supported: item.modifier_side_effects_supported,
                 }),
                 ItemGroupTargetV1::Group(group_id) => {
                     let index = *evaluator.lookup.get(group_id.as_str())?;
@@ -273,9 +309,10 @@ impl<'a> ItemGroupEvaluator<'a> {
             .clone();
         let metrics =
             self.evaluate_entries(node.kind, &node.entries, |evaluator, target| match target {
-                ItemGroupTargetV1::Item(_) => Some(ItemGroupMetrics {
+                ItemGroupTargetV1::Item(item) => Some(ItemGroupMetrics {
                     outputs: 1,
                     depth: 0,
+                    modifier_side_effects_supported: item.modifier_side_effects_supported,
                 }),
                 ItemGroupTargetV1::Group(group_id) => {
                     let index = *evaluator.lookup.get(group_id.as_str())?;
@@ -300,8 +337,14 @@ impl<'a> ItemGroupEvaluator<'a> {
     ) -> Option<ItemGroupMetrics> {
         let mut outputs = 0_u64;
         let mut depth = 0_usize;
+        let mut modifier_side_effects_supported = true;
         for entry in entries {
             let target = target_metrics(self, &entry.target)?;
+            if (entry.raw_damage.is_some() || entry.variant_id.is_some())
+                && !target.modifier_side_effects_supported
+            {
+                return None;
+            }
             let entry_outputs = target.outputs.checked_mul(u64::from(entry.count_max))?;
             let entry_depth = target.depth.checked_add(1)?;
             if entry_outputs > MAX_ITEM_GROUP_OUTPUTS || entry_depth > MAX_ITEM_GROUP_DEPTH {
@@ -317,8 +360,13 @@ impl<'a> ItemGroupEvaluator<'a> {
                 return None;
             }
             depth = depth.max(entry_depth);
+            modifier_side_effects_supported &= target.modifier_side_effects_supported;
         }
-        Some(ItemGroupMetrics { outputs, depth })
+        Some(ItemGroupMetrics {
+            outputs,
+            depth,
+            modifier_side_effects_supported,
+        })
     }
 
     fn evaluate_source(&mut self, source: &ItemGroupSourceV1) -> Option<ItemGroupMetrics> {
@@ -366,6 +414,7 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
         node.entries.iter().any(|entry| {
             let modifier_requires_marker = entry.count_min != 1
                 || entry.count_max != 1
+                || entry.variant_id.is_some()
                 || matches!(
                     &entry.target,
                     ItemGroupTargetV1::Item(item) if item.charges.is_some()
@@ -378,11 +427,16 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                     &entry.target,
                     ItemGroupTargetV1::Item(item) if item.prototype.type_id == "null"
                 )
-                || entry
-                    .raw_damage
-                    .is_some_and(|damage| damage.minimum != 0 || damage.maximum != 0)
-                || (entry.raw_damage.is_some()
-                    && !matches!(&entry.target, ItemGroupTargetV1::Item(_)))
+                || entry.raw_damage.is_some_and(|damage| {
+                    damage.minimum > damage.maximum || damage.maximum > MAX_ITEM_RAW_DAMAGE
+                })
+                || entry.variant_id.as_ref().is_some_and(|variant| {
+                    variant.is_empty()
+                        || variant.len() > 512
+                        || variant.chars().any(char::is_control)
+                })
+                || ((entry.raw_damage.is_some() || entry.variant_id.is_some())
+                    && matches!(&entry.target, ItemGroupTargetV1::Node(_)))
                 || !valid_item_group_target(&entry.target, &node_ids)
         }) || (node.kind == ItemGroupKindV1::Distribution && weight_sum.is_none())
     }) {
@@ -409,6 +463,8 @@ fn valid_item_group_target(target: &ItemGroupTargetV1, node_ids: &BTreeSet<u16>)
     match target {
         ItemGroupTargetV1::Item(item) => {
             valid_craft_item_prototype(&item.prototype)
+                && matches!(item.maximum_raw_damage, 0 | MAX_ITEM_RAW_DAMAGE)
+                && valid_item_group_variants(&item.variants)
                 && item.charges.is_none_or(|charges| {
                     if charges.minimum < 0 || charges.maximum < charges.minimum {
                         return false;
@@ -428,6 +484,49 @@ fn valid_item_group_target(target: &ItemGroupTargetV1, node_ids: &BTreeSet<u16>)
         ItemGroupTargetV1::Group(group_id) => valid_recipe_id(group_id),
         ItemGroupTargetV1::Node(node_id) => node_ids.contains(node_id),
     }
+}
+
+fn valid_item_group_variants(variants: &[ItemGroupVariantOptionV1]) -> bool {
+    if variants.len() > MAX_ITEM_VARIANTS {
+        return false;
+    }
+    let mut ids = BTreeSet::new();
+    let mut total_weight = 0_u32;
+    for option in variants {
+        if !item_variant_is_valid(&option.variant)
+            || option.weight > i32::MAX as u32
+            || !ids.insert(option.variant.id.as_str())
+        {
+            return false;
+        }
+        let Some(total) = total_weight.checked_add(option.weight) else {
+            return false;
+        };
+        total_weight = total;
+        if total_weight > i32::MAX as u32 {
+            return false;
+        }
+    }
+    true
+}
+
+#[must_use]
+pub fn item_variant_is_valid(variant: &ItemVariantV1) -> bool {
+    !variant.id.is_empty()
+        && variant.id != "<any>"
+        && variant.id.len() <= 512
+        && !variant.id.chars().any(char::is_control)
+        && !variant.name.is_empty()
+        && variant.name.len() <= 1_024
+        && !variant.name.chars().any(char::is_control)
+        && variant.description.len() <= 16_384
+        && !variant.description.chars().any(char::is_control)
+        && variant.symbol.len() <= 16
+        && !variant.symbol.chars().any(char::is_control)
+        && variant.color.len() <= 64
+        && !variant.color.chars().any(char::is_control)
+        && variant.ascii_picture.len() <= 512
+        && !variant.ascii_picture.chars().any(char::is_control)
 }
 
 /// Validates the complete named group catalog, including local and global

@@ -41,6 +41,22 @@
       "actual_downstream": 6558,
       "downstream_draw_matches": true
     },
+    "constructor_variants": [
+      {
+        "seed": 3,
+        "selected": "test_rock_blue",
+        "name": "blue test_rock",
+        "description": "A rock the size of a baseball.  Makes a decent melee weapon, and is also good for throwing at enemies.  It's a blue test rock",
+        "downstream_draw": 9862
+      },
+      {
+        "seed": 1,
+        "selected": "test_rock_green",
+        "name": "green test_rock",
+        "description": "A rock the size of a baseball.  Makes a decent melee weapon, and is also good for throwing at enemies.  It's a green test rock",
+        "downstream_draw": 6855
+      }
+    ],
     "nested": {
       "rolls_consumed": 4,
       "expected_trace": ["child_conditional", "child_always", "root_last"],

@@ -20,10 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 63;
-/// Old Postcard snapshots and journals cannot be decoded after the Protocol 85
-/// item-modifier marker change. Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 63;
+pub const SCHEMA_VERSION: i64 = 64;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 86
+/// added exact item damage and selected-variant state. Metadata-only databases
+/// may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 64;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -9333,7 +9334,7 @@ mod tests {
         let death_position = WorldPosition { x: 2, y: 1, z: 0 };
         let corpse_prototype = cdda_protocol::CreatureCorpsePrototypeV1 {
             monster_type_id: String::from("mon_test"),
-            max_hp: 10,
+            max_hp: 8,
             speed: 1,
             attack_cost_moves: 100,
             aggression: 0,
@@ -9362,7 +9363,7 @@ mod tests {
             .spawn_creature(CreatureSpawn {
                 type_id: String::from("mon_test"),
                 position: death_position,
-                hp: 10,
+                hp: 8,
                 speed: 1,
                 attack_cost_moves: 100,
                 aggression: 0,
@@ -9402,24 +9403,32 @@ mod tests {
                     },
                 };
                 let mut candidate = world.clone();
-                candidate
+                let events = candidate
                     .advance_tick(vec![command.clone()])
                     .expect("candidate fatal attack should resolve")
-                    .events
-                    .iter()
-                    .any(|event| {
-                        matches!(
-                            &event.kind,
-                            WorldEventKind::FieldIntensityChanged {
-                                position,
-                                field_type_id,
-                                intensity: 1,
-                            } if *position == death_position && field_type_id == "fd_blood"
-                        )
-                    })
-                    .then_some(command)
+                    .events;
+                let remaining_hp = events.iter().find_map(|event| match event.kind {
+                    WorldEventKind::CreatureDamaged {
+                        target,
+                        remaining_hp,
+                        ..
+                    } if target == creature_id && remaining_hp <= 0 => Some(remaining_hp),
+                    _ => None,
+                })?;
+                let raw_damage = u16::try_from(
+                    (i64::from(remaining_hp).checked_neg()? * 2_500
+                        / i64::from(corpse_prototype.max_hp))
+                    .min(4_000),
+                )
+                .ok()?;
+                (raw_damage > 0
+                    && raw_damage < cdda_protocol::MAX_ITEM_RAW_DAMAGE
+                    && cdda_protocol::minimum_raw_damage_for_level(
+                        cdda_protocol::item_damage_level(raw_damage),
+                    ) != Some(raw_damage))
+                .then_some(command)
             })
-            .expect("named stream should contain a fatal hit");
+            .expect("named stream should contain a non-boundary fatal hit");
         let outcome = world
             .advance_tick(vec![command.clone()])
             .expect("fatal attack should advance");
@@ -9441,6 +9450,32 @@ mod tests {
                 _ => None,
             })
             .expect("death should create a corpse");
+        let remaining_hp = outcome
+            .events
+            .iter()
+            .find_map(|event| match event.kind {
+                WorldEventKind::CreatureDamaged {
+                    target,
+                    remaining_hp,
+                    ..
+                } if target == creature_id => Some(remaining_hp),
+                _ => None,
+            })
+            .expect("fatal damage should be recorded");
+        let expected_raw_damage = u16::try_from(
+            (i64::from(remaining_hp).abs() * 2_500 / i64::from(corpse_prototype.max_hp)).min(4_000),
+        )
+        .expect("bounded corpse damage");
+        let expected_condition = (
+            expected_raw_damage,
+            cdda_protocol::item_damage_level(expected_raw_damage),
+        );
+        assert_eq!(
+            world
+                .ground_item_snapshot(corpse_item_id)
+                .map(|ground| (ground.item.raw_damage, ground.item.damage)),
+            Some(expected_condition)
+        );
         let sequence = store
             .append_journal_batch(&JournalBatchV1 {
                 ticks: vec![JournalTickV1 {
@@ -9479,6 +9514,12 @@ mod tests {
                 .map(|corpse| corpse.prototype),
             Some(corpse_prototype.clone())
         );
+        assert_eq!(
+            recovered
+                .ground_item_snapshot(corpse_item_id)
+                .map(|ground| (ground.item.raw_damage, ground.item.damage)),
+            Some(expected_condition)
+        );
 
         let content = ContentIdentity {
             baseline_commit: BASELINE_COMMIT.to_owned(),
@@ -9507,6 +9548,12 @@ mod tests {
                 .and_then(|ground| ground.item.creature_corpse)
                 .map(|corpse| corpse.prototype),
             Some(corpse_prototype)
+        );
+        assert_eq!(
+            replayed
+                .ground_item_snapshot(corpse_item_id)
+                .map(|ground| (ground.item.raw_damage, ground.item.damage)),
+            Some(expected_condition)
         );
     }
 

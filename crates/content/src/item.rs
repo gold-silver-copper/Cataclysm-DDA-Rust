@@ -22,6 +22,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "price_postapoc",
     "symbol",
     "color",
+    "ascii_picture",
     "material",
     "flags",
     "qualities",
@@ -56,6 +57,8 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "read_skill",
     "intelligence",
     "time",
+    "variant_type",
+    "variants",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -75,6 +78,7 @@ pub struct ItemDefinition {
     pub price_postapoc_cents: i64,
     pub symbol: String,
     pub color: String,
+    pub ascii_picture: String,
     pub materials: BTreeMap<String, i64>,
     pub flags: BTreeSet<String>,
     pub qualities: BTreeMap<String, ItemQualityDefinition>,
@@ -156,8 +160,25 @@ pub struct ItemDefinition {
     pub book_intelligence: i32,
     /// Pinned BOOK base reading duration in simulation moves.
     pub book_time_moves: u64,
+    /// Finalized source-ordered immutable appearance variants. Unsupported
+    /// per-variant behavior is retained explicitly for strict admission.
+    pub variants: Vec<ItemVariantDefinition>,
+    pub variant_type: String,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemVariantDefinition {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub symbol: Option<String>,
+    pub color: Option<String>,
+    pub ascii_picture: Option<String>,
+    pub weight: u32,
+    pub append: bool,
+    pub unsupported_fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -648,6 +669,7 @@ fn apply_common_fields(
     )?;
     apply_string(object, "symbol", &mut item.symbol, source)?;
     apply_string(object, "color", &mut item.color, source)?;
+    apply_string(object, "ascii_picture", &mut item.ascii_picture, source)?;
     apply_materials(object, &mut item.materials, source)?;
     apply_string_set(object, "flags", &mut item.flags, source)?;
     apply_qualities(object, "qualities", &mut item.qualities, source)?;
@@ -737,6 +759,8 @@ fn apply_common_fields(
     apply_string(object, "read_skill", &mut item.book_skill, source)?;
     apply_integer(object, "intelligence", &mut item.book_intelligence, source)?;
     apply_duration_moves(object, "time", &mut item.book_time_moves, source)?;
+    apply_string(object, "variant_type", &mut item.variant_type, source)?;
+    apply_item_variants(object, item, source)?;
     if item.book_required_level < 0 {
         return Err(invalid_field(source, "required_level"));
     }
@@ -778,6 +802,160 @@ fn apply_common_fields(
         }
     }
     Ok(())
+}
+
+fn apply_item_variants(
+    object: &Map<String, Value>,
+    item: &mut ItemDefinition,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    if let Some(value) = object.get("variants") {
+        item.variants = parse_item_variants(value, source)?;
+    }
+    if let Some(value) = modifier(object, "extend", "variants", source)? {
+        item.variants.extend(parse_item_variants(value, source)?);
+    }
+    if let Some(value) = modifier(object, "delete", "variants", source)? {
+        let deleted = parse_deleted_variant_ids(value, source)?;
+        item.variants
+            .retain(|variant| !deleted.contains(&variant.id));
+    }
+    if !item.variants.is_empty() && item.variant_type.is_empty() {
+        item.variant_type = String::from("generic");
+    }
+    Ok(())
+}
+
+fn parse_item_variants(
+    value: &Value,
+    source: &str,
+) -> Result<Vec<ItemVariantDefinition>, ItemRegistryError> {
+    value
+        .as_array()
+        .ok_or_else(|| invalid_field(source, "variants"))?
+        .iter()
+        .map(|value| parse_item_variant(value, source))
+        .collect()
+}
+
+fn parse_item_variant(
+    value: &Value,
+    source: &str,
+) -> Result<ItemVariantDefinition, ItemRegistryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_field(source, "variants"))?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid_field(source, "variants"))?
+        .to_owned();
+    let weight = object.get("weight").map_or(Ok(1), |weight| {
+        u32::try_from(
+            weight
+                .as_i64()
+                .filter(|weight| *weight >= 0)
+                .ok_or_else(|| invalid_field(source, "variants"))?,
+        )
+        .map_err(|_| invalid_field(source, "variants"))
+    })?;
+    let mut unsupported_fields = object
+        .keys()
+        .filter(|field| {
+            !matches!(
+                field.as_str(),
+                "id" | "name"
+                    | "description"
+                    | "symbol"
+                    | "color"
+                    | "ascii_picture"
+                    | "weight"
+                    | "append"
+                    | "expand_snippets"
+            )
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if object
+        .get("expand_snippets")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        unsupported_fields.insert(String::from("expand_snippets"));
+    }
+    Ok(ItemVariantDefinition {
+        id,
+        name: optional_text(object, "name", source)?,
+        description: optional_text(object, "description", source)?,
+        symbol: optional_owned_string(object, "symbol", source)?,
+        color: optional_owned_string(object, "color", source)?,
+        ascii_picture: optional_owned_string(object, "ascii_picture", source)?,
+        weight,
+        append: match object.get("append") {
+            None => false,
+            Some(Value::Bool(append)) => *append,
+            Some(_) => return Err(invalid_field(source, "variants")),
+        },
+        unsupported_fields,
+    })
+}
+
+fn parse_deleted_variant_ids(
+    value: &Value,
+    source: &str,
+) -> Result<BTreeSet<String>, ItemRegistryError> {
+    value
+        .as_array()
+        .ok_or_else(|| invalid_field(source, "variants"))?
+        .iter()
+        .map(|value| match value {
+            Value::String(id) if !id.is_empty() => Ok(id.clone()),
+            Value::Object(object) => object
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_field(source, "variants")),
+            _ => Err(invalid_field(source, "variants")),
+        })
+        .collect()
+}
+
+fn optional_text(
+    object: &Map<String, Value>,
+    field: &str,
+    source: &str,
+) -> Result<Option<String>, ItemRegistryError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    match value {
+        Value::String(value) => Ok(Some(value.clone())),
+        Value::Object(value) => ["str", "str_sp", "str_pl"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(Value::as_str))
+            .map(str::to_owned)
+            .map(Some)
+            .ok_or_else(|| invalid_field(source, "variants")),
+        _ => Err(invalid_field(source, "variants")),
+    }
+}
+
+fn optional_owned_string(
+    object: &Map<String, Value>,
+    field: &str,
+    source: &str,
+) -> Result<Option<String>, ItemRegistryError> {
+    object
+        .get(field)
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_field(source, "variants"))
+        })
+        .transpose()
 }
 
 fn apply_power_pocket_projections(
@@ -2818,6 +2996,62 @@ mod tests {
             build_tool_subtype_replacements(&items),
             Err(ItemRegistryError::CyclicToolSubtype { .. })
         ));
+    }
+
+    #[test]
+    fn item_variants_preserve_order_inheritance_modifiers_and_unsupported_semantics() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let base = raw(serde_json::json!({
+            "type": "ITEM",
+            "abstract": "variant_base",
+            "name": "variant base",
+            "description": "base description",
+            "ascii_picture": "base_art",
+            "variant_type": "generic",
+            "variants": [
+                { "id": "blue", "name": { "str": "blue base" }, "weight": 2 },
+                { "id": "deleted", "weight": 0 }
+            ]
+        }));
+        assert!(load_one(&base, &mut items, &mut abstracts).expect("base should load"));
+        let concrete = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "variant_item",
+            "copy-from": "variant_base",
+            "name": "variant item",
+            "extend": { "variants": [
+                { "id": "green", "description": "green description", "append": true },
+                { "id": "snippet", "expand_snippets": true }
+            ] },
+            "delete": { "variants": [ { "id": "deleted" } ] }
+        }));
+        assert!(load_one(&concrete, &mut items, &mut abstracts).expect("derived item should load"));
+        let variants = &items["variant_item"].variants;
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.id.as_str())
+                .collect::<Vec<_>>(),
+            ["blue", "green", "snippet"]
+        );
+        assert_eq!(variants[0].name.as_deref(), Some("blue base"));
+        assert_eq!(items["variant_item"].ascii_picture, "base_art");
+        assert_eq!(variants[0].weight, 2);
+        assert_eq!(
+            variants[1].description.as_deref(),
+            Some("green description")
+        );
+        assert!(variants[1].append);
+        assert_eq!(
+            variants[2].unsupported_fields,
+            BTreeSet::from([String::from("expand_snippets")])
+        );
+        assert!(
+            !items["variant_item"]
+                .unsupported_fields
+                .contains("variants")
+        );
     }
 
     #[test]

@@ -220,6 +220,45 @@ int downstream_after_fixed_count( unsigned int seed )
     return rng( 0, 9999 );
 }
 
+struct constructor_variant_trace {
+    unsigned int seed = 0;
+    std::string selected;
+    std::string name;
+    std::string description;
+    int downstream_draw = 0;
+};
+
+std::vector<constructor_variant_trace> observe_constructor_variants()
+{
+    std::map<std::string, constructor_variant_trace> first_by_variant;
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item generated( itype_id( "test_rock" ) );
+        REQUIRE( generated.has_itype_variant() );
+        const std::string selected = generated.itype_variant().id;
+        first_by_variant.try_emplace( selected, constructor_variant_trace{
+            seed, selected, generated.tname( 1, false ), generated.variant_description(),
+            rng( 0, 9999 )
+        } );
+        if( first_by_variant.size() == 2 ) {
+            break;
+        }
+    }
+    REQUIRE( first_by_variant.count( "test_rock_blue" ) == 1 );
+    REQUIRE( first_by_variant.count( "test_rock_green" ) == 1 );
+    REQUIRE( first_by_variant.at( "test_rock_blue" ).name == "blue test_rock" );
+    REQUIRE( first_by_variant.at( "test_rock_green" ).name == "green test_rock" );
+    REQUIRE( first_by_variant.at( "test_rock_blue" ).description ==
+             "A rock the size of a baseball.  Makes a decent melee weapon, and is also good for throwing at enemies.  It's a blue test rock" );
+    REQUIRE( first_by_variant.at( "test_rock_green" ).description ==
+             "A rock the size of a baseball.  Makes a decent melee weapon, and is also good for throwing at enemies.  It's a green test rock" );
+    std::vector<constructor_variant_trace> traces;
+    for( const std::string &variant : { "test_rock_blue", "test_rock_green" } ) {
+        traces.push_back( first_by_variant.at( variant ) );
+    }
+    return traces;
+}
+
 unsigned int seed_for_observed_charges( int minimum, int maximum, int target )
 {
     for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
@@ -520,6 +559,8 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     static_cast<void>( rng( 0, 0 ) ); // default Item_modifier damage roll
     const int modifier_rng_expected_downstream = rng( 0, 9999 );
     const int modifier_rng_actual_downstream = downstream_after_fixed_count( modifier_rng_seed );
+    const std::vector<constructor_variant_trace> constructor_variants =
+        observe_constructor_variants();
 
     const unsigned int nested_seed = seed_for_collection_branch( branch_probability );
     rng_set_engine_seed( nested_seed );
@@ -693,6 +734,19 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "downstream_draw_matches",
                      modifier_rng_expected_downstream == modifier_rng_actual_downstream );
         json.end_object();
+
+        json.member( "constructor_variants" );
+        json.start_array();
+        for( const constructor_variant_trace &trace : constructor_variants ) {
+            json.start_object();
+            json.member( "seed", trace.seed );
+            json.member( "selected", trace.selected );
+            json.member( "name", trace.name );
+            json.member( "description", trace.description );
+            json.member( "downstream_draw", trace.downstream_draw );
+            json.end_object();
+        }
+        json.end_array();
 
         json.member( "nested" );
         json.start_object();

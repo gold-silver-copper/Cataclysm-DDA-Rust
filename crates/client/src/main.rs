@@ -2957,9 +2957,15 @@ fn item_menu_entries(
 }
 
 fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> String {
-    let name = content
-        .and_then(|content| content.0.get(&item.type_id))
-        .map_or(item.type_id.as_str(), |definition| definition.name.as_str());
+    let name = item
+        .variant
+        .as_ref()
+        .map(|variant| variant.name.as_str())
+        .unwrap_or_else(|| {
+            content
+                .and_then(|content| content.0.get(&item.type_id))
+                .map_or(item.type_id.as_str(), |definition| definition.name.as_str())
+        });
     let charges = if !item.ammunition_containers.is_empty() {
         Some(format!(
             " [{}]",
@@ -3081,6 +3087,8 @@ fn item_stored_ammunition_charges(item: &ItemSnapshot) -> i32 {
 fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
     left.type_id == right.type_id
         && left.damage == right.damage
+        && left.raw_damage == right.raw_damage
+        && left.variant == right.variant
         && left.melee_damage_milli == right.melee_damage_milli
         && left.calories == right.calories
         && left.quench == right.quench
@@ -4728,23 +4736,27 @@ fn gameplay_status(
             snapshot.tick.0
         );
     }
-    let item_name = |type_id: &str| {
-        content
-            .and_then(|content| content.0.get(type_id))
-            .map_or_else(|| type_id.to_owned(), |definition| definition.name.clone())
+    let item_name = |item: &ItemSnapshot| {
+        item.variant.as_ref().map_or_else(
+            || {
+                content
+                    .and_then(|content| content.0.get(&item.type_id))
+                    .map_or_else(
+                        || item.type_id.clone(),
+                        |definition| definition.name.clone(),
+                    )
+            },
+            |variant| variant.name.clone(),
+        )
     };
-    let inventory = actor
-        .inventory
-        .iter()
-        .map(|item| item_name(&item.type_id))
-        .collect::<Vec<_>>();
+    let inventory = actor.inventory.iter().map(item_name).collect::<Vec<_>>();
     let wielded = actor
         .wielded
         .and_then(|item_id| actor.inventory.iter().find(|item| item.id == item_id))
         .map_or_else(
             || String::from("nothing"),
             |item| {
-                let name = item_name(&item.type_id);
+                let name = item_name(item);
                 item.ranged_weapon.as_ref().map_or(name.clone(), |weapon| {
                     format!(
                         "{name} [{}/{} {}]",
@@ -5158,6 +5170,8 @@ mod tests {
                 type_id: format!("item_{counter}"),
                 charges: 5,
                 damage: 0,
+                raw_damage: 0,
+                variant: None,
                 melee_damage_milli: std::collections::BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -5194,6 +5208,19 @@ mod tests {
         );
         let ground = item(4, "", "", None);
         let elsewhere = item(5, "", "", None);
+        let mut variant_item = item(6, "", "", None);
+        variant_item.variant = Some(cdda_protocol::ItemVariantV1 {
+            id: String::from("weathered"),
+            name: String::from("weathered splinter"),
+            description: String::from("A weathered splinter."),
+            symbol: String::from(";"),
+            color: String::from("brown"),
+            ascii_picture: String::new(),
+        });
+        assert!(
+            item_menu_label(&variant_item, None).starts_with("weathered splinter x5"),
+            "the authoritative selected variant should be visible in normal item menus"
+        );
         let tick = cdda_protocol::SimTick(0);
         let snapshot = ReplicationSnapshotV1 {
             tick,
@@ -5538,6 +5565,8 @@ mod tests {
             type_id: type_id.to_owned(),
             charges: 1,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -6207,6 +6236,8 @@ mod tests {
             type_id: String::from("test_revolver"),
             charges: 1,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: std::collections::BTreeMap::new(),
             calories: 0,
             quench: 0,

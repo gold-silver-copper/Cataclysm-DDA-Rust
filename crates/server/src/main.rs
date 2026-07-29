@@ -4378,11 +4378,14 @@ mod tests {
             minimum: 1,
             maximum: 4,
         });
-        assert!(
-            runtime_item_group_graph(&damage_definition, &items)
-                .expect_err("raw damage must stay wire-closed")
-                .to_string()
-                .contains("raw-damage modifiers")
+        let damage_graph = runtime_item_group_graph(&damage_definition, &items)
+            .expect("raw damage should project exactly");
+        assert_eq!(
+            damage_graph.nodes[0].entries[0].raw_damage,
+            Some(cdda_protocol::InclusiveU16RangeV1 {
+                minimum: 1_000,
+                maximum: 4_000,
+            })
         );
         let mut entry_wrapper_definition = event_definition.clone();
         entry_wrapper_definition.nodes[0].direct_wrapper = Some(ItemGroupEntryWrapper {
@@ -4397,11 +4400,18 @@ mod tests {
         );
         let mut variant_definition = event_definition.clone();
         variant_definition.nodes[0].variant = Some(String::from("oracle_variant"));
-        assert!(
-            runtime_item_group_graph(&variant_definition, &items)
-                .expect_err("item variants must stay wire-closed")
-                .to_string()
-                .contains("item variants")
+        let variant_graph = runtime_item_group_graph(&variant_definition, &items)
+            .expect("explicit variants should project");
+        assert_eq!(
+            variant_graph.nodes[0].entries[0].variant_id.as_deref(),
+            Some("oracle_variant")
+        );
+        assert_eq!(
+            variant_graph.nodes[0].entries[0].raw_damage,
+            Some(cdda_protocol::InclusiveU16RangeV1 {
+                minimum: 0,
+                maximum: 0,
+            })
         );
         let mut wrapper_definition = event_definition;
         wrapper_definition.wrapper = Some(ItemGroupWrapper {
@@ -4722,9 +4732,21 @@ mod tests {
                 .expect("admitted furniture bashes should normalize");
         assert_eq!(
             furniture_bashes.len(),
-            521,
-            "modifier, containment, constructor-RNG, constructor-state, and temperature paths must fail closed"
+            524,
+            "unsupported containment, constructor state, and temperature paths must remain closed"
         );
+        for furniture_id in [
+            "f_cardboard_door_o",
+            "f_cardboard_roof",
+            "f_pallet_brick_adobe",
+        ] {
+            assert!(
+                furniture_bashes
+                    .iter()
+                    .any(|bash| bash.furniture_id == furniture_id),
+                "the audited damage/variant family should admit {furniture_id}"
+            );
+        }
         let furniture_bash_ids = furniture
             .iter()
             .filter(|definition| definition.bash.is_some())
@@ -4751,8 +4773,6 @@ mod tests {
             "f_exodii_charger",
             "f_exodii_charger_cheap",
             "f_exodii_pump",
-            "f_cardboard_door_o",
-            "f_cardboard_roof",
             "f_firefly_terrarium",
             "f_hay",
             "f_pillow_fort",

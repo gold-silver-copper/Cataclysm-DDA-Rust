@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x2a, 0xae, 0x0f, 0x85, 0x97, 0x88, 0xb6, 0xe8, 0x3b, 0xd4, 0xc0, 0x39, 0x72,
-                    0xf3, 0x2a, 0x6a, 0x78, 0x96, 0x3a, 0x63, 0xc1, 0xce, 0xdf, 0x57, 0x74, 0xb6,
-                    0xb1, 0xe8, 0x95, 0xe3, 0x78, 0x20,
+                    0x8f, 0x87, 0x10, 0xe0, 0x69, 0x37, 0xa5, 0x0c, 0x14, 0xbc, 0xad, 0x35, 0xa1,
+                    0x7d, 0xbc, 0x41, 0xa0, 0x59, 0x12, 0x80, 0x61, 0xf4, 0xbe, 0x93, 0x16, 0xc4,
+                    0xc6, 0x44, 0x93, 0x58, 0xdc, 0x66,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1247,12 +1247,15 @@ mod tests {
                         residual_energy_millijoules: 0,
                         powered_tool: None,
                     },
+                    maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+                    variants: Vec::new(),
+                    modifier_side_effects_supported: true,
                     minimum_one_charge: charges.is_some(),
                     charges,
                 },
             ))
         };
-        let item_groups = vec![ItemGroupDefinitionV1 {
+        let mut item_groups = vec![ItemGroupDefinitionV1 {
             group_id: String::from("wall_bash_results"),
             graph: cdda_protocol::ItemGroupGraphV1 {
                 root_node: 0,
@@ -1265,6 +1268,7 @@ mod tests {
                             count_min: 1,
                             count_max: 1,
                             raw_damage: None,
+                            variant_id: None,
                             event: Some(cdda_protocol::ItemGroupEventV1::Christmas),
                             target: item_leaf("holiday_token", None),
                         },
@@ -1276,6 +1280,7 @@ mod tests {
                                 minimum: 0,
                                 maximum: 0,
                             }),
+                            variant_id: None,
                             event: None,
                             target: item_leaf("splinter", None),
                         },
@@ -1287,6 +1292,7 @@ mod tests {
                                 minimum: 0,
                                 maximum: 0,
                             }),
+                            variant_id: None,
                             event: None,
                             target: item_leaf(
                                 "nail",
@@ -1299,6 +1305,27 @@ mod tests {
                     ],
                 }],
             },
+        }];
+        let splinter = &mut item_groups[0].graph.nodes[0].entries[1];
+        splinter.raw_damage = Some(cdda_protocol::InclusiveU16RangeV1 {
+            minimum: 1_000,
+            maximum: 1_000,
+        });
+        splinter.variant_id = Some(String::from("weathered"));
+        let cdda_protocol::ItemGroupTargetV1::Item(splinter_item) = &mut splinter.target else {
+            unreachable!("splinter fixture is a direct item")
+        };
+        splinter_item.maximum_raw_damage = cdda_protocol::MAX_ITEM_RAW_DAMAGE;
+        splinter_item.variants = vec![cdda_protocol::ItemGroupVariantOptionV1 {
+            variant: cdda_protocol::ItemVariantV1 {
+                id: String::from("weathered"),
+                name: String::from("weathered splinter"),
+                description: String::from("A weathered splinter."),
+                symbol: String::from("/"),
+                color: String::from("brown"),
+                ascii_picture: String::new(),
+            },
+            weight: 1,
         }];
         let floor = TerrainTileSnapshot {
             terrain_id: String::from("t_floor"),
@@ -1440,6 +1467,22 @@ mod tests {
             [("splinter", 1), ("splinter", 1), ("nail", 4)],
             "the fixed seed must include each generated item's constructor, variant, and fit phases"
         );
+        let splinters = direct
+            .final_snapshot
+            .ground_items
+            .iter()
+            .filter(|item| item.item.type_id == "splinter")
+            .collect::<Vec<_>>();
+        assert_eq!(splinters.len(), 2);
+        assert!(splinters.iter().all(|item| {
+            item.item.raw_damage == 1_000
+                && item.item.damage == 2
+                && item
+                    .item
+                    .variant
+                    .as_ref()
+                    .is_some_and(|variant| variant.id == "weathered")
+        }));
         let (coord, local) = wall_position.chunk_and_local();
         let chunk = direct
             .final_snapshot

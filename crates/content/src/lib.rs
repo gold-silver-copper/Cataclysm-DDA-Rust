@@ -29,8 +29,8 @@ pub use field::{
 };
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
 pub use item::{
-    ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, PocketDefinition,
-    PocketTypeDefinition, StrictMagazineDefinition,
+    ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemVariantDefinition,
+    PocketDefinition, PocketTypeDefinition, StrictMagazineDefinition,
 };
 pub use item_group::{
     ItemGroupChargesRange, ItemGroupDefinition, ItemGroupEntryWrapper, ItemGroupEvent,

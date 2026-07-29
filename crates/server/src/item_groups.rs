@@ -9,7 +9,8 @@ use cdda_protocol::{
     CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupDefinitionV1,
     ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
     ItemGroupKindV1, ItemGroupNodeV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    item_group_catalog_is_valid, item_group_source_max_outputs,
+    ItemGroupVariantOptionV1, ItemVariantV1, MAX_ITEM_RAW_DAMAGE, item_group_catalog_is_valid,
+    item_group_source_max_outputs,
 };
 
 use super::{craft_item_prototype, default_instance_charges};
@@ -272,13 +273,6 @@ fn runtime_item_group_entry(
         )
         .into());
     }
-    if node.variant.is_some() {
-        return Err(format!(
-            "item group {} requires unimplemented item variants",
-            definition.id
-        )
-        .into());
-    }
     if node.modifier_sealed.is_some() {
         return Err(format!(
             "item group {} requires unimplemented modifier sealing",
@@ -290,20 +284,19 @@ fn runtime_item_group_entry(
         .damage
         .map(
             |damage| -> Result<InclusiveU16RangeV1, Box<dyn std::error::Error>> {
-                if damage.minimum != 0 || damage.maximum != 0 {
-                    return Err(format!(
-                        "item group {} requires unimplemented raw-damage modifiers",
-                        definition.id
-                    )
-                    .into());
-                }
                 Ok(InclusiveU16RangeV1 {
-                    minimum: 0,
-                    maximum: 0,
+                    minimum: u16::try_from(i64::from(damage.minimum) * 1_000)?,
+                    maximum: u16::try_from(i64::from(damage.maximum) * 1_000)?,
                 })
             },
         )
-        .transpose()?;
+        .transpose()?
+        .or_else(|| {
+            node.variant.as_ref().map(|_| InclusiveU16RangeV1 {
+                minimum: 0,
+                maximum: 0,
+            })
+        });
     let target = match &node.kind {
         StrictItemGroupNodeKind::Item(item_id) => {
             let item = items.get(item_id).ok_or_else(|| {
@@ -314,21 +307,27 @@ fn runtime_item_group_entry(
             })?;
             let (charges, minimum_one_charge) = runtime_item_group_charges(item, node.charges)?;
             let prototype = craft_item_prototype(item, default_instance_charges(item), items)?;
-            validate_item_group_item_spawn(item, &prototype, raw_damage.is_some())?;
+            validate_item_group_item_spawn(item, &prototype, false)?;
+            let modifier_side_effects_supported =
+                validate_item_group_item_spawn(item, &prototype, true).is_ok();
+            let modifier_present = raw_damage.is_some() || node.variant.is_some();
+            if modifier_present && !modifier_side_effects_supported {
+                validate_item_group_item_spawn(item, &prototype, true)?;
+            }
             ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
                 prototype,
+                maximum_raw_damage: if item.count_by_charges() {
+                    0
+                } else {
+                    MAX_ITEM_RAW_DAMAGE
+                },
+                variants: runtime_item_variants(item)?,
+                modifier_side_effects_supported,
                 charges,
                 minimum_one_charge,
             }))
         }
         StrictItemGroupNodeKind::Group(group_id) => {
-            if raw_damage.is_some() {
-                return Err(format!(
-                    "item group {} applies a modifier to nested group {group_id}; recursive modifier-side-effect admission is not implemented",
-                    definition.id
-                )
-                .into());
-            }
             if node.charges.is_some() {
                 return Err(format!(
                     "item group {} applies charges to nested group {group_id}, which the current protocol cannot represent",
@@ -339,6 +338,13 @@ fn runtime_item_group_entry(
             ItemGroupTargetV1::Group(group_id.clone())
         }
         StrictItemGroupNodeKind::Collection(_) | StrictItemGroupNodeKind::Distribution(_) => {
+            if raw_damage.is_some() || node.variant.is_some() {
+                return Err(format!(
+                    "item group {} applies a modifier to a local composite whose upstream modifier is not evaluated",
+                    definition.id
+                )
+                .into());
+            }
             if node.charges.is_some() {
                 return Err(format!(
                     "item group {} applies charges to a local nested group, which the current protocol cannot represent",
@@ -359,9 +365,72 @@ fn runtime_item_group_entry(
         count_min: u16::try_from(node.count.minimum)?,
         count_max: u16::try_from(node.count.maximum)?,
         raw_damage,
+        variant_id: node.variant.clone(),
         event: node.event.map(runtime_item_group_event),
         target,
     })
+}
+
+fn runtime_item_variants(
+    item: &ItemDefinition,
+) -> Result<Vec<ItemGroupVariantOptionV1>, Box<dyn std::error::Error>> {
+    if item.variants.is_empty() {
+        return Ok(Vec::new());
+    }
+    if item.variant_type != "generic" {
+        return Err(format!(
+            "item-group item {} uses unsupported {} variant visibility policy",
+            item.id, item.variant_type
+        )
+        .into());
+    }
+    item.variants
+        .iter()
+        .map(|variant| {
+            if !variant.unsupported_fields.is_empty() {
+                return Err(format!(
+                    "item-group item {} variant {} requires unsupported fields {:?}",
+                    item.id, variant.id, variant.unsupported_fields
+                )
+                .into());
+            }
+            // Pinned item-type finalization fills missing variant text from
+            // the finalized base item before instances select a variant.
+            let name = variant
+                .name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| item.name.clone());
+            let alternate_description = variant
+                .description
+                .clone()
+                .filter(|description| !description.is_empty())
+                .unwrap_or_else(|| item.description.clone());
+            let description = if variant.append {
+                format!("{}  {alternate_description}", item.description)
+            } else {
+                alternate_description
+            };
+            Ok(ItemGroupVariantOptionV1 {
+                variant: ItemVariantV1 {
+                    id: variant.id.clone(),
+                    name,
+                    description,
+                    symbol: variant
+                        .symbol
+                        .clone()
+                        .unwrap_or_else(|| item.symbol.clone()),
+                    color: variant.color.clone().unwrap_or_else(|| item.color.clone()),
+                    ascii_picture: variant
+                        .ascii_picture
+                        .clone()
+                        .filter(|ascii_picture| !ascii_picture.is_empty())
+                        .unwrap_or_else(|| item.ascii_picture.clone()),
+                },
+                weight: variant.weight,
+            })
+        })
+        .collect()
 }
 
 fn validate_item_group_item_spawn(
@@ -435,7 +504,6 @@ fn validate_item_group_item_spawn(
         .into());
     }
     const CONSTRUCTOR_RNG_FIELDS: &[&str] = &[
-        "variants",
         "nanofab_template_group",
         "trait_group",
         "built_in_mods",
@@ -540,4 +608,58 @@ pub(super) fn runtime_item_group_charges(
         }),
         item.count_by_charges() || liquid,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cdda_content::ItemVariantDefinition;
+
+    #[test]
+    fn finalized_variants_fall_back_to_base_text_and_art_before_append() {
+        let item = ItemDefinition {
+            id: String::from("variant_item"),
+            name: String::from("base name"),
+            description: String::from("base description"),
+            symbol: String::from("?"),
+            color: String::from("white"),
+            ascii_picture: String::from("base_art"),
+            variant_type: String::from("generic"),
+            variants: vec![
+                ItemVariantDefinition {
+                    id: String::from("fallback"),
+                    ..ItemVariantDefinition::default()
+                },
+                ItemVariantDefinition {
+                    id: String::from("append_fallback"),
+                    name: Some(String::from("alternate name")),
+                    append: true,
+                    ..ItemVariantDefinition::default()
+                },
+                ItemVariantDefinition {
+                    id: String::from("append_explicit"),
+                    description: Some(String::from("alternate description")),
+                    ascii_picture: Some(String::from("alternate_art")),
+                    append: true,
+                    ..ItemVariantDefinition::default()
+                },
+            ],
+            ..ItemDefinition::default()
+        };
+
+        let variants = runtime_item_variants(&item).expect("generic variants should project");
+        assert_eq!(variants[0].variant.name, "base name");
+        assert_eq!(variants[0].variant.description, "base description");
+        assert_eq!(variants[0].variant.ascii_picture, "base_art");
+        assert_eq!(variants[1].variant.name, "alternate name");
+        assert_eq!(
+            variants[1].variant.description,
+            "base description  base description"
+        );
+        assert_eq!(
+            variants[2].variant.description,
+            "base description  alternate description"
+        );
+        assert_eq!(variants[2].variant.ascii_picture, "alternate_art");
+    }
 }

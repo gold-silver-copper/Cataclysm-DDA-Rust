@@ -53,7 +53,7 @@ use cdda_protocol::{
     ItemGroupTargetV1,
 };
 
-use items::{ItemInstance, plan_item_group_source};
+use items::{ItemInstance, PlannedItemSpawn, plan_item_group_source};
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
 pub const DEFAULT_ACTOR_HP: i32 = 100;
@@ -755,10 +755,9 @@ fn horizontally_adjacent(left: WorldPosition, right: WorldPosition) -> bool {
         && left.y.abs_diff(right.y) <= 1
 }
 
-/// Maps upstream's continuous ordinary-death overkill damage to the existing
-/// pinned coarse item-condition representation. `None` is the strict
-/// `corpse_damage > 5` pulverization boundary.
-fn corpse_damage_level(remaining_hp: i32, max_hp: i32) -> Result<Option<(u16, bool)>, SimError> {
+/// Maps upstream's continuous ordinary-death overkill damage to exact item
+/// raw damage. `None` is the strict `corpse_damage > 5` pulverization boundary.
+fn corpse_raw_damage(remaining_hp: i32, max_hp: i32) -> Result<Option<(u16, bool)>, SimError> {
     if max_hp <= 0 {
         return Err(SimError::InvalidCreature);
     }
@@ -769,24 +768,20 @@ fn corpse_damage_level(remaining_hp: i32, max_hp: i32) -> Result<Option<(u16, bo
     } else {
         0
     };
-    let max_hp = i64::from(max_hp);
-    if overflow > max_hp.checked_mul(2).ok_or(SimError::NumericOverflow)? {
+    // Pinned C++ stores both the nonnegative overflow and the ratio in
+    // single-precision floats. Preserve that rounding before the final
+    // multiply-and-floor instead of simplifying the expression as a rational.
+    let overflow_damage = overflow as f32;
+    let corpse_damage = (2.5_f64 * f64::from(overflow_damage) / f64::from(max_hp)) as f32;
+    if corpse_damage > 5.0 && overflow_damage > max_hp as f32 {
         return Ok(None);
     }
-    let scaled_damage = overflow
-        .checked_mul(2_500)
-        .ok_or(SimError::NumericOverflow)?
-        / max_hp;
-    let upstream_level = if scaled_damage == 0 {
-        0
-    } else {
-        1 + 4 * scaled_damage / 4_000
-    }
-    .clamp(0, 5);
-    let revivable_at_this_damage = upstream_level < 5;
-    let stored_level = u16::try_from(upstream_level.min(i64::from(MAX_ITEM_DAMAGE_LEVEL)))
-        .map_err(|_| SimError::NumericOverflow)?;
-    Ok(Some((stored_level, revivable_at_this_damage)))
+    let scaled_damage = (corpse_damage * 1_000.0_f32).floor() as u16;
+    let raw_damage = scaled_damage.min(cdda_protocol::MAX_ITEM_RAW_DAMAGE);
+    Ok(Some((
+        raw_damage,
+        raw_damage < cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+    )))
 }
 
 fn validate_item_type_id(type_id: &str) -> Result<(), SimError> {
@@ -953,6 +948,12 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
     }
     if snapshot.id.counter() == 0
         || snapshot.damage > MAX_ITEM_DAMAGE_LEVEL
+        || snapshot.raw_damage > cdda_protocol::MAX_ITEM_RAW_DAMAGE
+        || snapshot.damage != cdda_protocol::item_damage_level(snapshot.raw_damage)
+        || snapshot
+            .variant
+            .as_ref()
+            .is_some_and(|variant| !cdda_protocol::item_variant_is_valid(variant))
         || snapshot.melee_damage_milli.len() > 32
         || snapshot.melee_damage_milli.iter().any(|(kind, damage)| {
             kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) || *damage < 0
@@ -1496,6 +1497,12 @@ fn validate_item_component(
     if depth > MAX_ITEM_COMPONENT_DEPTH
         || *remaining == 0
         || component.damage > MAX_ITEM_DAMAGE_LEVEL
+        || component.raw_damage > cdda_protocol::MAX_ITEM_RAW_DAMAGE
+        || component.damage != cdda_protocol::item_damage_level(component.raw_damage)
+        || component
+            .variant
+            .as_ref()
+            .is_some_and(|variant| !cdda_protocol::item_variant_is_valid(variant))
         || (component.count_by_charges && component.charges <= 0)
         || component.melee_damage_milli.len() > 32
         || component.melee_damage_milli.iter().any(|(kind, damage)| {
@@ -2854,6 +2861,8 @@ fn snapshot_stored_ammunition_charges(item: &ItemSnapshot) -> i32 {
 fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
     left.type_id == right.type_id
         && left.damage == right.damage
+        && left.raw_damage == right.raw_damage
+        && left.variant == right.variant
         && left.melee_damage_milli == right.melee_damage_milli
         && left.calories == right.calories
         && left.quench == right.quench
@@ -2962,6 +2971,8 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
         type_id: prototype.type_id.clone(),
         charges: prototype.charges,
         damage: 0,
+        raw_damage: 0,
+        variant: None,
         melee_damage_milli: prototype.melee_damage_milli.clone(),
         calories: prototype.calories,
         quench: prototype.quench,
@@ -3015,12 +3026,22 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
     }
 }
 
+fn item_from_planned_spawn(id: ItemId, planned: &PlannedItemSpawn) -> ItemInstance {
+    let mut item = item_from_craft_prototype(id, &planned.prototype);
+    item.raw_damage = planned.raw_damage;
+    item.damage = cdda_protocol::item_damage_level(planned.raw_damage);
+    item.variant.clone_from(&planned.variant);
+    item
+}
+
 fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemInstance {
     ItemInstance {
         id,
         type_id: component.type_id.clone(),
         charges: component.charges,
         damage: component.damage,
+        raw_damage: component.raw_damage,
+        variant: component.variant.clone(),
         melee_damage_milli: component.melee_damage_milli.clone(),
         calories: component.calories,
         quench: component.quench,
@@ -3102,6 +3123,8 @@ fn component_from_consumed(
         type_id: consumed.item.type_id.clone(),
         charges: consumed.item.charges,
         damage: consumed.item.damage,
+        raw_damage: consumed.item.raw_damage,
+        variant: consumed.item.variant.clone(),
         melee_damage_milli: consumed.item.melee_damage_milli.clone(),
         calories: consumed.item.calories,
         quench: consumed.item.quench,
@@ -3271,6 +3294,8 @@ fn roll_dice(rng: &mut ChaCha8Rng, count: u32, sides: u32) -> Result<u32, SimErr
 fn same_item_definition(item: &ItemInstance, snapshot: &ItemSnapshot) -> bool {
     item.type_id == snapshot.type_id
         && item.damage == snapshot.damage
+        && item.raw_damage == snapshot.raw_damage
+        && item.variant == snapshot.variant
         && item.melee_damage_milli == snapshot.melee_damage_milli
         && item.calories == snapshot.calories
         && item.quench == snapshot.quench
@@ -4847,6 +4872,8 @@ impl WorldState {
                 type_id: ammunition.type_id,
                 charges: ammunition.charges,
                 damage: 0,
+                raw_damage: 0,
+                variant: None,
                 melee_damage_milli: ammunition.melee_damage_milli,
                 calories: ammunition.calories,
                 quench: ammunition.quench,
@@ -4913,6 +4940,8 @@ impl WorldState {
                     type_id: spawn.type_id,
                     charges: spawn.charges,
                     damage: 0,
+                    raw_damage: 0,
+                    variant: None,
                     melee_damage_milli: spawn.melee_damage_milli,
                     calories: spawn.calories,
                     quench: spawn.quench,
@@ -7201,7 +7230,7 @@ impl WorldState {
                 .ok_or(SimError::NumericOverflow)?;
             if remaining_hp <= 0
                 && creature.corpse.is_some()
-                && corpse_damage_level(remaining_hp, creature.max_hp)?.is_some()
+                && corpse_raw_damage(remaining_hp, creature.max_hp)?.is_some()
                 && !self.allocator.can_allocate()
             {
                 events.push(self.rejection(
@@ -8707,7 +8736,7 @@ impl WorldState {
                 .insert(
                     item_id,
                     GroundItem {
-                        item: item_from_craft_prototype(item_id, &prototype),
+                        item: item_from_planned_spawn(item_id, &prototype),
                         position,
                     },
                 )
@@ -8875,7 +8904,7 @@ impl WorldState {
             .ok_or(SimError::NumericOverflow)?;
         Ok(remaining_hp <= 0
             && creature.corpse.is_some()
-            && corpse_damage_level(remaining_hp, creature.max_hp)?.is_some())
+            && corpse_raw_damage(remaining_hp, creature.max_hp)?.is_some())
     }
 
     fn finish_creature_death(
@@ -8895,7 +8924,7 @@ impl WorldState {
             self.creatures.remove(&creature_id);
             return Ok(());
         };
-        let Some((damage, revivable_at_this_damage)) = corpse_damage_level(remaining_hp, max_hp)?
+        let Some((raw_damage, revivable_at_this_damage)) = corpse_raw_damage(remaining_hp, max_hp)?
         else {
             // Upstream pulverizes overkilled bodies. Gib scattering is a later
             // fail-closed processor rather than an invented ordinary corpse.
@@ -8916,7 +8945,9 @@ impl WorldState {
                     id: corpse_item_id,
                     type_id: String::from("corpse"),
                     charges: 1,
-                    damage,
+                    damage: cdda_protocol::item_damage_level(raw_damage),
+                    raw_damage,
+                    variant: None,
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -9570,7 +9601,7 @@ impl WorldState {
                 self.ground_items.insert(
                     item_id,
                     GroundItem {
-                        item: item_from_craft_prototype(item_id, &prototype),
+                        item: item_from_planned_spawn(item_id, &prototype),
                         position: drop_position,
                     },
                 );
@@ -11956,8 +11987,8 @@ impl WorldState {
                 // Pinned damage-level recovery is 0.8^level. The exact
                 // ten-thousandths table avoids floating point in canonical
                 // outcomes while preserving 100%, 80%, 64%, 51.2%, 40.96%.
-                const DAMAGE_RECOVERY_TEN_THOUSANDTHS: [u32; 5] =
-                    [10_000, 8_000, 6_400, 5_120, 4_096];
+                const DAMAGE_RECOVERY_TEN_THOUSANDTHS: [u32; 6] =
+                    [10_000, 8_000, 6_400, 5_120, 4_096, 3_277];
                 let damage_chance =
                     DAMAGE_RECOVERY_TEN_THOUSANDTHS[usize::from(activity.target_item.damage)];
                 let damage_success = component_rng.next_u32() % 10_000 < damage_chance;
@@ -13473,7 +13504,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV61");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV62");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13685,6 +13716,9 @@ mod tests {
     ) -> ItemGroupTargetV1 {
         ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
             prototype: test_craft_item_prototype(type_id),
+            maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+            variants: Vec::new(),
+            modifier_side_effects_supported: true,
             charges,
             minimum_one_charge,
         }))
@@ -13824,6 +13858,8 @@ mod tests {
             type_id: String::from("wizard_cane_cheap_on"),
             charges: 0,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -13846,6 +13882,8 @@ mod tests {
                     type_id: String::from("light_minus_battery_cell"),
                     charges: 1,
                     damage: 0,
+                    raw_damage: 0,
+                    variant: None,
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -14035,6 +14073,8 @@ mod tests {
                     type_id: String::from("test_component"),
                     charges: 1,
                     damage: 0,
+                    raw_damage: 0,
+                    variant: None,
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -15674,7 +15714,13 @@ mod tests {
             .get_mut(&actor_id)
             .and_then(|actor| actor.inventory.get_mut(&target_item_id))
             .expect("target is carried")
-            .damage = MAX_ITEM_DAMAGE_LEVEL;
+            .damage = 4;
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("target is carried")
+            .raw_damage = 3_000;
         let sequence = (2_u64..100)
             .find(|sequence| {
                 let mut rng = world.named_session_rng(
@@ -15717,7 +15763,7 @@ mod tests {
                 .find(|item| item.id == target_item_id)
                 .expect("exact target should return")
                 .damage,
-            MAX_ITEM_DAMAGE_LEVEL
+            4
         );
 
         let completed = world
@@ -15750,6 +15796,8 @@ mod tests {
             type_id: String::from("raw_thread"),
             charges: 23,
             damage: 1,
+            raw_damage: 1,
+            variant: None,
             melee_damage_milli: BTreeMap::from([(String::from("cut"), 250)]),
             calories: 0,
             quench: 0,
@@ -15773,6 +15821,7 @@ mod tests {
                 .and_then(|actor| actor.inventory.get_mut(&component_id))
                 .expect("actual alternative is carried");
             component.damage = 2;
+            component.raw_damage = 1_000;
             component.melee_damage_milli = BTreeMap::from([(String::from("bash"), 1_750)]);
             component.component_provenance = Some(vec![nested.clone()]);
         }
@@ -15811,6 +15860,8 @@ mod tests {
             type_id: String::from("actual_component"),
             charges: 7,
             damage: 2,
+            raw_damage: 1_000,
+            variant: None,
             melee_damage_milli: BTreeMap::from([(String::from("bash"), 1_750)]),
             calories: 0,
             quench: 0,
@@ -15940,6 +15991,8 @@ mod tests {
             type_id: String::from("nested_component"),
             charges: 1,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -16083,6 +16136,12 @@ mod tests {
             .and_then(|actor| actor.inventory.get_mut(&target_item_id))
             .expect("target remains carried")
             .damage = 0;
+        world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("target is carried")
+            .raw_damage = 0;
         let practiced_at = world.tick();
         world
             .actors
@@ -20041,6 +20100,8 @@ mod tests {
             type_id: String::from("flashlight"),
             charges: 0,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -20060,6 +20121,8 @@ mod tests {
                     type_id: String::from("medium_battery_cell"),
                     charges: 37,
                     damage: 0,
+                    raw_damage: 0,
+                    variant: None,
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -21463,6 +21526,7 @@ mod tests {
             .expect("corpse should be on the ground")
             .item;
         corpse.damage = 1;
+        corpse.raw_damage = 1;
         corpse
             .creature_corpse
             .as_mut()
@@ -21583,20 +21647,26 @@ mod tests {
 
     #[test]
     fn corpse_overkill_mapping_preserves_exact_pulverization_boundary() {
+        assert_eq!(corpse_raw_damage(0, 80).expect("valid HP"), Some((0, true)));
         assert_eq!(
-            corpse_damage_level(0, 80).expect("valid HP"),
-            Some((0, true))
+            corpse_raw_damage(-1, 80).expect("valid HP"),
+            Some((31, true))
         );
         assert_eq!(
-            corpse_damage_level(-1, 80).expect("valid HP"),
-            Some((1, true))
+            corpse_raw_damage(-48, 80).expect("valid HP"),
+            Some((1_500, true))
         );
         assert_eq!(
-            corpse_damage_level(-160, 80).expect("boundary should fit"),
-            Some((MAX_ITEM_DAMAGE_LEVEL, false))
+            corpse_raw_damage(-251, 625).expect("valid HP"),
+            Some((1_003, true)),
+            "pinned float32 rounding differs from exact rational arithmetic"
         );
         assert_eq!(
-            corpse_damage_level(-161, 80).expect("pulverization should fit"),
+            corpse_raw_damage(-160, 80).expect("boundary should fit"),
+            Some((cdda_protocol::MAX_ITEM_RAW_DAMAGE, false))
+        );
+        assert_eq!(
+            corpse_raw_damage(-161, 80).expect("pulverization should fit"),
             None
         );
     }
@@ -21621,6 +21691,8 @@ mod tests {
                     type_id: String::from("corpse"),
                     charges: 1,
                     damage: 0,
+                    raw_damage: 0,
+                    variant: None,
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -23160,6 +23232,8 @@ mod tests {
                 type_id: String::from("rock"),
                 charges: 1,
                 damage: 0,
+                raw_damage: 0,
+                variant: None,
                 melee_damage_milli: BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -23634,6 +23708,12 @@ mod tests {
             .and_then(|actor| actor.inventory.get_mut(&ammunition))
             .expect("source ammunition should remain")
             .damage = 1;
+        world
+            .actors
+            .get_mut(&actor)
+            .and_then(|actor| actor.inventory.get_mut(&ammunition))
+            .expect("source ammunition should remain")
+            .raw_damage = 1;
         let incompatible_merge = world
             .advance_tick(vec![ClientCommand {
                 actor_id: actor,
@@ -23654,11 +23734,12 @@ mod tests {
         )));
         {
             let actor_state = world.actors.get_mut(&actor).expect("actor should remain");
-            actor_state
+            let source = actor_state
                 .inventory
                 .get_mut(&ammunition)
-                .expect("source ammunition should remain")
-                .damage = 0;
+                .expect("source ammunition should remain");
+            source.damage = 0;
+            source.raw_damage = 0;
             let pocket = &mut actor_state
                 .inventory
                 .get_mut(&partial_magazine)
@@ -25988,6 +26069,14 @@ mod tests {
             .get_mut(&hammer_id)
             .expect("hammer remains")
             .damage = 2;
+        degraded
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor remains")
+            .inventory
+            .get_mut(&hammer_id)
+            .expect("hammer remains")
+            .raw_damage = 1_000;
         assert_eq!(
             degraded
                 .actor_bash_strength(actor_id)
@@ -26130,6 +26219,7 @@ mod tests {
                             count_min: 1,
                             count_max: 1,
                             raw_damage: None,
+                            variant_id: None,
                             event: None,
                             target: test_item_group_leaf("beta", None, false),
                         },
@@ -26138,6 +26228,7 @@ mod tests {
                             count_min: 1,
                             count_max: 1,
                             raw_damage: None,
+                            variant_id: None,
                             event: None,
                             target: test_item_group_leaf("gamma", None, false),
                         },
@@ -26159,6 +26250,7 @@ mod tests {
                             minimum: 0,
                             maximum: 0,
                         }),
+                        variant_id: None,
                         event: None,
                         target: test_item_group_leaf("alpha", None, false),
                     },
@@ -26167,6 +26259,7 @@ mod tests {
                         count_min: 1,
                         count_max: 1,
                         raw_damage: None,
+                        variant_id: None,
                         event: None,
                         target: ItemGroupTargetV1::Group(String::from("weighted_child")),
                     },
@@ -26178,6 +26271,7 @@ mod tests {
                             minimum: 0,
                             maximum: 0,
                         }),
+                        variant_id: None,
                         event: None,
                         target: test_item_group_leaf(
                             "charged",
@@ -26207,14 +26301,14 @@ mod tests {
         assert_eq!(
             first
                 .iter()
-                .map(|prototype| prototype.type_id.as_str())
+                .map(|prototype| prototype.prototype.type_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["alpha", "alpha", "beta", "charged", "charged"]
         );
         assert!(
             first[3..]
                 .iter()
-                .all(|prototype| (1..=2).contains(&prototype.charges))
+                .all(|prototype| (1..=2).contains(&prototype.prototype.charges))
         );
     }
 
@@ -26232,6 +26326,7 @@ mod tests {
                         count_min: 1,
                         count_max: 1,
                         raw_damage: None,
+                        variant_id: None,
                         event: None,
                         target: test_item_group_leaf("rock", None, false),
                     }],
@@ -26319,6 +26414,7 @@ mod tests {
                         minimum: 0,
                         maximum: 0,
                     }),
+                    variant_id: None,
                     event: None,
                     target: test_item_group_leaf(
                         "fixed_charges",
@@ -26336,7 +26432,11 @@ mod tests {
         let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
             .expect("fixed group should plan");
         assert_eq!(planned.len(), 2);
-        assert!(planned.iter().all(|prototype| prototype.charges == 5));
+        assert!(
+            planned
+                .iter()
+                .all(|prototype| prototype.prototype.charges == 5)
+        );
 
         let mut expected_rng = ChaCha8Rng::from_seed(seed);
         let _guaranteed_collection_roll = expected_rng.next_u64();
@@ -26393,6 +26493,7 @@ mod tests {
                         count_min: 1,
                         count_max: 1,
                         raw_damage: None,
+                        variant_id: None,
                         event: None,
                         target: ItemGroupTargetV1::Item(Box::new(
                             cdda_protocol::ItemGroupItemPrototypeV1 {
@@ -26412,6 +26513,9 @@ mod tests {
                                     residual_energy_millijoules: 0,
                                     powered_tool: None,
                                 },
+                                maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+                                variants: Vec::new(),
+                                modifier_side_effects_supported: true,
                                 charges: None,
                                 minimum_one_charge: false,
                             },
@@ -28019,6 +28123,7 @@ mod tests {
                         count_min: 1,
                         count_max: 1,
                         raw_damage: None,
+                        variant_id: None,
                         event: None,
                         target: test_item_group_leaf("marker_item", None, false),
                     }],
@@ -28440,6 +28545,7 @@ mod tests {
                         count_min: 1,
                         count_max: 1,
                         raw_damage: None,
+                        variant_id: None,
                         event: None,
                         target: test_item_group_leaf("rock", None, false),
                     }],

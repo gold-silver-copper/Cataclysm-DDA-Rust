@@ -13,12 +13,13 @@ use item_groups::item_group_sources_have_exact_named_closure;
 pub use item_groups::{
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
     ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH,
-    MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
-    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
+    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupVariantOptionV1, ItemVariantV1,
+    MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES,
+    MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIANTS, item_group_catalog_is_valid,
+    item_group_source_max_outputs, item_group_sources_are_valid, item_variant_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 85;
+pub const PROTOCOL_VERSION: u16 = 86;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -59,8 +60,32 @@ pub const MAX_CRAFT_OUTPUT_INSTANCES: u16 = 256;
 pub const MAX_CRAFT_BYPRODUCT_TYPES: usize = 64;
 pub const MAX_DISASSEMBLY_COMPONENT_TYPES: usize = 256;
 pub const MAX_LEARNED_RECIPES: usize = 8_192;
-/// Canonical item condition uses pinned CDDA's coarse damage level, 0 through 4.
-pub const MAX_ITEM_DAMAGE_LEVEL: u16 = 4;
+/// Canonical item condition uses pinned CDDA's display damage level, 0 through 5.
+pub const MAX_ITEM_DAMAGE_LEVEL: u16 = 5;
+/// Pinned `itype::damage_scale * 4` maximum for ordinary damageable items.
+pub const MAX_ITEM_RAW_DAMAGE: u16 = 4_000;
+
+#[must_use]
+pub const fn item_damage_level(raw_damage: u16) -> u16 {
+    if raw_damage == 0 {
+        0
+    } else {
+        1 + (4 * raw_damage / MAX_ITEM_RAW_DAMAGE)
+    }
+}
+
+#[must_use]
+pub const fn minimum_raw_damage_for_level(level: u16) -> Option<u16> {
+    match level {
+        0 => Some(0),
+        1 => Some(1),
+        2 => Some(1_000),
+        3 => Some(2_000),
+        4 => Some(3_000),
+        5 => Some(4_000),
+        _ => None,
+    }
+}
 pub const MAX_ACTOR_BASE_STAT: u16 = 100;
 /// Pinned freeform character-creator bounds from `CHARACTER_STAT_MIN/MAX`.
 pub const MIN_CHARACTER_CREATION_STAT: u16 = 4;
@@ -1953,6 +1978,13 @@ pub struct ItemSnapshot {
     pub type_id: String,
     pub charges: i32,
     pub damage: u16,
+    /// Exact upstream item damage. `damage` is the derived display level.
+    #[serde(default)]
+    pub raw_damage: u16,
+    /// Selected immutable appearance variant, if any. The state is
+    /// self-contained so snapshot/replay recovery never consults live content.
+    #[serde(default)]
+    pub variant: Option<ItemVariantV1>,
     pub melee_damage_milli: BTreeMap<String, i32>,
     pub calories: i32,
     pub quench: i32,
@@ -2040,6 +2072,10 @@ pub struct ItemComponentSnapshotV1 {
     pub type_id: String,
     pub charges: i32,
     pub damage: u16,
+    #[serde(default)]
+    pub raw_damage: u16,
+    #[serde(default)]
+    pub variant: Option<ItemVariantV1>,
     pub melee_damage_milli: BTreeMap<String, i32>,
     pub calories: i32,
     pub quench: i32,
@@ -3571,6 +3607,8 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
         type_id: item.type_id.clone(),
         charges: item.charges,
         damage: 0,
+        raw_damage: 0,
+        variant: None,
         melee_damage_milli: item.melee_damage_milli.clone(),
         calories: item.calories,
         quench: item.quench,
@@ -4218,6 +4256,9 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
     !item.type_id.is_empty()
         && item.type_id.len() <= 512
         && item.damage <= MAX_ITEM_DAMAGE_LEVEL
+        && item.raw_damage <= MAX_ITEM_RAW_DAMAGE
+        && item.damage == item_damage_level(item.raw_damage)
+        && item.variant.as_ref().is_none_or(item_variant_is_valid)
         && item
             .type_id
             .chars()
@@ -4678,6 +4719,9 @@ fn valid_item_component(
             .chars()
             .all(|character| !character.is_control())
         && component.damage <= MAX_ITEM_DAMAGE_LEVEL
+        && component.raw_damage <= MAX_ITEM_RAW_DAMAGE
+        && component.damage == item_damage_level(component.raw_damage)
+        && component.variant.as_ref().is_none_or(item_variant_is_valid)
         && (!component.count_by_charges || component.charges > 0)
         && component.melee_damage_milli.len() <= 32
         && component
@@ -5327,6 +5371,8 @@ mod tests {
                     type_id: String::from("scrap"),
                     charges: 1,
                     damage: 0,
+                    raw_damage: 0,
+                    variant: None,
                     melee_damage_milli: BTreeMap::new(),
                     calories: 0,
                     quench: 0,
@@ -5354,6 +5400,9 @@ mod tests {
         prototype.type_id = type_id.to_owned();
         ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
             prototype,
+            maximum_raw_damage: 0,
+            variants: Vec::new(),
+            modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
         }))
@@ -5370,6 +5419,7 @@ mod tests {
             count_min,
             count_max,
             raw_damage: None,
+            variant_id: None,
             event: None,
             target,
         }
@@ -6040,9 +6090,100 @@ mod tests {
         assert!(item_group_catalog_is_valid(&[fixed_zero_damage.clone()]));
         fixed_zero_damage.graph.nodes[0].entries[0].raw_damage = Some(InclusiveU16RangeV1 {
             minimum: 0,
-            maximum: 1,
+            maximum: MAX_ITEM_RAW_DAMAGE + 1,
         });
         assert!(!item_group_catalog_is_valid(&[fixed_zero_damage]));
+
+        let direct_item_definition = |group_id: &str, target| ItemGroupDefinitionV1 {
+            group_id: group_id.to_owned(),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, target)],
+                }],
+            },
+        };
+        let mut exact_damage_cap = item_group_item("damageable");
+        let ItemGroupTargetV1::Item(item) = &mut exact_damage_cap else {
+            unreachable!("fixture is a direct item")
+        };
+        item.maximum_raw_damage = MAX_ITEM_RAW_DAMAGE;
+        assert!(item_group_catalog_is_valid(&[direct_item_definition(
+            "exact_damage_cap",
+            exact_damage_cap.clone(),
+        )]));
+        let ItemGroupTargetV1::Item(item) = &mut exact_damage_cap else {
+            unreachable!("fixture is a direct item")
+        };
+        item.maximum_raw_damage = 123;
+        assert!(
+            !item_group_catalog_is_valid(&[direct_item_definition(
+                "invented_damage_cap",
+                exact_damage_cap,
+            )]),
+            "upstream item damage caps are exactly zero or the global maximum"
+        );
+
+        let variant = |id: &str, weight| ItemGroupVariantOptionV1 {
+            variant: ItemVariantV1 {
+                id: id.to_owned(),
+                name: format!("{id} name"),
+                description: String::new(),
+                symbol: String::new(),
+                color: String::new(),
+                ascii_picture: String::new(),
+            },
+            weight,
+        };
+        assert!(
+            !item_variant_is_valid(&variant("<any>", 1).variant),
+            "the modifier sentinel is not a selectable variant identity"
+        );
+        let mut weighted_variants = item_group_item("variant_item");
+        let ItemGroupTargetV1::Item(item) = &mut weighted_variants else {
+            unreachable!("fixture is a direct item")
+        };
+        item.variants = vec![variant("maximum", i32::MAX as u32), variant("zero", 0)];
+        assert!(item_group_catalog_is_valid(&[direct_item_definition(
+            "maximum_variant_weight",
+            weighted_variants.clone(),
+        )]));
+        let ItemGroupTargetV1::Item(item) = &mut weighted_variants else {
+            unreachable!("fixture is a direct item")
+        };
+        item.variants[1].weight = 1;
+        assert!(
+            !item_group_catalog_is_valid(&[direct_item_definition(
+                "overflowed_variant_weight",
+                weighted_variants,
+            )]),
+            "the pinned signed-int constructor weight sum must not overflow"
+        );
+
+        let mut maximum_variants = item_group_item("maximum_variants");
+        let ItemGroupTargetV1::Item(item) = &mut maximum_variants else {
+            unreachable!("fixture is a direct item")
+        };
+        item.variants = (0..MAX_ITEM_VARIANTS)
+            .map(|index| variant(&format!("variant_{index}"), 1))
+            .collect();
+        assert!(item_group_catalog_is_valid(&[direct_item_definition(
+            "maximum_unique_variants",
+            maximum_variants.clone(),
+        )]));
+        let ItemGroupTargetV1::Item(item) = &mut maximum_variants else {
+            unreachable!("fixture is a direct item")
+        };
+        item.variants[MAX_ITEM_VARIANTS - 1].variant.id = String::from("variant_0");
+        assert!(
+            !item_group_catalog_is_valid(&[direct_item_definition(
+                "duplicate_maximum_variants",
+                maximum_variants,
+            )]),
+            "duplicate IDs must reject at the maximum bounded shape"
+        );
 
         let mut missing_count_marker = ItemGroupDefinitionV1 {
             group_id: String::from("missing_count_marker"),
@@ -6153,8 +6294,19 @@ mod tests {
             },
         };
         assert!(
-            !item_group_catalog_is_valid(&[named_modifier, named_target]),
-            "wire prototypes cannot prove nested outputs lack modifier side effects"
+            item_group_catalog_is_valid(&[named_modifier.clone(), named_target.clone()]),
+            "named modifiers are applied to each completed child output"
+        );
+        let mut unsafe_named_target = named_target;
+        let ItemGroupTargetV1::Item(leaf) =
+            &mut unsafe_named_target.graph.nodes[0].entries[0].target
+        else {
+            unreachable!("fixture is a direct item")
+        };
+        leaf.modifier_side_effects_supported = false;
+        assert!(
+            !item_group_catalog_is_valid(&[named_modifier, unsafe_named_target]),
+            "named modifiers must not reach leaves with unrepresented side effects"
         );
 
         let charged_food_group = |minimum_one_charge| {
@@ -6886,6 +7038,8 @@ mod tests {
                 type_id: String::from("rock"),
                 charges: 1,
                 damage: 0,
+                raw_damage: 0,
+                variant: None,
                 melee_damage_milli: BTreeMap::new(),
                 calories: 0,
                 quench: 0,
@@ -7170,6 +7324,8 @@ mod tests {
                 type_id: "x".repeat(512),
                 charges: i32::MAX,
                 damage: MAX_ITEM_DAMAGE_LEVEL,
+                raw_damage: MAX_ITEM_RAW_DAMAGE,
+                variant: None,
                 melee_damage_milli: melee_damage_milli.clone(),
                 calories: i32::MAX,
                 quench: i32::MAX,
@@ -7341,6 +7497,8 @@ mod tests {
             type_id: String::from("medium_battery"),
             charges: 0,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7362,6 +7520,8 @@ mod tests {
             type_id: String::from("flashlight"),
             charges: 0,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7488,6 +7648,8 @@ mod tests {
             type_id: String::from("battery"),
             charges: 6,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7517,6 +7679,8 @@ mod tests {
             type_id: String::from("test_cell"),
             charges: 0,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7599,6 +7763,8 @@ mod tests {
             type_id: format!("{ammunition_type}_round_{counter}"),
             charges,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7632,6 +7798,8 @@ mod tests {
             type_id: String::from("ammo_pouch"),
             charges: 1,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7834,6 +8002,8 @@ mod tests {
             type_id: String::from("corpse"),
             charges: 1,
             damage: 1,
+            raw_damage: 1,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,
@@ -7907,6 +8077,8 @@ mod tests {
             type_id: String::from("component"),
             charges: 1,
             damage: 0,
+            raw_damage: 0,
+            variant: None,
             melee_damage_milli: BTreeMap::new(),
             calories: 0,
             quench: 0,

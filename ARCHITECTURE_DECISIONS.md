@@ -2991,6 +2991,59 @@ The Postcard representation therefore changes even when the marker is absent,
 so schema 63 is the minimum recoverable schema and the canonical state domain
 advances. The checked item-flow fixture contains no item-group catalog and keeps
 the same tick, actors, inventory, ground items, and CanonicalEventsV18 trace;
-only its intentional state-hash domain changes. The remaining item-state damage
-and variant representation should be one version batch, and general containment
-another, after the protocol item-group domain is mechanically extracted.
+only its intentional state-hash domain changes. The item-state damage and
+variant representation is the next version batch; general containment remains
+a separate batch after the protocol item-group domain extraction.
+
+## Exact item damage and immutable selected variants
+
+Protocol 86 advances to schema 64 and CanonicalStateV62 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. It is one
+coherent serialized batch: every canonical item and retained component now
+stores exact raw damage plus its derived display level, and may store a
+self-contained immutable selected variant. A recovered world therefore never
+consults the live content tree to reconstruct a name, description, glyph,
+color, or ASCII picture.
+
+The selected-content ITEM importer finalizes source-ordered generic variants
+through replacement, inheritance, `extend`, and `delete`. Missing or empty
+alternate names, descriptions, and ASCII art fall back to the finalized base
+ITEM before description append. Construction always consumes the pinned
+variant-selection and FIT phases. Direct and named-group modifiers then apply
+raw damage and an explicit variant after completed child generation, in child
+output order; ranged charge selection precedes magazine dressing, and `<any>`
+performs a second weighted selection without clearing a prior selection when
+all weights are zero. Raw damage clamps to the exact zero-or-4000 leaf boundary.
+A named modifier is admitted only when every reachable
+leaf declares that its other modifier side effects are represented. The
+protocol graph evaluator computes that property once through its existing
+memoized closure, and simulation rechecks it defensively. Degrading vehicle
+parts, fouling guns, unsupported variant fields or visibility policies, and
+unrepresented constructor state remain fail-closed.
+
+The C++ oracle retains exact constructor-variant witnesses and downstream RNG
+values in addition to the existing representative corpse/container traces and
+damage boundaries. Rust unit tests cover the generalized direct and named
+modifier engines, and the structural-bash scenario retains exact raw damage and
+variant metadata through direct execution, per-tick restore, SQLite recovery,
+portable replay, and the normal Bevy item-menu path. Three additional
+production furniture bashes (`f_cardboard_door_o`, `f_cardboard_roof`, and
+`f_pallet_brick_adobe`) now normalize exactly. They do not yet earn weighted
+runtime points because the current playable LMOE generator does not place
+them.
+
+Ordinary monster death also retains the exact raw overkill value produced by
+the pinned float32 ratio, multiply, floor, and item clamp. The raw-1003
+625-HP/251-overflow witness prevents an exact-rational substitute, and a
+non-boundary ordinary death preserves raw/display condition through live state,
+SQLite recovery, and portable replay.
+
+The fixed item-flow scenario has no item-group catalog and keeps tick 80, the
+same actors, inventory, ground items, and CanonicalEventsV18 trace. Its state
+root changes from
+`2aae0f859788b6e83bd4c03972f32a6a78963a63c1cedf5774b6b1e895e37820`
+to
+`8f8710e06937a50c14bcad35a17dbc41a059128061f4be9316c4c6449358dc66`,
+isolating the new serialized defaults and CanonicalStateV62 domain. General
+`contents-group` ownership, wrapper stable IDs, and overflow remain the next
+regional-field dependency and require their own representation batch.
