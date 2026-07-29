@@ -52,14 +52,16 @@ pub struct BashFieldEffectDefinition {
     pub intensity: u8,
 }
 
+/// Raw item-group source attached to a terrain or furniture bash definition.
+///
+/// Named sources resolve through the selected content's item-group registry.
+/// Inline arrays use CDDA's implicit collection semantics and deliberately
+/// remain raw here so every item-group consumer shares one parser and
+/// finalizer instead of growing a second, subtly different entry model.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BashDropDefinition {
-    pub item_id: String,
-    pub probability_percent: u8,
-    pub count_min: u16,
-    pub count_max: u16,
-    pub charges_min: Option<i32>,
-    pub charges_max: Option<i32>,
+pub enum BashItemGroupSource {
+    Named(String),
+    InlineCollection(Vec<Value>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,7 +83,7 @@ pub struct BashDefinition {
     pub failure_sound: String,
     pub hit_field: Option<BashFieldEffectDefinition>,
     pub destroyed_field: Option<BashFieldEffectDefinition>,
-    pub drops: Vec<BashDropDefinition>,
+    pub item_group: Option<BashItemGroupSource>,
     pub tent_centers: Vec<String>,
     pub terrain_result: String,
     pub terrain_result_bashed_from_above: String,
@@ -109,7 +111,7 @@ impl Default for BashDefinition {
             failure_sound: String::from("thump!"),
             hit_field: None,
             destroyed_field: None,
-            drops: Vec::new(),
+            item_group: None,
             tent_centers: Vec::new(),
             terrain_result: String::from("t_null"),
             terrain_result_bashed_from_above: String::new(),
@@ -187,9 +189,9 @@ pub(crate) fn apply_bash_definition(
     if let Some(value) = object.get("items") {
         bash.unsupported_fields
             .retain(|field, _reason| field != "items" && !field.starts_with("items["));
-        bash.drops = parse_drops(value, source, &mut bash.unsupported_fields)?;
+        bash.item_group = Some(parse_item_group_source(value, source)?);
     } else if !was_loaded {
-        bash.drops.clear();
+        bash.item_group = None;
     }
     for field in object.keys() {
         if !field.starts_with("//") && !BASH_FIELDS.contains(&field.as_str()) {
@@ -297,136 +299,16 @@ fn string_array(value: &Value, source: &str, field: &str) -> Result<Vec<String>,
         .collect()
 }
 
-fn parse_drops(
-    value: &Value,
-    source: &str,
-    unsupported: &mut BTreeMap<String, String>,
-) -> Result<Vec<BashDropDefinition>, String> {
-    let Some(entries) = value.as_array() else {
-        unsupported.insert(
-            String::from("items"),
-            String::from("bash item groups are not yet represented"),
-        );
-        return Ok(Vec::new());
-    };
-    let mut drops = Vec::new();
-    for (index, value) in entries.iter().enumerate() {
-        let entry = value
-            .as_object()
-            .ok_or_else(|| format!("items[{index}] must be an object in {source}"))?;
-        for field in entry.keys() {
-            if !matches!(field.as_str(), "item" | "prob" | "count" | "charges") {
-                unsupported.insert(
-                    format!("items[{index}].{field}"),
-                    String::from("unsupported bash drop field"),
-                );
-            }
+fn parse_item_group_source(value: &Value, source: &str) -> Result<BashItemGroupSource, String> {
+    match value {
+        Value::String(group_id) if !group_id.is_empty() => {
+            Ok(BashItemGroupSource::Named(group_id.clone()))
         }
-        let Some(item_id) = entry.get("item").and_then(Value::as_str) else {
-            unsupported.insert(
-                format!("items[{index}]"),
-                String::from("bash drop is not a direct item"),
-            );
-            continue;
-        };
-        let probability_percent = match entry.get("prob") {
-            None => 100,
-            Some(value) => u8::try_from(
-                value
-                    .as_u64()
-                    .filter(|value| *value <= 100)
-                    .ok_or_else(|| format!("items[{index}].prob is invalid in {source}"))?,
-            )
-            .map_err(|_| format!("items[{index}].prob is out of range in {source}"))?,
-        };
-        if entry.contains_key("count") && entry.contains_key("charges") {
-            unsupported.insert(
-                format!("items[{index}]"),
-                String::from("count and charges cannot both be represented"),
-            );
-            continue;
-        }
-        let count = match entry.get("count") {
-            None => (1, 1),
-            Some(value) => match parse_u16_range(value, source, &format!("items[{index}].count")) {
-                Ok(range) => range,
-                Err(error) => {
-                    unsupported.insert(format!("items[{index}].count"), error);
-                    continue;
-                }
-            },
-        };
-        let charges = match entry.get("charges") {
-            None => None,
-            Some(value) => {
-                match parse_i32_range(value, source, &format!("items[{index}].charges")) {
-                    Ok(range) => Some(range),
-                    Err(error) => {
-                        unsupported.insert(format!("items[{index}].charges"), error);
-                        continue;
-                    }
-                }
-            }
-        };
-        drops.push(BashDropDefinition {
-            item_id: item_id.to_owned(),
-            probability_percent,
-            count_min: count.0,
-            count_max: count.1,
-            charges_min: charges.map(|range| range.0),
-            charges_max: charges.map(|range| range.1),
-        });
+        Value::Array(entries) => Ok(BashItemGroupSource::InlineCollection(entries.clone())),
+        _ => Err(format!(
+            "items must be a non-empty item-group id or inline collection in {source}"
+        )),
     }
-    Ok(drops)
-}
-
-fn parse_u16_range(value: &Value, source: &str, field: &str) -> Result<(u16, u16), String> {
-    let (min, max) = parse_u64_range(value, source, field)?;
-    let min = u16::try_from(min).map_err(|_| format!("{field} is out of range in {source}"))?;
-    let max = u16::try_from(max).map_err(|_| format!("{field} is out of range in {source}"))?;
-    Ok((min, max))
-}
-
-fn parse_i32_range(value: &Value, source: &str, field: &str) -> Result<(i32, i32), String> {
-    let parse = |value: &Value| {
-        i32::try_from(
-            value
-                .as_i64()
-                .filter(|value| *value >= 0)
-                .ok_or_else(|| format!("{field} is invalid in {source}"))?,
-        )
-        .map_err(|_| format!("{field} is out of range in {source}"))
-    };
-    let range = match value {
-        Value::Array(values) if values.len() == 2 => (parse(&values[0])?, parse(&values[1])?),
-        value => {
-            let value = parse(value)?;
-            (value, value)
-        }
-    };
-    if range.0 > range.1 {
-        return Err(format!("{field} has reversed bounds in {source}"));
-    }
-    Ok(range)
-}
-
-fn parse_u64_range(value: &Value, source: &str, field: &str) -> Result<(u64, u64), String> {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .ok_or_else(|| format!("{field} is invalid in {source}"))
-    };
-    let range = match value {
-        Value::Array(values) if values.len() == 2 => (parse(&values[0])?, parse(&values[1])?),
-        value => {
-            let value = parse(value)?;
-            (value, value)
-        }
-    };
-    if range.0 > range.1 {
-        return Err(format!("{field} has reversed bounds in {source}"));
-    }
-    Ok(range)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -596,6 +478,7 @@ impl std::error::Error for BashDamageProfileRegistryError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn decimal_multiplier_conversion_is_exact_and_bounded() {
@@ -603,5 +486,68 @@ mod tests {
         assert_eq!(decimal_millionths(&Value::from(0.95)), Some(950_000));
         assert_eq!(decimal_millionths(&Value::from(1.2)), Some(1_200_000));
         assert_eq!(decimal_millionths(&Value::from(-0.1)), None);
+    }
+
+    #[test]
+    fn named_bash_items_are_an_item_group_reference() {
+        let mut bash = None;
+        apply_bash_definition(
+            &mut bash,
+            &json!({ "items": "wall_bash_results" }),
+            "terrain-walls.json",
+        )
+        .expect("named bash item group should parse");
+
+        let bash = bash.expect("bash should be present");
+        assert_eq!(
+            bash.item_group,
+            Some(BashItemGroupSource::Named(String::from(
+                "wall_bash_results"
+            )))
+        );
+        assert!(bash.unsupported_fields.is_empty());
+    }
+
+    #[test]
+    fn inline_bash_collection_replaces_and_then_inherits_as_one_source() {
+        let initial_entries = vec![
+            json!({ "item": "splinter", "prob": 80, "count": [1, 3] }),
+            json!({ "group": "nails", "prob": 25 }),
+        ];
+        let mut bash = None;
+        apply_bash_definition(
+            &mut bash,
+            &json!({ "items": initial_entries }),
+            "base furniture",
+        )
+        .expect("inline bash collection should parse");
+
+        apply_bash_definition(
+            &mut bash,
+            &json!({ "sound": "crack!" }),
+            "inherited furniture",
+        )
+        .expect("missing items should retain the inherited source");
+        assert_eq!(
+            bash.as_ref().and_then(|bash| bash.item_group.as_ref()),
+            Some(&BashItemGroupSource::InlineCollection(initial_entries))
+        );
+
+        let replacement_entries = vec![json!({ "item": "stick", "count": [0, 1] })];
+        apply_bash_definition(
+            &mut bash,
+            &json!({ "items": replacement_entries }),
+            "replacement furniture",
+        )
+        .expect("present items should replace the inherited source");
+        assert_eq!(
+            bash.as_ref().and_then(|bash| bash.item_group.as_ref()),
+            Some(&BashItemGroupSource::InlineCollection(replacement_entries))
+        );
+
+        let mut fresh = None;
+        apply_bash_definition(&mut fresh, &json!({ "sound": "smash!" }), "fresh")
+            .expect("a fresh bash definition without items should parse");
+        assert_eq!(fresh.and_then(|bash| bash.item_group), None);
     }
 }

@@ -18,28 +18,33 @@ use cdda_protocol::{
     DisassemblyRecipeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
     FurnitureTileSnapshot, GroundItemSnapshot, HeldInputSequence, HeldMovementUpdateSource,
     HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
-    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemId, ItemSnapshot,
-    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
+    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemId, ItemSnapshot, LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
     MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
     MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
     MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
     MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
     MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
     MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
-    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
-    MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
-    MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
-    MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
-    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
-    PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
-    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, SimTick,
-    SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
-    TerrainTileSnapshot, WakeReason, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
-    adjusted_book_study_time_moves,
+    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS,
+    MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
+    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
+    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
+    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
+    MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot, PoweredToolStateV1,
+    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
+    RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
+    WorldEventKind, WorldPosition, WorldSnapshotV1, adjusted_book_study_time_moves,
+    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use cdda_protocol::{ItemGroupItemPrototypeV1, ItemGroupNodeV1};
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
 pub const DEFAULT_ACTOR_HP: i32 = 100;
@@ -841,29 +846,11 @@ fn validate_bash_field(
             })
 }
 
-fn validate_bash_drops(drops: &[cdda_protocol::BashDropPrototypeV1]) -> bool {
-    let maximum_outputs = drops.iter().try_fold(0_u64, |total, drop| {
-        total.checked_add(if drop.charges_min.is_some() {
-            1
-        } else {
-            u64::from(drop.count_max)
-        })
-    });
-    drops.len() <= 128
-        && maximum_outputs.is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
-        && drops.iter().all(|drop| {
-            drop.probability_percent <= 100
-                && drop.count_min <= drop.count_max
-                && matches!(
-                    (drop.charges_min, drop.charges_max),
-                    (None, None) | (Some(0..), Some(0..))
-                )
-                && drop
-                    .charges_min
-                    .zip(drop.charges_max)
-                    .is_none_or(|(minimum, maximum)| minimum <= maximum)
-                && validate_craft_item_prototype(&drop.prototype).is_ok()
-        })
+fn validate_bash_drop_source(
+    source: Option<&ItemGroupSourceV1>,
+    item_groups: &[ItemGroupDefinitionV1],
+) -> bool {
+    source.is_none_or(|source| item_group_source_max_outputs(source, item_groups).is_some())
 }
 
 fn valid_bash_sound(value: &str) -> bool {
@@ -873,6 +860,7 @@ fn valid_bash_sound(value: &str) -> bool {
 fn validate_terrain_bash_type(
     bash: &TerrainBashTypeV1,
     field_types: &BTreeMap<String, FieldTypeSnapshotV1>,
+    item_groups: &[ItemGroupDefinitionV1],
 ) -> Result<(), SimError> {
     if validate_item_type_id(&bash.terrain_id).is_err()
         || !validate_bash_strengths(
@@ -885,7 +873,7 @@ fn validate_terrain_bash_type(
         )
         || bash.bash_multiplier_millionths == 0
         || validate_terrain_tile(&bash.result).is_err()
-        || !validate_bash_drops(&bash.drops)
+        || !validate_bash_drop_source(bash.drop_source.as_ref(), item_groups)
         || bash
             .hit_field
             .as_ref()
@@ -909,6 +897,7 @@ fn validate_terrain_bash_type(
 fn validate_furniture_bash_type(
     bash: &FurnitureBashTypeV1,
     field_types: &BTreeMap<String, FieldTypeSnapshotV1>,
+    item_groups: &[ItemGroupDefinitionV1],
 ) -> Result<(), SimError> {
     if validate_item_type_id(&bash.furniture_id).is_err()
         || !validate_bash_strengths(
@@ -924,7 +913,7 @@ fn validate_furniture_bash_type(
             .result
             .as_ref()
             .is_some_and(|result| validate_furniture_tile(result).is_err())
-        || !validate_bash_drops(&bash.drops)
+        || !validate_bash_drop_source(bash.drop_source.as_ref(), item_groups)
         || bash
             .hit_field
             .as_ref()
@@ -941,6 +930,164 @@ fn validate_furniture_bash_type(
         || bash.failure_sound_volume > i32::from(u16::MAX)
     {
         return Err(SimError::InvalidFurniture);
+    }
+    Ok(())
+}
+
+fn plan_item_group_source(
+    source: &ItemGroupSourceV1,
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+) -> Result<Vec<CraftItemPrototypeV1>, SimError> {
+    let mut output = Vec::new();
+    plan_item_group_source_into(source, item_groups, rng, &mut output, 0)?;
+    Ok(output)
+}
+
+fn plan_item_group_source_into(
+    source: &ItemGroupSourceV1,
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+    output: &mut Vec<CraftItemPrototypeV1>,
+    depth: usize,
+) -> Result<(), SimError> {
+    let graph = match source {
+        ItemGroupSourceV1::Group(group_id) => {
+            &item_groups
+                .get(group_id)
+                .ok_or(SimError::InvalidItem)?
+                .graph
+        }
+        ItemGroupSourceV1::Inline(graph) => graph,
+    };
+    plan_item_group_node(graph, graph.root_node, item_groups, rng, output, depth)
+}
+
+fn plan_item_group_node(
+    graph: &ItemGroupGraphV1,
+    node_id: u16,
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+    output: &mut Vec<CraftItemPrototypeV1>,
+    depth: usize,
+) -> Result<(), SimError> {
+    if depth > MAX_ITEM_GROUP_DEPTH {
+        return Err(SimError::InvalidItem);
+    }
+    let node = graph
+        .nodes
+        .iter()
+        .find(|node| node.node_id == node_id)
+        .ok_or(SimError::InvalidItem)?;
+    match node.kind {
+        ItemGroupKindV1::Collection => {
+            for entry in &node.entries {
+                // The pinned implementation rolls even for guaranteed entries.
+                if rng.next_u64() % 100 < u64::from(entry.probability) {
+                    plan_item_group_entry(graph, entry, item_groups, rng, output, depth)?;
+                }
+            }
+        }
+        ItemGroupKindV1::Distribution => {
+            let total = node.entries.iter().try_fold(0_u64, |total, entry| {
+                total.checked_add(u64::from(entry.probability))
+            });
+            let Some(total) = total.filter(|total| *total > 0) else {
+                return Ok(());
+            };
+            let ticket = inclusive_rng_u64(rng, 1, total);
+            let mut accumulated = 0_u64;
+            let entry = node
+                .entries
+                .iter()
+                .find(|entry| {
+                    accumulated = accumulated.saturating_add(u64::from(entry.probability));
+                    ticket <= accumulated
+                })
+                .ok_or(SimError::InvalidItem)?;
+            plan_item_group_entry(graph, entry, item_groups, rng, output, depth)?;
+        }
+    }
+    Ok(())
+}
+
+fn plan_item_group_entry(
+    graph: &ItemGroupGraphV1,
+    entry: &ItemGroupEntryV1,
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+    output: &mut Vec<CraftItemPrototypeV1>,
+    depth: usize,
+) -> Result<(), SimError> {
+    let count = if entry.count_min == entry.count_max {
+        u64::from(entry.count_min)
+    } else {
+        inclusive_rng_u64(rng, u64::from(entry.count_min), u64::from(entry.count_max))
+    };
+    for _ in 0..count {
+        plan_item_group_target(
+            graph,
+            &entry.target,
+            item_groups,
+            rng,
+            output,
+            depth.checked_add(1).ok_or(SimError::NumericOverflow)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn plan_item_group_target(
+    graph: &ItemGroupGraphV1,
+    target: &ItemGroupTargetV1,
+    item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+    output: &mut Vec<CraftItemPrototypeV1>,
+    depth: usize,
+) -> Result<(), SimError> {
+    if depth > MAX_ITEM_GROUP_DEPTH {
+        return Err(SimError::InvalidItem);
+    }
+    match target {
+        ItemGroupTargetV1::Item(item) => {
+            let mut prototype = item.prototype.clone();
+            if let Some(charges) = item.charges {
+                let rolled = if charges.minimum == charges.maximum {
+                    charges.minimum
+                } else {
+                    i32::try_from(inclusive_rng_u64(
+                        rng,
+                        u64::try_from(charges.minimum).map_err(|_| SimError::InvalidItem)?,
+                        u64::try_from(charges.maximum).map_err(|_| SimError::InvalidItem)?,
+                    ))
+                    .map_err(|_| SimError::NumericOverflow)?
+                };
+                prototype.charges = if item.minimum_one_charge {
+                    rolled.max(1)
+                } else {
+                    rolled
+                };
+            }
+            if output.len()
+                >= usize::try_from(MAX_ITEM_GROUP_OUTPUTS).map_err(|_| SimError::NumericOverflow)?
+            {
+                return Err(SimError::InvalidItem);
+            }
+            if validate_craft_item_prototype(&prototype).is_err() {
+                return Err(SimError::InvalidItem);
+            }
+            output.push(prototype);
+        }
+        ItemGroupTargetV1::Group(group_id) => plan_item_group_source_into(
+            &ItemGroupSourceV1::Group(group_id.clone()),
+            item_groups,
+            rng,
+            output,
+            depth,
+        )?,
+        ItemGroupTargetV1::Node(node_id) => {
+            plan_item_group_node(graph, *node_id, item_groups, rng, output, depth)?;
+        }
     }
     Ok(())
 }
@@ -2644,10 +2791,10 @@ impl CreatureBashTarget {
         }
     }
 
-    fn drops(&self) -> &[cdda_protocol::BashDropPrototypeV1] {
+    fn drop_source(&self) -> Option<&ItemGroupSourceV1> {
         match self {
-            Self::Terrain(bash) => &bash.drops,
-            Self::Furniture(bash) => &bash.drops,
+            Self::Terrain(bash) => bash.drop_source.as_ref(),
+            Self::Furniture(bash) => bash.drop_source.as_ref(),
         }
     }
 
@@ -4602,6 +4749,7 @@ pub struct WorldState {
     next_event_counter: u64,
     next_field_sequence: u64,
     field_types: BTreeMap<String, FieldTypeSnapshotV1>,
+    item_groups: BTreeMap<String, ItemGroupDefinitionV1>,
     terrain_bash_types: BTreeMap<String, TerrainBashTypeV1>,
     furniture_bash_ids: BTreeSet<String>,
     furniture_bash_types: BTreeMap<String, FurnitureBashTypeV1>,
@@ -4628,6 +4776,7 @@ impl WorldState {
             next_event_counter: 1,
             next_field_sequence: 1,
             field_types: BTreeMap::new(),
+            item_groups: BTreeMap::new(),
             terrain_bash_types: BTreeMap::new(),
             furniture_bash_ids: BTreeSet::new(),
             furniture_bash_types: BTreeMap::new(),
@@ -4681,43 +4830,92 @@ impl WorldState {
         }
     }
 
+    /// Installs the complete reachable item-group closure atomically. Named
+    /// references and cycles are validated before canonical state changes.
+    pub fn register_item_group_catalog(
+        &mut self,
+        definitions: Vec<ItemGroupDefinitionV1>,
+    ) -> Result<(), SimError> {
+        if self.tick != SimTick(0)
+            || !item_group_catalog_is_valid(&definitions)
+            || !self.item_group_sources_fit(&definitions, None)
+        {
+            return Err(SimError::InvalidItem);
+        }
+        let existing = self.item_groups.values().cloned().collect::<Vec<_>>();
+        if !existing.is_empty() {
+            return (existing == definitions)
+                .then_some(())
+                .ok_or(SimError::InvalidItem);
+        }
+        self.item_groups = definitions
+            .into_iter()
+            .map(|definition| (definition.group_id.clone(), definition))
+            .collect();
+        Ok(())
+    }
+
+    fn item_group_sources_fit(
+        &self,
+        definitions: &[ItemGroupDefinitionV1],
+        additional: Option<&ItemGroupSourceV1>,
+    ) -> bool {
+        let mut sources = self
+            .terrain_bash_types
+            .values()
+            .filter_map(|bash| bash.drop_source.as_ref())
+            .chain(
+                self.furniture_bash_types
+                    .values()
+                    .filter_map(|bash| bash.drop_source.as_ref()),
+            )
+            .collect::<Vec<_>>();
+        sources.extend(additional);
+        item_group_sources_are_valid(definitions, sources)
+    }
+
     pub fn register_terrain_bash_type(
         &mut self,
         definition: TerrainBashTypeV1,
     ) -> Result<(), SimError> {
-        validate_terrain_bash_type(&definition, &self.field_types)?;
+        let item_groups = self.item_groups.values().cloned().collect::<Vec<_>>();
+        validate_terrain_bash_type(&definition, &self.field_types, &item_groups)?;
         if self.tick != SimTick(0) {
             return Err(SimError::InvalidTerrain);
         }
         match self.terrain_bash_types.get(&definition.terrain_id) {
-            Some(existing) if existing == &definition => Ok(()),
-            Some(_) => Err(SimError::InvalidTerrain),
-            None => {
-                self.terrain_bash_types
-                    .insert(definition.terrain_id.clone(), definition);
-                Ok(())
-            }
+            Some(existing) if existing == &definition => return Ok(()),
+            Some(_) => return Err(SimError::InvalidTerrain),
+            None => {}
         }
+        if !self.item_group_sources_fit(&item_groups, definition.drop_source.as_ref()) {
+            return Err(SimError::InvalidTerrain);
+        }
+        self.terrain_bash_types
+            .insert(definition.terrain_id.clone(), definition);
+        Ok(())
     }
 
     pub fn register_furniture_bash_type(
         &mut self,
         definition: FurnitureBashTypeV1,
     ) -> Result<(), SimError> {
-        validate_furniture_bash_type(&definition, &self.field_types)?;
+        let item_groups = self.item_groups.values().cloned().collect::<Vec<_>>();
+        validate_furniture_bash_type(&definition, &self.field_types, &item_groups)?;
         if self.tick != SimTick(0) {
             return Err(SimError::InvalidFurniture);
         }
         let furniture_id = definition.furniture_id.clone();
         match self.furniture_bash_types.get(&furniture_id) {
-            Some(existing) if existing == &definition => Ok(()),
-            Some(_) => Err(SimError::InvalidFurniture),
-            None => {
-                self.furniture_bash_types
-                    .insert(furniture_id.clone(), definition);
-                Ok(())
-            }
-        }?;
+            Some(existing) if existing == &definition => return Ok(()),
+            Some(_) => return Err(SimError::InvalidFurniture),
+            None => {}
+        }
+        if !self.item_group_sources_fit(&item_groups, definition.drop_source.as_ref()) {
+            return Err(SimError::InvalidFurniture);
+        }
+        self.furniture_bash_types
+            .insert(furniture_id.clone(), definition);
         self.furniture_bash_ids.insert(furniture_id);
         Ok(())
     }
@@ -9694,37 +9892,14 @@ impl WorldState {
             ),
         };
         let mut rng = self.named_rng(rng_domain, &[stable_id], rng_sequence);
-        let mut planned = Vec::new();
-        if total >= hp {
-            for drop in bash.drops() {
-                if rng.next_u64() % 100 >= u64::from(drop.probability_percent) {
-                    continue;
-                }
-                if let Some((minimum, maximum)) = drop.charges_min.zip(drop.charges_max) {
-                    let charges = i32::try_from(inclusive_rng_u64(
-                        &mut rng,
-                        u64::try_from(minimum).map_err(|_| SimError::InvalidItem)?,
-                        u64::try_from(maximum).map_err(|_| SimError::InvalidItem)?,
-                    ))
-                    .map_err(|_| SimError::NumericOverflow)?;
-                    if charges > 0 {
-                        let mut prototype = drop.prototype.clone();
-                        prototype.charges = charges;
-                        planned.push(prototype);
-                    }
-                } else {
-                    let count = inclusive_rng_u64(
-                        &mut rng,
-                        u64::from(drop.count_min),
-                        u64::from(drop.count_max),
-                    );
-                    planned.extend(std::iter::repeat_n(
-                        drop.prototype.clone(),
-                        usize::try_from(count).map_err(|_| SimError::NumericOverflow)?,
-                    ));
-                }
-            }
-        }
+        let planned = if total >= hp {
+            bash.drop_source().map_or_else(
+                || Ok(Vec::new()),
+                |source| plan_item_group_source(source, &self.item_groups, &mut rng),
+            )?
+        } else {
+            Vec::new()
+        };
         let drop_position = self.bash_drop_position(target, &bash);
         let can_materialize = planned.is_empty()
             || (drop_position.is_some()
@@ -13200,6 +13375,7 @@ impl WorldState {
             next_event_counter: self.next_event_counter,
             next_field_sequence: self.next_field_sequence,
             field_types: self.field_types.values().cloned().collect(),
+            item_groups: self.item_groups.values().cloned().collect(),
             terrain_bash_types: self.terrain_bash_types.values().cloned().collect(),
             furniture_bash_ids: self.furniture_bash_ids.iter().cloned().collect(),
             furniture_bash_types: self.furniture_bash_types.values().cloned().collect(),
@@ -13226,6 +13402,15 @@ impl WorldState {
         {
             return Err(SimError::InvalidSnapshot);
         }
+        if !snapshot.item_groups_are_valid() {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let item_groups = snapshot
+            .item_groups
+            .iter()
+            .cloned()
+            .map(|definition| (definition.group_id.clone(), definition))
+            .collect::<BTreeMap<_, _>>();
         let mut field_types = BTreeMap::new();
         for field_type in &snapshot.field_types {
             validate_field_type(field_type)?;
@@ -13245,7 +13430,7 @@ impl WorldState {
         }
         let mut terrain_bash_types = BTreeMap::new();
         for bash in &snapshot.terrain_bash_types {
-            validate_terrain_bash_type(bash, &field_types)?;
+            validate_terrain_bash_type(bash, &field_types, &snapshot.item_groups)?;
             if terrain_bash_types
                 .insert(bash.terrain_id.clone(), bash.clone())
                 .is_some()
@@ -13277,7 +13462,7 @@ impl WorldState {
         }
         let mut furniture_bash_types = BTreeMap::new();
         for bash in &snapshot.furniture_bash_types {
-            validate_furniture_bash_type(bash, &field_types)?;
+            validate_furniture_bash_type(bash, &field_types, &snapshot.item_groups)?;
             if !furniture_bash_ids.contains(&bash.furniture_id) {
                 return Err(SimError::InvalidSnapshot);
             }
@@ -13606,6 +13791,7 @@ impl WorldState {
             next_event_counter: snapshot.next_event_counter,
             next_field_sequence: snapshot.next_field_sequence,
             field_types,
+            item_groups,
             terrain_bash_types,
             furniture_bash_ids,
             furniture_bash_types,
@@ -13626,7 +13812,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV55");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV56");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13753,6 +13939,37 @@ mod tests {
             close_transparent: None,
             close_flat: None,
         }
+    }
+
+    fn test_craft_item_prototype(type_id: &str) -> CraftItemPrototypeV1 {
+        CraftItemPrototypeV1 {
+            type_id: type_id.to_owned(),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+        }
+    }
+
+    fn test_item_group_leaf(
+        type_id: &str,
+        charges: Option<cdda_protocol::InclusiveI32RangeV1>,
+        minimum_one_charge: bool,
+    ) -> ItemGroupTargetV1 {
+        ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
+            prototype: test_craft_item_prototype(type_id),
+            charges,
+            minimum_one_charge,
+        }))
     }
 
     fn test_field_type(
@@ -22697,7 +22914,7 @@ mod tests {
             str_max_supported: -1,
             bash_multiplier_millionths: 1_000_000,
             result: test_terrain("t_floor"),
-            drops: Vec::new(),
+            drop_source: None,
             hit_field: None,
             destroyed_field: None,
             sound: String::from("smash!"),
@@ -25705,7 +25922,7 @@ mod tests {
                 str_max_supported: -1,
                 bash_multiplier_millionths: 950_000,
                 result: floor,
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("crash!"),
@@ -25733,7 +25950,7 @@ mod tests {
                 str_max_supported: -1,
                 bash_multiplier_millionths: 1_000_000,
                 result: None,
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("splinter!"),
@@ -26181,6 +26398,215 @@ mod tests {
     }
 
     #[test]
+    fn item_group_planner_preserves_order_counts_charges_and_named_distribution() {
+        let catalog = [ItemGroupDefinitionV1 {
+            group_id: String::from("weighted_child"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Distribution,
+                    entries: vec![
+                        ItemGroupEntryV1 {
+                            probability: 1,
+                            count_min: 1,
+                            count_max: 1,
+                            target: test_item_group_leaf("beta", None, false),
+                        },
+                        ItemGroupEntryV1 {
+                            probability: 2,
+                            count_min: 1,
+                            count_max: 1,
+                            target: test_item_group_leaf("gamma", None, false),
+                        },
+                    ],
+                }],
+            },
+        }];
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![
+                    ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 2,
+                        count_max: 2,
+                        target: test_item_group_leaf("alpha", None, false),
+                    },
+                    ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        target: ItemGroupTargetV1::Group(String::from("weighted_child")),
+                    },
+                    ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 2,
+                        count_max: 2,
+                        target: test_item_group_leaf(
+                            "charged",
+                            Some(cdda_protocol::InclusiveI32RangeV1 {
+                                minimum: 0,
+                                maximum: 2,
+                            }),
+                            true,
+                        ),
+                    },
+                ],
+            }],
+        });
+        let catalog_map = catalog
+            .iter()
+            .cloned()
+            .map(|definition| (definition.group_id.clone(), definition))
+            .collect::<BTreeMap<_, _>>();
+        let mut first_rng = ChaCha8Rng::from_seed([7; 32]);
+        let first = plan_item_group_source(&source, &catalog_map, &mut first_rng)
+            .expect("valid group should plan");
+        let mut second_rng = ChaCha8Rng::from_seed([7; 32]);
+        let second = plan_item_group_source(&source, &catalog_map, &mut second_rng)
+            .expect("same group should plan again");
+        assert_eq!(first, second, "the same named stream must replay exactly");
+        assert_eq!(first.len(), 5);
+        assert_eq!(
+            first
+                .iter()
+                .map(|prototype| prototype.type_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "alpha", "gamma", "charged", "charged"]
+        );
+        assert!(
+            first[3..]
+                .iter()
+                .all(|prototype| (1..=2).contains(&prototype.charges))
+        );
+    }
+
+    #[test]
+    fn item_group_catalog_registration_is_atomic_and_snapshot_stable() {
+        let catalog = vec![ItemGroupDefinitionV1 {
+            group_id: String::from("stable_group"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        target: test_item_group_leaf("rock", None, false),
+                    }],
+                }],
+            },
+        }];
+        let mut world = WorldState::new(83, [83; 32]);
+        world
+            .register_item_group_catalog(catalog.clone())
+            .expect("valid catalog should register");
+        world
+            .register_terrain_bash_type(TerrainBashTypeV1 {
+                terrain_id: String::from("t_group_test"),
+                str_min: 1,
+                str_max: 1,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 1_000_000,
+                result: test_terrain("t_floor"),
+                drop_source: Some(ItemGroupSourceV1::Group(String::from("stable_group"))),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("smash"),
+                failure_sound: String::from("whump"),
+                sound_volume: -1,
+                failure_sound_volume: -1,
+            })
+            .expect("catalog consumer should register");
+        assert_eq!(world.snapshot().item_groups, catalog);
+        let restored =
+            WorldState::from_snapshot(&world.snapshot()).expect("catalog should restore");
+        assert_eq!(restored.snapshot(), world.snapshot());
+
+        let mut nonminimal = world.snapshot();
+        nonminimal.item_groups.push(ItemGroupDefinitionV1 {
+            group_id: String::from("unused_group"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: Vec::new(),
+                }],
+            },
+        });
+        assert!(matches!(
+            WorldState::from_snapshot(&nonminimal),
+            Err(SimError::InvalidSnapshot)
+        ));
+
+        let mut conflicting = world.snapshot().item_groups;
+        conflicting[0].graph.nodes[0].entries[0].count_max = 2;
+        let before = world.snapshot();
+        assert!(matches!(
+            world.register_item_group_catalog(conflicting),
+            Err(SimError::InvalidItem)
+        ));
+        assert_eq!(
+            world.snapshot(),
+            before,
+            "failed replacement must be atomic"
+        );
+
+        world.tick = SimTick(1);
+        assert!(matches!(
+            world.register_item_group_catalog(catalog),
+            Err(SimError::InvalidItem)
+        ));
+    }
+
+    #[test]
+    fn item_group_guaranteed_collection_rolls_but_fixed_ranges_do_not() {
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 2,
+                    count_max: 2,
+                    target: test_item_group_leaf(
+                        "fixed_charges",
+                        Some(cdda_protocol::InclusiveI32RangeV1 {
+                            minimum: 5,
+                            maximum: 5,
+                        }),
+                        false,
+                    ),
+                }],
+            }],
+        });
+        let seed = [91; 32];
+        let mut actual_rng = ChaCha8Rng::from_seed(seed);
+        let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
+            .expect("fixed group should plan");
+        assert_eq!(planned.len(), 2);
+        assert!(planned.iter().all(|prototype| prototype.charges == 5));
+
+        let mut expected_rng = ChaCha8Rng::from_seed(seed);
+        let _guaranteed_collection_roll = expected_rng.next_u64();
+        assert_eq!(
+            actual_rng.next_u64(),
+            expected_rng.next_u64(),
+            "fixed count and fixed charges must not consume RNG values"
+        );
+    }
+
+    #[test]
     fn group_bash_persists_damage_and_atomically_transforms_drops_fields_and_sound() {
         let mut world = WorldState::new(41, [19; 32]);
         world
@@ -26208,29 +26634,40 @@ mod tests {
             str_max_supported: -1,
             bash_multiplier_millionths: 950_000,
             result: damaged_door.clone(),
-            drops: vec![cdda_protocol::BashDropPrototypeV1 {
-                prototype: CraftItemPrototypeV1 {
-                    type_id: String::from("splinter"),
-                    charges: 1,
-                    melee_damage_milli: BTreeMap::new(),
-                    calories: 0,
-                    quench: 0,
-                    comestible_type: String::new(),
-                    ammunition_type: String::new(),
-                    ranged_weapon: None,
-                    magazine_capacity: 0,
-                    integral_magazines: Vec::new(),
-                    magazine_wells: Vec::new(),
-                    ammunition_containers: Vec::new(),
-                    residual_energy_millijoules: 0,
-                    powered_tool: None,
-                },
-                probability_percent: 100,
-                count_min: 1,
-                count_max: 1,
-                charges_min: None,
-                charges_max: None,
-            }],
+            drop_source: Some(ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![cdda_protocol::ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![cdda_protocol::ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        target: ItemGroupTargetV1::Item(Box::new(
+                            cdda_protocol::ItemGroupItemPrototypeV1 {
+                                prototype: CraftItemPrototypeV1 {
+                                    type_id: String::from("splinter"),
+                                    charges: 1,
+                                    melee_damage_milli: BTreeMap::new(),
+                                    calories: 0,
+                                    quench: 0,
+                                    comestible_type: String::new(),
+                                    ammunition_type: String::new(),
+                                    ranged_weapon: None,
+                                    magazine_capacity: 0,
+                                    integral_magazines: Vec::new(),
+                                    magazine_wells: Vec::new(),
+                                    ammunition_containers: Vec::new(),
+                                    residual_energy_millijoules: 0,
+                                    powered_tool: None,
+                                },
+                                charges: None,
+                                minimum_one_charge: false,
+                            },
+                        )),
+                    }],
+                }],
+            })),
             hit_field: Some(cdda_protocol::BashFieldEffectV1 {
                 field_type_id: String::from("fd_dust"),
                 intensity: 2,
@@ -26559,7 +26996,7 @@ mod tests {
                 str_max_supported: -1,
                 bash_multiplier_millionths: 1_000_000,
                 result: test_terrain("t_floor"),
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("crunch!"),
@@ -26579,7 +27016,7 @@ mod tests {
                 str_max_supported: -1,
                 bash_multiplier_millionths: 1_000_000,
                 result: None,
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("smash!"),
@@ -26733,7 +27170,7 @@ mod tests {
                 str_max_supported: -1,
                 bash_multiplier_millionths: 1_000_000,
                 result: Some(broken_table.clone()),
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("crash!"),

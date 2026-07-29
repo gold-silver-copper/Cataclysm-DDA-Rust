@@ -20,12 +20,25 @@ observation and test-user data live in one self-cleaning runtime directory. No
 C++ code or library is linked into the Rust client, server, simulation, or
 protocol crates.
 
-The initial kernel calls upstream `item_pocket::can_contain` for items shorter
-than, equal to, and longer than a fixed container maximum. This is a bounded
-bootstrap, not a general C++ RPC service: adding a kernel requires a new
-versioned scenario/observation shape and explicit C++ adapter code. The first
-build compiles upstream's headless core and can take several minutes; subsequent
-runs reuse it only when a strict cache record matches the commit, tree, adapter,
-and BLAKE3 executable digest. Any mismatch deletes the export and rebuilds it
-from the pinned Git archive. Runtime-loaded JSON is never reused from that
-build cache.
+The pocket kernel calls upstream `item_pocket::can_contain` for items shorter
+than, equal to, and longer than a fixed container maximum. The item-group kernel
+uses the real `Item_group`, `Single_item_creator`, and `Item_modifier` paths to
+cover collection order and roll consumption, all distribution interval
+boundaries, fixed and ranged count/charges, and nested groups sharing one RNG
+stream. Run it with:
+
+```sh
+cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json
+```
+
+Seed values used to reach range boundaries are deliberately omitted from the
+observation. The adapter finds them within a fixed search bound, then emits only
+normalized semantic results, ordered traces, and downstream RNG-state equality.
+
+This remains a bounded bootstrap, not a general C++ RPC service: adding a kernel
+requires a new versioned scenario/observation shape and explicit C++ adapter
+code. The first build compiles upstream's headless core and can take several
+minutes; subsequent runs reuse it only when a strict cache record matches the
+commit, tree, adapters, and BLAKE3 executable digest. Any mismatch deletes the
+export and rebuilds it from the pinned Git archive. Runtime-loaded JSON is never
+reused from that build cache.

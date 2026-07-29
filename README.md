@@ -594,6 +594,24 @@ through direct execution, per-tick restore, SQLite recovery, and portable replay
 Databases below schema 57 that contain serialized state are rejected before
 mutation.
 
+Protocol 80 advances to schema 58 and CanonicalStateV56 while retaining
+CanonicalEventsV18. A strict selected-content item-group registry now models
+legacy and modern collection/distribution groups, ordered nested nodes, named
+references, count and charge ranges, self-copy/extension load order, item
+migrations, cycle/reference checks, and explicit unsupported fields. Canonical
+worlds persist only the sorted reachable group closure. Structural bash sources
+use named or inline graphs; the authoritative planner consumes one named RNG
+stream in pinned source order, preflights at most 4,096 stable output IDs, and
+then atomically transforms the tile and materializes drops. The starter-world
+`t_wall` now resolves the pinned `wall_bash_results` collection (maximum 82
+objects) before becoming `t_floor`; the generalized source path raises strict
+furniture-bash admission from 537 to 539 of 699 definitions. Scenario format
+6/observation format 5 prove
+the same weighted/count/charge result through direct execution, per-tick
+snapshot restore, SQLite recovery, and portable replay. Ammo/magazine dressing
+and unsupported entry fields remain fail-closed. Databases below schema 58 that
+contain serialized state are rejected before mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -839,11 +857,15 @@ core uses its wide-character API.
 
 ```sh
 cargo xtask cpp-oracle-check
+cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json
 ```
 
-The initial strict scenario exercises real upstream
-`item_pocket::can_contain` maximum-length behavior at the shorter, equal, and
-longer boundaries. The runner rejects unknown JSON fields, mismatched format or
+The pocket scenario exercises real upstream `item_pocket::can_contain`
+maximum-length behavior at the shorter, equal, and longer boundaries. The
+item-group scenario covers ordered collection RNG consumption, distribution
+interval boundaries, fixed/ranged count and charges, zero-to-one clamping, and
+nested groups sharing the same RNG stream. The runner rejects unknown JSON
+fields, mismatched format or
 baseline versions, the wrong upstream Git tree, and any observation drift. It
 enforces byte bounds while reading, serializes concurrent invocations, freshly
 exports pinned runtime data, removes temporary run data after every result,
@@ -883,8 +905,9 @@ item-flow, indexed multi-well, and item-backed split/removal scenarios plus
 checked-in semantic/hash expectations through direct headless simulation,
 per-tick snapshot restoration, SQLite recovery, and portable replay
 verification.
-The separate C++ oracle provides the first real-upstream item-pocket kernel;
-additional kernels still require explicit versioned adapters.
+The separate C++ oracle provides checked real-upstream item-pocket and
+item-group kernels; additional kernels still require explicit versioned
+adapters.
 
 ## License
 

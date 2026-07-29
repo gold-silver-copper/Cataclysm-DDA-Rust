@@ -1,0 +1,44 @@
+{
+  "format_version": 1,
+  "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+  "upstream_tree": "210f31db2e8b2f0caed1809f1a66781859f9d129",
+  "kernel": "item_group_generation_v1",
+  "expected_observation": {
+    "format_version": 1,
+    "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+    "upstream_tree": "210f31db2e8b2f0caed1809f1a66781859f9d129",
+    "kernel": "item_group_generation_v1",
+    "collection": {
+      "entry_probability": 50,
+      "rolls_consumed": 3,
+      "expected_trace": ["first", "conditional", "last"],
+      "actual_trace": ["first", "conditional", "last"],
+      "downstream_draw_matches": true
+    },
+    "distribution": [
+      { "ticket": 1, "selected": "low" },
+      { "ticket": 2, "selected": "low" },
+      { "ticket": 3, "selected": "middle" },
+      { "ticket": 5, "selected": "middle" },
+      { "ticket": 6, "selected": "high" },
+      { "ticket": 10, "selected": "high" }
+    ],
+    "counts": [
+      { "case_id": "fixed", "minimum": 3, "maximum": 3, "target": 3, "observed": 3 },
+      { "case_id": "range_minimum", "minimum": 2, "maximum": 4, "target": 2, "observed": 2 },
+      { "case_id": "range_maximum", "minimum": 2, "maximum": 4, "target": 4, "observed": 4 }
+    ],
+    "charges": [
+      { "case_id": "fixed", "minimum": 4, "maximum": 4, "target": 4, "observed": 4 },
+      { "case_id": "zero_clamped_to_one", "minimum": 0, "maximum": 0, "target": 1, "observed": 1 },
+      { "case_id": "range_minimum", "minimum": 1, "maximum": 4, "target": 1, "observed": 1 },
+      { "case_id": "range_maximum", "minimum": 1, "maximum": 4, "target": 4, "observed": 4 }
+    ],
+    "nested": {
+      "rolls_consumed": 4,
+      "expected_trace": ["child_conditional", "child_always", "root_last"],
+      "actual_trace": ["child_conditional", "child_always", "root_last"],
+      "downstream_draw_matches": true
+    }
+  }
+}

@@ -2713,3 +2713,44 @@ multiple same-tick attacks. Tests lock both outcomes, exact miss charging,
 hashing and snapshot rejection, corpse revival, selected-content projection,
 SQLite recovery, and portable replay. Special-attack timing remains outside
 this ordinary-melee slice.
+
+## Canonical item-group graphs and authoritative generation
+
+Protocol 80 advances to schema 58 and CanonicalStateV56 while retaining
+CanonicalEventsV18. Item groups are content programs, not pre-expanded drop
+lists. The selected-content loader therefore finalizes legacy and modern
+collection/distribution syntax into ordered local graphs, applies reset and
+self-copy extension in selected load order, resolves item migrations, retains
+unsupported fields, and rejects missing references and cycles. A strict graph
+contains one root plus the complete reachable named closure. Canonical worlds
+persist only the sorted closure referenced by admitted consumers, never all
+7,621 pinned definitions.
+
+Protocol graphs use bounded local node IDs and explicit item, named-group, and
+local-node targets. Validation checks sorted uniqueness, reachability, positive
+normalized probabilities, count and charge ranges, direct item prototypes,
+global/local cycles, depth 32, 512 definitions, 2,048 nodes, 8,192 entries, and
+at most one 4,096-object stable-ID reservation per invocation. Collection
+entries retain source order and consume a percentage roll even at probability
+100. Distribution nodes consume one inclusive weighted ticket. Fixed counts
+and charges consume no roll; ranges consume one inclusive roll at the pinned
+point, and group counts repeat the complete child evaluation. Every nested
+evaluation shares the caller-owned named RNG stream.
+
+Structural bash is the first authoritative consumer. Terrain and furniture
+definitions reference a named group or an inline implicit collection. On a
+successful damage threshold, the server evaluates the complete output plan
+without mutating world state, verifies a materialization position and enough
+reserved stable IDs, then transforms the structure and creates objects in plan
+order. A failed preflight leaves damage capped below destruction and burns no
+ID. The pinned `t_wall` source uses `wall_bash_results`, whose strict maximum is
+82, and resolves to the known starter-world `t_floor`. Two additional furniture
+definitions become strictly representable, raising current admission to 539 of
+699 while preserving replacement-closure checks. Direct, per-tick
+snapshot, SQLite, and portable-replay scenario modes must produce identical
+state and semantic events.
+
+Ammo and magazine dressing, damage/on-drop modifiers, container nesting, and
+charges applied to nested group targets are not represented by Protocol 80 and
+must reject admission. This boundary prevents the generic interpreter from
+claiming behavior that currently requires deeper item-content semantics.

@@ -5,6 +5,7 @@ mod construction;
 mod field;
 mod furniture;
 mod item;
+mod item_group;
 mod monster;
 mod proficiency;
 mod recipe;
@@ -13,7 +14,7 @@ mod terrain;
 
 pub use bash::{
     BASH_MULTIPLIER_SCALE, BashDamageProfileDefinition, BashDamageProfileRegistry,
-    BashDamageProfileRegistryError, BashDefinition, BashDropDefinition, BashFieldEffectDefinition,
+    BashDamageProfileRegistryError, BashDefinition, BashFieldEffectDefinition, BashItemGroupSource,
 };
 pub use construction::{
     ConstructionDefinition, ConstructionGroupDefinition, ConstructionRegistry,
@@ -26,6 +27,13 @@ pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryErr
 pub use item::{
     ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, PocketDefinition,
     PocketTypeDefinition, StrictMagazineDefinition,
+};
+pub use item_group::{
+    ItemGroupDefinition, ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind, ItemGroupRange,
+    ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype, MAX_ITEM_GROUP_LOCAL_DEPTH,
+    MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUT, MAX_ITEM_GROUP_QUANTITY,
+    MAX_ITEM_GROUP_REFERENCE_DEPTH, StrictItemGroupDefinition, StrictItemGroupGraph,
+    StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
 pub use proficiency::{
@@ -415,6 +423,7 @@ fn definition_support(kind: &str) -> SupportStatus {
             | "construction"
             | "construction_group"
             | "field_type"
+            | "item_group"
     ) {
         SupportStatus::LoaderImplemented
     } else {
@@ -427,6 +436,7 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "construction" && construction::field_is_implemented(field))
         || (kind == "construction_group" && construction::group_field_is_implemented(field))
         || (kind == "ITEM" && item::field_is_implemented(field))
+        || (kind == "item_group" && item_group::field_is_implemented(field))
         || (kind == "MONSTER" && monster::field_is_implemented(field))
         || (kind == "field_type" && field::field_is_implemented(field))
         || (kind == "terrain" && terrain::field_is_implemented(field))
@@ -437,6 +447,8 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "skill" && skill::field_is_implemented(field))
     {
         SupportStatus::LoaderImplemented
+    } else if kind == "item_group" {
+        SupportStatus::Unimplemented
     } else {
         definition_support(kind)
     }
@@ -1427,7 +1439,10 @@ mod tests {
         );
         assert_eq!(door_bash.profile, "wooden_door");
         assert_eq!(door_bash.terrain_result, "t_door_b");
-        assert_eq!(door_bash.drops.len(), 4);
+        assert!(matches!(
+            &door_bash.item_group,
+            Some(BashItemGroupSource::InlineCollection(entries)) if entries.len() == 4
+        ));
         assert_eq!(
             door_bash.hit_field,
             Some(BashFieldEffectDefinition {

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 79;
+pub const PROTOCOL_VERSION: u16 = 80;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -65,6 +65,20 @@ pub const MAX_ITEM_AMMUNITION_CONTAINER_POCKETS: usize = 16;
 pub const MAX_AMMUNITION_CONTAINER_TYPES: usize = 256;
 pub const MAX_AMMUNITION_CONTAINER_CONTENTS: usize = 256;
 pub const MILLIJOULES_PER_BATTERY_CHARGE: u32 = 1_000_000;
+/// Maximum number of named item groups retained by one canonical world.
+/// Runtime catalogs contain only the transitive closure used by canonical
+/// consumers rather than every group present in the selected content set.
+pub const MAX_ITEM_GROUP_DEFINITIONS: usize = 512;
+/// Maximum number of flat local nodes across the canonical named catalog and
+/// every inline consumer graph retained by one world.
+pub const MAX_ITEM_GROUP_NODES: usize = 2_048;
+/// Maximum number of entries across the canonical named catalog and every
+/// inline consumer graph retained by one world.
+pub const MAX_ITEM_GROUP_ENTRIES: usize = 8_192;
+/// Maximum number of local-node and named-group edges on a generated path.
+pub const MAX_ITEM_GROUP_DEPTH: usize = 32;
+/// One item-group invocation cannot require more than one reserved ID block.
+pub const MAX_ITEM_GROUP_OUTPUTS: u64 = 4_096;
 
 const fn default_true() -> bool {
     true
@@ -2304,14 +2318,73 @@ pub struct BashFieldEffectV1 {
     pub intensity: u8,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemGroupKindV1 {
+    Collection,
+    Distribution,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InclusiveI32RangeV1 {
+    pub minimum: i32,
+    pub maximum: i32,
+}
+
+/// A direct item leaf in a normalized item-group graph. The server resolves
+/// immutable content into the same prototype used by crafting before the
+/// graph enters canonical simulation state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BashDropPrototypeV1 {
+pub struct ItemGroupItemPrototypeV1 {
     pub prototype: CraftItemPrototypeV1,
-    pub probability_percent: u8,
+    pub charges: Option<InclusiveI32RangeV1>,
+    /// Count-by-charge items clamp an explicit zero charge roll to one in the
+    /// pinned implementation. Non-charge items leave this false.
+    pub minimum_one_charge: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemGroupTargetV1 {
+    Item(Box<ItemGroupItemPrototypeV1>),
+    Group(String),
+    /// Reference to a node in the containing graph.
+    Node(u16),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupEntryV1 {
+    /// Collection entries use a normalized percentage in 1..=100;
+    /// distribution entries use an arbitrary positive weight.
+    pub probability: u32,
     pub count_min: u16,
     pub count_max: u16,
-    pub charges_min: Option<i32>,
-    pub charges_max: Option<i32>,
+    pub target: ItemGroupTargetV1,
+}
+
+/// One node in a flat local item-group graph. Nodes are ID-sorted in their
+/// containing graph while each node's entries retain source order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupNodeV1 {
+    pub node_id: u16,
+    pub kind: ItemGroupKindV1,
+    pub entries: Vec<ItemGroupEntryV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupGraphV1 {
+    pub root_node: u16,
+    pub nodes: Vec<ItemGroupNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupDefinitionV1 {
+    pub group_id: String,
+    pub graph: ItemGroupGraphV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemGroupSourceV1 {
+    Group(String),
+    Inline(ItemGroupGraphV1),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2325,7 +2398,7 @@ pub struct TerrainBashTypeV1 {
     pub str_max_supported: i32,
     pub bash_multiplier_millionths: u32,
     pub result: TerrainTileSnapshot,
-    pub drops: Vec<BashDropPrototypeV1>,
+    pub drop_source: Option<ItemGroupSourceV1>,
     pub hit_field: Option<BashFieldEffectV1>,
     pub destroyed_field: Option<BashFieldEffectV1>,
     pub sound: String,
@@ -2345,7 +2418,7 @@ pub struct FurnitureBashTypeV1 {
     pub str_max_supported: i32,
     pub bash_multiplier_millionths: u32,
     pub result: Option<FurnitureTileSnapshot>,
-    pub drops: Vec<BashDropPrototypeV1>,
+    pub drop_source: Option<ItemGroupSourceV1>,
     pub hit_field: Option<BashFieldEffectV1>,
     pub destroyed_field: Option<BashFieldEffectV1>,
     pub sound: String,
@@ -2411,6 +2484,9 @@ pub struct WorldSnapshotV1 {
     pub next_field_sequence: u64,
     /// Field-type-ID-sorted simulation definitions admitted from pinned data.
     pub field_types: Vec<FieldTypeSnapshotV1>,
+    /// Group-ID-sorted transitive closure of normalized item groups referenced
+    /// by canonical simulation definitions.
+    pub item_groups: Vec<ItemGroupDefinitionV1>,
     /// Stable terrain/furniture-ID-sorted authoritative bash definitions.
     pub terrain_bash_types: Vec<TerrainBashTypeV1>,
     /// Furniture-ID-sorted set of every pinned furniture definition with an
@@ -3415,6 +3491,436 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
         creature_corpse: None,
     };
     valid_item_snapshot(&snapshot)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ItemGroupMetrics {
+    outputs: u64,
+    depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ItemGroupEvaluationState {
+    Visiting,
+    Complete(ItemGroupMetrics),
+}
+
+struct ItemGroupEvaluator<'a> {
+    definitions: &'a [ItemGroupDefinitionV1],
+    lookup: BTreeMap<&'a str, usize>,
+    group_states: Vec<Option<ItemGroupEvaluationState>>,
+    node_states: BTreeMap<(usize, u16), ItemGroupEvaluationState>,
+}
+
+impl<'a> ItemGroupEvaluator<'a> {
+    fn new(definitions: &'a [ItemGroupDefinitionV1]) -> Option<Self> {
+        if definitions.len() > MAX_ITEM_GROUP_DEFINITIONS
+            || definitions
+                .windows(2)
+                .any(|pair| pair[0].group_id >= pair[1].group_id)
+        {
+            return None;
+        }
+        let total_nodes = definitions.iter().try_fold(0_usize, |total, definition| {
+            total.checked_add(definition.graph.nodes.len())
+        })?;
+        let total_entries = definitions.iter().try_fold(0_usize, |total, definition| {
+            definition
+                .graph
+                .nodes
+                .iter()
+                .try_fold(total, |total, node| total.checked_add(node.entries.len()))
+        })?;
+        if total_nodes > MAX_ITEM_GROUP_NODES || total_entries > MAX_ITEM_GROUP_ENTRIES {
+            return None;
+        }
+        let mut lookup = BTreeMap::new();
+        for (index, definition) in definitions.iter().enumerate() {
+            if !valid_recipe_id(&definition.group_id)
+                || !valid_item_group_graph_shape(&definition.graph)
+                || lookup.insert(definition.group_id.as_str(), index).is_some()
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            definitions,
+            lookup,
+            group_states: vec![None; definitions.len()],
+            node_states: BTreeMap::new(),
+        })
+    }
+
+    fn validate_catalog(&mut self) -> bool {
+        (0..self.definitions.len()).all(|index| self.evaluate_group(index, 0).is_some())
+    }
+
+    fn evaluate_group(&mut self, index: usize, recursion_depth: usize) -> Option<ItemGroupMetrics> {
+        if recursion_depth > MAX_ITEM_GROUP_DEPTH {
+            return None;
+        }
+        match self.group_states.get(index).copied().flatten() {
+            Some(ItemGroupEvaluationState::Visiting) => return None,
+            Some(ItemGroupEvaluationState::Complete(metrics)) => return Some(metrics),
+            None => {}
+        }
+        *self.group_states.get_mut(index)? = Some(ItemGroupEvaluationState::Visiting);
+        let root_node = self.definitions.get(index)?.graph.root_node;
+        let metrics = self.evaluate_named_node(index, root_node, recursion_depth)?;
+        if metrics.outputs > MAX_ITEM_GROUP_OUTPUTS || metrics.depth > MAX_ITEM_GROUP_DEPTH {
+            return None;
+        }
+        *self.group_states.get_mut(index)? = Some(ItemGroupEvaluationState::Complete(metrics));
+        Some(metrics)
+    }
+
+    fn evaluate_named_node(
+        &mut self,
+        owner: usize,
+        node_id: u16,
+        recursion_depth: usize,
+    ) -> Option<ItemGroupMetrics> {
+        if recursion_depth > MAX_ITEM_GROUP_DEPTH {
+            return None;
+        }
+        let key = (owner, node_id);
+        match self.node_states.get(&key).copied() {
+            Some(ItemGroupEvaluationState::Visiting) => return None,
+            Some(ItemGroupEvaluationState::Complete(metrics)) => return Some(metrics),
+            None => {}
+        }
+        self.node_states
+            .insert(key, ItemGroupEvaluationState::Visiting);
+        let node = self
+            .definitions
+            .get(owner)?
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.node_id == node_id)?
+            .clone();
+        let metrics =
+            self.evaluate_entries(node.kind, &node.entries, |evaluator, target| match target {
+                ItemGroupTargetV1::Item(_) => Some(ItemGroupMetrics {
+                    outputs: 1,
+                    depth: 0,
+                }),
+                ItemGroupTargetV1::Group(group_id) => {
+                    let index = *evaluator.lookup.get(group_id.as_str())?;
+                    evaluator.evaluate_group(index, recursion_depth.checked_add(1)?)
+                }
+                ItemGroupTargetV1::Node(node_id) => {
+                    evaluator.evaluate_named_node(owner, *node_id, recursion_depth.checked_add(1)?)
+                }
+            })?;
+        self.node_states
+            .insert(key, ItemGroupEvaluationState::Complete(metrics));
+        Some(metrics)
+    }
+
+    fn evaluate_inline_graph(&mut self, graph: &ItemGroupGraphV1) -> Option<ItemGroupMetrics> {
+        if !valid_item_group_graph_shape(graph) {
+            return None;
+        }
+        let mut states = BTreeMap::new();
+        let metrics = self.evaluate_inline_node(graph, graph.root_node, &mut states, 0)?;
+        (metrics.outputs <= MAX_ITEM_GROUP_OUTPUTS && metrics.depth <= MAX_ITEM_GROUP_DEPTH)
+            .then_some(metrics)
+    }
+
+    fn evaluate_inline_node(
+        &mut self,
+        graph: &ItemGroupGraphV1,
+        node_id: u16,
+        states: &mut BTreeMap<u16, ItemGroupEvaluationState>,
+        recursion_depth: usize,
+    ) -> Option<ItemGroupMetrics> {
+        if recursion_depth > MAX_ITEM_GROUP_DEPTH {
+            return None;
+        }
+        match states.get(&node_id).copied() {
+            Some(ItemGroupEvaluationState::Visiting) => return None,
+            Some(ItemGroupEvaluationState::Complete(metrics)) => return Some(metrics),
+            None => {}
+        }
+        states.insert(node_id, ItemGroupEvaluationState::Visiting);
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_id == node_id)?
+            .clone();
+        let metrics =
+            self.evaluate_entries(node.kind, &node.entries, |evaluator, target| match target {
+                ItemGroupTargetV1::Item(_) => Some(ItemGroupMetrics {
+                    outputs: 1,
+                    depth: 0,
+                }),
+                ItemGroupTargetV1::Group(group_id) => {
+                    let index = *evaluator.lookup.get(group_id.as_str())?;
+                    evaluator.evaluate_group(index, recursion_depth.checked_add(1)?)
+                }
+                ItemGroupTargetV1::Node(node_id) => evaluator.evaluate_inline_node(
+                    graph,
+                    *node_id,
+                    states,
+                    recursion_depth.checked_add(1)?,
+                ),
+            })?;
+        states.insert(node_id, ItemGroupEvaluationState::Complete(metrics));
+        Some(metrics)
+    }
+
+    fn evaluate_entries(
+        &mut self,
+        kind: ItemGroupKindV1,
+        entries: &[ItemGroupEntryV1],
+        mut target_metrics: impl FnMut(&mut Self, &ItemGroupTargetV1) -> Option<ItemGroupMetrics>,
+    ) -> Option<ItemGroupMetrics> {
+        let mut outputs = 0_u64;
+        let mut depth = 0_usize;
+        for entry in entries {
+            let target = target_metrics(self, &entry.target)?;
+            let entry_outputs = target.outputs.checked_mul(u64::from(entry.count_max))?;
+            let entry_depth = target.depth.checked_add(1)?;
+            if entry_outputs > MAX_ITEM_GROUP_OUTPUTS || entry_depth > MAX_ITEM_GROUP_DEPTH {
+                return None;
+            }
+            match kind {
+                ItemGroupKindV1::Collection => {
+                    outputs = outputs.checked_add(entry_outputs)?;
+                }
+                ItemGroupKindV1::Distribution => outputs = outputs.max(entry_outputs),
+            }
+            if outputs > MAX_ITEM_GROUP_OUTPUTS {
+                return None;
+            }
+            depth = depth.max(entry_depth);
+        }
+        Some(ItemGroupMetrics { outputs, depth })
+    }
+
+    fn evaluate_source(&mut self, source: &ItemGroupSourceV1) -> Option<ItemGroupMetrics> {
+        match source {
+            ItemGroupSourceV1::Group(group_id) => {
+                let index = *self.lookup.get(group_id.as_str())?;
+                self.evaluate_group(index, 0)
+            }
+            ItemGroupSourceV1::Inline(graph) => self.evaluate_inline_graph(graph),
+        }
+    }
+}
+
+fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
+    if graph.nodes.is_empty()
+        || graph.nodes.len() > MAX_ITEM_GROUP_NODES
+        || graph
+            .nodes
+            .windows(2)
+            .any(|pair| pair[0].node_id >= pair[1].node_id)
+        || !graph
+            .nodes
+            .iter()
+            .any(|node| node.node_id == graph.root_node)
+    {
+        return false;
+    }
+    let entry_count = graph
+        .nodes
+        .iter()
+        .try_fold(0_usize, |total, node| total.checked_add(node.entries.len()));
+    if entry_count.is_none_or(|count| count > MAX_ITEM_GROUP_ENTRIES) {
+        return false;
+    }
+    let node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.node_id)
+        .collect::<BTreeSet<_>>();
+    if graph.nodes.iter().any(|node| {
+        let weight_sum = node
+            .entries
+            .iter()
+            .try_fold(0_u32, |total, entry| total.checked_add(entry.probability));
+        node.entries.iter().any(|entry| {
+            entry.probability == 0
+                || (node.kind == ItemGroupKindV1::Collection && entry.probability > 100)
+                || entry.count_min > entry.count_max
+                || !valid_item_group_target(&entry.target, &node_ids)
+        }) || (node.kind == ItemGroupKindV1::Distribution && weight_sum.is_none())
+    }) {
+        return false;
+    }
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![graph.root_node];
+    while let Some(node_id) = pending.pop() {
+        if !reachable.insert(node_id) {
+            continue;
+        }
+        let Some(node) = graph.nodes.iter().find(|node| node.node_id == node_id) else {
+            return false;
+        };
+        pending.extend(node.entries.iter().filter_map(|entry| match entry.target {
+            ItemGroupTargetV1::Node(node_id) => Some(node_id),
+            ItemGroupTargetV1::Item(_) | ItemGroupTargetV1::Group(_) => None,
+        }));
+    }
+    reachable.len() == graph.nodes.len()
+}
+
+fn valid_item_group_target(target: &ItemGroupTargetV1, node_ids: &BTreeSet<u16>) -> bool {
+    match target {
+        ItemGroupTargetV1::Item(item) => {
+            valid_craft_item_prototype(&item.prototype)
+                && item.charges.is_none_or(|charges| {
+                    if charges.minimum < 0 || charges.maximum < charges.minimum {
+                        return false;
+                    }
+                    [charges.minimum, charges.maximum].into_iter().all(|value| {
+                        let mut effective = item.prototype.clone();
+                        effective.charges = if item.minimum_one_charge {
+                            value.max(1)
+                        } else {
+                            value
+                        };
+                        valid_craft_item_prototype(&effective)
+                    })
+                })
+                && (!item.minimum_one_charge || item.charges.is_some())
+        }
+        ItemGroupTargetV1::Group(group_id) => valid_recipe_id(group_id),
+        ItemGroupTargetV1::Node(node_id) => node_ids.contains(node_id),
+    }
+}
+
+/// Validates the complete named group catalog, including local and global
+/// references, cycles, depth, weight sums, direct prototypes, and maximum
+/// generated output counts.
+#[must_use]
+pub fn item_group_catalog_is_valid(definitions: &[ItemGroupDefinitionV1]) -> bool {
+    item_group_sources_are_valid(definitions, std::iter::empty())
+}
+
+/// Validates a named catalog and all retained consumer sources against one
+/// aggregate graph budget. Repeated named references do not duplicate storage;
+/// each inline graph does.
+#[must_use]
+pub fn item_group_sources_are_valid<'a>(
+    definitions: &[ItemGroupDefinitionV1],
+    sources: impl IntoIterator<Item = &'a ItemGroupSourceV1>,
+) -> bool {
+    let Some(mut evaluator) = ItemGroupEvaluator::new(definitions) else {
+        return false;
+    };
+    if !evaluator.validate_catalog() {
+        return false;
+    }
+    let Some(mut total_nodes) = definitions.iter().try_fold(0_usize, |total, definition| {
+        total.checked_add(definition.graph.nodes.len())
+    }) else {
+        return false;
+    };
+    let Some(mut total_entries) = definitions.iter().try_fold(0_usize, |total, definition| {
+        definition
+            .graph
+            .nodes
+            .iter()
+            .try_fold(total, |total, node| total.checked_add(node.entries.len()))
+    }) else {
+        return false;
+    };
+    for source in sources {
+        if let ItemGroupSourceV1::Inline(graph) = source {
+            let Some(nodes) = total_nodes.checked_add(graph.nodes.len()) else {
+                return false;
+            };
+            let Some(entries) = graph.nodes.iter().try_fold(total_entries, |total, node| {
+                total.checked_add(node.entries.len())
+            }) else {
+                return false;
+            };
+            total_nodes = nodes;
+            total_entries = entries;
+            if total_nodes > MAX_ITEM_GROUP_NODES || total_entries > MAX_ITEM_GROUP_ENTRIES {
+                return false;
+            }
+        }
+        if evaluator.evaluate_source(source).is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Returns the maximum number of stable top-level item objects produced by a
+/// source when both the source and its named catalog are valid.
+#[must_use]
+pub fn item_group_source_max_outputs(
+    source: &ItemGroupSourceV1,
+    definitions: &[ItemGroupDefinitionV1],
+) -> Option<u64> {
+    item_group_sources_are_valid(definitions, std::iter::once(source)).then_some(())?;
+    let mut evaluator = ItemGroupEvaluator::new(definitions)?;
+    Some(evaluator.evaluate_source(source)?.outputs)
+}
+
+fn item_group_sources_have_exact_named_closure(
+    definitions: &[ItemGroupDefinitionV1],
+    sources: &[&ItemGroupSourceV1],
+) -> bool {
+    let lookup = definitions
+        .iter()
+        .map(|definition| (definition.group_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = Vec::new();
+    for source in sources {
+        match source {
+            ItemGroupSourceV1::Group(group_id) => pending.push(group_id.as_str()),
+            ItemGroupSourceV1::Inline(graph) => pending.extend(item_group_graph_references(graph)),
+        }
+    }
+    let mut reachable = BTreeSet::new();
+    while let Some(group_id) = pending.pop() {
+        if !reachable.insert(group_id) {
+            continue;
+        }
+        let Some(definition) = lookup.get(group_id) else {
+            return false;
+        };
+        pending.extend(item_group_graph_references(&definition.graph));
+    }
+    reachable.len() == definitions.len()
+}
+
+fn item_group_graph_references(graph: &ItemGroupGraphV1) -> impl Iterator<Item = &str> {
+    graph
+        .nodes
+        .iter()
+        .flat_map(|node| &node.entries)
+        .filter_map(|entry| match &entry.target {
+            ItemGroupTargetV1::Group(group_id) => Some(group_id.as_str()),
+            ItemGroupTargetV1::Item(_) | ItemGroupTargetV1::Node(_) => None,
+        })
+}
+
+impl WorldSnapshotV1 {
+    /// Validates the canonical item-group catalog and every terrain/furniture
+    /// consumer in one pass. Full world restoration performs its other domain
+    /// checks separately.
+    #[must_use]
+    pub fn item_groups_are_valid(&self) -> bool {
+        let sources = self
+            .terrain_bash_types
+            .iter()
+            .filter_map(|bash| bash.drop_source.as_ref())
+            .chain(
+                self.furniture_bash_types
+                    .iter()
+                    .filter_map(|bash| bash.drop_source.as_ref()),
+            )
+            .collect::<Vec<_>>();
+        item_group_sources_are_valid(&self.item_groups, sources.iter().copied())
+            && item_group_sources_have_exact_named_closure(&self.item_groups, &sources)
+    }
 }
 
 fn valid_craft_activity(activity: &CraftActivitySnapshotV1, actor_id: ActorId) -> bool {
@@ -4727,6 +5233,355 @@ mod tests {
             tools: Vec::new(),
             qualities: Vec::new(),
         }
+    }
+
+    fn item_group_item(type_id: &str) -> ItemGroupTargetV1 {
+        let mut prototype = protocol_test_recipe().output;
+        prototype.type_id = type_id.to_owned();
+        ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
+            prototype,
+            charges: None,
+            minimum_one_charge: false,
+        }))
+    }
+
+    fn item_group_entry(
+        probability: u32,
+        count_min: u16,
+        count_max: u16,
+        target: ItemGroupTargetV1,
+    ) -> ItemGroupEntryV1 {
+        ItemGroupEntryV1 {
+            probability,
+            count_min,
+            count_max,
+            target,
+        }
+    }
+
+    fn item_group_chain(nodes: usize) -> ItemGroupDefinitionV1 {
+        let nodes = (0..nodes)
+            .map(|index| ItemGroupNodeV1 {
+                node_id: u16::try_from(index).expect("test graph is small"),
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![item_group_entry(
+                    100,
+                    1,
+                    1,
+                    if index + 1 == nodes {
+                        item_group_item("chain_leaf")
+                    } else {
+                        ItemGroupTargetV1::Node(
+                            u16::try_from(index + 1).expect("test graph is small"),
+                        )
+                    },
+                )],
+            })
+            .collect();
+        ItemGroupDefinitionV1 {
+            group_id: String::from("chain"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes,
+            },
+        }
+    }
+
+    #[test]
+    fn item_group_graph_round_trips_and_computes_recursive_output_bound() {
+        let mut charged_leaf = item_group_item("nail");
+        let ItemGroupTargetV1::Item(item) = &mut charged_leaf else {
+            unreachable!("fixture is a direct item")
+        };
+        item.charges = Some(InclusiveI32RangeV1 {
+            minimum: 0,
+            maximum: 12,
+        });
+        item.minimum_one_charge = true;
+        let leaf = ItemGroupDefinitionV1 {
+            group_id: String::from("a_leaf"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Distribution,
+                    entries: vec![item_group_entry(250, 1, 3, charged_leaf)],
+                }],
+            },
+        };
+        let root = ItemGroupDefinitionV1 {
+            group_id: String::from("b_root"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![
+                    ItemGroupNodeV1 {
+                        node_id: 0,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![
+                            item_group_entry(
+                                100,
+                                2,
+                                2,
+                                ItemGroupTargetV1::Group(String::from("a_leaf")),
+                            ),
+                            item_group_entry(25, 1, 1, ItemGroupTargetV1::Node(1)),
+                        ],
+                    },
+                    ItemGroupNodeV1 {
+                        node_id: 1,
+                        kind: ItemGroupKindV1::Distribution,
+                        entries: vec![item_group_entry(1, 1, 1, item_group_item("splinter"))],
+                    },
+                ],
+            },
+        };
+        let catalog = vec![leaf, root];
+        assert!(item_group_catalog_is_valid(&catalog));
+        assert_eq!(
+            item_group_source_max_outputs(
+                &ItemGroupSourceV1::Group(String::from("b_root")),
+                &catalog,
+            ),
+            Some(7)
+        );
+        let inline = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 4,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 4,
+                kind: ItemGroupKindV1::Distribution,
+                entries: vec![item_group_entry(
+                    1,
+                    1,
+                    1,
+                    ItemGroupTargetV1::Group(String::from("b_root")),
+                )],
+            }],
+        });
+        assert_eq!(item_group_source_max_outputs(&inline, &catalog), Some(7));
+
+        let encoded = postcard::to_stdvec(&(catalog.clone(), inline.clone()))
+            .expect("bounded item-group graph should encode");
+        let decoded: (Vec<ItemGroupDefinitionV1>, ItemGroupSourceV1) =
+            postcard::from_bytes(&encoded).expect("bounded item-group graph should decode");
+        assert_eq!(decoded, (catalog, inline));
+    }
+
+    #[test]
+    fn item_group_validation_rejects_cycles_missing_refs_and_invalid_ranges() {
+        let local_cycle = ItemGroupDefinitionV1 {
+            group_id: String::from("local_cycle"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, ItemGroupTargetV1::Node(0))],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(&[local_cycle]));
+
+        let named_cycle = |group_id: &str, target: &str| ItemGroupDefinitionV1 {
+            group_id: group_id.to_owned(),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Distribution,
+                    entries: vec![item_group_entry(
+                        1,
+                        1,
+                        1,
+                        ItemGroupTargetV1::Group(target.to_owned()),
+                    )],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(&[
+            named_cycle("a", "b"),
+            named_cycle("b", "a"),
+        ]));
+        assert!(!item_group_catalog_is_valid(&[named_cycle(
+            "missing", "absent",
+        )]));
+
+        let mut invalid_charges = item_group_item("nail");
+        let ItemGroupTargetV1::Item(item) = &mut invalid_charges else {
+            unreachable!("fixture is a direct item")
+        };
+        item.charges = Some(InclusiveI32RangeV1 {
+            minimum: 4,
+            maximum: 3,
+        });
+        let invalid_charges = ItemGroupDefinitionV1 {
+            group_id: String::from("invalid_charges"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, invalid_charges)],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(&[invalid_charges]));
+
+        let charged_food_group = |minimum_one_charge| {
+            let mut target = item_group_item("food");
+            let ItemGroupTargetV1::Item(item) = &mut target else {
+                unreachable!("fixture is a direct item")
+            };
+            item.prototype.comestible_type = String::from("FOOD");
+            item.charges = Some(InclusiveI32RangeV1 {
+                minimum: 0,
+                maximum: 0,
+            });
+            item.minimum_one_charge = minimum_one_charge;
+            ItemGroupDefinitionV1 {
+                group_id: String::from("charged_food"),
+                graph: ItemGroupGraphV1 {
+                    root_node: 0,
+                    nodes: vec![ItemGroupNodeV1 {
+                        node_id: 0,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![item_group_entry(100, 1, 1, target)],
+                    }],
+                },
+            }
+        };
+        assert!(item_group_catalog_is_valid(&[charged_food_group(true)]));
+        assert!(!item_group_catalog_is_valid(&[charged_food_group(false)]));
+
+        let mut overfilled_magazine = item_group_item("magazine");
+        let ItemGroupTargetV1::Item(item) = &mut overfilled_magazine else {
+            unreachable!("fixture is a direct item")
+        };
+        item.prototype.ammunition_type = String::from("9mm");
+        item.prototype.magazine_capacity = 10;
+        item.charges = Some(InclusiveI32RangeV1 {
+            minimum: 0,
+            maximum: 11,
+        });
+        let overfilled_magazine = ItemGroupDefinitionV1 {
+            group_id: String::from("overfilled_magazine"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 1, 1, overfilled_magazine)],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(&[overfilled_magazine]));
+
+        let overflowed_weights = ItemGroupDefinitionV1 {
+            group_id: String::from("weights"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Distribution,
+                    entries: vec![
+                        item_group_entry(u32::MAX, 1, 1, item_group_item("rock")),
+                        item_group_entry(1, 1, 1, item_group_item("stick")),
+                    ],
+                }],
+            },
+        };
+        assert!(!item_group_catalog_is_valid(&[overflowed_weights]));
+    }
+
+    #[test]
+    fn item_group_output_depth_and_catalog_limits_are_exact() {
+        let output_group = |count_max| ItemGroupDefinitionV1 {
+            group_id: String::from("outputs"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![item_group_entry(100, 0, count_max, item_group_item("rock"))],
+                }],
+            },
+        };
+        assert!(item_group_catalog_is_valid(&[output_group(
+            u16::try_from(MAX_ITEM_GROUP_OUTPUTS).expect("output bound fits u16"),
+        )]));
+        assert!(!item_group_catalog_is_valid(&[output_group(
+            u16::try_from(MAX_ITEM_GROUP_OUTPUTS + 1).expect("test bound fits u16"),
+        )]));
+
+        assert!(item_group_catalog_is_valid(&[item_group_chain(
+            MAX_ITEM_GROUP_DEPTH,
+        )]));
+        assert!(!item_group_catalog_is_valid(&[item_group_chain(
+            MAX_ITEM_GROUP_DEPTH + 1,
+        )]));
+
+        let empty_group = |index: usize| ItemGroupDefinitionV1 {
+            group_id: format!("group_{index:04}"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: Vec::new(),
+                }],
+            },
+        };
+        let maximum_catalog = (0..MAX_ITEM_GROUP_DEFINITIONS)
+            .map(empty_group)
+            .collect::<Vec<_>>();
+        assert!(item_group_catalog_is_valid(&maximum_catalog));
+
+        let inline_node_count = MAX_ITEM_GROUP_NODES - maximum_catalog.len();
+        let exact_inline = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: std::iter::once(ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: (1..inline_node_count)
+                    .map(|index| {
+                        item_group_entry(
+                            100,
+                            1,
+                            1,
+                            ItemGroupTargetV1::Node(
+                                u16::try_from(index).expect("node bound fits u16"),
+                            ),
+                        )
+                    })
+                    .collect(),
+            })
+            .chain((1..inline_node_count).map(|index| ItemGroupNodeV1 {
+                node_id: u16::try_from(index).expect("node bound fits u16"),
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![item_group_entry(100, 1, 1, item_group_item("rock"))],
+            }))
+            .collect(),
+        });
+        assert!(item_group_sources_are_valid(
+            &maximum_catalog,
+            std::iter::once(&exact_inline),
+        ));
+        let one_more_inline = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: Vec::new(),
+            }],
+        });
+        assert!(!item_group_sources_are_valid(
+            &maximum_catalog,
+            [&exact_inline, &one_more_inline],
+        ));
+
+        let oversized_catalog = (0..=MAX_ITEM_GROUP_DEFINITIONS)
+            .map(empty_group)
+            .collect::<Vec<_>>();
+        assert!(!item_group_catalog_is_valid(&oversized_catalog));
     }
 
     #[test]

@@ -13,12 +13,13 @@ obstacle-routing, route-planned bashing, broad safe furniture-bashing, and final
 wooden-door-frame slices plus initial player-controlled smashing: close
 persistent iroh identity, recovery, and audit
 guarantees while accelerating toward generalized subsystem parity. The active
-machine-readable milestone is item containment: inherited pocket definitions
-are retained losslessly and strict magazine/well admission is generalized
-through ordered detachable wells and strict item-backed integral magazine
-pockets plus strict ammunition-restricted containers. General physical
-containers remain blocked on item dimensions and recursive carry physics;
-deterministic item-group generation is the next accelerated subsystem.
+machine-readable milestone is deterministic item groups. The selected-content
+registry and Protocol 80 canonical graph model now cover strict ordered
+collection/distribution generation, nested local and named references, count
+and charge ranges, and the pinned `wall_bash_results` structural-drop path.
+Unsupported entry behavior and ammo/magazine dressing remain fail-closed; the
+next boundary is reusing the interpreter for mapgen and spawn consumers while
+general physical containers remain blocked on dimensions and carry physics.
 
 ## Runnable behavior
 
@@ -31,16 +32,19 @@ deterministic item-group generation is the next accelerated subsystem.
   version-bound, acyclic dependency DAG for generalized subsystem work.
 - A development-only C++ differential-oracle command verifies the exact pinned
   upstream commit and Git tree, exports it into ignored `target/`, and invokes
-  real `item_pocket::can_contain` behavior through a minimal oracle-only
-  `cata_test`. Its strict version-1 JSON scenario records shorter, equal, and
-  longer maximum-length boundaries and rejects unknown fields or any exact
-  observation drift. Reads enforce their byte cap, each runtime directory is
+  real upstream behavior through two minimal oracle-only `cata_test` adapters.
+  Strict version-1 JSON scenarios cover `item_pocket::can_contain` shorter,
+  equal, and longer maximum-length boundaries plus item-group collection order
+  and RNG consumption, distribution interval boundaries, fixed/ranged count
+  and charges (including zero-to-one clamping), and nested shared-RNG behavior.
+  Unknown fields or any exact observation drift reject. Reads enforce their
+  byte cap, each runtime directory is
   self-cleaning, and reusable binaries require exact cache identity plus a
   matching BLAKE3 digest or the export is rebuilt. One cross-process exclusive
   lock covers build and execution, while runtime `data/` is freshly exported
   from the pinned commit on every run. The initial upstream core build is
-  intentionally not part of the fast workspace test gate, and further kernels
-  still need explicit adapters.
+  intentionally not part of the fast workspace test gate; every additional
+  kernel still requires an explicit versioned adapter.
 - The ITEM loader preserves every inherited `pocket_data` object and source
   index without claiming unsupported runtime behavior. Strict MAGAZINE and
   MAGAZINE_WELL projections retain explicit pocket indices/IDs, reject extra
@@ -67,6 +71,19 @@ deterministic item-group generation is the next accelerated subsystem.
   requests are atomic. The starter cabin supplies a quiver and wooden arrows,
   while scenario format 5/observation format 4 proves direct/snapshot/SQLite/portable-replay
   equivalence. Pre-57 serialized state rejects before mutation.
+- Protocol 80/schema 58/CanonicalStateV56 retain CanonicalEventsV18 while
+  adding bounded canonical item-group graphs and a strict selected-content
+  registry. Modern and legacy collection/distribution forms retain source
+  order, nested nodes, named references, count/charge ranges, load-order reset
+  and self-extension, migration resolution, and explicit unsupported fields.
+  Cycles, missing references/items, excessive depth/output, unsupported
+  ammo/magazine dressing, and unsupported entry semantics fail closed. Bash
+  consumers persist only their reachable sorted closure and plan every drop on
+  one named RNG stream before checking placement and stable-ID capacity. Pinned
+  `t_wall` uses the exact `wall_bash_results` source with maximum output 82 and
+  resolves to `t_floor`. Scenario format 6/observation format 5 prove exact
+  direct/snapshot/SQLite/portable-replay equivalence. Pre-58 serialized state
+  rejects before mutation.
 - Protocol 77/schema 55/CanonicalStateV53/CanonicalEventsV16 add strict
   item-backed integral MAGAZINE pockets to Protocol 76's ordered detachable
   wells. Whole-stack reload preserves the source ID; partial transfer into an
@@ -989,7 +1006,7 @@ Run on Apple-silicon macOS on 2026-07-28:
 - `cargo xtask verify-dependency-boundaries` — passed; Bevy remains
   client-only.
 - `cargo xtask parity-ledger-check` — passed for 13 version-bound milestones;
-  active milestone `item-containment`, all Rust paths and DAG edges valid.
+  active milestone `item-groups`, all Rust paths and DAG edges valid.
 - `cargo xtask content-validate` — passed for all 7,992 tracked files and
   manifest hash
   `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
@@ -998,12 +1015,13 @@ Run on Apple-silicon macOS on 2026-07-28:
   MONSTER field-support classifications; all 1,374 `volume` and 284
   `attack_cost` occurrences are now marked loader-implemented.
 - `cargo xtask astronomy-table-check` — passed for all 364 pinned Boston days.
-- `cargo xtask cpp-oracle-check` — passed against the exact pinned C++ commit
-  and tree: three strict `item_pocket::can_contain` maximum-length cases, eight
-  upstream Catch assertions, exact version-1 JSON observation equality, a cold
-  rebuild, digest-checked warm reuse, fresh runtime-data export, artifact
-  cleanup, and two serialized concurrent invocations.
-- `cargo test --workspace --all-targets --all-features` — passed, 270 tests
+- `cargo xtask cpp-oracle-check` — both checked scenarios passed against the
+  exact pinned C++ commit and tree: the pocket kernel's three strict
+  maximum-length cases/eight Catch assertions and the item-group kernel's 34
+  assertions over ordered collection/distribution, count/charge boundaries,
+  zero clamping, and nested shared RNG. Both require exact version-1 observation
+  equality and digest-checked adapters/runtime identity.
+- `cargo test --workspace --all-targets --all-features` — passed, 298 tests
   including real loopback iroh enrollment/gameplay/authoritative crafting,
   charged-tool bucket debit, resupply timing/capacity, offline
   interruption/resume/cancel, mandatory/optional/zero-learning proficiency
@@ -1675,8 +1693,8 @@ Run on Apple-silicon macOS on 2026-07-28:
   definitions. The complete upstream bash-presence set is retained separately,
   so unsupported furniture blocks rather than exposing underlying terrain. It
   still does not model item damage/on-drop behavior, signage,
-  plants, fungus, tents, collapse, explosions, bash item groups,
-  supported-strength variants, support-from-below, or arbitrary `t_null`
+  plants, fungus, tents, collapse, explosions, item damage/on-drop group
+  behavior, supported-strength variants, support-from-below, or arbitrary `t_null`
   roof/floor repair. The cabin frame repair is valid only because the current
   generated structure has an explicit z=0 `t_floor` result.
 - Protocol 62 exposes those registered structures to an eight-direction player
@@ -1698,9 +1716,9 @@ Run on Apple-silicon macOS on 2026-07-28:
   scenario/profession slice. Pinned `unemployed` includes gendered worn clothing
   plus randomized nested smartphone and wallet groups, while pinned `evacuee`
   requires an evac-shelter start location. Strict implementation therefore
-  depends on sex selection, worn/pocket semantics, item-group generation, and
-  mapgen/start-location work; those dependencies must land before the choices
-  are exposed.
+  depends on sex selection, worn/pocket semantics, complete item-group
+  ammo/magazine/container dressing, and mapgen/start-location work; those
+  dependencies must land before the choices are exposed.
 - Protocol 66 applies pinned DEX/practical-melee attack speed to unarmed and
   already-admitted ordinary bash weapons, including the disconnected defensive
   path, without changing the canonical snapshot/event shapes.
@@ -1777,6 +1795,11 @@ Run on Apple-silicon macOS on 2026-07-28:
   multi-variant contents, exact removal, category switching, access-move cost,
   CanonicalStateV55/CanonicalEventsV18, schema-57 recovery, and four-mode
   conformance. General physical containers remain fail-closed.
+- Protocol 80 adds strict bounded item-group content finalization and canonical
+  generation graphs, named/inline structural bash sources, stable ordered RNG
+  consumption, atomic output-ID preflight, the pinned wall-drop closure, and
+  four-mode scenario conformance under CanonicalStateV56/schema 58. Item-group
+  ammo/magazine dressing and non-bash consumers remain fail-closed.
 
 ## Next tasks
 

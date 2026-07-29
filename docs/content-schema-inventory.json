@@ -6267,7 +6267,7 @@
       }
     },
     "item_group": {
-      "support": "unimplemented",
+      "support": "loader_implemented",
       "objects": 7621,
       "source_files": 567,
       "example_files": [
@@ -6339,7 +6339,7 @@
           "occurrences": 1
         },
         "ammo": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 426
         },
         "container-item": {
@@ -6347,31 +6347,31 @@
           "occurrences": 1477
         },
         "copy-from": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 226
         },
         "entries": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 4220
         },
         "extend": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 226
         },
         "groups": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 69
         },
         "id": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 7621
         },
         "items": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 3100
         },
         "magazine": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 166
         },
         "on_overflow": {
@@ -6379,11 +6379,11 @@
           "occurrences": 198
         },
         "subtype": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 6098
         },
         "type": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 7621
         }
       }

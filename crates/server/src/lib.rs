@@ -6036,7 +6036,7 @@ mod tests {
                         close_flat: None,
                     }
                 },
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("crunch!"),
@@ -6056,7 +6056,7 @@ mod tests {
                 str_max_supported: -1,
                 bash_multiplier_millionths: 1_000_000,
                 result: None,
-                drops: Vec::new(),
+                drop_source: None,
                 hit_field: None,
                 destroyed_field: None,
                 sound: String::from("crash!"),

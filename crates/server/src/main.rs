@@ -8,10 +8,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cdda_content::{
     AmmunitionRegistry, BashDamageProfileRegistry, BashDefinition, BashFieldEffectDefinition,
-    ConstructionRegistry, ContentManifest, DEFAULT_MANIFEST_PATH, FieldTypeDefinition,
-    FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemRegistry,
-    ModCatalog, MonsterDefinition, MonsterRegistry, ProficiencyRegistry, RecipeRegistry,
-    SkillRegistry, TerrainDefinition, TerrainRegistry,
+    BashItemGroupSource, ConstructionRegistry, ContentManifest, DEFAULT_MANIFEST_PATH,
+    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
+    ItemGroupRegistry, ItemGroupSubtype, ItemRegistry, ModCatalog, MonsterDefinition,
+    MonsterRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry, StrictItemGroupDefinition,
+    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind, TerrainDefinition,
+    TerrainRegistry,
 };
 use cdda_persistence::{
     AllocatorInputV1, DatabaseBackupMetadata, JournalBatchV1, JournalTickV1,
@@ -20,18 +22,21 @@ use cdda_persistence::{
 };
 use cdda_protocol::{
     ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, AmmunitionCapacityV1,
-    AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, BashDropPrototypeV1, BashFieldEffectV1,
-    BookStudyV1, ChunkCoord, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
+    AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, BashFieldEffectV1, BookStudyV1,
+    ChunkCoord, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
     CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
     CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
     CraftSkillRequirementV1, CraftToolRequirementV1, CreatureCorpsePrototypeV1,
     CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1, DisassemblyRecipeV1,
     ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
-    FurnitureTileSnapshot, GAME_ALPN, IntegralMagazinePocketPrototypeV1, LocalTileCoord,
+    FurnitureTileSnapshot, GAME_ALPN, InclusiveI32RangeV1, IntegralMagazinePocketPrototypeV1,
+    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupSourceV1, ItemGroupTargetV1, LocalTileCoord,
     MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS,
     MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL,
     MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1, RangedWeaponSnapshot, SimTick,
     SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, adjusted_book_study_time_moves,
+    item_group_catalog_is_valid, item_group_source_max_outputs,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -60,6 +65,16 @@ struct OpenedWorld {
     world: WorldState,
     journal_sequence: u64,
     recovery_connection_updates: Vec<ActorConnectionUpdateV1>,
+}
+
+struct RuntimeWorldContent<'a> {
+    items: &'a ItemRegistry,
+    item_groups: &'a ItemGroupRegistry,
+    monsters: &'a MonsterRegistry,
+    fields: &'a FieldTypeRegistry,
+    bash_profiles: &'a BashDamageProfileRegistry,
+    terrain: &'a TerrainRegistry,
+    furniture: &'a FurnitureRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -189,6 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let items =
         ItemRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
+    let item_groups = ItemGroupRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let monsters = MonsterRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -283,12 +304,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovery_connection_updates,
     } = open_world(
         &database_path,
-        &items,
-        &monsters,
-        &fields,
-        &bash_profiles,
-        &terrain,
-        &furniture,
+        &RuntimeWorldContent {
+            items: &items,
+            item_groups: &item_groups,
+            monsters: &monsters,
+            fields: &fields,
+            bash_profiles: &bash_profiles,
+            terrain: &terrain,
+            furniture: &furniture,
+        },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
     let persistence = persistence_host.handle();
@@ -327,6 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         items.len(),
         items.abstract_count()
     );
+    println!("Item groups: {} definitions", item_groups.len());
     println!(
         "Monsters: {} concrete definitions; {} abstracts",
         monsters.len(),
@@ -599,13 +624,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn open_world(
     path: &Path,
-    items: &ItemRegistry,
-    monsters: &MonsterRegistry,
-    fields: &FieldTypeRegistry,
-    bash_profiles: &BashDamageProfileRegistry,
-    terrain: &TerrainRegistry,
-    furniture: &FurnitureRegistry,
+    content: &RuntimeWorldContent<'_>,
 ) -> Result<OpenedWorld, Box<dyn std::error::Error>> {
+    let items = content.items;
+    let item_groups = content.item_groups;
+    let monsters = content.monsters;
+    let fields = content.fields;
+    let bash_profiles = content.bash_profiles;
+    let terrain = content.terrain;
+    let furniture = content.furniture;
     let mut store = WorldStore::open(path)?;
     let metadata = match store.metadata_optional()? {
         Some(metadata) => metadata,
@@ -635,17 +662,40 @@ fn open_world(
             .ok_or("pinned default content is missing a creature blood field")?;
         initial.register_field_type(runtime_field_type(definition)?)?;
     }
-    for terrain_id in ["t_door_b", "t_door_c", "t_door_frame"] {
-        let definition = terrain
-            .get(terrain_id)
-            .ok_or("pinned default content is missing structural door terrain")?;
+    let terrain_bash_definitions = ["t_wall", "t_door_b", "t_door_c", "t_door_frame"]
+        .into_iter()
+        .map(|terrain_id| {
+            terrain.get(terrain_id).ok_or_else(|| {
+                format!("pinned default content is missing structural terrain {terrain_id}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let furniture_bashes =
+        runtime_furniture_bash_types(furniture, bash_profiles, fields, items, item_groups)?;
+    let item_group_catalog = runtime_bash_item_group_catalog(
+        terrain_bash_definitions
+            .iter()
+            .filter_map(|definition| definition.bash.as_ref())
+            .chain(furniture_bashes.iter().filter_map(|runtime| {
+                furniture
+                    .get(&runtime.furniture_id)
+                    .and_then(|definition| definition.bash.as_ref())
+            })),
+        item_groups,
+        items,
+    )?;
+    initial.register_item_group_catalog(item_group_catalog)?;
+    for definition in terrain_bash_definitions {
+        let dynamic_floor_result =
+            matches!(definition.id.as_str(), "t_wall" | "t_door_frame").then_some("t_floor");
         initial.register_terrain_bash_type(runtime_terrain_bash_type(
             definition,
             bash_profiles,
             fields,
             terrain,
             items,
-            (terrain_id == "t_door_frame").then_some("t_floor"),
+            item_groups,
+            dynamic_floor_result,
         )?)?;
     }
     for profile in runtime_smash_item_types(items) {
@@ -657,7 +707,7 @@ fn open_world(
     {
         initial.register_furniture_bash_presence(definition.id.clone())?;
     }
-    for bash in runtime_furniture_bash_types(furniture, bash_profiles, fields, items)? {
+    for bash in furniture_bashes {
         initial.register_furniture_bash_type(bash)?;
     }
     if !has_snapshot {
@@ -2300,6 +2350,7 @@ fn runtime_terrain_bash_type(
     fields: &FieldTypeRegistry,
     terrain: &TerrainRegistry,
     items: &ItemRegistry,
+    item_groups: &ItemGroupRegistry,
     dynamic_floor_result: Option<&str>,
 ) -> Result<TerrainBashTypeV1, Box<dyn std::error::Error>> {
     let bash = definition
@@ -2349,7 +2400,6 @@ fn runtime_terrain_bash_type(
             definition.id, result_id
         )
     })?;
-    let drops = runtime_bash_drops(bash, items, "terrain", &definition.id)?;
     Ok(TerrainBashTypeV1 {
         terrain_id: definition.id.clone(),
         str_min: bash.str_min,
@@ -2360,7 +2410,13 @@ fn runtime_terrain_bash_type(
         str_max_supported: bash.str_max_supported,
         bash_multiplier_millionths,
         result: terrain_tile(result_definition, terrain)?,
-        drops,
+        drop_source: runtime_bash_item_group_source(
+            bash,
+            item_groups,
+            items,
+            "terrain",
+            &definition.id,
+        )?,
         hit_field: runtime_bash_field(bash.hit_field.as_ref(), fields, &definition.id)?,
         destroyed_field: runtime_bash_field(bash.destroyed_field.as_ref(), fields, &definition.id)?,
         sound: bash.sound.clone(),
@@ -2376,6 +2432,7 @@ fn runtime_furniture_bash_type(
     fields: &FieldTypeRegistry,
     furniture: &FurnitureRegistry,
     items: &ItemRegistry,
+    item_groups: &ItemGroupRegistry,
 ) -> Result<FurnitureBashTypeV1, Box<dyn std::error::Error>> {
     let bash = definition
         .bash
@@ -2421,7 +2478,13 @@ fn runtime_furniture_bash_type(
         str_max_supported: bash.str_max_supported,
         bash_multiplier_millionths,
         result,
-        drops: runtime_bash_drops(bash, items, "furniture", &definition.id)?,
+        drop_source: runtime_bash_item_group_source(
+            bash,
+            item_groups,
+            items,
+            "furniture",
+            &definition.id,
+        )?,
         hit_field: runtime_bash_field(bash.hit_field.as_ref(), fields, &definition.id)?,
         destroyed_field: runtime_bash_field(bash.destroyed_field.as_ref(), fields, &definition.id)?,
         sound: bash.sound.clone(),
@@ -2436,10 +2499,11 @@ fn runtime_furniture_bash_types(
     profiles: &BashDamageProfileRegistry,
     fields: &FieldTypeRegistry,
     items: &ItemRegistry,
+    item_groups: &ItemGroupRegistry,
 ) -> Result<Vec<FurnitureBashTypeV1>, Box<dyn std::error::Error>> {
     let mut admitted = furniture
         .iter()
-        .filter(|definition| furniture_bash_is_runtime_admitted(definition))
+        .filter(|definition| furniture_bash_is_runtime_admitted(definition, item_groups, items))
         .map(|definition| definition.id.clone())
         .collect::<BTreeSet<_>>();
     loop {
@@ -2471,6 +2535,7 @@ fn runtime_furniture_bash_types(
                 fields,
                 furniture,
                 items,
+                item_groups,
             )
         })
         .collect()
@@ -2518,7 +2583,11 @@ fn runtime_smash_item_types(items: &ItemRegistry) -> Vec<SmashItemTypeV1> {
         .collect()
 }
 
-fn furniture_bash_is_runtime_admitted(definition: &FurnitureDefinition) -> bool {
+fn furniture_bash_is_runtime_admitted(
+    definition: &FurnitureDefinition,
+    item_groups: &ItemGroupRegistry,
+    items: &ItemRegistry,
+) -> bool {
     let Some(bash) = definition.bash.as_ref() else {
         return false;
     };
@@ -2537,18 +2606,9 @@ fn furniture_bash_is_runtime_admitted(definition: &FurnitureDefinition) -> bool 
         .iter()
         .chain(bash.destroyed_field.iter())
         .all(|effect| matches!(effect.field_type_id.as_str(), "fd_dust" | "fd_splinters"));
-    let bounded_drops = bash.drops.len() <= 128
-        && bash
-            .drops
-            .iter()
-            .try_fold(0_u64, |total, drop| {
-                total.checked_add(if drop.charges_min.is_some() {
-                    1
-                } else {
-                    u64::from(drop.count_max)
-                })
-            })
-            .is_some_and(|count| count <= cdda_sim::ID_RESERVATION_SIZE);
+    let bounded_drops =
+        runtime_bash_item_group_source(bash, item_groups, items, "furniture", &definition.id)
+            .is_ok();
     bash.is_fully_supported()
         && ordinary_bounds
         && modeled_fields
@@ -2558,34 +2618,326 @@ fn furniture_bash_is_runtime_admitted(definition: &FurnitureDefinition) -> bool 
         && bash.failure_sound_volume <= i32::from(u16::MAX)
 }
 
-fn runtime_bash_drops(
+fn runtime_bash_item_group_source(
     bash: &BashDefinition,
+    item_groups: &ItemGroupRegistry,
     items: &ItemRegistry,
     owner_kind: &str,
     owner_id: &str,
-) -> Result<Vec<BashDropPrototypeV1>, Box<dyn std::error::Error>> {
-    bash.drops
-        .iter()
-        .map(|drop| -> Result<_, Box<dyn std::error::Error>> {
-            let item = items.get(&drop.item_id).ok_or_else(|| {
+) -> Result<Option<ItemGroupSourceV1>, Box<dyn std::error::Error>> {
+    let Some(graph) = strict_bash_item_group_graph(bash, item_groups, owner_id)? else {
+        return Ok(None);
+    };
+    if graph.maximum_output > cdda_sim::ID_RESERVATION_SIZE {
+        return Err(format!(
+            "{owner_kind} {owner_id} bash item group can generate {} objects, exceeding the stable-ID reservation",
+            graph.maximum_output
+        )
+        .into());
+    }
+    let catalog = runtime_strict_item_group_catalog(&graph, items)?;
+    let source = match bash.item_group.as_ref() {
+        Some(BashItemGroupSource::Named(group_id)) => ItemGroupSourceV1::Group(group_id.clone()),
+        Some(BashItemGroupSource::InlineCollection(_)) => {
+            ItemGroupSourceV1::Inline(runtime_item_group_graph(&graph.root, items)?)
+        }
+        None => return Err("bash item-group source disappeared during normalization".into()),
+    };
+    let maximum_output = item_group_source_max_outputs(&source, &catalog).ok_or_else(|| {
+        format!("{owner_kind} {owner_id} produced an invalid Protocol 80 item-group graph")
+    })?;
+    if maximum_output > cdda_sim::ID_RESERVATION_SIZE {
+        return Err(format!(
+            "{owner_kind} {owner_id} Protocol 80 item group can generate {maximum_output} objects, exceeding the stable-ID reservation"
+        )
+        .into());
+    }
+    Ok(Some(source))
+}
+
+fn strict_bash_item_group_graph(
+    bash: &BashDefinition,
+    item_groups: &ItemGroupRegistry,
+    owner_id: &str,
+) -> Result<Option<StrictItemGroupGraph>, Box<dyn std::error::Error>> {
+    match bash.item_group.as_ref() {
+        None => Ok(None),
+        Some(BashItemGroupSource::Named(group_id)) => Ok(Some(item_groups.strict_graph(group_id)?)),
+        Some(BashItemGroupSource::InlineCollection(entries)) => Ok(Some(
+            item_groups.strict_inline_collection(entries, &format!("bash:{owner_id}"))?,
+        )),
+    }
+}
+
+fn runtime_bash_item_group_catalog<'a>(
+    bashes: impl IntoIterator<Item = &'a BashDefinition>,
+    item_groups: &ItemGroupRegistry,
+    items: &ItemRegistry,
+) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
+    let mut reachable = BTreeMap::<String, StrictItemGroupDefinition>::new();
+    for bash in bashes {
+        let Some(graph) = strict_bash_item_group_graph(bash, item_groups, "catalog")? else {
+            continue;
+        };
+        if graph.maximum_output > cdda_sim::ID_RESERVATION_SIZE {
+            return Err(format!(
+                "admitted bash item group can generate {} objects, exceeding the stable-ID reservation",
+                graph.maximum_output
+            )
+            .into());
+        }
+        for (group_id, definition) in graph.groups {
+            match reachable.get(&group_id) {
+                Some(existing) if existing != &definition => {
+                    return Err(format!(
+                        "reachable item group {group_id} normalized inconsistently"
+                    )
+                    .into());
+                }
+                Some(_) => {}
+                None => {
+                    reachable.insert(group_id, definition);
+                }
+            }
+        }
+    }
+    let catalog = reachable
+        .values()
+        .map(|definition| runtime_item_group_definition(definition, items))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !item_group_catalog_is_valid(&catalog) {
+        return Err("reachable bash item-group catalog is invalid for Protocol 80".into());
+    }
+    Ok(catalog)
+}
+
+fn runtime_strict_item_group_catalog(
+    graph: &StrictItemGroupGraph,
+    items: &ItemRegistry,
+) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
+    let catalog = graph
+        .groups
+        .values()
+        .map(|definition| runtime_item_group_definition(definition, items))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !item_group_catalog_is_valid(&catalog) {
+        return Err(format!(
+            "item-group closure rooted at {} is invalid for Protocol 80",
+            graph.root.id
+        )
+        .into());
+    }
+    Ok(catalog)
+}
+
+fn runtime_item_group_definition(
+    definition: &StrictItemGroupDefinition,
+    items: &ItemRegistry,
+) -> Result<ItemGroupDefinitionV1, Box<dyn std::error::Error>> {
+    Ok(ItemGroupDefinitionV1 {
+        group_id: definition.id.clone(),
+        graph: runtime_item_group_graph(definition, items)?,
+    })
+}
+
+fn runtime_item_group_graph(
+    definition: &StrictItemGroupDefinition,
+    items: &ItemRegistry,
+) -> Result<ItemGroupGraphV1, Box<dyn std::error::Error>> {
+    if definition.ammo_chance != 0 || definition.magazine_chance != 0 {
+        return Err(format!(
+            "item group {} requires unimplemented ammunition or magazine dressing",
+            definition.id
+        )
+        .into());
+    }
+    let reachable = strict_item_group_reachable_nodes(definition)?;
+    let mut composite_ids = BTreeMap::new();
+    for content_node_id in &reachable {
+        let node = strict_item_group_node(definition, *content_node_id)?;
+        if matches!(
+            node.kind,
+            StrictItemGroupNodeKind::Collection(_) | StrictItemGroupNodeKind::Distribution(_)
+        ) {
+            let protocol_node_id = u16::try_from(composite_ids.len() + 1)
+                .map_err(|_| format!("item group {} has too many local nodes", definition.id))?;
+            composite_ids.insert(*content_node_id, protocol_node_id);
+        }
+    }
+
+    let mut nodes = vec![ItemGroupNodeV1 {
+        node_id: 0,
+        kind: runtime_item_group_kind(definition.subtype),
+        entries: definition
+            .roots
+            .iter()
+            .map(|node_id| runtime_item_group_entry(definition, *node_id, &composite_ids, items))
+            .collect::<Result<Vec<_>, _>>()?,
+    }];
+    for (content_node_id, protocol_node_id) in &composite_ids {
+        let node = strict_item_group_node(definition, *content_node_id)?;
+        let (kind, children) = match &node.kind {
+            StrictItemGroupNodeKind::Collection(children) => {
+                (ItemGroupKindV1::Collection, children)
+            }
+            StrictItemGroupNodeKind::Distribution(children) => {
+                (ItemGroupKindV1::Distribution, children)
+            }
+            StrictItemGroupNodeKind::Item(_) | StrictItemGroupNodeKind::Group(_) => {
+                return Err(format!(
+                    "item group {} changed local node shape during normalization",
+                    definition.id
+                )
+                .into());
+            }
+        };
+        nodes.push(ItemGroupNodeV1 {
+            node_id: *protocol_node_id,
+            kind,
+            entries: children
+                .iter()
+                .map(|node_id| {
+                    runtime_item_group_entry(definition, *node_id, &composite_ids, items)
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+        });
+    }
+    Ok(ItemGroupGraphV1 {
+        root_node: 0,
+        nodes,
+    })
+}
+
+fn strict_item_group_reachable_nodes(
+    definition: &StrictItemGroupDefinition,
+) -> Result<BTreeSet<u32>, Box<dyn std::error::Error>> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = definition.roots.clone();
+    while let Some(node_id) = pending.pop() {
+        if !reachable.insert(node_id) {
+            continue;
+        }
+        match &strict_item_group_node(definition, node_id)?.kind {
+            StrictItemGroupNodeKind::Collection(children)
+            | StrictItemGroupNodeKind::Distribution(children) => {
+                pending.extend(children.iter().copied());
+            }
+            StrictItemGroupNodeKind::Item(_) | StrictItemGroupNodeKind::Group(_) => {}
+        }
+    }
+    Ok(reachable)
+}
+
+fn strict_item_group_node(
+    definition: &StrictItemGroupDefinition,
+    node_id: u32,
+) -> Result<&StrictItemGroupNode, Box<dyn std::error::Error>> {
+    definition
+        .nodes
+        .get(usize::try_from(node_id)?)
+        .ok_or_else(|| format!("item group {} has invalid node {node_id}", definition.id).into())
+}
+
+fn runtime_item_group_kind(subtype: ItemGroupSubtype) -> ItemGroupKindV1 {
+    match subtype {
+        ItemGroupSubtype::Collection => ItemGroupKindV1::Collection,
+        ItemGroupSubtype::Distribution => ItemGroupKindV1::Distribution,
+    }
+}
+
+fn runtime_item_group_entry(
+    definition: &StrictItemGroupDefinition,
+    node_id: u32,
+    composite_ids: &BTreeMap<u32, u16>,
+    items: &ItemRegistry,
+) -> Result<ItemGroupEntryV1, Box<dyn std::error::Error>> {
+    let node = strict_item_group_node(definition, node_id)?;
+    let target = match &node.kind {
+        StrictItemGroupNodeKind::Item(item_id) => {
+            let item = items.get(item_id).ok_or_else(|| {
                 format!(
-                    "{owner_kind} {owner_id} bash drop references missing item {}",
-                    drop.item_id
+                    "item group {} references missing concrete item {item_id}",
+                    definition.id
                 )
             })?;
-            let charges = drop
-                .charges_min
-                .map_or_else(|| default_instance_charges(item), |charges| charges.max(1));
-            Ok(BashDropPrototypeV1 {
-                prototype: craft_item_prototype(item, charges, items)?,
-                probability_percent: drop.probability_percent,
-                count_min: drop.count_min,
-                count_max: drop.count_max,
-                charges_min: drop.charges_min,
-                charges_max: drop.charges_max,
-            })
-        })
-        .collect()
+            let (charges, minimum_one_charge) = runtime_item_group_charges(item, node.charges)?;
+            ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
+                prototype: craft_item_prototype(item, default_instance_charges(item), items)?,
+                charges,
+                minimum_one_charge,
+            }))
+        }
+        StrictItemGroupNodeKind::Group(group_id) => {
+            if node.charges.is_some() {
+                return Err(format!(
+                    "item group {} applies charges to nested group {group_id}, which Protocol 80 cannot represent",
+                    definition.id
+                )
+                .into());
+            }
+            ItemGroupTargetV1::Group(group_id.clone())
+        }
+        StrictItemGroupNodeKind::Collection(_) | StrictItemGroupNodeKind::Distribution(_) => {
+            if node.charges.is_some() {
+                return Err(format!(
+                    "item group {} applies charges to a local nested group, which Protocol 80 cannot represent",
+                    definition.id
+                )
+                .into());
+            }
+            ItemGroupTargetV1::Node(*composite_ids.get(&node_id).ok_or_else(|| {
+                format!(
+                    "item group {} lost reachable local node {node_id}",
+                    definition.id
+                )
+            })?)
+        }
+    };
+    Ok(ItemGroupEntryV1 {
+        probability: node.probability,
+        count_min: u16::try_from(node.count.minimum)?,
+        count_max: u16::try_from(node.count.maximum)?,
+        target,
+    })
+}
+
+fn runtime_item_group_charges(
+    item: &ItemDefinition,
+    charges: Option<cdda_content::ItemGroupRange>,
+) -> Result<(Option<InclusiveI32RangeV1>, bool), Box<dyn std::error::Error>> {
+    let Some(charges) = charges else {
+        return Ok((None, false));
+    };
+    if item.subtypes.contains("TOOL")
+        || item.subtypes.contains("GUN")
+        || item.subtypes.contains("MAGAZINE")
+    {
+        return Err(format!(
+            "item-group charges for {} require unimplemented ammunition loading",
+            item.id
+        )
+        .into());
+    }
+    let liquid = matches!(item.phase.as_str(), "LIQUID" | "liquid");
+    if !item.count_by_charges() && !liquid && !item.flags.contains("CAN_HAVE_CHARGES") {
+        if charges.minimum == charges.maximum {
+            // Pinned Item_modifier computes the fixed value without consuming
+            // RNG, then ignores it for an ordinary item.
+            return Ok((None, false));
+        }
+        return Err(format!(
+            "ranged item-group charges for ordinary item {} require consume-only RNG semantics",
+            item.id
+        )
+        .into());
+    }
+    Ok((
+        Some(InclusiveI32RangeV1 {
+            minimum: i32::try_from(charges.minimum)?,
+            maximum: i32::try_from(charges.maximum)?,
+        }),
+        item.count_by_charges() || liquid,
+    ))
 }
 
 fn runtime_bash_field(
@@ -4116,6 +4468,81 @@ mod tests {
     }
 
     #[test]
+    fn item_group_charge_overrides_follow_pinned_item_categories() {
+        let range = cdda_content::ItemGroupRange {
+            minimum: 0,
+            maximum: 7,
+        };
+
+        let mut ordinary = ItemDefinition {
+            id: String::from("ordinary"),
+            ..ItemDefinition::default()
+        };
+        assert!(
+            runtime_item_group_charges(&ordinary, Some(range)).is_err(),
+            "a ranged ignored modifier would still consume pinned RNG"
+        );
+        assert_eq!(
+            runtime_item_group_charges(
+                &ordinary,
+                Some(cdda_content::ItemGroupRange {
+                    minimum: 2,
+                    maximum: 2,
+                }),
+            )
+            .expect("fixed ignored modifier consumes no RNG"),
+            (None, false)
+        );
+
+        ordinary.stackable = true;
+        assert_eq!(
+            runtime_item_group_charges(&ordinary, Some(range))
+                .expect("count-by-charges item should admit"),
+            (
+                Some(InclusiveI32RangeV1 {
+                    minimum: 0,
+                    maximum: 7,
+                }),
+                true,
+            )
+        );
+
+        ordinary.stackable = false;
+        ordinary.phase = String::from("LIQUID");
+        assert_eq!(
+            runtime_item_group_charges(&ordinary, Some(range))
+                .expect("every liquid charge modifier should clamp"),
+            (
+                Some(InclusiveI32RangeV1 {
+                    minimum: 0,
+                    maximum: 7,
+                }),
+                true,
+            )
+        );
+
+        ordinary.phase.clear();
+        ordinary.flags.insert(String::from("CAN_HAVE_CHARGES"));
+        assert_eq!(
+            runtime_item_group_charges(&ordinary, Some(range))
+                .expect("explicit charge-bearing item should admit"),
+            (
+                Some(InclusiveI32RangeV1 {
+                    minimum: 0,
+                    maximum: 7,
+                }),
+                false,
+            )
+        );
+
+        ordinary.subtypes.insert(String::from("TOOL"));
+        assert!(
+            runtime_item_group_charges(&ordinary, Some(range)).is_err(),
+            "tool charge modifiers require ammo-loading semantics"
+        );
+    }
+
+    #[test]
     fn pinned_default_content_builds_authoritative_rock_sock_recipe() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest_path = repository.join(cdda_content::DEFAULT_MANIFEST_PATH);
@@ -4129,6 +4556,9 @@ mod tests {
             .expect("default mods should resolve");
         let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("items should load");
+        let item_groups =
+            ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("item groups should load");
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("ammunition should load");
@@ -4264,6 +4694,65 @@ mod tests {
             .open
             .is_empty()
         );
+        let wall_definition = terrain.get("t_wall").expect("wall should load");
+        let wall_bash = runtime_terrain_bash_type(
+            wall_definition,
+            &bash_profiles,
+            &fields,
+            &terrain,
+            &items,
+            &item_groups,
+            Some("t_floor"),
+        )
+        .expect("wall bash should normalize");
+        assert_eq!(wall_bash.result.terrain_id, "t_floor");
+        assert_eq!(
+            wall_bash.drop_source,
+            Some(ItemGroupSourceV1::Group(String::from("wall_bash_results")))
+        );
+        let wall_catalog = runtime_bash_item_group_catalog(
+            [wall_definition.bash.as_ref().expect("wall bash")],
+            &item_groups,
+            &items,
+        )
+        .expect("wall item-group closure should normalize");
+        assert_eq!(wall_catalog.len(), 1);
+        assert_eq!(wall_catalog[0].group_id, "wall_bash_results");
+        let wall_entries = &wall_catalog[0].graph.nodes[0].entries;
+        assert_eq!(wall_entries.len(), 8);
+        assert_eq!(
+            (wall_entries[0].count_min, wall_entries[0].count_max),
+            (0, 2)
+        );
+        let ItemGroupTargetV1::Item(nails) = &wall_entries[2].target else {
+            panic!("nail drop should be a direct item")
+        };
+        assert_eq!(nails.prototype.type_id, "nail");
+        assert_eq!(
+            nails.charges,
+            Some(InclusiveI32RangeV1 {
+                minimum: 4,
+                maximum: 16,
+            })
+        );
+        assert!(nails.minimum_one_charge);
+        assert_eq!(wall_entries[4].probability, 25);
+        assert_eq!(
+            item_group_source_max_outputs(
+                wall_bash.drop_source.as_ref().expect("wall drops"),
+                &wall_catalog,
+            ),
+            Some(82)
+        );
+        let mut dressed_wall = item_groups
+            .strict_graph("wall_bash_results")
+            .expect("wall group should strictly normalize")
+            .root;
+        dressed_wall.ammo_chance = 1;
+        assert!(
+            runtime_item_group_graph(&dressed_wall, &items).is_err(),
+            "unimplemented ammunition dressing must fail closed"
+        );
         for (terrain_id, dynamic_floor_result, multiplier) in [
             ("t_door_b", None, 950_000),
             ("t_door_c", None, 950_000),
@@ -4275,6 +4764,7 @@ mod tests {
                 &fields,
                 &terrain,
                 &items,
+                &item_groups,
                 dynamic_floor_result,
             )
             .expect("door bash should normalize");
@@ -4291,15 +4781,15 @@ mod tests {
                     .field_type_id,
                 "fd_splinters"
             );
-            assert!(!bash.drops.is_empty());
+            assert!(bash.drop_source.is_some());
             if terrain_id == "t_door_frame" {
                 assert_eq!(bash.result.terrain_id, "t_floor");
             }
         }
         let furniture_bashes =
-            runtime_furniture_bash_types(&furniture, &bash_profiles, &fields, &items)
+            runtime_furniture_bash_types(&furniture, &bash_profiles, &fields, &items, &item_groups)
                 .expect("admitted furniture bashes should normalize");
-        assert_eq!(furniture_bashes.len(), 537);
+        assert_eq!(furniture_bashes.len(), 539);
         let furniture_bash_ids = furniture
             .iter()
             .filter(|definition| definition.bash.is_some())
@@ -4325,7 +4815,7 @@ mod tests {
         assert_eq!(dresser_bash.furniture_id, "f_dresser");
         assert!(dresser_bash.result.is_none());
         assert_eq!(dresser_bash.bash_multiplier_millionths, 1_000_000);
-        assert!(!dresser_bash.drops.is_empty());
+        assert!(dresser_bash.drop_source.is_some());
         let smash_items = runtime_smash_item_types(&items);
         let hammer_smash = smash_items
             .iter()
@@ -4367,6 +4857,19 @@ mod tests {
             );
         }
         let mut bash_validation = WorldState::new(60, [60; 32]);
+        let item_group_catalog = runtime_bash_item_group_catalog(
+            furniture_bashes.iter().filter_map(|runtime| {
+                furniture
+                    .get(&runtime.furniture_id)
+                    .and_then(|definition| definition.bash.as_ref())
+            }),
+            &item_groups,
+            &items,
+        )
+        .expect("admitted furniture group closure should normalize");
+        bash_validation
+            .register_item_group_catalog(item_group_catalog)
+            .expect("admitted furniture group closure should register");
         for field_type_id in ["fd_dust", "fd_splinters"] {
             bash_validation
                 .register_field_type(

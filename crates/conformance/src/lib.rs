@@ -9,8 +9,9 @@ use cdda_persistence::{
 use cdda_protocol::{
     ActorConnectionUpdateV1, ActorId, AmmunitionContainerPocketPrototypeV1,
     CharacterCreationStatsV1, ChunkCoord, ClientCommand, CommandKind, CommandSequence,
-    ContentIdentity, IntegralMagazinePocketPrototypeV1, ItemId, MagazineWellPrototypeV1,
-    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, WorldEvent, WorldPosition, WorldSnapshotV1,
+    ContentIdentity, IntegralMagazinePocketPrototypeV1, ItemGroupDefinitionV1, ItemId,
+    MagazineWellPrototypeV1, PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1,
+    TerrainBashTypeV1, TerrainTileSnapshot, WorldEvent, WorldPosition, WorldSnapshotV1,
 };
 use cdda_sim::{
     Chunk, ID_RESERVATION_SIZE, ItemSpawn, ReservedIdBlock, SimError, WorldState,
@@ -21,13 +22,14 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use cdda_protocol::WorldEventKind;
 
-pub const SCENARIO_FORMAT_VERSION: u16 = 5;
-pub const OBSERVATION_FORMAT_VERSION: u16 = 4;
+pub const SCENARIO_FORMAT_VERSION: u16 = 6;
+pub const OBSERVATION_FORMAT_VERSION: u16 = 5;
 const MAX_ALIASES: usize = 512;
 const MAX_ALIAS_BYTES: usize = 64;
 const MAX_CHUNKS: usize = 121;
 const MAX_ACTORS: usize = 16;
 const MAX_ITEMS: usize = 256;
+const MAX_TERRAIN_FIXTURES: usize = 512;
 const MAX_STEPS: usize = 4_096;
 const MAX_TICKS: u64 = 100_000;
 
@@ -43,11 +45,22 @@ pub struct ScenarioV1 {
     pub world_seed: [u8; 32],
     pub content_manifest_hash: [u8; 32],
     pub enabled_mods: Vec<String>,
+    pub item_groups: Vec<ItemGroupDefinitionV1>,
+    pub terrain_bash_types: Vec<TerrainBashTypeV1>,
+    pub smash_item_types: Vec<SmashItemTypeV1>,
     pub chunks: Vec<ChunkCoord>,
+    pub terrain: Vec<ScenarioTerrainV1>,
     pub actors: Vec<ScenarioActorV1>,
     pub ground_items: Vec<ScenarioItemV1>,
     pub steps: Vec<ScenarioStepV1>,
     pub expected: ScenarioExpectationV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioTerrainV1 {
+    pub position: WorldPosition,
+    pub terrain: TerrainTileSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -126,6 +139,10 @@ pub enum ScenarioCommandV1 {
         owner_item: String,
         pocket_index: u16,
         source_item: String,
+    },
+    Smash {
+        dx: i8,
+        dy: i8,
     },
     Wait,
 }
@@ -350,7 +367,10 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
     if scenario.actors.is_empty() || scenario.actors.len() > MAX_ACTORS {
         return Err(ConformanceError::InvalidScenario("invalid actor count"));
     }
-    if scenario.ground_items.len() > MAX_ITEMS || scenario.steps.len() > MAX_STEPS {
+    if scenario.ground_items.len() > MAX_ITEMS
+        || scenario.terrain.len() > MAX_TERRAIN_FIXTURES
+        || scenario.steps.len() > MAX_STEPS
+    {
         return Err(ConformanceError::InvalidScenario(
             "item or step count exceeds bounds",
         ));
@@ -519,14 +539,36 @@ fn execute_scenario(
 fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), ConformanceError> {
     let mut world = WorldState::new(scenario.world_namespace, scenario.world_seed);
     world.install_reserved_block(ReservedIdBlock::new(1, ID_RESERVATION_SIZE)?)?;
-    let mut chunks = scenario.chunks.clone();
-    chunks.sort_unstable();
-    chunks.dedup();
-    if chunks.len() != scenario.chunks.len() {
-        return Err(ConformanceError::InvalidScenario("duplicate chunk"));
+    world.register_item_group_catalog(scenario.item_groups.clone())?;
+    for profile in &scenario.smash_item_types {
+        world.register_smash_item_type(profile.clone())?;
     }
-    for coord in chunks {
-        world.insert_chunk(Chunk::floor(coord));
+    for bash in &scenario.terrain_bash_types {
+        world.register_terrain_bash_type(bash.clone())?;
+    }
+    let mut chunks = BTreeMap::new();
+    for coord in &scenario.chunks {
+        if chunks.insert(*coord, Chunk::floor(*coord)).is_some() {
+            return Err(ConformanceError::InvalidScenario("duplicate chunk"));
+        }
+    }
+    let mut terrain_positions = BTreeSet::new();
+    for fixture in &scenario.terrain {
+        let (coord, local) = fixture.position.chunk_and_local();
+        if !terrain_positions.insert(fixture.position) {
+            return Err(ConformanceError::InvalidScenario(
+                "duplicate terrain fixture",
+            ));
+        }
+        chunks
+            .get_mut(&coord)
+            .ok_or(ConformanceError::InvalidScenario(
+                "terrain fixture is outside declared chunks",
+            ))?
+            .set_terrain(local, fixture.terrain.clone())?;
+    }
+    for (_, chunk) in chunks {
+        world.insert_chunk(chunk);
     }
     let mut actors = BTreeMap::new();
     let mut actor_specs = scenario.actors.iter().collect::<Vec<_>>();
@@ -643,6 +685,7 @@ fn resolve_command(
             pocket_index: *pocket_index,
             source_item: item_id(source_item)?,
         },
+        ScenarioCommandV1::Smash { dx, dy } => CommandKind::Smash { dx: *dx, dy: *dy },
         ScenarioCommandV1::Wait => CommandKind::Wait,
     })
 }
@@ -856,7 +899,11 @@ mod tests {
             world_seed: [9; 32],
             content_manifest_hash: [7; 32],
             enabled_mods: vec![String::from("dda")],
+            item_groups: Vec::new(),
+            terrain_bash_types: Vec::new(),
+            smash_item_types: Vec::new(),
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+            terrain: Vec::new(),
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
                 position: WorldPosition { x: 1, y: 1, z: 0 },
@@ -912,9 +959,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x54, 0xcb, 0xf9, 0x04, 0xb7, 0xed, 0x19, 0x16, 0x39, 0x16, 0x49, 0x18, 0x1b,
-                    0xef, 0xdf, 0x70, 0x66, 0x17, 0x43, 0xb2, 0xf4, 0x67, 0xf8, 0xb6, 0x3d, 0xdb,
-                    0xb1, 0xa6, 0x0c, 0xa4, 0x6a, 0xb1,
+                    0xe9, 0x60, 0x50, 0x3c, 0x39, 0xc7, 0x48, 0x2e, 0x6a, 0xcc, 0xa5, 0xcb, 0x7a,
+                    0x44, 0xc1, 0x11, 0x84, 0x5b, 0xa6, 0x4b, 0x2b, 0xd8, 0x22, 0x42, 0xe8, 0x20,
+                    0x0c, 0x3b, 0xd5, 0xa1, 0x23, 0xdc,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -955,6 +1002,223 @@ mod tests {
             observation.final_snapshot.ground_items[0].item.type_id,
             "rock"
         );
+    }
+
+    #[test]
+    fn named_item_group_bash_is_identical_across_snapshot_sqlite_and_replay() {
+        let position = WorldPosition { x: 1, y: 1, z: 0 };
+        let wall_position = WorldPosition { x: 2, y: 1, z: 0 };
+        let item_leaf = |type_id: &str, charges: Option<cdda_protocol::InclusiveI32RangeV1>| {
+            cdda_protocol::ItemGroupTargetV1::Item(Box::new(
+                cdda_protocol::ItemGroupItemPrototypeV1 {
+                    prototype: cdda_protocol::CraftItemPrototypeV1 {
+                        type_id: type_id.to_owned(),
+                        charges: 1,
+                        melee_damage_milli: BTreeMap::new(),
+                        calories: 0,
+                        quench: 0,
+                        comestible_type: String::new(),
+                        ammunition_type: String::new(),
+                        ranged_weapon: None,
+                        magazine_capacity: 0,
+                        integral_magazines: Vec::new(),
+                        magazine_wells: Vec::new(),
+                        ammunition_containers: Vec::new(),
+                        residual_energy_millijoules: 0,
+                        powered_tool: None,
+                    },
+                    minimum_one_charge: charges.is_some(),
+                    charges,
+                },
+            ))
+        };
+        let item_groups = vec![ItemGroupDefinitionV1 {
+            group_id: String::from("wall_bash_results"),
+            graph: cdda_protocol::ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![cdda_protocol::ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: cdda_protocol::ItemGroupKindV1::Collection,
+                    entries: vec![
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 2,
+                            count_max: 2,
+                            target: item_leaf("splinter", None),
+                        },
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            target: item_leaf(
+                                "nail",
+                                Some(cdda_protocol::InclusiveI32RangeV1 {
+                                    minimum: 4,
+                                    maximum: 6,
+                                }),
+                            ),
+                        },
+                    ],
+                }],
+            },
+        }];
+        let floor = TerrainTileSnapshot {
+            terrain_id: String::from("t_floor"),
+            move_cost: 2,
+            transparent: true,
+            flat: true,
+            open: String::new(),
+            open_move_cost: None,
+            open_transparent: None,
+            open_flat: None,
+            close: String::new(),
+            close_move_cost: None,
+            close_transparent: None,
+            close_flat: None,
+        };
+        let mut wall = floor.clone();
+        wall.terrain_id = String::from("t_wall");
+        wall.move_cost = 0;
+        wall.transparent = false;
+        wall.flat = false;
+        let scenario = ScenarioV1 {
+            format_version: SCENARIO_FORMAT_VERSION,
+            protocol_version: cdda_protocol::PROTOCOL_VERSION,
+            persistence_schema_version: SCHEMA_VERSION,
+            replay_format_version: REPLAY_FORMAT_VERSION,
+            baseline_commit: String::from(cdda_protocol::BASELINE_COMMIT),
+            world_namespace: 905,
+            world_seed: [29; 32],
+            content_manifest_hash: [30; 32],
+            enabled_mods: vec![String::from("dda")],
+            item_groups,
+            terrain_bash_types: vec![TerrainBashTypeV1 {
+                terrain_id: String::from("t_wall"),
+                str_min: 1,
+                str_max: 5,
+                str_min_blocked: -1,
+                str_max_blocked: -1,
+                str_min_supported: -1,
+                str_max_supported: -1,
+                bash_multiplier_millionths: 1_000_000,
+                result: floor,
+                drop_source: Some(cdda_protocol::ItemGroupSourceV1::Group(String::from(
+                    "wall_bash_results",
+                ))),
+                hit_field: None,
+                destroyed_field: None,
+                sound: String::from("crash!"),
+                failure_sound: String::from("whump!"),
+                sound_volume: 12,
+                failure_sound_volume: 8,
+            }],
+            smash_item_types: vec![SmashItemTypeV1 {
+                item_type_id: String::from("hammer"),
+                bash_damage: 12,
+                attack_time_moves: 100,
+                melee_to_hit: 0,
+            }],
+            chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+            terrain: vec![ScenarioTerrainV1 {
+                position: wall_position,
+                terrain: wall,
+            }],
+            actors: vec![ScenarioActorV1 {
+                alias: String::from("survivor"),
+                position,
+                connected: true,
+                stats: CharacterCreationStatsV1::default(),
+            }],
+            ground_items: vec![ScenarioItemV1 {
+                alias: String::from("hammer"),
+                position,
+                type_id: String::from("hammer"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::from([(String::from("bash"), 12_000)]),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                integral_magazines: Vec::new(),
+                magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            }],
+            steps: vec![
+                ScenarioStepV1::Command {
+                    actor: String::from("survivor"),
+                    command: ScenarioCommandV1::PickUp {
+                        item: String::from("hammer"),
+                    },
+                },
+                ScenarioStepV1::Advance { ticks: 25 },
+                ScenarioStepV1::Command {
+                    actor: String::from("survivor"),
+                    command: ScenarioCommandV1::Wield {
+                        item: String::from("hammer"),
+                    },
+                },
+                ScenarioStepV1::Advance { ticks: 25 },
+                ScenarioStepV1::Command {
+                    actor: String::from("survivor"),
+                    command: ScenarioCommandV1::Smash { dx: 1, dy: 0 },
+                },
+                ScenarioStepV1::Advance { ticks: 25 },
+            ],
+            expected: ScenarioExpectationV1 {
+                final_tick: SimTick(0),
+                final_state_hash: [0; 32],
+                event_trace_hash: [0; 32],
+                actors: Vec::new(),
+                ground_items: Vec::new(),
+                event_batches: None,
+            },
+        };
+        let direct = run_scenario(&scenario, ScenarioMode::Direct)
+            .expect("named item-group bash should run directly");
+        for mode in [
+            ScenarioMode::SnapshotEachTick,
+            ScenarioMode::SqliteRecovery,
+            ScenarioMode::PortableReplay,
+        ] {
+            assert_eq!(
+                run_scenario(&scenario, mode).expect("named bash scenario should replay"),
+                direct,
+                "{mode} must preserve item-group generation"
+            );
+        }
+        assert_eq!(direct.final_snapshot.item_groups, scenario.item_groups);
+        assert_eq!(
+            direct
+                .final_snapshot
+                .ground_items
+                .iter()
+                .map(|item| (item.item.type_id.as_str(), item.item.charges))
+                .collect::<Vec<_>>(),
+            [("splinter", 1), ("splinter", 1), ("nail", 6)]
+        );
+        let (coord, local) = wall_position.chunk_and_local();
+        let chunk = direct
+            .final_snapshot
+            .chunks
+            .iter()
+            .find(|chunk| chunk.coord == coord)
+            .expect("target chunk should remain");
+        let index = usize::from(local.y)
+            * usize::try_from(cdda_protocol::SUBMAP_SIZE).expect("submap size fits")
+            + usize::from(local.x);
+        assert_eq!(chunk.tiles[index].terrain_id, "t_floor");
+        assert!(direct.event_batches.iter().any(|batch| {
+            batch.events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    WorldEventKind::ActorBashed { success: true, .. }
+                )
+            })
+        }));
     }
 
     #[test]
@@ -1024,7 +1288,11 @@ mod tests {
             world_seed: [10; 32],
             content_manifest_hash: [8; 32],
             enabled_mods: vec![String::from("dda")],
+            item_groups: Vec::new(),
+            terrain_bash_types: Vec::new(),
+            smash_item_types: Vec::new(),
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+            terrain: Vec::new(),
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
                 position,
@@ -1173,7 +1441,11 @@ mod tests {
             world_seed: [11; 32],
             content_manifest_hash: [9; 32],
             enabled_mods: vec![String::from("dda")],
+            item_groups: Vec::new(),
+            terrain_bash_types: Vec::new(),
+            smash_item_types: Vec::new(),
             chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+            terrain: Vec::new(),
             actors: vec![ScenarioActorV1 {
                 alias: String::from("survivor"),
                 position,
@@ -1413,7 +1685,11 @@ mod tests {
                 world_seed: [21; 32],
                 content_manifest_hash: [22; 32],
                 enabled_mods: vec![String::from("dda")],
+                item_groups: Vec::new(),
+                terrain_bash_types: Vec::new(),
+                smash_item_types: Vec::new(),
                 chunks: vec![ChunkCoord { x: 0, y: 0, z: 0 }],
+                terrain: Vec::new(),
                 actors: vec![ScenarioActorV1 {
                     alias: String::from("survivor"),
                     position,

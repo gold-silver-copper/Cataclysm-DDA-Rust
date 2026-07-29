@@ -11,11 +11,24 @@ const ORACLE_FORMAT_VERSION: u16 = 1;
 const CACHE_FORMAT_VERSION: u16 = 1;
 const UPSTREAM_TREE: &str = "210f31db2e8b2f0caed1809f1a66781859f9d129";
 const KERNEL: &str = "item_pocket_max_length_v1";
+const ITEM_GROUP_KERNEL: &str = "item_group_generation_v1";
 const MAX_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_CASES: usize = 8;
 const DEFAULT_SCENARIO: &str = "docs/oracles/item-pocket-max-length-v1.json";
 const ADAPTER_SOURCE: &str = include_str!("../../../tools/cpp-oracle/item_pocket_oracle_test.cpp");
+const ITEM_GROUP_ADAPTER_SOURCE: &str =
+    include_str!("../../../tools/cpp-oracle/item_group_oracle_test.cpp");
 const ADAPTER_MAKEFILE: &str = include_str!("../../../tools/cpp-oracle/oracle.mk");
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OracleScenarioHeader {
+    format_version: u16,
+    baseline_commit: String,
+    upstream_tree: String,
+    kernel: String,
+    expected_observation: serde_json::Value,
+}
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +70,66 @@ struct PocketCaseObservationV1 {
     contain_code: i32,
     contain_code_name: String,
     reason: String,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupOracleScenarioV1 {
+    format_version: u16,
+    baseline_commit: String,
+    upstream_tree: String,
+    kernel: String,
+    expected_observation: ItemGroupOracleObservationV1,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupOracleObservationV1 {
+    format_version: u16,
+    baseline_commit: String,
+    upstream_tree: String,
+    kernel: String,
+    collection: ItemGroupTraceObservationV1,
+    distribution: Vec<ItemGroupDistributionObservationV1>,
+    counts: Vec<ItemGroupRangeObservationV1>,
+    charges: Vec<ItemGroupRangeObservationV1>,
+    nested: ItemGroupNestedObservationV1,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupTraceObservationV1 {
+    entry_probability: u16,
+    rolls_consumed: u16,
+    expected_trace: Vec<String>,
+    actual_trace: Vec<String>,
+    downstream_draw_matches: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupDistributionObservationV1 {
+    ticket: u16,
+    selected: String,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupRangeObservationV1 {
+    case_id: String,
+    minimum: i32,
+    maximum: i32,
+    target: i32,
+    observed: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupNestedObservationV1 {
+    rolls_consumed: u16,
+    expected_trace: Vec<String>,
+    actual_trace: Vec<String>,
+    downstream_draw_matches: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -106,23 +179,42 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
         .get(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| default_upstream(workspace));
-    let scenario = load_scenario(&scenario_path)?;
+    let kernel = load_kernel(&scenario_path)?;
     validate_upstream(&upstream)?;
 
     let binary = prepare_binary(workspace, &upstream)?;
-    let observation = run_binary(workspace, &upstream, &binary)?;
-    compare(&scenario, &observation)?;
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&observation)
-            .map_err(|error| format!("could not encode oracle observation: {error}"))?
-    );
-    eprintln!(
-        "C++ oracle verified {} cases against pinned {}",
-        observation.cases.len(),
-        BASELINE_COMMIT
-    );
+    match kernel.as_str() {
+        KERNEL => {
+            let scenario = load_scenario(&scenario_path)?;
+            let observation = run_binary(workspace, &upstream, &binary)?;
+            compare(&scenario, &observation)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&observation)
+                    .map_err(|error| format!("could not encode oracle observation: {error}"))?
+            );
+            eprintln!(
+                "C++ oracle verified {} cases against pinned {}",
+                observation.cases.len(),
+                BASELINE_COMMIT
+            );
+        }
+        ITEM_GROUP_KERNEL => {
+            let scenario = load_item_group_scenario(&scenario_path)?;
+            let observation = run_item_group_binary(workspace, &upstream, &binary)?;
+            compare_item_group(&scenario, &observation)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&observation)
+                    .map_err(|error| format!("could not encode oracle observation: {error}"))?
+            );
+            eprintln!(
+                "C++ oracle verified bounded item-group generation against pinned {}",
+                BASELINE_COMMIT
+            );
+        }
+        _ => return Err(format!("unsupported C++ oracle kernel: {kernel}").into()),
+    }
     Ok(())
 }
 
@@ -143,6 +235,34 @@ fn load_scenario(path: &Path) -> Result<OracleScenarioV1, Box<dyn std::error::Er
     let scenario: OracleScenarioV1 = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid oracle scenario {}: {error}", path.display()))?;
     validate_scenario(&scenario)?;
+    Ok(scenario)
+}
+
+fn load_kernel(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let bytes = read_bounded(path)?;
+    let header: OracleScenarioHeader = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid oracle scenario {}: {error}", path.display()))?;
+    if header.format_version != ORACLE_FORMAT_VERSION
+        || header.baseline_commit != BASELINE_COMMIT
+        || header.upstream_tree != UPSTREAM_TREE
+        || header.expected_observation.is_null()
+    {
+        return Err("oracle scenario version, baseline, or content tree mismatch".into());
+    }
+    Ok(header.kernel)
+}
+
+fn load_item_group_scenario(
+    path: &Path,
+) -> Result<ItemGroupOracleScenarioV1, Box<dyn std::error::Error>> {
+    let bytes = read_bounded(path)?;
+    let scenario: ItemGroupOracleScenarioV1 = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "invalid item-group oracle scenario {}: {error}",
+            path.display()
+        )
+    })?;
+    validate_item_group_scenario(&scenario)?;
     Ok(scenario)
 }
 
@@ -216,6 +336,96 @@ fn validate_observation(
     Ok(())
 }
 
+fn validate_item_group_scenario(
+    scenario: &ItemGroupOracleScenarioV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if scenario.format_version != ORACLE_FORMAT_VERSION
+        || scenario.baseline_commit != BASELINE_COMMIT
+        || scenario.upstream_tree != UPSTREAM_TREE
+        || scenario.kernel != ITEM_GROUP_KERNEL
+    {
+        return Err("item-group oracle scenario identity mismatch".into());
+    }
+    validate_item_group_observation(&scenario.expected_observation)
+}
+
+fn validate_item_group_observation(
+    observation: &ItemGroupOracleObservationV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if observation.format_version != ORACLE_FORMAT_VERSION
+        || observation.baseline_commit != BASELINE_COMMIT
+        || observation.upstream_tree != UPSTREAM_TREE
+        || observation.kernel != ITEM_GROUP_KERNEL
+    {
+        return Err("item-group oracle observation identity mismatch".into());
+    }
+    let collection_trace = ["first", "conditional", "last"];
+    if observation.collection.entry_probability != 50
+        || observation.collection.rolls_consumed != 3
+        || !observation.collection.downstream_draw_matches
+        || observation.collection.expected_trace != collection_trace
+        || observation.collection.actual_trace != collection_trace
+    {
+        return Err("item-group collection observation is not the complete ordered case".into());
+    }
+    let distribution = [
+        (1, "low"),
+        (2, "low"),
+        (3, "middle"),
+        (5, "middle"),
+        (6, "high"),
+        (10, "high"),
+    ];
+    if observation.distribution.len() != distribution.len()
+        || observation
+            .distribution
+            .iter()
+            .zip(distribution)
+            .any(|(actual, expected)| actual.ticket != expected.0 || actual.selected != expected.1)
+    {
+        return Err("item-group distribution observation omits an interval boundary".into());
+    }
+    let expected_counts = [
+        ("fixed", 3, 3, 3),
+        ("range_minimum", 2, 4, 2),
+        ("range_maximum", 2, 4, 4),
+    ];
+    let expected_charges = [
+        ("fixed", 4, 4, 4),
+        ("zero_clamped_to_one", 0, 0, 1),
+        ("range_minimum", 1, 4, 1),
+        ("range_maximum", 1, 4, 4),
+    ];
+    if !ranges_match(&observation.counts, &expected_counts)
+        || !ranges_match(&observation.charges, &expected_charges)
+    {
+        return Err("item-group count or charges observation is incomplete".into());
+    }
+    let nested_trace = ["child_conditional", "child_always", "root_last"];
+    if observation.nested.rolls_consumed != 4
+        || !observation.nested.downstream_draw_matches
+        || observation.nested.expected_trace != nested_trace
+        || observation.nested.actual_trace != nested_trace
+    {
+        return Err("item-group nested observation does not preserve the shared RNG stream".into());
+    }
+    Ok(())
+}
+
+fn ranges_match(
+    actual: &[ItemGroupRangeObservationV1],
+    expected: &[(&str, i32, i32, i32)],
+) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            actual.case_id == expected.0
+                && actual.minimum == expected.1
+                && actual.maximum == expected.2
+                && actual.target == expected.3
+                && actual.observed == actual.target
+        })
+}
+
 fn validate_upstream(upstream: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let canonical = fs::canonicalize(upstream).map_err(|error| {
         format!(
@@ -264,9 +474,13 @@ fn prepare_binary(
     let binary = root.join("tests/cata_test");
     let cache_path = root.join(".rust-cpp-oracle-cache.json");
     let adapter_hash = blake3::hash(
-        [ADAPTER_SOURCE.as_bytes(), ADAPTER_MAKEFILE.as_bytes()]
-            .concat()
-            .as_slice(),
+        [
+            ADAPTER_SOURCE.as_bytes(),
+            ITEM_GROUP_ADAPTER_SOURCE.as_bytes(),
+            ADAPTER_MAKEFILE.as_bytes(),
+        ]
+        .concat()
+        .as_slice(),
     )
     .to_hex()
     .to_string();
@@ -281,6 +495,10 @@ fn prepare_binary(
     fs::write(
         root.join("tests/rust_cpp_oracle_item_pocket_test.cpp"),
         ADAPTER_SOURCE,
+    )?;
+    fs::write(
+        root.join("tests/rust_cpp_oracle_item_group_test.cpp"),
+        ITEM_GROUP_ADAPTER_SOURCE,
     )?;
     fs::write(root.join("rust-cpp-oracle.mk"), ADAPTER_MAKEFILE)?;
 
@@ -487,6 +705,47 @@ fn run_binary(
     Ok(observation)
 }
 
+fn run_item_group_binary(
+    workspace: &Path,
+    upstream: &Path,
+    binary: &Path,
+) -> Result<ItemGroupOracleObservationV1, Box<dyn std::error::Error>> {
+    cleanup_legacy_run_artifacts(workspace)?;
+    let run_root = workspace.join("target/cpp-oracle/runtime");
+    if run_root.exists() {
+        fs::remove_dir_all(&run_root)?;
+    }
+    fs::create_dir_all(&run_root)?;
+    let _artifacts = OracleRunArtifacts {
+        root: run_root.clone(),
+    };
+    let output_path = run_root.join("observation.json");
+    let user_dir = run_root.join("user");
+    export_upstream_paths(upstream, &run_root, &["data"])?;
+    let status = Command::new(binary)
+        .arg("rust_cpp_oracle_item_group_generation")
+        .args(["--rng-seed", "1", "--order", "lex", "--drop-world"])
+        .arg("--user-dir")
+        .arg(&user_dir)
+        .env("CDDA_RUST_CPP_ORACLE_OUTPUT", &output_path)
+        .env("LANGUAGE", "en")
+        .env("LC_ALL", "C")
+        .current_dir(&run_root)
+        .status()?;
+    if !status.success() {
+        return Err(
+            format!("pinned C++ item-group oracle execution failed with status {status}").into(),
+        );
+    }
+    let bytes = read_bounded(&output_path)?;
+    let observation: ItemGroupOracleObservationV1 =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            format!("C++ item-group oracle emitted invalid observation JSON: {error}")
+        })?;
+    validate_item_group_observation(&observation)?;
+    Ok(observation)
+}
+
 fn cleanup_legacy_run_artifacts(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace.join("target/cpp-oracle");
     if !root.is_dir() {
@@ -537,6 +796,21 @@ fn compare(
     .into())
 }
 
+fn compare_item_group(
+    scenario: &ItemGroupOracleScenarioV1,
+    observation: &ItemGroupOracleObservationV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if &scenario.expected_observation == observation {
+        return Ok(());
+    }
+    Err(format!(
+        "C++ item-group oracle diverged from the checked scenario\nexpected: {}\nactual: {}",
+        serde_json::to_string_pretty(&scenario.expected_observation)?,
+        serde_json::to_string_pretty(observation)?
+    )
+    .into())
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let file = fs::File::open(path)
         .map_err(|error| format!("could not open {}: {error}", path.display()))?;
@@ -579,6 +853,13 @@ mod tests {
             "../../../docs/oracles/item-pocket-max-length-v1.json"
         ))
         .expect("checked oracle scenario should decode")
+    }
+
+    fn checked_item_group_scenario() -> ItemGroupOracleScenarioV1 {
+        serde_json::from_str(include_str!(
+            "../../../docs/oracles/item-group-generation-v1.json"
+        ))
+        .expect("checked item-group oracle scenario should decode")
     }
 
     #[test]
@@ -666,6 +947,24 @@ mod tests {
     }
 
     #[test]
+    fn checked_item_group_scenario_is_complete_and_version_bound() {
+        let scenario = checked_item_group_scenario();
+        validate_item_group_scenario(&scenario)
+            .expect("checked item-group oracle scenario should validate");
+
+        let mut incomplete = checked_item_group_scenario();
+        incomplete.expected_observation.distribution.pop();
+        assert!(validate_item_group_scenario(&incomplete).is_err());
+
+        let mut bad_stream = checked_item_group_scenario();
+        bad_stream
+            .expected_observation
+            .nested
+            .downstream_draw_matches = false;
+        assert!(validate_item_group_scenario(&bad_stream).is_err());
+    }
+
+    #[test]
     fn comparison_is_exact() {
         let scenario = checked_scenario();
         compare(&scenario, &scenario.expected_observation)
@@ -674,5 +973,9 @@ mod tests {
         let mut changed = checked_scenario().expected_observation;
         changed.cases[2].reason = String::from("changed");
         assert!(compare(&scenario, &changed).is_err());
+
+        let item_group = checked_item_group_scenario();
+        compare_item_group(&item_group, &item_group.expected_observation)
+            .expect("identical item-group observation should compare");
     }
 }
