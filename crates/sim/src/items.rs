@@ -58,8 +58,11 @@ fn plan_item_group_node(
     match node.kind {
         ItemGroupKindV1::Collection => {
             for entry in &node.entries {
-                // The pinned implementation rolls even for guaranteed entries.
-                if rng.next_u64() % 100 < u64::from(entry.probability) {
+                // Pinned collection generation rolls even for guaranteed and
+                // inactive event entries. The server fixes EVENT_SPAWNS to its
+                // upstream default `off`, so a qualified entry never spawns.
+                let roll = rng.next_u64() % 100;
+                if entry.event.is_none() && roll < u64::from(entry.probability) {
                     plan_item_group_entry(graph, entry, item_groups, rng, output, depth)?;
                 }
             }
@@ -81,6 +84,12 @@ fn plan_item_group_node(
                     ticket <= accumulated
                 })
                 .ok_or(SimError::InvalidItem)?;
+            // Distribution tickets retain the original event entry weight.
+            // Under the deterministic disabled policy, landing on one yields
+            // no item instead of selecting another entry.
+            if entry.event.is_some() {
+                return Ok(());
+            }
             plan_item_group_entry(graph, entry, item_groups, rng, output, depth)?;
         }
     }
@@ -166,4 +175,116 @@ fn plan_item_group_target(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cdda_protocol::{ItemGroupEventV1, ItemGroupItemPrototypeV1, ItemGroupNodeV1};
+    use rand_core::SeedableRng;
+
+    fn leaf(type_id: &str) -> ItemGroupTargetV1 {
+        ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
+            prototype: CraftItemPrototypeV1 {
+                type_id: type_id.to_owned(),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                integral_magazines: Vec::new(),
+                magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+            },
+            charges: None,
+            minimum_one_charge: false,
+        }))
+    }
+
+    fn entry(probability: u32, event: Option<ItemGroupEventV1>, type_id: &str) -> ItemGroupEntryV1 {
+        ItemGroupEntryV1 {
+            probability,
+            count_min: 1,
+            count_max: 1,
+            event,
+            target: leaf(type_id),
+        }
+    }
+
+    #[test]
+    fn disabled_event_collection_still_consumes_its_probability_roll() {
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![
+                    entry(100, Some(ItemGroupEventV1::Christmas), "holiday_token"),
+                    entry(100, None, "ordinary"),
+                ],
+            }],
+        });
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(19);
+        let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
+            .expect("valid event collection should plan");
+        assert_eq!(
+            planned
+                .iter()
+                .map(|prototype| prototype.type_id.as_str())
+                .collect::<Vec<_>>(),
+            ["ordinary"]
+        );
+
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(19);
+        let _ = expected_rng.next_u64();
+        let _ = expected_rng.next_u64();
+        assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn disabled_event_distribution_retains_empty_ticket_intervals() {
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Distribution,
+                entries: vec![
+                    entry(3, Some(ItemGroupEventV1::Halloween), "holiday_token"),
+                    entry(2, None, "ordinary"),
+                ],
+            }],
+        });
+        for ticket in 1..=5 {
+            let seed = (0..100_000)
+                .find(|seed| {
+                    let mut rng = ChaCha8Rng::seed_from_u64(*seed);
+                    inclusive_rng_u64(&mut rng, 1, 5) == ticket
+                })
+                .expect("every bounded ticket should have a witness seed");
+            let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+            let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut actual_rng)
+                .expect("valid event distribution should plan");
+            assert_eq!(
+                planned
+                    .iter()
+                    .map(|prototype| prototype.type_id.as_str())
+                    .collect::<Vec<_>>(),
+                if ticket <= 3 {
+                    Vec::<&str>::new()
+                } else {
+                    vec!["ordinary"]
+                },
+                "ticket {ticket} must retain its pinned interval"
+            );
+
+            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+            assert_eq!(inclusive_rng_u64(&mut expected_rng, 1, 5), ticket);
+            assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+        }
+    }
 }

@@ -33,6 +33,7 @@ const IMPLEMENTED_ENTRY_FIELDS: &[&str] = &[
     "prob",
     "count",
     "charges",
+    "event",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -43,6 +44,19 @@ pub(crate) fn field_is_implemented(field: &str) -> bool {
 pub enum ItemGroupSubtype {
     Collection,
     Distribution,
+}
+
+/// Real-world holiday qualifier accepted by pinned item groups. Runtime
+/// policy decides whether a matching qualifier is active; retaining the value
+/// here prevents inactive entries from being removed from distribution weight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ItemGroupEvent {
+    NewYear,
+    Easter,
+    IndependenceDay,
+    Halloween,
+    Thanksgiving,
+    Christmas,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +88,7 @@ pub struct ItemGroupNode {
     pub probability: u32,
     pub count: ItemGroupRange,
     pub charges: Option<ItemGroupRange>,
+    pub event: Option<ItemGroupEvent>,
     pub unsupported_fields: BTreeMap<String, Value>,
     pub source: String,
 }
@@ -104,6 +119,7 @@ pub struct StrictItemGroupNode {
     pub probability: u32,
     pub count: ItemGroupRange,
     pub charges: Option<ItemGroupRange>,
+    pub event: Option<ItemGroupEvent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -513,6 +529,7 @@ impl ItemGroupRegistry {
                     probability: node.probability,
                     count: node.count,
                     charges: node.charges,
+                    event: node.event,
                 })
             })
             .collect::<Result<_, ItemGroupRegistryError>>()?;
@@ -673,6 +690,7 @@ fn append_legacy_items(
                             probability,
                             count: ItemGroupRange::ONE,
                             charges: None,
+                            event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
                         },
@@ -724,6 +742,7 @@ fn append_shortcut_array(
                     probability: 100,
                     count: ItemGroupRange::ONE,
                     charges: None,
+                    event: None,
                     unsupported_fields: BTreeMap::new(),
                     source: location,
                 },
@@ -741,6 +760,7 @@ fn append_shortcut_array(
                             probability,
                             count: ItemGroupRange::ONE,
                             charges: None,
+                            event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
                         },
@@ -797,6 +817,7 @@ fn parse_object_entry(
         },
     };
     let discriminator = discriminators[0];
+    let event = parse_event(object.get("event"), source)?;
     let kind = match discriminator {
         "item" => ItemGroupNodeKind::Item(required_string(object, "item", source)?.to_owned()),
         "group" => ItemGroupNodeKind::Group(required_string(object, "group", source)?.to_owned()),
@@ -859,6 +880,7 @@ fn parse_object_entry(
             probability,
             count,
             charges,
+            event,
             unsupported_fields,
             source: source.to_owned(),
         },
@@ -947,6 +969,23 @@ fn parse_subtype(value: &Value, source: &str) -> Result<ItemGroupSubtype, ItemGr
         Some("collection") => Ok(ItemGroupSubtype::Collection),
         Some("distribution" | "old") => Ok(ItemGroupSubtype::Distribution),
         _ => Err(invalid(source, "subtype")),
+    }
+}
+
+fn parse_event(
+    value: Option<&Value>,
+    source: &str,
+) -> Result<Option<ItemGroupEvent>, ItemGroupRegistryError> {
+    match value.and_then(Value::as_str) {
+        None if value.is_none() => Ok(None),
+        Some("none") => Ok(None),
+        Some("new_year") => Ok(Some(ItemGroupEvent::NewYear)),
+        Some("easter") => Ok(Some(ItemGroupEvent::Easter)),
+        Some("independence_day") => Ok(Some(ItemGroupEvent::IndependenceDay)),
+        Some("halloween") => Ok(Some(ItemGroupEvent::Halloween)),
+        Some("thanksgiving") => Ok(Some(ItemGroupEvent::Thanksgiving)),
+        Some("christmas") => Ok(Some(ItemGroupEvent::Christmas)),
+        Some(_) | None => Err(invalid(source, "event")),
     }
 }
 
@@ -1398,6 +1437,62 @@ mod tests {
         assert!(matches!(
             registry.strict_graph("nested"),
             Err(ItemGroupRegistryError::UnsupportedFields { .. })
+        ));
+    }
+
+    #[test]
+    fn holiday_events_parse_project_and_reject_unknown_values() {
+        let registry = load_values(serde_json::json!([
+            { "type": "ITEM", "id": "a" },
+            {
+                "type": "item_group",
+                "id": "events",
+                "subtype": "collection",
+                "entries": [
+                    { "item": "a", "event": "new_year" },
+                    { "item": "a", "event": "easter" },
+                    { "item": "a", "event": "independence_day" },
+                    { "item": "a", "event": "halloween" },
+                    { "item": "a", "event": "thanksgiving" },
+                    { "item": "a", "event": "christmas" },
+                    { "collection": [ { "item": "a" } ], "event": "none" }
+                ]
+            }
+        ]))
+        .expect("every pinned holiday value should parse");
+        let strict = registry
+            .strict_graph("events")
+            .expect("event qualifiers should be strictly projected");
+        assert_eq!(
+            strict
+                .root
+                .nodes
+                .iter()
+                .map(|node| node.event)
+                .collect::<Vec<_>>(),
+            [
+                Some(ItemGroupEvent::NewYear),
+                Some(ItemGroupEvent::Easter),
+                Some(ItemGroupEvent::IndependenceDay),
+                Some(ItemGroupEvent::Halloween),
+                Some(ItemGroupEvent::Thanksgiving),
+                Some(ItemGroupEvent::Christmas),
+                None,
+                None,
+            ]
+        );
+
+        assert!(matches!(
+            load_values(serde_json::json!([
+                { "type": "ITEM", "id": "a" },
+                {
+                    "type": "item_group",
+                    "id": "invalid_event",
+                    "subtype": "collection",
+                    "entries": [ { "item": "a", "event": "num_holiday" } ]
+                }
+            ])),
+            Err(ItemGroupRegistryError::InvalidField { ref field, .. }) if field == "event"
         ));
     }
 

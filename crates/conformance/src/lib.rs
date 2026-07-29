@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xce, 0xd7, 0x7c, 0x1d, 0xd1, 0xcd, 0xaa, 0xb7, 0xb3, 0x0f, 0xbf, 0x20, 0x2a,
-                    0x15, 0xe0, 0xaa, 0xe5, 0x45, 0x48, 0xe5, 0xa4, 0xbe, 0xb1, 0x1b, 0x9b, 0x70,
-                    0x74, 0x17, 0xb6, 0xe9, 0x4e, 0x11,
+                    0xb5, 0x53, 0x71, 0x99, 0xf1, 0x7d, 0x36, 0x75, 0x5d, 0x7f, 0x9d, 0xea, 0x39,
+                    0x26, 0x46, 0x22, 0x2e, 0x55, 0xd1, 0x67, 0x1f, 0x41, 0x07, 0x99, 0x0d, 0x7b,
+                    0x09, 0xb0, 0x99, 0x57, 0x32, 0x6b,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1262,14 +1262,23 @@ mod tests {
                     entries: vec![
                         cdda_protocol::ItemGroupEntryV1 {
                             probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            event: Some(cdda_protocol::ItemGroupEventV1::Christmas),
+                            target: item_leaf("holiday_token", None),
+                        },
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
                             count_min: 2,
                             count_max: 2,
+                            event: None,
                             target: item_leaf("splinter", None),
                         },
                         cdda_protocol::ItemGroupEntryV1 {
                             probability: 100,
                             count_min: 1,
                             count_max: 1,
+                            event: None,
                             target: item_leaf(
                                 "nail",
                                 Some(cdda_protocol::InclusiveI32RangeV1 {

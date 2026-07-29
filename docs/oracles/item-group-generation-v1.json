@@ -71,7 +71,45 @@
           "test_utility_belt,test_nuclear_carafe",
           "test_utility_belt,test_pants_fur"
         ],
-        "outside_types": []
+        "outside_types": [],
+        "exact_traces": [
+          {
+            "witness": "first_content_order:test_utility_belt,test_pants_fur",
+            "seed": 1,
+            "top_level_types": ["test_balloon"],
+            "content_types": ["test_utility_belt", "test_pants_fur"]
+          },
+          {
+            "witness": "first_content_order:test_utility_belt,test_nuclear_carafe",
+            "seed": 2,
+            "top_level_types": ["test_balloon"],
+            "content_types": ["test_utility_belt", "test_nuclear_carafe"]
+          },
+          {
+            "witness": "first_content_order:test_nuclear_carafe,test_pants_fur",
+            "seed": 3,
+            "top_level_types": ["test_balloon"],
+            "content_types": ["test_nuclear_carafe", "test_pants_fur"]
+          },
+          {
+            "witness": "first_content_order:test_pants_fur,test_utility_belt",
+            "seed": 4,
+            "top_level_types": ["test_balloon"],
+            "content_types": ["test_pants_fur", "test_utility_belt"]
+          },
+          {
+            "witness": "first_content_order:test_pants_fur,test_nuclear_carafe",
+            "seed": 9,
+            "top_level_types": ["test_balloon"],
+            "content_types": ["test_pants_fur", "test_nuclear_carafe"]
+          },
+          {
+            "witness": "first_content_order:test_nuclear_carafe,test_utility_belt",
+            "seed": 19,
+            "top_level_types": ["test_balloon"],
+            "content_types": ["test_nuclear_carafe", "test_utility_belt"]
+          }
+        ]
       },
       {
         "case_id": "spill",
@@ -89,7 +127,45 @@
           "test_utility_belt,test_nuclear_carafe",
           "test_utility_belt,test_pants_fur"
         ],
-        "outside_types": ["test_nuclear_carafe", "test_pants_fur", "test_utility_belt"]
+        "outside_types": ["test_nuclear_carafe", "test_pants_fur", "test_utility_belt"],
+        "exact_traces": [
+          {
+            "witness": "first_content_order:test_utility_belt,test_pants_fur",
+            "seed": 1,
+            "top_level_types": ["test_nuclear_carafe", "test_balloon"],
+            "content_types": ["test_utility_belt", "test_pants_fur"]
+          },
+          {
+            "witness": "first_content_order:test_utility_belt,test_nuclear_carafe",
+            "seed": 2,
+            "top_level_types": ["test_pants_fur", "test_balloon"],
+            "content_types": ["test_utility_belt", "test_nuclear_carafe"]
+          },
+          {
+            "witness": "first_content_order:test_nuclear_carafe,test_pants_fur",
+            "seed": 3,
+            "top_level_types": ["test_utility_belt", "test_balloon"],
+            "content_types": ["test_nuclear_carafe", "test_pants_fur"]
+          },
+          {
+            "witness": "first_content_order:test_pants_fur,test_utility_belt",
+            "seed": 4,
+            "top_level_types": ["test_nuclear_carafe", "test_balloon"],
+            "content_types": ["test_pants_fur", "test_utility_belt"]
+          },
+          {
+            "witness": "first_content_order:test_pants_fur,test_nuclear_carafe",
+            "seed": 9,
+            "top_level_types": ["test_utility_belt", "test_balloon"],
+            "content_types": ["test_pants_fur", "test_nuclear_carafe"]
+          },
+          {
+            "witness": "first_content_order:test_nuclear_carafe,test_utility_belt",
+            "seed": 19,
+            "top_level_types": ["test_pants_fur", "test_balloon"],
+            "content_types": ["test_nuclear_carafe", "test_utility_belt"]
+          }
+        ]
       }
     ],
     "everyday_corpse": {
@@ -100,7 +176,29 @@
       "wrapper_damage_levels": [5],
       "multiple_content_counts": true,
       "observed_pristine_content": true,
-      "observed_damage_four_content": true
+      "observed_damage_four_content": true,
+      "exact_traces": [
+        {
+          "witness": "fixed_seed:1",
+          "seed": 1,
+          "wrapper_type": "corpse_child_calm",
+          "wrapper_raw_damage": 4000,
+          "wrapper_damage_level": 5,
+          "content_types": ["multitool", "string_6", "socks_ankle", "hoodie", "camisole", "smart_phone_locked", "wallet_large"],
+          "content_raw_damage": [0, 0, 2792, 2751, 2330, 0, 0],
+          "content_damage_levels": [0, 0, 3, 3, 3, 0, 0]
+        },
+        {
+          "witness": "first_damage_four_content",
+          "seed": 84,
+          "wrapper_type": "corpse_generic_male",
+          "wrapper_raw_damage": 4000,
+          "wrapper_damage_level": 5,
+          "content_types": ["tank_top", "blister_pack_small", "socks_ankle", "b_shorts", "wrapper", "wrapper", "portable_game", "comb_pocket", "mp3", "jacket_flannel", "pockknife", "boxer_briefs", "comb_pocket", "leathersandals", "teleumbrella", "heavy_flashlight", "smart_phone_locked", "smart_phone"],
+          "content_raw_damage": [3015, 0, 4000, 1601, 0, 0, 0, 0, 0, 3542, 0, 1772, 0, 3296, 0, 0, 0, 0],
+          "content_damage_levels": [4, 0, 5, 2, 0, 0, 0, 0, 0, 4, 0, 2, 0, 4, 0, 0, 0, 0]
+        }
+      ]
     },
     "nonholiday_event_types": ["test_rock"],
     "event_distribution": [

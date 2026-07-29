@@ -33,11 +33,11 @@ pub use item::{
     PocketTypeDefinition, StrictMagazineDefinition,
 };
 pub use item_group::{
-    ItemGroupDefinition, ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind, ItemGroupRange,
-    ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype, MAX_ITEM_GROUP_LOCAL_DEPTH,
-    MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUT, MAX_ITEM_GROUP_QUANTITY,
-    MAX_ITEM_GROUP_REFERENCE_DEPTH, StrictItemGroupDefinition, StrictItemGroupGraph,
-    StrictItemGroupNode, StrictItemGroupNodeKind,
+    ItemGroupDefinition, ItemGroupEvent, ItemGroupNode, ItemGroupNodeId, ItemGroupNodeKind,
+    ItemGroupRange, ItemGroupRegistry, ItemGroupRegistryError, ItemGroupSubtype,
+    MAX_ITEM_GROUP_LOCAL_DEPTH, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUT,
+    MAX_ITEM_GROUP_QUANTITY, MAX_ITEM_GROUP_REFERENCE_DEPTH, StrictItemGroupDefinition,
+    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 pub use mapgen::{
     DEFAULT_MAPGEN_WEIGHT, MAPGEN_HEIGHT, MAPGEN_WIDTH, MAX_MAPGEN_BINDINGS,

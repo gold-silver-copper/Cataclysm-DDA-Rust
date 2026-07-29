@@ -1,0 +1,84 @@
+{
+  "format_version": 1,
+  "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
+  "green_parent_commit": "73a64d0d3822cc38623bd30a3585968f4dfe4961",
+  "verified_commit": null,
+  "protocol_version": 84,
+  "persistence_schema_version": 62,
+  "replay_format_version": 3,
+  "evidence_weights": {
+    "generated": 1,
+    "authoritative_interaction": 2,
+    "persisted": 3,
+    "client_accessible": 5,
+    "four_mode_conformance": 8
+  },
+  "parser_inventory": [
+    {
+      "id": "item_group",
+      "inventoried_definitions": 7621,
+      "evidence_paths": ["docs/content-schema-inventory.json"]
+    },
+    {
+      "id": "mapgen",
+      "inventoried_definitions": 9520,
+      "evidence_paths": ["docs/content-schema-inventory.json"]
+    },
+    {
+      "id": "overmap_terrain",
+      "inventoried_definitions": 2712,
+      "evidence_paths": ["docs/content-schema-inventory.json"]
+    },
+    {
+      "id": "start_location",
+      "inventoried_definitions": 150,
+      "evidence_paths": ["docs/content-schema-inventory.json"]
+    }
+  ],
+  "categories": [
+    {
+      "id": "admitted-mapgen-generator",
+      "generated_definitions": 1,
+      "authoritatively_interacted_definitions": 1,
+      "persisted_definitions": 1,
+      "client_accessible_definitions": 1,
+      "four_mode_definitions": 0,
+      "weighted_points": 11,
+      "ordinary_gameplay_loops": ["create a world, spawn in generated terrain, and traverse its durable chunks"],
+      "evidence_paths": ["crates/server/src/worldgen.rs", "crates/conformance/src/lib.rs"]
+    },
+    {
+      "id": "admitted-omt-identity",
+      "generated_definitions": 1,
+      "authoritatively_interacted_definitions": 1,
+      "persisted_definitions": 1,
+      "client_accessible_definitions": 1,
+      "four_mode_definitions": 0,
+      "weighted_points": 11,
+      "ordinary_gameplay_loops": ["move through the coordinate-owned surface and receive authoritative blocked edges"],
+      "evidence_paths": ["crates/sim/src/overmap.rs", "crates/conformance/src/lib.rs"]
+    },
+    {
+      "id": "admitted-start-location",
+      "generated_definitions": 1,
+      "authoritatively_interacted_definitions": 1,
+      "persisted_definitions": 1,
+      "client_accessible_definitions": 1,
+      "four_mode_definitions": 0,
+      "weighted_points": 11,
+      "ordinary_gameplay_loops": ["create a persistent character at a server-selected matching start"],
+      "evidence_paths": ["crates/content/src/start_location.rs", "crates/conformance/src/lib.rs"]
+    },
+    {
+      "id": "structural-bash-item-group",
+      "generated_definitions": 1,
+      "authoritatively_interacted_definitions": 1,
+      "persisted_definitions": 1,
+      "client_accessible_definitions": 1,
+      "four_mode_definitions": 0,
+      "weighted_points": 11,
+      "ordinary_gameplay_loops": ["smash an admitted structure and collect its generated persistent drops"],
+      "evidence_paths": ["crates/sim/src/items.rs", "crates/conformance/src/lib.rs"]
+    }
+  ]
+}

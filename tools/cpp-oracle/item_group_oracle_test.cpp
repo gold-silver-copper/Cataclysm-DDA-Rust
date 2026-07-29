@@ -292,6 +292,13 @@ struct container_observation {
     int maximum_contents = 0;
     std::set<std::string> content_orders;
     std::set<std::string> outside_types;
+    struct exact_trace {
+        std::string witness;
+        unsigned int seed = 0;
+        std::vector<std::string> top_level_types;
+        std::vector<std::string> content_types;
+    };
+    std::vector<exact_trace> exact_traces;
 };
 
 container_observation observe_container_group( const std::string &case_id,
@@ -308,7 +315,9 @@ container_observation observe_container_group( const std::string &case_id,
         observation.maximum_top_level = std::max( observation.maximum_top_level,
                                         static_cast<int>( items.size() ) );
         const item *container = nullptr;
+        std::vector<std::string> top_level_types;
         for( const item &candidate : items ) {
+            top_level_types.push_back( candidate.typeId().str() );
             if( candidate.typeId() == itype_id( "test_balloon" ) ) {
                 if( container != nullptr ) {
                     observation.valid_shapes = false;
@@ -329,13 +338,19 @@ container_observation observe_container_group( const std::string &case_id,
         observation.maximum_contents = std::max( observation.maximum_contents,
                                        static_cast<int>( contents.size() ) );
         std::string order;
+        std::vector<std::string> content_types;
         for( const item *content : contents ) {
             if( !order.empty() ) {
                 order += ",";
             }
             order += content->typeId().str();
+            content_types.push_back( content->typeId().str() );
         }
-        observation.content_orders.insert( order );
+        if( observation.content_orders.insert( order ).second ) {
+            observation.exact_traces.push_back( {
+                "first_content_order:" + order, seed, top_level_types, content_types
+            } );
+        }
         const bool outside_complete = case_id == "discard" || observation.outside_types.size() == 3;
         if( observation.content_orders.size() == 6 && outside_complete ) {
             break;
@@ -353,6 +368,17 @@ struct corpse_observation {
     std::set<int> content_counts;
     bool observed_pristine_content = false;
     bool observed_damage_four_content = false;
+    struct exact_trace {
+        std::string witness;
+        unsigned int seed = 0;
+        std::string wrapper_type;
+        int wrapper_raw_damage = 0;
+        int wrapper_damage_level = 0;
+        std::vector<std::string> content_types;
+        std::vector<int> content_raw_damage;
+        std::vector<int> content_damage_levels;
+    };
+    std::vector<exact_trace> exact_traces;
 };
 
 corpse_observation observe_everyday_corpses()
@@ -376,11 +402,44 @@ corpse_observation observe_everyday_corpses()
             break;
         }
         observation.content_counts.insert( static_cast<int>( contents.size() ) );
+        std::vector<std::string> content_types;
+        std::vector<int> content_raw_damage;
+        std::vector<int> content_damage_levels;
+        bool has_pristine_content = false;
+        bool has_damage_four_content = false;
         for( const item *content : contents ) {
-            observation.observed_pristine_content = observation.observed_pristine_content ||
-                    ( content->damage() == 0 && content->damage_level() == 0 );
-            observation.observed_damage_four_content = observation.observed_damage_four_content ||
-                    ( content->damage() == 4 * itype::damage_scale && content->damage_level() == 5 );
+            content_types.push_back( content->typeId().str() );
+            content_raw_damage.push_back( content->damage() );
+            content_damage_levels.push_back( content->damage_level() );
+            has_pristine_content = has_pristine_content ||
+                                   ( content->damage() == 0 && content->damage_level() == 0 );
+            has_damage_four_content = has_damage_four_content ||
+                                      ( content->damage() == 4 * itype::damage_scale &&
+                                        content->damage_level() == 5 );
+        }
+        const bool first_damage_four = has_damage_four_content &&
+                                       !observation.observed_damage_four_content;
+        observation.observed_pristine_content = observation.observed_pristine_content ||
+                                                has_pristine_content;
+        observation.observed_damage_four_content = observation.observed_damage_four_content ||
+                                                   has_damage_four_content;
+        const auto retain_trace = [&]( const std::string &witness ) {
+            observation.exact_traces.push_back( {
+                witness,
+                seed,
+                corpse.typeId().str(),
+                corpse.damage(),
+                corpse.damage_level(),
+                content_types,
+                content_raw_damage,
+                content_damage_levels
+            } );
+        };
+        if( seed == 1 ) {
+            retain_trace( "fixed_seed:1" );
+        }
+        if( first_damage_four ) {
+            retain_trace( "first_damage_four_content" );
         }
         if( observation.wrapper_types.size() == 3 && observation.wrapper_raw_damage.size() == 1 &&
             observation.wrapper_damage_levels.size() == 1 && observation.content_counts.size() > 1 &&
@@ -645,6 +704,19 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             write_strings( json, observation->content_orders );
             json.member( "outside_types" );
             write_strings( json, observation->outside_types );
+            json.member( "exact_traces" );
+            json.start_array();
+            for( const container_observation::exact_trace &trace : observation->exact_traces ) {
+                json.start_object();
+                json.member( "witness", trace.witness );
+                json.member( "seed", trace.seed );
+                json.member( "top_level_types" );
+                write_trace( json, trace.top_level_types );
+                json.member( "content_types" );
+                write_trace( json, trace.content_types );
+                json.end_object();
+            }
+            json.end_array();
             json.end_object();
         }
         json.end_array();
@@ -670,6 +742,32 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "multiple_content_counts", corpses.content_counts.size() > 1 );
         json.member( "observed_pristine_content", corpses.observed_pristine_content );
         json.member( "observed_damage_four_content", corpses.observed_damage_four_content );
+        json.member( "exact_traces" );
+        json.start_array();
+        for( const corpse_observation::exact_trace &trace : corpses.exact_traces ) {
+            json.start_object();
+            json.member( "witness", trace.witness );
+            json.member( "seed", trace.seed );
+            json.member( "wrapper_type", trace.wrapper_type );
+            json.member( "wrapper_raw_damage", trace.wrapper_raw_damage );
+            json.member( "wrapper_damage_level", trace.wrapper_damage_level );
+            json.member( "content_types" );
+            write_trace( json, trace.content_types );
+            json.member( "content_raw_damage" );
+            json.start_array();
+            for( const int damage : trace.content_raw_damage ) {
+                json.write( damage );
+            }
+            json.end_array();
+            json.member( "content_damage_levels" );
+            json.start_array();
+            for( const int level : trace.content_damage_levels ) {
+                json.write( level );
+            }
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
         json.end_object();
 
         json.member( "nonholiday_event_types" );

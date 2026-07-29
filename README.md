@@ -682,6 +682,22 @@ Forest/city/road/river/special population and adjacent overmaps remain later
 work. Databases below schema 61 that contain serialized state are rejected
 before mutation.
 
+Protocol 84 advances to schema 62 and CanonicalStateV60 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Item-group
+entries now retain all six pinned holiday qualifiers through selected-content
+loading, strict server normalization, canonical snapshots, recovery, and
+portable replay. The persistent server fixes CDDA's real-world
+`EVENT_SPAWNS` option to its pinned default `off`: collection entries still
+consume their probability roll before producing nothing, and distribution
+entries retain their ticket interval so a selected inactive entry deliberately
+yields no item. The simulation never reads host wall time, keeping macOS,
+Linux, Windows, recovery, and replay deterministic. The existing authoritative
+smash scenario includes an inactive holiday drop and remains identical through
+direct execution, per-tick restore, SQLite recovery, and portable replay.
+Enabling seasonal content later requires an explicit persisted world policy;
+it cannot be inferred from process-local time. Databases below schema 62 that
+contain serialized state are rejected before mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -913,6 +929,7 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 cargo xtask verify-dependency-boundaries
 cargo xtask parity-ledger-check
+cargo xtask runtime-progress-check
 cargo xtask astronomy-table-check
 cargo xtask content-validate
 cargo xtask content-inventory-check
@@ -940,7 +957,11 @@ nested groups sharing the same RNG stream. It also characterizes raw versus
 display damage, explicit variants, integral and detachable ammunition dressing,
 shuffled container insertion with discard/spill overflow, the real
 `everyday_corpse` wrapper family, nonholiday collection filtering, and inactive
-event entries retaining distribution tickets while producing no item. The
+event entries retaining distribution tickets while producing no item. Exact
+seeded container traces retain every first-observed content order and its
+top-level spill result; exact corpse traces retain a fixed representative and
+the first maximum-damage-content boundary, so aggregates alone cannot satisfy
+the scenario. The
 mapgen scenario verifies exact, type, subtype, prefix, and contains matching;
 rotatable and linear OMT orientation; point rotation; and static palette/nested
 phase ordering. The runner rejects unknown JSON
@@ -979,7 +1000,14 @@ is commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05` in
 `docs/parity-ledger.json` is the machine-readable implementation DAG. Its gate
 binds the ledger to the current protocol, persistence schema, replay format,
 and baseline while rejecting missing Rust paths, duplicate priorities, unknown
-dependencies, and cycles. The leaf `cdda-conformance` crate runs versioned
+dependencies, and cycles. A milestone can be complete only after its pinned
+characterization, generalized engine, direct comparison, all four recovery
+modes, runtime admission, and authoritative client path (or a recorded
+not-applicable rationale) are coherent. `docs/runtime-progress.json` separately
+records raw parser inventory and weighted runtime evidence. Only definitions
+that are generated, authoritatively interacted with, persisted,
+client-accessible, and four-mode verified earn the corresponding points; loaded
+JSON alone earns none. The leaf `cdda-conformance` crate runs versioned
 item-flow, indexed multi-well, and item-backed split/removal scenarios plus
 checked-in semantic/hash expectations through direct headless simulation,
 per-tick snapshot restoration, SQLite recovery, and portable replay

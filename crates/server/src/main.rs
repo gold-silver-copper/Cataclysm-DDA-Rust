@@ -12,8 +12,8 @@ use cdda_content::{
     AmmunitionRegistry, BashDamageProfileRegistry, BashDefinition, BashFieldEffectDefinition,
     BashItemGroupSource, ConstructionRegistry, ContentManifest, DEFAULT_MANIFEST_PATH,
     DefaultRegionTerrainFurnitureRegistry, FieldTypeDefinition, FieldTypeRegistry,
-    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemGroupSubtype,
-    ItemRegistry, MapgenRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
+    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupEvent, ItemGroupRegistry,
+    ItemGroupSubtype, ItemRegistry, MapgenRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
     OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry,
     StartLocationRegistry, StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode,
     StrictItemGroupNodeKind, TerrainDefinition, TerrainRegistry,
@@ -37,12 +37,13 @@ use cdda_protocol::{
     DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1,
     FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN,
     InclusiveI32RangeV1, IntegralMagazinePocketPrototypeV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
-    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
-    MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
-    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
-    adjusted_book_study_time_moves, item_group_catalog_is_valid, item_group_source_max_outputs,
+    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupSourceV1, ItemGroupTargetV1, MAX_ACTOR_BASE_STAT,
+    MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES,
+    MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION,
+    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1,
+    TerrainTileSnapshot, adjusted_book_study_time_moves, item_group_catalog_is_valid,
+    item_group_source_max_outputs,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -2861,6 +2862,17 @@ fn runtime_item_group_kind(subtype: ItemGroupSubtype) -> ItemGroupKindV1 {
     }
 }
 
+fn runtime_item_group_event(event: ItemGroupEvent) -> ItemGroupEventV1 {
+    match event {
+        ItemGroupEvent::NewYear => ItemGroupEventV1::NewYear,
+        ItemGroupEvent::Easter => ItemGroupEventV1::Easter,
+        ItemGroupEvent::IndependenceDay => ItemGroupEventV1::IndependenceDay,
+        ItemGroupEvent::Halloween => ItemGroupEventV1::Halloween,
+        ItemGroupEvent::Thanksgiving => ItemGroupEventV1::Thanksgiving,
+        ItemGroupEvent::Christmas => ItemGroupEventV1::Christmas,
+    }
+}
+
 fn runtime_item_group_entry(
     definition: &StrictItemGroupDefinition,
     node_id: u32,
@@ -2913,6 +2925,7 @@ fn runtime_item_group_entry(
         probability: node.probability,
         count_min: u16::try_from(node.count.minimum)?,
         count_max: u16::try_from(node.count.maximum)?,
+        event: node.event.map(runtime_item_group_event),
         target,
     })
 }
@@ -4598,6 +4611,50 @@ mod tests {
                 ..
             } if group == "everyday_corpse" && fields == &[String::from("damage")]
         ));
+        let content_events = [
+            ItemGroupEvent::NewYear,
+            ItemGroupEvent::Easter,
+            ItemGroupEvent::IndependenceDay,
+            ItemGroupEvent::Halloween,
+            ItemGroupEvent::Thanksgiving,
+            ItemGroupEvent::Christmas,
+        ];
+        let event_definition = StrictItemGroupDefinition {
+            id: String::from("event_projection"),
+            subtype: ItemGroupSubtype::Distribution,
+            ammo_chance: 0,
+            magazine_chance: 0,
+            roots: (0..content_events.len())
+                .map(|index| u32::try_from(index).expect("event index fits"))
+                .collect(),
+            nodes: content_events
+                .into_iter()
+                .map(|event| StrictItemGroupNode {
+                    kind: StrictItemGroupNodeKind::Item(String::from("rock")),
+                    probability: 1,
+                    count: cdda_content::ItemGroupRange::ONE,
+                    charges: None,
+                    event: Some(event),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            runtime_item_group_graph(&event_definition, &items)
+                .expect("every holiday qualifier should project")
+                .nodes[0]
+                .entries
+                .iter()
+                .map(|entry| entry.event)
+                .collect::<Vec<_>>(),
+            [
+                Some(ItemGroupEventV1::NewYear),
+                Some(ItemGroupEventV1::Easter),
+                Some(ItemGroupEventV1::IndependenceDay),
+                Some(ItemGroupEventV1::Halloween),
+                Some(ItemGroupEventV1::Thanksgiving),
+                Some(ItemGroupEventV1::Christmas),
+            ]
+        );
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("ammunition should load");

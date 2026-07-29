@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod astronomy_table;
 
-pub const PROTOCOL_VERSION: u16 = 83;
+pub const PROTOCOL_VERSION: u16 = 84;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2525,6 +2525,20 @@ pub enum ItemGroupKindV1 {
     Distribution,
 }
 
+/// Pinned real-world holiday qualifier on an item-group entry. Authoritative
+/// server policy decides whether the qualifier is active; inactive
+/// distribution entries retain their weight and can deliberately yield no
+/// output.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemGroupEventV1 {
+    NewYear,
+    Easter,
+    IndependenceDay,
+    Halloween,
+    Thanksgiving,
+    Christmas,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InclusiveI32RangeV1 {
     pub minimum: i32,
@@ -2558,6 +2572,7 @@ pub struct ItemGroupEntryV1 {
     pub probability: u32,
     pub count_min: u16,
     pub count_max: u16,
+    pub event: Option<ItemGroupEventV1>,
     pub target: ItemGroupTargetV1,
 }
 
@@ -5851,6 +5866,7 @@ mod tests {
             probability,
             count_min,
             count_max,
+            event: None,
             target,
         }
     }
@@ -6363,7 +6379,34 @@ mod tests {
                 ],
             },
         };
-        let catalog = vec![leaf, root];
+        let holidays = [
+            ItemGroupEventV1::NewYear,
+            ItemGroupEventV1::Easter,
+            ItemGroupEventV1::IndependenceDay,
+            ItemGroupEventV1::Halloween,
+            ItemGroupEventV1::Thanksgiving,
+            ItemGroupEventV1::Christmas,
+        ];
+        let holiday_group = ItemGroupDefinitionV1 {
+            group_id: String::from("c_holidays"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Distribution,
+                    entries: holidays
+                        .into_iter()
+                        .map(|event| {
+                            let mut entry =
+                                item_group_entry(1, 1, 1, item_group_item("holiday_token"));
+                            entry.event = Some(event);
+                            entry
+                        })
+                        .collect(),
+                }],
+            },
+        };
+        let catalog = vec![leaf, root, holiday_group];
         assert!(item_group_catalog_is_valid(&catalog));
         assert_eq!(
             item_group_source_max_outputs(

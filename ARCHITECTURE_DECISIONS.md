@@ -2906,3 +2906,54 @@ matching-only authoritative character placement, snapshot stability, and
 atomic out-of-layout failure; the shared scenario proves direct, per-tick
 snapshot, SQLite, and portable-replay equivalence. Regional population replaces
 the LMOE fill only after the complete field dependency closure is supported.
+
+## Deterministic holiday-qualified item groups
+
+Protocol 84 advances to schema 62 and CanonicalStateV60 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. The canonical
+item-group graph stores every upstream holiday qualifier: New Year, Easter,
+Independence Day, Halloween, Thanksgiving, and Christmas. Unknown values and
+the internal `num_holiday` sentinel fail closed during selected-content load.
+
+The persistent multiplayer server fixes CDDA's `EVENT_SPAWNS` setting to its
+pinned default `off`. This is an explicit authoritative world rule, not a
+locale-sensitive wall-clock query. A collection still consumes one probability
+roll for each event-qualified entry and then emits nothing. A distribution
+still includes inactive entries in its cumulative weight; selecting one emits
+nothing instead of falling through. Those details match the pinned C++ oracle
+and preserve all downstream RNG ordering.
+
+Reading host time would make identical worlds diverge by timezone, date,
+restart, and replay host, so it is forbidden in simulation. Future seasonal
+content can be enabled only by adding an explicit persisted world policy and a
+versioned deterministic active-holiday value. It must not silently inherit the
+server process's current date.
+
+## Milestone completion, module ownership, and version batching
+
+The former `mapgen-overmaps` milestone is not a permanent umbrella. Atomic
+static mapgen, OMT identities/routing, start selection, regional terrain,
+cities, roads, rivers, specials, and general spawning each carry an independent
+state in the checked parity ledger. “Complete” means the whole semantic family
+has a pinned characterization (including exact traces at randomized
+boundaries), a generalized Rust engine, direct Rust/C++ comparison,
+direct/snapshot/SQLite/portable-replay conformance, runtime content admission,
+and a normal authoritative client path when player interaction applies.
+The existing mapgen C++ characterization and separate Rust expectations do not
+yet constitute that direct comparator, so the first three runnable mapgen
+submilestones remain `oracle_pending` rather than being labeled complete.
+
+Large behavioral systems must not keep accumulating in the central crate files.
+Items, actors, combat, activities, monsters, canonical state, protocol domains,
+persistence responsibilities, and server sessions/replication have separate
+mechanical extraction milestones. Each extraction preserves behavior and is
+verified independently; anatomy and EOC expansion wait on their relevant
+ownership boundaries. The extraction itself never changes protocol, schema,
+replay, or canonical hash versions.
+
+Serialized or wire changes are grouped into coherent semantic families where
+practical. A version changes only when its representation changes, never as a
+progress counter. Closely related item modifier and containment fields should be
+batched in one increment after their full representation is designed, rather
+than repeating migration, replay, fixture, and documentation work for isolated
+fields.

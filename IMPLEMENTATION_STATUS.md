@@ -4,20 +4,26 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Current checkpoint: this commit; green parent `ce36152` (`Characterize
-  item-group modifiers and wrappers`).
-- Active milestone: `mapgen-overmaps`.
-- Runtime: protocol 83, worldgen algorithm 2, persistence schema/minimum
-  recoverable schema 61, replay format 3, CanonicalStateV59, and
+- Verified green commit: `73a64d0` (`Extract simulation item-group planning`).
+- Active worktree: Protocol 84 holiday-qualified item-group selection; targeted
+  gates are green, full checkpoint gates and independent review are pending.
+- Active milestone: `regional-terrain-base`.
+- Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
+  recoverable schema 62, replay format 3, CanonicalStateV60, and
   CanonicalEventsV18.
 - Conformance: scenario 7 and observation 6.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only; the server and
   simulation are plain Rust. Networking and endpoint-owned authentication use
   iroh 1.0.3.
+- Mapgen submilestones: `atomic-static-mapgen`, `omt-identities-routing`, and
+  `start-location-selection` have runnable engines but remain `oracle_pending`
+  until one normalized Rust/C++ comparator covers them; `regional-terrain-base`
+  is in progress; `overmap-cities`, `overmap-roads`, `overmap-rivers`,
+  `overmap-specials`, and `mapgen-spawning` are planned.
 
 Protocol 81-era and earlier narration is archived in
 [docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md](docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md).
-Protocol 82 is summarized in the repository history and architecture record;
+Protocols 82 and 83 are summarized in repository history and the architecture record;
 this file describes only the current runnable state and next boundary.
 
 ## Runnable behavior
@@ -78,15 +84,28 @@ authoritative and retains deterministic multiplayer fallback.
   RNG, count/charge ranges, raw/display damage, explicit variants, ammunition
   dressing, bounded semantic-witness searches for randomized discard/spill
   containment and the real `everyday_corpse` family, and inactive event
-  tickets. This is differential evidence only; unsupported runtime projections
-  remain fail-closed.
+  tickets. The checked scenario pins ordered seed traces for all six first
+  container orders and exact corpse traces for seed 1 and the first raw-damage
+  4000 content boundary, preventing an aggregate-only implementation from
+  passing. Rust now retains all six holiday qualifiers and applies the pinned
+  default disabled policy without host time: inactive collection entries
+  consume their roll, while inactive distribution tickets yield no item.
 - The only checked canonical hash change is the item-flow state root:
-  `68cf369b8e35b9b2c7613d273436c0a202c723927113d629e9c1a34a9a56e0a1`
-  under CanonicalStateV58 becomes
   `ced77c1dd1cdaab7b30fbf202a15e0aae54548e5a4beb11b9b707417b6e94e11`
-  under CanonicalStateV59. That scenario has no worldgen state; its tick,
-  actor, inventory, ground item, and CanonicalEventsV18 trace are unchanged,
-  isolating the difference to the intentional state-hash domain change.
+  under CanonicalStateV59 becomes
+  `b5537199f17d36755d7f9dea392646222e55d1671f4107990d7b09b09957326b`
+  under CanonicalStateV60. That scenario has no item groups; its tick, actor,
+  inventory, ground item, and CanonicalEventsV18 trace are unchanged, isolating
+  the difference to the intentional state-hash domain change.
+- Active-worktree runtime evidence counts four admitted definitions through
+  generation, authoritative interaction, persistence, and client access: 44
+  points above green parent `73a64d0`. Exact production definitions receive
+  zero four-mode credit because the current conformance paths use normalized
+  semantic substitutes; those fixtures are not mislabeled as production
+  evidence. The separate parser inventory counts 7,621 item groups, 9,520
+  mapgen objects, 2,712 overmap terrains, and 150 starts but assigns them no
+  runtime points merely for loading. Exact commit binding remains pending until
+  the green implementation checkpoint exists.
 
 ## Explicit boundaries
 
@@ -113,7 +132,7 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Local implementation gates are green: formatting; workspace all-target,
+Verified commit `73a64d0` is green for formatting; workspace all-target,
 all-feature check; strict Clippy; warning-free rustdoc; dependency boundaries;
 parity ledger; astronomy table; selected-content validation at the unchanged
 manifest hash `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
@@ -128,11 +147,22 @@ and loader-local JSON byte caps for future mutable content packages.
 
 ## Next dependency boundary
 
-Implement authoritative item-group event selection under the pinned default
-disabled-event policy, including inactive collection entries and distribution
-tickets that deliberately yield no item. Then continue the coherent item-group
-modifier/contained-item family needed by the pinned `field` closure, using the
-checked oracle and all four recovery modes before replacing the runnable LMOE
-population with the real default field layer.
+The central-file split is now an explicit prerequisite DAG rather than an
+informal cleanup task. Current ownership surfaces are about 28.9K lines in
+simulation `lib.rs`, 8.3K in protocol, 13K in persistence, and 8.8K in the
+server library. Item-group planning has moved to `sim/items.rs`; the ledger now
+tracks the remaining item, actor, combat, activity, monster, canonical-state,
+protocol-domain, persistence-domain, and session/replication extractions
+separately. Anatomy and EOC expansion depend on the relevant extractions.
+
+Implement the coherent item-group modifier/contained-item family needed by the
+pinned `field` closure, using the checked oracle and all four recovery modes
+before replacing the runnable LMOE population with the real default field
+layer. Damage must preserve upstream raw scaling and RNG order; general wrappers
+must retain nested stable identities and explicit overflow rather than flattening
+contents.
 Forest/city/road/river/special placement begins only after that base layer is
 exact and green.
+Batch the related modifier/containment wire and persistence representation into
+one reviewed version increment where practical; do not bump either version for
+mechanical module moves or unchanged encodings.

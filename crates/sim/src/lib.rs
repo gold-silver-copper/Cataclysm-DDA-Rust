@@ -13774,7 +13774,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV59");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV60");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -26430,12 +26430,14 @@ mod tests {
                             probability: 1,
                             count_min: 1,
                             count_max: 1,
+                            event: None,
                             target: test_item_group_leaf("beta", None, false),
                         },
                         ItemGroupEntryV1 {
                             probability: 2,
                             count_min: 1,
                             count_max: 1,
+                            event: None,
                             target: test_item_group_leaf("gamma", None, false),
                         },
                     ],
@@ -26452,18 +26454,21 @@ mod tests {
                         probability: 100,
                         count_min: 2,
                         count_max: 2,
+                        event: None,
                         target: test_item_group_leaf("alpha", None, false),
                     },
                     ItemGroupEntryV1 {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        event: None,
                         target: ItemGroupTargetV1::Group(String::from("weighted_child")),
                     },
                     ItemGroupEntryV1 {
                         probability: 100,
                         count_min: 2,
                         count_max: 2,
+                        event: None,
                         target: test_item_group_leaf(
                             "charged",
                             Some(cdda_protocol::InclusiveI32RangeV1 {
@@ -26516,6 +26521,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        event: None,
                         target: test_item_group_leaf("rock", None, false),
                     }],
                 }],
@@ -26598,6 +26604,7 @@ mod tests {
                     probability: 100,
                     count_min: 2,
                     count_max: 2,
+                    event: None,
                     target: test_item_group_leaf(
                         "fixed_charges",
                         Some(cdda_protocol::InclusiveI32RangeV1 {
@@ -26662,6 +26669,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        event: None,
                         target: ItemGroupTargetV1::Item(Box::new(
                             cdda_protocol::ItemGroupItemPrototypeV1 {
                                 prototype: CraftItemPrototypeV1 {
@@ -28286,6 +28294,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        event: None,
                         target: test_item_group_leaf("marker_item", None, false),
                     }],
                 }],
@@ -28705,6 +28714,7 @@ mod tests {
                         probability: 100,
                         count_min: 1,
                         count_max: 1,
+                        event: None,
                         target: test_item_group_leaf("rock", None, false),
                     }],
                 }],

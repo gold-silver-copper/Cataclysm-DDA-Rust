@@ -54,7 +54,21 @@ struct ParityLedger {
     persistence_schema_version: i64,
     replay_format_version: u16,
     active_milestone: String,
+    completion_gate: Vec<String>,
+    completed_family_evidence: Vec<CompletedFamilyEvidence>,
     milestones: Vec<ParityMilestone>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompletedFamilyEvidence {
+    milestone_id: String,
+    pinned_characterization: Vec<String>,
+    generalized_rust_engine: Vec<String>,
+    direct_rust_cpp_comparison: Vec<String>,
+    four_mode_conformance: Vec<String>,
+    runtime_content_admission: Vec<String>,
+    authoritative_client_path: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -73,10 +87,58 @@ struct ParityMilestone {
     unlocks: Vec<String>,
 }
 
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeProgress {
+    format_version: u16,
+    baseline_commit: String,
+    green_parent_commit: String,
+    verified_commit: Option<String>,
+    protocol_version: u16,
+    persistence_schema_version: i64,
+    replay_format_version: u16,
+    evidence_weights: RuntimeEvidenceWeights,
+    parser_inventory: Vec<ParserInventoryCategory>,
+    categories: Vec<RuntimeProgressCategory>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeEvidenceWeights {
+    generated: u64,
+    authoritative_interaction: u64,
+    persisted: u64,
+    client_accessible: u64,
+    four_mode_conformance: u64,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ParserInventoryCategory {
+    id: String,
+    inventoried_definitions: u64,
+    evidence_paths: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeProgressCategory {
+    id: String,
+    generated_definitions: u64,
+    authoritatively_interacted_definitions: u64,
+    persisted_definitions: u64,
+    client_accessible_definitions: u64,
+    four_mode_definitions: u64,
+    weighted_points: u64,
+    ordinary_gameplay_loops: Vec<String>,
+    evidence_paths: Vec<String>,
+}
+
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum ParityState {
     Complete,
+    OraclePending,
     InProgress,
     Planned,
     Pending,
@@ -96,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match command.as_deref() {
         Some("verify-dependency-boundaries") => verify_dependency_boundaries(),
         Some("parity-ledger-check") => parity_ledger_check(),
+        Some("runtime-progress-check") => runtime_progress_check(),
         Some("cpp-oracle-check") => cpp_oracle::check(std::env::args().skip(2).collect()),
         Some("astronomy-table-check") => astronomy_table_check(),
         Some("account-create") => create_account(std::env::args().skip(2).collect()),
@@ -110,10 +173,242 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-verify") => replay_verify(std::env::args().skip(2).collect()),
         Some(other) => Err(format!("unknown xtask command: {other}").into()),
         None => Err(
-            "usage: cargo xtask <verify-dependency-boundaries|parity-ledger-check|cpp-oracle-check ...|astronomy-table-check|account-create ...|account-recover ...|content-import ...|content-validate ...|content-inventory ...|content-inventory-check ...|replay-export ...|replay-verify ...>"
+            "usage: cargo xtask <verify-dependency-boundaries|parity-ledger-check|runtime-progress-check|cpp-oracle-check ...|astronomy-table-check|account-create ...|account-recover ...|content-import ...|content-validate ...|content-inventory ...|content-inventory-check ...|replay-export ...|replay-verify ...>"
                 .into(),
         ),
     }
+}
+
+fn runtime_progress_check() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("tools crate is not nested beneath the workspace")?;
+    let progress: RuntimeProgress =
+        serde_json::from_slice(&fs::read(workspace.join("docs/runtime-progress.json"))?)?;
+    if progress.format_version != 1
+        || progress.baseline_commit != BASELINE_COMMIT
+        || progress.protocol_version != PROTOCOL_VERSION
+        || progress.persistence_schema_version != SCHEMA_VERSION
+        || progress.replay_format_version != REPLAY_FORMAT_VERSION
+    {
+        return Err("runtime progress version gates do not match the runtime".into());
+    }
+    let validate_commit = |commit: &str, label: &str| -> Result<(), Box<dyn std::error::Error>> {
+        if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("runtime progress {label} is not a full Git object ID").into());
+        }
+        let available = Command::new("git")
+            .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+            .current_dir(workspace)
+            .status()?;
+        let ancestor = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+            .current_dir(workspace)
+            .status()?;
+        if !available.success() || !ancestor.success() {
+            return Err(
+                format!("runtime progress {label} is unavailable or not an ancestor").into(),
+            );
+        }
+        Ok(())
+    };
+    validate_commit(&progress.green_parent_commit, "green parent commit")?;
+    if let Some(verified_commit) = &progress.verified_commit {
+        validate_commit(verified_commit, "verified commit")?;
+    }
+    let weights = &progress.evidence_weights;
+    if !(weights.generated > 0
+        && weights.generated < weights.authoritative_interaction
+        && weights.authoritative_interaction < weights.persisted
+        && weights.persisted < weights.client_accessible
+        && weights.client_accessible < weights.four_mode_conformance)
+    {
+        return Err("runtime progress evidence weights must be strictly increasing".into());
+    }
+    if progress.parser_inventory.is_empty() || progress.categories.is_empty() {
+        return Err("runtime progress must contain categories".into());
+    }
+    let schema_inventory: serde_json::Value = serde_json::from_slice(&fs::read(
+        workspace.join("docs/content-schema-inventory.json"),
+    )?)?;
+    let mut previous = None;
+    for parser in &progress.parser_inventory {
+        let actual = schema_inventory
+            .pointer(&format!("/definitions/{}/objects", parser.id))
+            .and_then(serde_json::Value::as_u64);
+        if parser.id.is_empty()
+            || previous.is_some_and(|previous| previous >= parser.id.as_str())
+            || parser.inventoried_definitions == 0
+            || actual != Some(parser.inventoried_definitions)
+            || parser.evidence_paths.is_empty()
+            || parser.evidence_paths.iter().any(|path| {
+                path.starts_with('/') || path.contains("..") || !workspace.join(path).is_file()
+            })
+        {
+            return Err(
+                format!("runtime progress parser category {} is invalid", parser.id).into(),
+            );
+        }
+        previous = Some(parser.id.as_str());
+    }
+    let mut previous = None;
+    let mut total_definitions = 0_u64;
+    let mut total_points = 0_u64;
+    for category in &progress.categories {
+        if category.id.is_empty()
+            || previous.is_some_and(|previous| previous >= category.id.as_str())
+            || category.generated_definitions == 0
+            || category.authoritatively_interacted_definitions > category.generated_definitions
+            || category.persisted_definitions > category.generated_definitions
+            || category.client_accessible_definitions
+                > category.authoritatively_interacted_definitions
+            || category.four_mode_definitions > category.authoritatively_interacted_definitions
+            || category.four_mode_definitions > category.persisted_definitions
+            || category.ordinary_gameplay_loops.is_empty()
+            || category.evidence_paths.is_empty()
+        {
+            return Err(format!("runtime progress category {} is invalid", category.id).into());
+        }
+        if category.evidence_paths.iter().any(|path| {
+            path.starts_with('/') || path.contains("..") || !workspace.join(path).is_file()
+        }) {
+            return Err(format!(
+                "runtime progress category {} has invalid evidence",
+                category.id
+            )
+            .into());
+        }
+        let expected = category
+            .generated_definitions
+            .checked_mul(weights.generated)
+            .and_then(|value| {
+                category
+                    .authoritatively_interacted_definitions
+                    .checked_mul(weights.authoritative_interaction)
+                    .and_then(|points| value.checked_add(points))
+            })
+            .and_then(|value| {
+                category
+                    .persisted_definitions
+                    .checked_mul(weights.persisted)
+                    .and_then(|points| value.checked_add(points))
+            })
+            .and_then(|value| {
+                category
+                    .client_accessible_definitions
+                    .checked_mul(weights.client_accessible)
+                    .and_then(|points| value.checked_add(points))
+            })
+            .and_then(|value| {
+                category
+                    .four_mode_definitions
+                    .checked_mul(weights.four_mode_conformance)
+                    .and_then(|points| value.checked_add(points))
+            })
+            .ok_or("runtime progress weighted points overflow")?;
+        if category.weighted_points != expected {
+            return Err(
+                format!("runtime progress category {} has stale points", category.id).into(),
+            );
+        }
+        total_definitions = total_definitions
+            .checked_add(category.generated_definitions)
+            .ok_or("runtime progress definition total overflow")?;
+        total_points = total_points
+            .checked_add(category.weighted_points)
+            .ok_or("runtime progress point total overflow")?;
+        previous = Some(category.id.as_str());
+    }
+    if let Some(verified_commit) = &progress.verified_commit {
+        let git_show = |path: &str| -> Result<String, Box<dyn std::error::Error>> {
+            let output = Command::new("git")
+                .args(["show", &format!("{verified_commit}:{path}")])
+                .current_dir(workspace)
+                .output()?;
+            if !output.status.success() {
+                return Err(format!("verified commit is missing {path}").into());
+            }
+            Ok(String::from_utf8(output.stdout)?)
+        };
+        let recorded_progress: RuntimeProgress =
+            serde_json::from_str(&git_show("docs/runtime-progress.json")?)?;
+        let mut normalized_progress = progress.clone();
+        normalized_progress.verified_commit = None;
+        if recorded_progress.verified_commit.is_some() || recorded_progress != normalized_progress {
+            return Err(
+                "runtime progress data differs from the unbound artifact at the verified commit"
+                    .into(),
+            );
+        }
+        let protocol_source = git_show("crates/protocol/src/lib.rs")?;
+        let persistence_source = git_show("crates/persistence/src/lib.rs")?;
+        if !protocol_source.contains(&format!(
+            "pub const PROTOCOL_VERSION: u16 = {};",
+            progress.protocol_version
+        )) || !persistence_source.contains(&format!(
+            "pub const SCHEMA_VERSION: i64 = {};",
+            progress.persistence_schema_version
+        )) || !persistence_source.contains(&format!(
+            "pub const REPLAY_FORMAT_VERSION: u16 = {};",
+            progress.replay_format_version
+        )) {
+            return Err("verified commit runtime versions do not match progress data".into());
+        }
+
+        let mut evidence_paths = BTreeSet::from([
+            "crates/protocol/src/lib.rs",
+            "crates/persistence/src/lib.rs",
+            "crates/tools/src/main.rs",
+            "docs/content-schema-inventory.json",
+        ]);
+        for path in progress
+            .parser_inventory
+            .iter()
+            .flat_map(|category| &category.evidence_paths)
+            .chain(
+                progress
+                    .categories
+                    .iter()
+                    .flat_map(|category| &category.evidence_paths),
+            )
+        {
+            evidence_paths.insert(path.as_str());
+        }
+        for path in &evidence_paths {
+            let tracked = Command::new("git")
+                .args(["cat-file", "-e", &format!("{verified_commit}:{path}")])
+                .current_dir(workspace)
+                .status()?;
+            if !tracked.success() {
+                return Err(format!(
+                    "runtime progress evidence {path} is absent from the verified commit"
+                )
+                .into());
+            }
+        }
+        let mut unchanged = Command::new("git");
+        unchanged
+            .args(["diff", "--quiet", verified_commit, "--"])
+            .args(evidence_paths)
+            .current_dir(workspace);
+        if !unchanged.status()?.success() {
+            return Err("runtime progress evidence differs from the verified commit".into());
+        }
+        let status = fs::read_to_string(workspace.join("IMPLEMENTATION_STATUS.md"))?;
+        if !status.contains(&format!("Verified green commit: `{verified_commit}`")) {
+            return Err("implementation status does not name the exact verified commit".into());
+        }
+        println!(
+            "runtime progress verified at {verified_commit}: {total_definitions} generated definitions, {total_points} weighted evidence points"
+        );
+    } else {
+        println!(
+            "runtime progress measured in the active worktree above green parent {}: {} generated definitions, {} weighted evidence points; checkpoint binding pending",
+            progress.green_parent_commit, total_definitions, total_points
+        );
+    }
+    Ok(())
 }
 
 fn parity_ledger_check() -> Result<(), Box<dyn std::error::Error>> {
@@ -138,6 +433,17 @@ fn validate_parity_ledger(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if ledger.format_version != 1 {
         return Err("unsupported parity ledger format version".into());
+    }
+    const COMPLETION_GATE: [&str; 6] = [
+        "pinned C++ characterization with exact boundary traces where applicable",
+        "generalized Rust engine",
+        "direct Rust-to-C++ comparison",
+        "direct snapshot SQLite and portable-replay conformance",
+        "runtime content admission",
+        "normal authoritative server/client path or explicit not-applicable rationale",
+    ];
+    if ledger.completion_gate != COMPLETION_GATE {
+        return Err("parity ledger completion gate is incomplete or reordered".into());
     }
     if ledger.baseline_commit != BASELINE_COMMIT
         || ledger.protocol_version != PROTOCOL_VERSION
@@ -240,6 +546,42 @@ fn validate_parity_ledger(
             )
             .into());
         }
+    }
+
+    let completed_ids = ledger
+        .milestones
+        .iter()
+        .filter(|milestone| milestone.state == ParityState::Complete)
+        .map(|milestone| milestone.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut evidence_ids = BTreeSet::new();
+    for evidence in &ledger.completed_family_evidence {
+        let evidence_paths = [
+            &evidence.pinned_characterization,
+            &evidence.generalized_rust_engine,
+            &evidence.direct_rust_cpp_comparison,
+            &evidence.four_mode_conformance,
+            &evidence.runtime_content_admission,
+            &evidence.authoritative_client_path,
+        ];
+        if evidence.milestone_id.is_empty()
+            || !evidence_ids.insert(evidence.milestone_id.as_str())
+            || evidence_paths.iter().any(|paths| paths.is_empty())
+            || evidence_paths.into_iter().flatten().any(|path| {
+                path.starts_with('/') || path.contains("..") || !workspace.join(path).is_file()
+            })
+        {
+            return Err(format!(
+                "completed milestone {} has invalid completion evidence",
+                evidence.milestone_id
+            )
+            .into());
+        }
+    }
+    if evidence_ids != completed_ids {
+        return Err(
+            "completed milestone evidence does not exactly match completed families".into(),
+        );
     }
 
     let active = by_id
@@ -924,7 +1266,36 @@ mod tests {
             .expect("item milestone should exist");
         item.state = ParityState::Complete;
         item.differential_oracle = DifferentialState::NotApplicable;
+        ledger
+            .completed_family_evidence
+            .push(CompletedFamilyEvidence {
+                milestone_id: String::from("item-containment"),
+                pinned_characterization: vec![String::from("README.md")],
+                generalized_rust_engine: vec![String::from("README.md")],
+                direct_rust_cpp_comparison: vec![String::from("README.md")],
+                four_mode_conformance: vec![String::from("README.md")],
+                runtime_content_admission: vec![String::from("README.md")],
+                authoritative_client_path: vec![String::from("README.md")],
+            });
         let result = validate_parity_ledger(&ledger, workspace());
         assert!(result.is_err_and(|error| error.to_string().contains("incomplete prerequisite")));
+    }
+
+    #[test]
+    fn completed_milestone_requires_six_part_evidence() {
+        let mut ledger = ledger();
+        let foundation = ledger
+            .milestones
+            .iter_mut()
+            .find(|milestone| milestone.id == "conformance-foundation")
+            .expect("foundation milestone should exist");
+        foundation.state = ParityState::Complete;
+        foundation.differential_oracle = DifferentialState::NotApplicable;
+        let result = validate_parity_ledger(&ledger, workspace());
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("evidence does not exactly match")
+        }));
     }
 }

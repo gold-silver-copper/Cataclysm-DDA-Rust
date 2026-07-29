@@ -169,6 +169,16 @@ struct ItemGroupContainerObservationV1 {
     maximum_contents: u16,
     content_orders: Vec<String>,
     outside_types: Vec<String>,
+    exact_traces: Vec<ItemGroupContainerTraceV1>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupContainerTraceV1 {
+    witness: String,
+    seed: u32,
+    top_level_types: Vec<String>,
+    content_types: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -182,6 +192,20 @@ struct ItemGroupCorpseObservationV1 {
     multiple_content_counts: bool,
     observed_pristine_content: bool,
     observed_damage_four_content: bool,
+    exact_traces: Vec<ItemGroupCorpseTraceV1>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupCorpseTraceV1 {
+    witness: String,
+    seed: u32,
+    wrapper_type: String,
+    wrapper_raw_damage: i32,
+    wrapper_damage_level: i32,
+    content_types: Vec<String>,
+    content_raw_damage: Vec<i32>,
+    content_damage_levels: Vec<i32>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -587,6 +611,13 @@ fn validate_item_group_observation(
                     || actual.maximum_contents != 2
                     || actual.content_orders != expected_content_orders
                     || actual.outside_types != outside_types
+                    || actual.exact_traces.len() != 6
+                    || actual.exact_traces.iter().any(|trace| {
+                        trace.witness.is_empty()
+                            || trace.seed == 0
+                            || trace.top_level_types.len() != usize::from(minimum_top_level)
+                            || trace.content_types.len() != 2
+                    })
             },
         )
     {
@@ -605,6 +636,24 @@ fn validate_item_group_observation(
         || !observation.everyday_corpse.multiple_content_counts
         || !observation.everyday_corpse.observed_pristine_content
         || !observation.everyday_corpse.observed_damage_four_content
+        || observation.everyday_corpse.exact_traces.len() != 2
+        || observation.everyday_corpse.exact_traces[0].witness != "fixed_seed:1"
+        || observation.everyday_corpse.exact_traces[0].seed != 1
+        || observation.everyday_corpse.exact_traces[1].witness != "first_damage_four_content"
+        || observation
+            .everyday_corpse
+            .exact_traces
+            .iter()
+            .any(|trace| {
+                trace.witness.is_empty()
+                    || trace.seed == 0
+                    || trace.wrapper_type.is_empty()
+                    || trace.wrapper_raw_damage != 4_000
+                    || trace.wrapper_damage_level != 5
+                    || trace.content_types.is_empty()
+                    || trace.content_types.len() != trace.content_raw_damage.len()
+                    || trace.content_types.len() != trace.content_damage_levels.len()
+            })
         || observation.nonholiday_event_types != ["test_rock"]
     {
         return Err("item-group corpse or event characterization is incomplete".into());
