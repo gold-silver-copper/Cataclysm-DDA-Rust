@@ -4,11 +4,10 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green parent: `58140edef392d98f8ad87a2224396b84c599382b`
-  (`Extract canonical item instance`).
-- Checkpoint candidate: server item-group normalization has been mechanically
-  extracted and fully verified above that parent. Exact commit binding remains
-  pending in a documentation-only follow-up; runtime sources are otherwise
+- Verified green commit: `d76965c54d5fee3a081b2a7c860b94a750b92cdd`
+  (`Extract server item group normalization`).
+- Checkpoint binding: this documentation-only follow-up records the exact green
+  implementation commit and scoped independent review; runtime sources are
   unchanged.
 - Active milestone: `regional-terrain-base`.
 - Runtime: protocol 84, worldgen algorithm 2, persistence schema/minimum
@@ -113,7 +112,7 @@ authoritative and retains deterministic multiplayer fallback.
   textually identical. The binary root falls from 6,565 to 6,240 lines; the
   focused module is 349 lines. No runtime representation or behavior changes.
 - Runtime evidence at verified commit
-  `58140edef392d98f8ad87a2224396b84c599382b` counts four admitted definitions
+  `d76965c54d5fee3a081b2a7c860b94a750b92cdd` counts four admitted definitions
   through generation, authoritative interaction, persistence, and client
   access: 44 points. Exact production definitions receive
   zero four-mode credit because the current conformance paths use normalized
@@ -148,17 +147,17 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-The candidate above verified parent
-`58140edef392d98f8ad87a2224396b84c599382b` is green for
+Verified commit `d76965c54d5fee3a081b2a7c860b94a750b92cdd` is green for
 formatting; workspace all-target/all-feature check; strict Clippy; warning-free
 rustdoc; dependency boundaries; the parity ledger and runtime-progress gates;
 astronomy; selected-content validation at unchanged manifest hash
 `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`;
 content inventory; all three pinned C++ differential oracles (8/41/17
 assertions); and 335 workspace tests plus doc-tests. An independent reviewer
-audited the scoped server extraction against base
+audited the complete five-file server extraction against base
 `d219c8c69290fc42ee697005ba1cae81ae469001`; one P3 visibility widening was
-validated and fixed, and the final rescan found no P0-P3 issue. Existing
+validated and fixed, and the final rescan found no P0-P3 issue. The durable
+record is `docs/reviews/server-item-group-normalization-extraction.md`. Existing
 nonblocking hardening opportunities remain indexed RLE identity lookup,
 loader-local JSON byte caps for future mutable content packages, and the
 explicit normalized Rust/C++ mapgen comparator named by the `oracle_pending`
