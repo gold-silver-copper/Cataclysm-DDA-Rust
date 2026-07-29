@@ -4,11 +4,10 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green parent: `d76965c54d5fee3a081b2a7c860b94a750b92cdd`
-  (`Extract server item group normalization`).
-- Candidate checkpoint: Protocol 85 item-modifier normalization is intentionally
-  unbound until the complete worktree passes the broad gates and independent
-  review. No later subsystem is in progress.
+- Verified green commit: `761962583d359c0992af3d6a4d1ec10c41a30905`
+  (`Preserve item group modifier phases`).
+- Checkpoint binding: this docs-only commit binds the reviewed implementation
+  above; no later subsystem is in progress.
 - Active milestone: `regional-terrain-base`.
 - Runtime: protocol 85, worldgen algorithm 2, persistence schema/minimum
   recoverable schema 63, replay format 3, CanonicalStateV61, and
@@ -112,7 +111,7 @@ authoritative and retains deterministic multiplayer fallback.
   default containers, nonzero damage, variants, sealing, and general
   containment fail closed; zero-chance magazine/ammunition dressing draws are
   retained only when their projected pocket shape is exact.
-- The only fixed canonical hash change in this candidate is the item-flow state
+- The only fixed canonical hash change in this checkpoint is the item-flow state
   root: CanonicalStateV60
   `b5537199f17d36755d7f9dea392646222e55d1671f4107990d7b09b09957326b`
   becomes CanonicalStateV61
@@ -172,24 +171,26 @@ authoritative and retains deterministic multiplayer fallback.
 
 ## Latest verification
 
-Green parent `d76965c54d5fee3a081b2a7c860b94a750b92cdd` retains its recorded
-full verification. The Protocol 85 candidate is green for formatting, strict
-all-target/all-feature Clippy, rustdoc with warnings denied, workspace
+Verified commit `761962583d359c0992af3d6a4d1ec10c41a30905` is green for formatting,
+strict all-target/all-feature Clippy, rustdoc with warnings denied, workspace
 all-target/all-feature check, and the full 338-test workspace suite plus
 doc-tests. Repository dependency-boundary, parity-ledger, weighted-runtime,
 astronomy, selected-content manifest, generated-inventory, and JSON syntax
-gates pass. The pinned default server loads all 7,621 item-group definitions and
-retains 521 admitted furniture bashes. The previous 539 included six degrading
-vehicle-part paths, one default-container path, three constructor-RNG paths,
-three constructor-state paths, and five temperature-state paths that are now
-explicitly rejected rather than projected.
+gates pass. The pinned default server loads all 7,621 item-group definitions
+and retains 521 admitted furniture bashes. The previous 539 included six
+degrading vehicle-part paths, one default-container path, three constructor-RNG
+paths, three constructor-state paths, and five temperature-state paths that are
+now explicitly rejected rather than projected.
 Real-C++ pocket, item-group, and mapgen oracles pass 8, 42, and 17 assertions
 respectively. The fixed upstream checkout
 is clean at `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, the two inventory support
 changes were audited. The only canonical hash change is the V60-to-V61 domain
 separator, while the structural-bash nail expectation changes from 6 to 4 for
-the corrected RNG phase detailed above. Independent scoped review and final
-post-review affected checks remain required before binding the checkpoint.
+the corrected RNG phase detailed above. An independent reviewer audited the
+complete 20-file patch against `40f24489282c1f9c3aeeaf66b71142eab78be98e`,
+validated and resolved all findings, and found no remaining P0-P3 issue. The
+durable scoped record is
+`docs/reviews/protocol-85-item-modifier-presence.md`.
 
 ## Next dependency boundary
 
