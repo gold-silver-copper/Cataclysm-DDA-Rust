@@ -1535,6 +1535,23 @@ fn validate_item_group_observation(
             331,
         ),
         (
+            "detachable_explicit_over_capacity",
+            31_415,
+            0,
+            100,
+            0,
+            100,
+            "wearable_light",
+            0,
+            "battery",
+            56,
+            0,
+            true,
+            "medium_battery_cell",
+            "",
+            6_092,
+        ),
+        (
             "magazine_minimum",
             24,
             0,
@@ -2373,22 +2390,96 @@ fn rust_item_group_magazine_charge_observation()
 fn rust_item_group_charge_capacity_sentinel_observation()
 -> Result<Vec<ItemGroupChargeCapacitySentinelDirectV1>, Box<dyn std::error::Error>> {
     [
-        ("integral_tool_minimum", 0, -1, Some(85)),
-        ("integral_tool_maximum", 0, -1, Some(85)),
-        ("ordinary_unresolved", 4, -1, None),
-        ("detachable_tool_minimum", 0, -1, Some(56)),
-        ("detachable_tool_maximum", 0, -1, Some(56)),
-        ("magazine_minimum", 0, -1, Some(16)),
-        ("magazine_maximum", 0, -1, Some(16)),
-        ("container_minimum", 1, -1, Some(2)),
-        ("container_maximum", 1, -1, Some(2)),
-        ("lower_sentinel_minimum", -1, 4, None),
-        ("lower_sentinel_maximum", -1, 4, None),
+        (
+            "integral_tool_minimum",
+            0,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(85),
+        ),
+        (
+            "integral_tool_maximum",
+            0,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(85),
+        ),
+        (
+            "ordinary_unresolved",
+            4,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::None,
+            None,
+        ),
+        (
+            "detachable_tool_minimum",
+            0,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(56),
+        ),
+        (
+            "detachable_tool_maximum",
+            0,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(56),
+        ),
+        (
+            "detachable_explicit_over_capacity",
+            0,
+            100,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(56),
+        ),
+        (
+            "magazine_minimum",
+            0,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(16),
+        ),
+        (
+            "magazine_maximum",
+            0,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            Some(16),
+        ),
+        (
+            "container_minimum",
+            1,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
+            Some(2),
+        ),
+        (
+            "container_maximum",
+            1,
+            -1,
+            cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
+            Some(2),
+        ),
+        (
+            "lower_sentinel_minimum",
+            -1,
+            4,
+            cdda_protocol::ItemGroupChargeCapacityV1::None,
+            None,
+        ),
+        (
+            "lower_sentinel_maximum",
+            -1,
+            4,
+            cdda_protocol::ItemGroupChargeCapacityV1::None,
+            None,
+        ),
     ]
     .into_iter()
-    .map(|(case_id, minimum, maximum, capacity)| {
+    .map(|(case_id, minimum, maximum, owner, capacity)| {
         let effective = cdda_sim::resolve_item_group_charge_range(
             cdda_protocol::ItemGroupChargeRangeV1 { minimum, maximum },
+            owner,
             capacity,
         )?;
         let (effective_minimum, effective_maximum) = effective

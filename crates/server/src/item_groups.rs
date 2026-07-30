@@ -1173,6 +1173,7 @@ pub(super) fn runtime_item_group_charges(
                 minimum: charges.minimum,
                 maximum: charges.maximum,
             },
+            ItemGroupChargeCapacityV1::None,
             None,
         )?;
         if resolved.is_none_or(|charges| charges.minimum == charges.maximum) {

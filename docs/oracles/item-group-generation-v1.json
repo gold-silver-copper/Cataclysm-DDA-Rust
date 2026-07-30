@@ -233,6 +233,23 @@
         "downstream_draw": 331
       },
       {
+        "case_id": "detachable_explicit_over_capacity",
+        "seed": 31415,
+        "minimum": 0,
+        "maximum": 100,
+        "effective_minimum": 0,
+        "effective_maximum": 100,
+        "item_type": "wearable_light",
+        "item_charges": 0,
+        "ammunition_type": "battery",
+        "ammunition_remaining": 56,
+        "remaining_capacity": 0,
+        "magazine_present": true,
+        "magazine_type": "medium_battery_cell",
+        "wrapper_type": "",
+        "downstream_draw": 6092
+      },
+      {
         "case_id": "magazine_minimum",
         "seed": 24,
         "minimum": 0,

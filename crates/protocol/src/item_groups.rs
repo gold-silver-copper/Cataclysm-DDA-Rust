@@ -705,7 +705,10 @@ impl<'a> ItemGroupEvaluator<'a> {
             if modifier_present && !target.modifier_side_effects_supported {
                 return None;
             }
-            if entry.modifier_charges.is_some() && !target.charges_supported {
+            let modifier_charges_apply = entry
+                .modifier_charges
+                .is_some_and(item_group_charge_range_applies);
+            if modifier_charges_apply && !target.charges_supported {
                 return None;
             }
             let modifier_creator_metrics = entry
@@ -756,8 +759,8 @@ impl<'a> ItemGroupEvaluator<'a> {
                 entry_outputs.checked_add(entry_outputs.checked_mul(contents_outputs)?)?;
             let positive_modifier_charges = entry
                 .modifier_charges
-                .is_some_and(|charges| charges.maximum > 0 || charges.maximum == -1);
-            if entry.modifier_charges.is_some() {
+                .is_some_and(item_group_charge_range_can_be_positive);
+            if modifier_charges_apply {
                 entry_outputs = entry_outputs
                     .checked_add(target.charge_magazine_candidates.checked_mul(count)?)?;
             }
@@ -796,7 +799,7 @@ impl<'a> ItemGroupEvaluator<'a> {
             }
             let entry_depth = target.depth.checked_add(1)?;
             let mut entry_containment_depth = target.containment_depth;
-            if entry.modifier_charges.is_some() && target.charge_magazine_candidates > 0 {
+            if modifier_charges_apply && target.charge_magazine_candidates > 0 {
                 entry_containment_depth = entry_containment_depth.max(1);
             }
             if positive_modifier_charges
@@ -1141,6 +1144,18 @@ fn valid_item_group_charge_range(charges: ItemGroupChargeRangeV1) -> bool {
         .all(|bound| (-1..=1_000_000).contains(&bound))
 }
 
+fn item_group_charge_range_applies(charges: ItemGroupChargeRangeV1) -> bool {
+    charges
+        != (ItemGroupChargeRangeV1 {
+            minimum: -1,
+            maximum: -1,
+        })
+}
+
+fn item_group_charge_range_can_be_positive(charges: ItemGroupChargeRangeV1) -> bool {
+    item_group_charge_range_applies(charges) && (charges.maximum > 0 || charges.maximum == -1)
+}
+
 fn valid_tool_charge_storage(
     owner: &CraftItemPrototypeV1,
     storage: &ItemGroupToolChargeStorageV1,
@@ -1225,18 +1240,15 @@ fn item_group_item_containment_depth(item: &ItemGroupItemPrototypeV1) -> usize {
         return 0;
     };
     let modifier_applies = item.charges.is_some_and(|charges| {
-        charges
-            != (ItemGroupChargeRangeV1 {
-                minimum: -1,
-                maximum: -1,
-            })
+        item_group_charge_range_applies(charges)
             && (charges.maximum != -1
                 || item.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage)
     });
     let ammunition_possible = item.charges.is_some_and(|charges| {
-        charges.maximum > 0
-            || (charges.maximum == -1
-                && item.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage)
+        item_group_charge_range_applies(charges)
+            && (charges.maximum > 0
+                || (charges.maximum == -1
+                    && item.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage))
     });
     match storage {
         ItemGroupToolChargeStorageV1::Integral { .. } => usize::from(ammunition_possible),
@@ -1868,12 +1880,69 @@ mod tests {
         assert_eq!(item_group_item_containment_depth(&tablet), 1);
         assert_eq!(item_group_item_max_outputs(&tablet), 2);
 
-        let mut invalid_endpoint = tablet;
+        let mut invalid_endpoint = tablet.clone();
         invalid_endpoint.charges = Some(ItemGroupChargeRangeV1 {
             minimum: -2,
             maximum: 4,
         });
         assert!(!valid_item_group_item(&invalid_endpoint));
+
+        let mut detachable = valid_test_item();
+        detachable.prototype.type_id = String::from("wearable_light");
+        detachable.prototype.charges = 0;
+        detachable.prototype.magazine_wells = vec![crate::MagazineWellPrototypeV1 {
+            pocket_index: 4,
+            pocket_id: String::from("BATTERY_WELL"),
+            compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+            rigid: true,
+            unloadable: true,
+        }];
+        let mut magazine = valid_test_item().prototype;
+        magazine.type_id = String::from("medium_battery_cell");
+        magazine.charges = 0;
+        magazine.integral_magazines = vec![crate::IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("MAGAZINE"),
+            ammunition_type: String::from("battery"),
+            capacity: 56,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+        }];
+        let mut battery = valid_test_item().prototype;
+        battery.type_id = String::from("battery");
+        battery.charges = 1;
+        battery.ammunition_type = String::from("battery");
+        battery.containment.count_by_charges = true;
+        battery.containment.stack_size = 1;
+        detachable.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index: 4,
+            magazine,
+            ammunition: Box::new(battery),
+        });
+        detachable.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
+        assert!(valid_item_group_item(&detachable));
+        let child = test_group(
+            "charge_child",
+            test_entry(ItemGroupTargetV1::Item(Box::new(detachable))),
+        );
+        let mut no_op = test_entry(ItemGroupTargetV1::Group(child.group_id.clone()));
+        no_op.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        no_op.modifier_charges = Some(ItemGroupChargeRangeV1 {
+            minimum: -1,
+            maximum: -1,
+        });
+        let outer = test_group("charge_no_op", no_op);
+        let source = ItemGroupSourceV1::Group(outer.group_id.clone());
+        assert!(item_group_catalog_is_valid(&[child.clone(), outer.clone()]));
+        assert_eq!(
+            item_group_source_metrics_for_test(&source, &[child, outer]),
+            Some((1, 0, 1)),
+            "an exact no-op must not budget an installed magazine or ammunition"
+        );
     }
 
     fn valid_test_container(type_id: &str) -> ItemGroupContainerV1 {

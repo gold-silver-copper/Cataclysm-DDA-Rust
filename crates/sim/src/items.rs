@@ -1646,12 +1646,14 @@ fn apply_item_group_charges(
         }
         return Ok(());
     };
-    let capacity = match planned.charge_capacity {
+    let maximum_capacity = match planned.charge_capacity {
         ItemGroupChargeCapacityV1::None => None,
         ItemGroupChargeCapacityV1::AmmunitionStorage => item_group_ammunition_capacity(planned)?,
         ItemGroupChargeCapacityV1::ModifierContainer => modifier_container_capacity,
     };
-    let Some(charges) = resolve_item_group_charge_range(charges, capacity)? else {
+    let Some(charges) =
+        resolve_item_group_charge_range(charges, planned.charge_capacity, maximum_capacity)?
+    else {
         return Ok(());
     };
     if !planned.charges_supported {
@@ -1740,36 +1742,51 @@ fn apply_item_group_charges(
     Ok(())
 }
 
-/// Resolve pinned `-1` charge endpoints after the concrete output type and
-/// modifier container are known. `None` is an exact no-op, distinct from a
-/// resolved zero which can empty ammunition storage.
+/// Resolve pinned charge endpoints after the concrete output type and modifier
+/// container are known. Ammunition capacity supplies only an upper `-1`
+/// sentinel; explicit ammunition ranges roll first and clamp while loading.
+/// Modifier-container capacity clamps before the roll. `None` is an exact
+/// no-op, distinct from a resolved zero which can empty ammunition storage.
 pub fn resolve_item_group_charge_range(
     charges: ItemGroupChargeRangeV1,
+    capacity_owner: ItemGroupChargeCapacityV1,
     maximum_capacity: Option<i32>,
 ) -> Result<Option<cdda_protocol::InclusiveI32RangeV1>, SimError> {
     if charges.minimum < -1 || charges.maximum < -1 {
         return Err(SimError::InvalidItem);
     }
+    if maximum_capacity.is_some_and(|capacity| capacity < 0)
+        || (capacity_owner == ItemGroupChargeCapacityV1::None && maximum_capacity.is_some())
+    {
+        return Err(SimError::InvalidItem);
+    }
     if charges.minimum == -1 && charges.maximum == -1 {
         return Ok(None);
     }
+    let applicable_capacity = match capacity_owner {
+        ItemGroupChargeCapacityV1::None => None,
+        ItemGroupChargeCapacityV1::AmmunitionStorage
+            if charges.minimum != -1 && charges.maximum == -1 =>
+        {
+            maximum_capacity
+        }
+        ItemGroupChargeCapacityV1::AmmunitionStorage => None,
+        ItemGroupChargeCapacityV1::ModifierContainer => maximum_capacity,
+    };
     let mut minimum = if charges.minimum == -1 {
         0
     } else {
         charges.minimum
     };
     let mut maximum = if charges.maximum == -1 {
-        maximum_capacity.unwrap_or(-1)
+        applicable_capacity.unwrap_or(-1)
     } else {
         charges.maximum
     };
-    if let Some(capacity) = maximum_capacity {
-        if capacity < 0 {
-            return Err(SimError::InvalidItem);
-        }
-        if maximum > capacity || (minimum != 1 && maximum == -1) {
-            maximum = capacity;
-        }
+    if let Some(capacity) = applicable_capacity
+        && (maximum > capacity || (minimum != 1 && maximum == -1))
+    {
+        maximum = capacity;
     }
     if minimum > maximum {
         minimum = maximum;
@@ -3514,6 +3531,51 @@ mod tests {
             );
         }
 
+        let mut ranged = source(0);
+        let ItemGroupSourceV1::Inline(graph) = &mut ranged else {
+            unreachable!("the fixture uses an inline group")
+        };
+        let ItemGroupTargetV1::Item(target) = &mut graph.nodes[0].entries[0].target else {
+            unreachable!("the fixture uses a direct item")
+        };
+        target.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: 0,
+            maximum: 100,
+        });
+        let (seed, expected_loaded, preclamped_loaded) = (1_u64..1_000)
+            .find_map(|seed| {
+                let roll = |maximum| {
+                    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                    for _ in 0..5 {
+                        let _constructor_phase = rng.next_u64();
+                    }
+                    inclusive_rng_u64(&mut rng, 0, maximum)
+                };
+                let expected = roll(100).min(56);
+                let preclamped = roll(56);
+                (expected > 0 && expected != preclamped).then_some((
+                    seed,
+                    expected as i32,
+                    preclamped as i32,
+                ))
+            })
+            .expect("a deterministic seed must distinguish roll-then-clamp ordering");
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(&ranged, &BTreeMap::new(), &mut actual_rng)
+            .expect("an explicit detachable range should plan");
+        assert_eq!(
+            planned[0].detachable_magazines[&4].integral_ammunition[&0]
+                .prototype
+                .charges,
+            expected_loaded
+        );
+        assert_ne!(expected_loaded, preclamped_loaded);
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        for _ in 0..12 {
+            let _expected_phase = expected_rng.next_u64();
+        }
+        assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+
         let ItemGroupSourceV1::Inline(inner_graph) = source(56) else {
             unreachable!("the fixture uses an inline inner group")
         };
@@ -3774,25 +3836,78 @@ mod tests {
 
     #[test]
     fn charge_capacity_sentinels_resolve_all_pinned_endpoint_families() {
-        let resolved = |minimum, maximum, capacity| {
-            resolve_item_group_charge_range(ItemGroupChargeRangeV1 { minimum, maximum }, capacity)
-                .expect("characterized sentinel range should resolve")
-                .map(|range| (range.minimum, range.maximum))
+        let resolved = |minimum, maximum, owner, capacity| {
+            resolve_item_group_charge_range(
+                ItemGroupChargeRangeV1 { minimum, maximum },
+                owner,
+                capacity,
+            )
+            .expect("characterized charge range should resolve")
+            .map(|range| (range.minimum, range.maximum))
         };
-        assert_eq!(resolved(-1, -1, None), None);
-        assert_eq!(resolved(0, -1, None), None);
-        assert_eq!(resolved(4, -1, None), None);
-        assert_eq!(resolved(0, -1, Some(85)), Some((0, 85)));
-        assert_eq!(resolved(0, -1, Some(56)), Some((0, 56)));
-        assert_eq!(resolved(1, -1, Some(2)), Some((1, 2)));
-        assert_eq!(resolved(-1, 4, None), Some((0, 4)));
-        assert_eq!(resolved(7, 2, None), Some((2, 2)));
+        assert_eq!(
+            resolved(-1, -1, ItemGroupChargeCapacityV1::None, None),
+            None
+        );
+        assert_eq!(resolved(0, -1, ItemGroupChargeCapacityV1::None, None), None);
+        assert_eq!(resolved(4, -1, ItemGroupChargeCapacityV1::None, None), None);
+        assert_eq!(
+            resolved(
+                0,
+                -1,
+                ItemGroupChargeCapacityV1::AmmunitionStorage,
+                Some(85)
+            ),
+            Some((0, 85))
+        );
+        assert_eq!(
+            resolved(
+                0,
+                -1,
+                ItemGroupChargeCapacityV1::AmmunitionStorage,
+                Some(56)
+            ),
+            Some((0, 56))
+        );
+        assert_eq!(
+            resolved(1, -1, ItemGroupChargeCapacityV1::ModifierContainer, Some(2)),
+            Some((1, 2))
+        );
+        assert_eq!(
+            resolved(
+                0,
+                100,
+                ItemGroupChargeCapacityV1::AmmunitionStorage,
+                Some(56)
+            ),
+            Some((0, 100)),
+            "explicit ammunition ranges roll before the loaded result is clamped"
+        );
+        assert_eq!(
+            resolved(
+                50,
+                80,
+                ItemGroupChargeCapacityV1::ModifierContainer,
+                Some(2)
+            ),
+            Some((2, 2)),
+            "physical modifier containers clamp before the roll"
+        );
+        assert_eq!(
+            resolved(-1, 4, ItemGroupChargeCapacityV1::None, None),
+            Some((0, 4))
+        );
+        assert_eq!(
+            resolved(7, 2, ItemGroupChargeCapacityV1::None, None),
+            Some((2, 2))
+        );
         assert!(
             resolve_item_group_charge_range(
                 ItemGroupChargeRangeV1 {
                     minimum: -2,
                     maximum: 4,
                 },
+                ItemGroupChargeCapacityV1::None,
                 None,
             )
             .is_err()

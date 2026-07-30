@@ -1621,6 +1621,8 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
                                        0, -1, 0 ),
         find_charge_capacity_sentinel( "detachable_tool_maximum", "wearable_light",
                                        0, -1, 56 ),
+        observe_charge_capacity_sentinel( "detachable_explicit_over_capacity", "wearable_light",
+                                          31415, 0, 100 ),
         find_charge_capacity_sentinel( "magazine_minimum", "light_battery_cell",
                                        0, -1, 0 ),
         find_charge_capacity_sentinel( "magazine_maximum", "light_battery_cell",
@@ -1647,10 +1649,12 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     REQUIRE( charge_capacity_sentinels[3].magazine_present );
     REQUIRE( charge_capacity_sentinels[4].magazine_present );
     REQUIRE( charge_capacity_sentinels[4].magazine_type == "medium_battery_cell" );
-    REQUIRE( charge_capacity_sentinels[5].ammunition_type == "null" );
-    REQUIRE( charge_capacity_sentinels[6].ammunition_type == "battery" );
-    REQUIRE( charge_capacity_sentinels[7].wrapper_type == "bottle_plastic" );
+    REQUIRE( charge_capacity_sentinels[5].effective_maximum == 100 );
+    REQUIRE( charge_capacity_sentinels[5].magazine_present );
+    REQUIRE( charge_capacity_sentinels[6].ammunition_type == "null" );
+    REQUIRE( charge_capacity_sentinels[7].ammunition_type == "battery" );
     REQUIRE( charge_capacity_sentinels[8].wrapper_type == "bottle_plastic" );
+    REQUIRE( charge_capacity_sentinels[9].wrapper_type == "bottle_plastic" );
 
     const std::vector<default_container_trace> default_containers = {
         observe_default_container( "direct_water", "water_clean", 31415,

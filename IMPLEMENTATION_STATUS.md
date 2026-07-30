@@ -37,11 +37,12 @@ Mapgen/overmap milestone states:
   integral/detachable ammunition storage, a physical modifier container, or the
   exact no-capacity no-op; unsupported randomized ordinary-item modifiers still
   fail closed.
-- Eleven exact C++ traces cover both ends of integral-tool, detachable-tool,
-  magazine, container, lower-sentinel, and unresolved ordinary behavior. The
-  oracle derives effective bounds from pinned item APIs and then compares them
-  directly with the generalized Rust resolver. Exact e-ink witnesses retain 0
-  and 85 loaded battery charges plus downstream RNG state.
+- Twelve exact C++ traces cover both ends of integral-tool, detachable-tool,
+  magazine, container, lower-sentinel, and unresolved ordinary behavior plus
+  an explicit over-capacity control. The oracle derives effective bounds from
+  pinned item APIs and then compares them directly with the generalized Rust
+  resolver. Exact e-ink witnesses retain 0 and 85 loaded battery charges plus
+  downstream RNG state.
 - A real `eink_tablet_pc` with its integral battery is identical through direct,
   per-tick snapshot, SQLite, and portable replay modes. The production-content
   audit admits `civilian_eink_tablet_pcs` and verifies raw `[0, -1]` ownership
@@ -78,15 +79,16 @@ proven as an ordinary gameplay surface.
 
 ## Module-growth budget
 
-Candidate sizes are 29,594 lines in `sim/lib.rs`, 5,216 in `sim/items.rs`,
-9,974 in `protocol/lib.rs`, 2,191 in `protocol/item_groups.rs`, 13,077 in
-persistence, 8,807 in the server library, 1,535 in `server/item_groups.rs`, and
+Candidate sizes are 29,594 lines in `sim/lib.rs`, 5,331 in `sim/items.rs`,
+9,974 in `protocol/lib.rs`, 2,260 in `protocol/item_groups.rs`, 13,077 in
+persistence, 8,807 in the server library, 1,536 in `server/item_groups.rs`, and
 7,110 in the server executable. Relative to verified implementation `40037fb`,
 the central simulation grows two net lines for the resolver export and
-canonical-domain bump; charge behavior grows `sim/items.rs` by 169 net lines.
+canonical-domain bump; charge behavior and its exact ordering tests grow
+`sim/items.rs` by 284 net lines.
 The central protocol grows one net export/version line while validation and
-metrics grow `protocol/item_groups.rs` by 90 net lines. Capability projection
-grows `server/item_groups.rs` by eight net lines; the server executable grows 40
+metrics grow `protocol/item_groups.rs` by 159 net lines. Capability projection
+grows `server/item_groups.rs` by nine net lines; the server executable grows 40
 net test/audit lines and no generalized behavior. Persistence and the server
 library do not grow. New behavior therefore stays in the requested ownership
 modules, and every central-file increase is mechanical or an exact production
@@ -108,7 +110,7 @@ Passing checks on the candidate implementation:
 - schema-73 persistence tests;
 - deterministic selected-content scan through `civilian_eink_tablet_pcs` to
   the exact six-pocket `leg_sheath6` boundary;
-- pinned item-group C++ oracle: 239 assertions plus direct Rust comparison;
+- pinned item-group C++ oracle: 242 assertions plus direct Rust comparison;
 - pinned pocket and static-mapgen C++ oracles, including the reusable direct
   mapgen comparator;
 - dependency boundaries, parity ledger, runtime denominator, astronomy table,
@@ -123,6 +125,12 @@ Hashing the same Postcard bytes under V70 yields
 the changed hash is therefore the deliberate domain bump for the newly
 serialized item-group representation. CanonicalEventsV18 is unchanged.
 
-The broad workspace gates pass. A fixed committed-tree independent review
-remains before this candidate becomes the live verified checkpoint. No failure
-is known.
+The independent review of frozen implementation commit `fe589b9`, tree
+`0aa1474`, found one P2 deterministic-parity defect: explicit ammunition ranges
+were clamped before their RNG roll. It also found one P3 bounded-metric defect:
+named `[-1, -1]` no-op modifiers budgeted nonexistent magazines and ammunition.
+Both findings were validated against pinned `item_group.cpp`, fixed in the
+generalized resolver/evaluator, and covered by exact regressions. The broad
+workspace gates pass on the corrected worktree. A final fixed committed-tree
+review remains before this candidate becomes the live verified checkpoint. No
+failure is known.
