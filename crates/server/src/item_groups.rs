@@ -5,16 +5,18 @@ use cdda_content::{
     ItemDefinition, ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
     ItemGroupSubtype, ItemRegistry, ItemTemperatureRuntimeClass, ItemVariableValueDefinition,
     MaterialRegistry, PocketTypeDefinition, StrictItemGroupDefinition, StrictItemGroupGraph,
-    StrictItemGroupNode, StrictItemGroupNodeKind,
+    StrictItemGroupNode, StrictItemGroupNodeKind, StrictSpawnPocketDefinition,
 };
 use cdda_protocol::{
-    CraftItemPrototypeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
-    ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, CraftItemPrototypeV1,
+    InclusiveU16RangeV1, ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1,
+    ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1,
+    ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
+    ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
+    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    SPAWN_POCKET_SINGLE_ITEM_MARKER, SpawnPocketKindV1, SpawnPocketRulesV1,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
     item_group_source_max_outputs,
 };
@@ -27,6 +29,286 @@ pub(super) struct RuntimeItemGroupContent<'a> {
     pub(super) materials: &'a MaterialRegistry,
     pub(super) ammunition: &'a AmmunitionRegistry,
     pub(super) snippets: &'a DescriptionSnippetRegistry,
+}
+
+#[cfg(test)]
+pub(super) fn assert_regional_field_multi_pocket_closure(
+    field_graph: &StrictItemGroupGraph,
+    content: RuntimeItemGroupContent<'_>,
+) {
+    let costume_accessories = runtime_item_group_graph(
+        field_graph
+            .groups
+            .get("costume_accessories")
+            .expect("field closure should retain costume accessories"),
+        content,
+    )
+    .expect("multi-pocket holster wrappers should normalize");
+    let (throwing_knife, knife_sheath) = costume_accessories
+        .nodes
+        .iter()
+        .flat_map(|node| &node.entries)
+        .find_map(|entry| match (&entry.target, &entry.direct_wrapper) {
+            (ItemGroupTargetV1::Item(item), Some(wrapper))
+                if item.prototype.type_id == "throwing_knife"
+                    && wrapper.item.prototype.type_id == "leg_sheath6" =>
+            {
+                Some((item.as_ref(), wrapper.clone()))
+            }
+            _ => None,
+        })
+        .expect("costume accessories should retain the six-knife wrapper entry");
+    assert_eq!(knife_sheath.item.prototype.ammunition_containers.len(), 6);
+    assert!(
+        knife_sheath
+            .item
+            .prototype
+            .ammunition_containers
+            .iter()
+            .all(|pocket| pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(cdda_protocol::spawn_pocket_is_single_item))
+    );
+    assert_eq!(
+        cdda_sim::item_group_multi_pocket_projection(throwing_knife, knife_sheath, 6)
+            .expect("six knives should fill six sheath pockets")
+            .pocket_contents
+            .iter()
+            .map(|(index, contents)| (*index, contents.len()))
+            .collect::<Vec<_>>(),
+        [(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+    );
+
+    let costume_hats = runtime_item_group_graph(
+        field_graph
+            .groups
+            .get("costume_hats_hoods")
+            .expect("field closure should retain costume hats"),
+        content,
+    )
+    .expect("multi-pocket ablative wrappers should normalize");
+    let (mandible_guard, hard_hat) = costume_hats
+        .nodes
+        .iter()
+        .flat_map(|node| &node.entries)
+        .find_map(|entry| match (&entry.target, &entry.modifier_container) {
+            (ItemGroupTargetV1::Item(item), Some(wrapper))
+                if item.prototype.type_id == "plastic_mandible_guard"
+                    && wrapper.item.prototype.type_id == "hat_hard" =>
+            {
+                Some((item.as_ref(), wrapper.clone()))
+            }
+            _ => None,
+        })
+        .expect("costume hats should retain the hard-hat mandible guard entry");
+    assert_eq!(
+        cdda_sim::item_group_multi_pocket_projection(mandible_guard, hard_hat, 1)
+            .expect("the mandible guard should select its declared compatible slot")
+            .pocket_contents
+            .iter()
+            .map(|(index, contents)| (*index, contents.len()))
+            .collect::<Vec<_>>(),
+        [(0, 0), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0)]
+    );
+
+    let field_runtime_errors = field_graph
+        .groups
+        .values()
+        .filter_map(|definition| {
+            runtime_item_group_graph(definition, content)
+                .err()
+                .map(|error| (definition.id.as_str(), error.to_string()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        field_runtime_errors
+            .iter()
+            .map(|(group, error)| (*group, error.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "everyday_corpse_child",
+                "item group item corpse_child_calm requires unimplemented corpse construction",
+            ),
+            (
+                "everyday_corpse_female",
+                "item group item corpse_generic_female requires unimplemented corpse construction",
+            ),
+            (
+                "everyday_corpse_male",
+                "item group item corpse_generic_male requires unimplemented corpse construction",
+            ),
+            (
+                "everyday_gear",
+                "item group everyday_gear requires unimplemented ammunition or magazine dressing",
+            ),
+            (
+                "everyday_lighter",
+                "item group item matches cannot retain charge modifiers",
+            ),
+            (
+                "flask_liquor",
+                "temperature-tracked item whiskey requires a custom freezing point",
+            ),
+            (
+                "lunchbox_food",
+                "temperature-tracked item cheeseburger requires unimplemented rot state",
+            ),
+            (
+                "lunchbox_fruit",
+                "temperature-tracked item banana requires unimplemented rot state",
+            ),
+            (
+                "newspaper_recent",
+                "item group item months_old_newspaper requires an unsupported named or empty snippet category",
+            ),
+            (
+                "sandwich_deluxe_wrapper_2",
+                "temperature-tracked item sandwich_deluxe requires unimplemented rot state",
+            ),
+            (
+                "sandwich_reuben_wrapper_2",
+                "temperature-tracked item sandwich_reuben requires unimplemented rot state",
+            ),
+            (
+                "sandwich_t_wrapper_2",
+                "temperature-tracked item sandwich_t requires unimplemented rot state",
+            ),
+            (
+                "sandwiches",
+                "temperature-tracked item sandwich_cucumber requires unimplemented rot state",
+            ),
+            (
+                "wallet_duct_tape_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+            (
+                "wallet_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+            (
+                "wallet_industrial_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+            (
+                "wallet_industrial_leather_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+            (
+                "wallet_large_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+            (
+                "wallet_leather_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+            (
+                "wallet_stylish_full",
+                "item group item wallet_photo requires an unsupported named or empty snippet category",
+            ),
+        ],
+        "every production-field blocker must remain classified until its generalized family is implemented"
+    );
+}
+
+fn runtime_spawn_pocket_item_restrictions(
+    pocket: &StrictSpawnPocketDefinition,
+) -> Option<Vec<String>> {
+    if pocket
+        .item_restrictions
+        .contains(SPAWN_POCKET_SINGLE_ITEM_MARKER)
+        || pocket
+            .flag_restrictions
+            .contains(SPAWN_POCKET_SINGLE_ITEM_MARKER)
+    {
+        return None;
+    }
+    let mut restrictions = pocket.item_restrictions.iter().cloned().collect::<Vec<_>>();
+    if pocket.single_item {
+        restrictions.push(SPAWN_POCKET_SINGLE_ITEM_MARKER.to_owned());
+        restrictions.sort_unstable();
+    }
+    Some(restrictions)
+}
+
+pub(super) fn runtime_ammunition_containers(
+    item: &ItemDefinition,
+) -> Result<Vec<AmmunitionContainerPocketPrototypeV1>, Box<dyn std::error::Error>> {
+    let mut pockets = item
+        .ammunition_containers
+        .iter()
+        .map(|pocket| AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: pocket.pocket_index,
+            pocket_id: pocket.pocket_id.clone(),
+            capacities: pocket
+                .capacities
+                .iter()
+                .map(|(ammunition_type, capacity)| AmmunitionCapacityV1 {
+                    ammunition_type: ammunition_type.clone(),
+                    capacity: *capacity,
+                })
+                .collect(),
+            rigid: pocket.rigid,
+            access_moves: pocket.access_moves,
+            reloadable: !item.flags.contains("NO_RELOAD"),
+            unloadable: !item.flags.contains("NO_UNLOAD"),
+            spawn_rules: None,
+        })
+        .collect::<Vec<_>>();
+    let spawn_pockets = item
+        .spawn_pockets
+        .iter()
+        .map(|pocket| {
+            let item_restrictions =
+                runtime_spawn_pocket_item_restrictions(pocket).ok_or_else(|| {
+                    format!(
+                        "item {} spawn pocket {} collides with reserved single-item marker",
+                        item.id, pocket.pocket_index
+                    )
+                })?;
+            Ok(AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                capacities: Vec::new(),
+                rigid: pocket.rigid,
+                access_moves: pocket.access_moves,
+                reloadable: false,
+                unloadable: !pocket.forbidden && !item.flags.contains("NO_UNLOAD"),
+                spawn_rules: Some(SpawnPocketRulesV1 {
+                    kind: match pocket.kind {
+                        cdda_content::SpawnPocketKindDefinition::Container => {
+                            SpawnPocketKindV1::Container
+                        }
+                        cdda_content::SpawnPocketKindDefinition::EFileStorage => {
+                            SpawnPocketKindV1::EFileStorage
+                        }
+                    },
+                    max_contains_volume_milliliters: pocket.max_contains_volume_milliliters,
+                    magazine_well_volume_milliliters: pocket.magazine_well_volume_milliliters,
+                    contents_collapsed_by_default: matches!(
+                        pocket.kind,
+                        cdda_content::SpawnPocketKindDefinition::Container
+                    ) && item.flags.contains("COLLAPSE_CONTENTS"),
+                    max_contains_weight_milligrams: pocket.max_contains_weight_milligrams,
+                    max_item_volume_milliliters: pocket.max_item_volume_milliliters,
+                    min_item_volume_milliliters: pocket.min_item_volume_milliliters,
+                    max_item_length_millimeters: pocket.max_item_length_millimeters,
+                    item_restrictions,
+                    flag_restrictions: pocket.flag_restrictions.iter().cloned().collect(),
+                    access_moves: pocket.access_moves,
+                    rigid: pocket.rigid,
+                    watertight: pocket.watertight,
+                    transparent: pocket.transparent,
+                    forbidden: pocket.forbidden,
+                    sealable: pocket.sealable,
+                }),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    pockets.extend(spawn_pockets);
+    pockets.sort_by_key(|pocket| pocket.pocket_index);
+    Ok(pockets)
 }
 
 pub(super) fn runtime_bash_item_group_source(
@@ -779,7 +1061,7 @@ fn runtime_item_group_creator_container(
         .default_container
         .as_ref()
         .unwrap_or(&container);
-    require_single_physical_container(effective)?;
+    require_physical_container(effective)?;
     Ok(container)
 }
 
@@ -792,7 +1074,7 @@ fn runtime_item_group_container_inner(
     default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
     let item = runtime_item_group_item_inner(item, None, content, default_container_stack)?;
-    require_single_physical_item(&item)?;
+    require_physical_item(&item)?;
     if variant_id.as_ref().is_some_and(|variant_id| {
         !item
             .variants
@@ -813,13 +1095,13 @@ fn runtime_item_group_container_inner(
     })
 }
 
-fn require_single_physical_container(
+fn require_physical_container(
     container: &ItemGroupContainerV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    require_single_physical_item(&container.item)
+    require_physical_item(&container.item)
 }
 
-fn require_single_physical_item(
+fn require_physical_item(
     item: &ItemGroupItemPrototypeV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let physical_pockets = item
@@ -829,9 +1111,9 @@ fn require_single_physical_item(
         .filter_map(|pocket| pocket.spawn_rules.as_ref())
         .filter(|rules| rules.kind == cdda_protocol::SpawnPocketKindV1::Container)
         .collect::<Vec<_>>();
-    if physical_pockets.len() != 1 {
+    if physical_pockets.is_empty() {
         return Err(format!(
-            "item-group wrapper {} requires exactly one physical container pocket",
+            "item-group wrapper {} requires at least one supported physical container pocket",
             item.prototype.type_id
         )
         .into());
@@ -1239,7 +1521,7 @@ fn item_group_charges_supported(item: &ItemDefinition) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cdda_content::{ItemVariantDefinition, PocketDefinition};
+    use cdda_content::{ItemVariantDefinition, PocketDefinition, SpawnPocketKindDefinition};
 
     fn materialless_temperature_item() -> ItemDefinition {
         ItemDefinition {
@@ -1249,6 +1531,40 @@ mod tests {
             flags: BTreeSet::from([String::from("CAN_HAVE_CHARGES")]),
             ..ItemDefinition::default()
         }
+    }
+
+    #[test]
+    fn reserved_single_item_marker_collision_fails_closed() {
+        let item = ItemDefinition {
+            id: String::from("hostile_marker_collision"),
+            spawn_pockets: vec![StrictSpawnPocketDefinition {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                kind: SpawnPocketKindDefinition::Container,
+                max_contains_volume_milliliters: 1,
+                magazine_well_volume_milliliters: 0,
+                max_contains_weight_milligrams: 1,
+                max_item_volume_milliliters: 1,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: 1,
+                item_restrictions: BTreeSet::from([String::from(SPAWN_POCKET_SINGLE_ITEM_MARKER)]),
+                flag_restrictions: BTreeSet::new(),
+                access_moves: 100,
+                rigid: true,
+                watertight: false,
+                transparent: false,
+                forbidden: false,
+                sealable: false,
+                single_item: false,
+            }],
+            ..ItemDefinition::default()
+        };
+        assert_eq!(
+            runtime_ammunition_containers(&item)
+                .expect_err("reserved marker collisions must not erase canonical pockets")
+                .to_string(),
+            "item hostile_marker_collision spawn pocket 0 collides with reserved single-item marker"
+        );
     }
 
     #[test]

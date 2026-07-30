@@ -1182,6 +1182,16 @@ pub struct ItemGroupFlexibleWrapperProjection {
     pub sealed: bool,
 }
 
+/// Ordered pocket ownership produced by the generalized whole-group wrapper
+/// insertion engine. Empty pockets remain present so differential tooling can
+/// prove declared-order first-compatible selection rather than aggregate
+/// containment alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupMultiPocketProjection {
+    pub outer_type: String,
+    pub pocket_contents: Vec<(u16, Vec<String>)>,
+}
+
 /// Renderer-free direct projection used by the pinned C++ differential
 /// comparator. It executes the production constructor, modifier fallback, and
 /// default-container insertion paths rather than duplicating their semantics
@@ -1330,6 +1340,38 @@ pub fn item_group_flexible_wrapper_projection(
             .ok_or(SimError::InvalidItem)?
             / 1_000,
         sealed: planned.sealed_pockets.contains(&pocket.pocket_index),
+    })
+}
+
+pub fn item_group_multi_pocket_projection(
+    item: &ItemGroupItemPrototypeV1,
+    container: ItemGroupContainerV1,
+    count: u16,
+) -> Result<ItemGroupMultiPocketProjection, SimError> {
+    let mut rng = ChaCha8Rng::from_seed([0; 32]);
+    let planned = plan_group_wrapper_explicit_null(item, container, count, None, &mut rng)?;
+    let pocket_contents = planned
+        .prototype
+        .ammunition_containers
+        .iter()
+        .filter_map(|pocket| {
+            pocket.spawn_rules.as_ref().map(|_| {
+                (
+                    pocket.pocket_index,
+                    planned
+                        .pocket_contents
+                        .get(&pocket.pocket_index)
+                        .into_iter()
+                        .flatten()
+                        .map(|content| content.prototype.type_id.clone())
+                        .collect(),
+                )
+            })
+        })
+        .collect();
+    Ok(ItemGroupMultiPocketProjection {
+        outer_type: planned.prototype.type_id,
+        pocket_contents,
     })
 }
 
@@ -2387,23 +2429,23 @@ fn insert_planned_item(
     } else {
         SpawnPocketKindV1::Container
     };
-    let pocket = target
-        .prototype
-        .ammunition_containers
-        .iter()
-        .find(|pocket| {
-            pocket
-                .spawn_rules
-                .as_ref()
-                .is_some_and(|rules| rules.kind == preferred_kind)
-        });
-    let Some(pocket) = pocket else {
+    let mut selected_pocket_index = None;
+    for pocket in &target.prototype.ammunition_containers {
+        let Some(rules) = pocket
+            .spawn_rules
+            .as_ref()
+            .filter(|rules| rules.kind == preferred_kind)
+        else {
+            continue;
+        };
+        if spawn_pocket_accepts(target, pocket.pocket_index, rules, &payload)? {
+            selected_pocket_index = Some(pocket.pocket_index);
+            break;
+        }
+    }
+    let Some(pocket_index) = selected_pocket_index else {
         return Ok(Err(payload));
     };
-    let rules = pocket.spawn_rules.as_ref().ok_or(SimError::InvalidItem)?;
-    if !spawn_pocket_accepts(target, pocket.pocket_index, rules, &payload)? {
-        return Ok(Err(payload));
-    }
     if payload
         .containment_depth()
         .and_then(|depth| depth.checked_add(1))
@@ -2411,10 +2453,7 @@ fn insert_planned_item(
     {
         return Err(SimError::InvalidItem);
     }
-    let contents = target
-        .pocket_contents
-        .entry(pocket.pocket_index)
-        .or_default();
+    let contents = target.pocket_contents.entry(pocket_index).or_default();
     let mut payload = payload;
     if payload.prototype.containment.count_by_charges {
         let combined_charges = contents
@@ -2451,15 +2490,15 @@ fn spawn_pocket_accepts(
         // canonical profile yet, so retain it explicitly but fail closed.
         return Ok(false);
     }
-    let restricted = !rules.item_restrictions.is_empty() || !rules.flag_restrictions.is_empty();
-    let accepted_restriction = rules
-        .item_restrictions
-        .binary_search(&payload.prototype.type_id)
-        .is_ok()
-        || rules
-            .flag_restrictions
-            .iter()
-            .any(|flag| profile.flags.binary_search(flag).is_ok());
+    let restricted = cdda_protocol::spawn_pocket_has_item_restrictions(rules)
+        || !rules.flag_restrictions.is_empty();
+    let accepted_restriction = rules.item_restrictions.iter().any(|restriction| {
+        restriction != cdda_protocol::SPAWN_POCKET_SINGLE_ITEM_MARKER
+            && restriction == &payload.prototype.type_id
+    }) || rules
+        .flag_restrictions
+        .iter()
+        .any(|flag| profile.flags.binary_search(flag).is_ok());
     let compatibility_volume = if profile.count_by_charges {
         item_containment_single_charge_volume_milliliters(profile)
     } else {
@@ -2488,6 +2527,12 @@ fn spawn_pocket_accepts(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+    if cdda_protocol::spawn_pocket_is_single_item(rules)
+        && !existing.is_empty()
+        && !(existing.len() == 1 && planned_items_can_combine_for_containment(existing[0], payload))
+    {
+        return Ok(false);
+    }
     if profile.phase == cdda_protocol::ItemPhaseV1::Liquid
         && existing.iter().any(|item| {
             item.prototype.containment.phase != cdda_protocol::ItemPhaseV1::Liquid
@@ -2556,7 +2601,7 @@ fn planned_items_can_combine_for_containment(
 }
 
 fn apply_automatic_pocket_collapse(item: &mut PlannedItemSpawn) {
-    let mut physical_pockets = item
+    let physical_pockets = item
         .prototype
         .ammunition_containers
         .iter()
@@ -2565,18 +2610,16 @@ fn apply_automatic_pocket_collapse(item: &mut PlannedItemSpawn) {
                 .spawn_rules
                 .as_ref()
                 .is_some_and(|rules| rules.kind == SpawnPocketKindV1::Container)
-        });
-    let Some(pocket) = physical_pockets.next() else {
-        return;
-    };
-    if physical_pockets.next().is_some() {
-        return;
-    }
-    let Some(contents) = item.pocket_contents.get(&pocket.pocket_index) else {
-        return;
-    };
-    if !contents.is_empty() && contents.windows(2).all(|pair| pair[0] == pair[1]) {
-        item.collapsed_pockets.insert(pocket.pocket_index);
+        })
+        .map(|pocket| pocket.pocket_index)
+        .collect::<Vec<_>>();
+    for pocket_index in physical_pockets {
+        let Some(contents) = item.pocket_contents.get(&pocket_index) else {
+            continue;
+        };
+        if !contents.is_empty() && contents.windows(2).all(|pair| pair[0] == pair[1]) {
+            item.collapsed_pockets.insert(pocket_index);
+        }
     }
 }
 
@@ -2616,6 +2659,9 @@ fn planned_item_is_container_full(item: &PlannedItemSpawn) -> Result<bool, SimEr
         else {
             return Ok(false);
         };
+        if cdda_protocol::spawn_pocket_is_single_item(rules) {
+            continue;
+        }
         let used_volume = contents.iter().try_fold(0_u64, |total, content| {
             total.checked_add(content.total_volume_milliliters()?)
         });
@@ -4562,6 +4608,102 @@ mod tests {
             insert_planned_item(&mut too_small, payload),
             Ok(Err(_))
         ));
+    }
+
+    #[test]
+    fn multi_pocket_wrappers_select_the_first_compatible_unoccupied_slot() {
+        let single_item_pocket = |index: u16, accepted_flag: &str| {
+            let mut pocket = spawn_pocket(
+                SpawnPocketKindV1::Container,
+                false,
+                100,
+                350,
+                vec![String::from(cdda_protocol::SPAWN_POCKET_SINGLE_ITEM_MARKER)],
+                false,
+            );
+            pocket.pocket_index = index;
+            pocket.pocket_id = format!("SLOT_{index}");
+            pocket
+                .spawn_rules
+                .as_mut()
+                .expect("spawn rules exist")
+                .flag_restrictions = vec![accepted_flag.to_owned()];
+            pocket
+        };
+        let wrapper = |type_id: &str, pockets| {
+            let mut item = leaf_item(type_id);
+            item.prototype.ammunition_containers = pockets;
+            ItemGroupContainerV1 {
+                item: Box::new(item),
+                variant_id: None,
+                sealed: false,
+                overflow: ItemGroupOverflowV1::None,
+            }
+        };
+
+        let mut knife = leaf_item("throwing_knife");
+        knife.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 200_000,
+            volume_milliliters: 56,
+            longest_side_millimeters: 350,
+            flags: vec![String::from("SHEATH_KNIFE")],
+            ..ItemContainmentProfileV1::default()
+        };
+        let sheath = wrapper(
+            "leg_sheath",
+            (0..3)
+                .map(|index| single_item_pocket(index, "SHEATH_KNIFE"))
+                .collect(),
+        );
+        assert_eq!(
+            item_group_multi_pocket_projection(&knife, sheath, 3)
+                .expect("three knives should spread across declared holster pockets")
+                .pocket_contents,
+            [
+                (0, vec![String::from("throwing_knife")]),
+                (1, vec![String::from("throwing_knife")]),
+                (2, vec![String::from("throwing_knife")]),
+            ]
+        );
+
+        let mut guard = leaf_item("plastic_mandible_guard");
+        guard.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 250_000,
+            volume_milliliters: 200,
+            longest_side_millimeters: 100,
+            flags: vec![String::from("HELMET_MANDIBLE_GUARD_STRAPPED")],
+            ..ItemContainmentProfileV1::default()
+        };
+        let hard_hat = wrapper(
+            "hat_hard",
+            [
+                "HELMET_FACE_SHIELD",
+                "HELMET_EAR_ATTACHMENT",
+                "HELMET_NAPE_PROTECTOR",
+                "HELMET_MANDIBLE_GUARD_STRAPPED",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, flag)| {
+                let mut pocket = single_item_pocket(index as u16, flag);
+                let rules = pocket.spawn_rules.as_mut().expect("spawn rules exist");
+                rules.max_contains_volume_milliliters = 500;
+                rules.max_item_volume_milliliters = 500;
+                pocket
+            })
+            .collect(),
+        );
+        assert_eq!(
+            item_group_multi_pocket_projection(&guard, hard_hat, 1)
+                .expect("the guard should skip three incompatible hard-hat pockets")
+                .pocket_contents,
+            [
+                (0, Vec::new()),
+                (1, Vec::new()),
+                (2, Vec::new()),
+                (3, vec![String::from("plastic_mandible_guard")]),
+            ]
+        );
     }
 
     #[test]

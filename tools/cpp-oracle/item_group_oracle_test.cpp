@@ -1209,6 +1209,52 @@ struct container_observation {
     std::vector<exact_trace> exact_traces;
 };
 
+struct multi_pocket_trace {
+    std::string case_id;
+    unsigned int seed = 0;
+    std::string wrapper_type;
+    std::string payload_type;
+    std::vector<std::vector<std::string>> pocket_contents;
+    int downstream_draw = 0;
+};
+
+multi_pocket_trace observe_multi_pocket_wrapper( const std::string &case_id,
+        const item_group_id &group_id, const itype_id &wrapper_type,
+        const itype_id &payload_type, std::size_t target_contents )
+{
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item_group::ItemList items = item_group::items_from( group_id );
+        if( items.size() != 1 || items.front().typeId() != wrapper_type ) {
+            continue;
+        }
+        std::vector<std::vector<std::string>> pocket_contents;
+        std::size_t content_count = 0;
+        bool valid_payloads = true;
+        for( const item_pocket *pocket : items.front().get_contents().get_container_pockets() ) {
+            std::vector<std::string> contents;
+            for( const item *content : pocket->all_items_top() ) {
+                contents.push_back( content->typeId().str() );
+                valid_payloads = valid_payloads && content->typeId() == payload_type;
+                ++content_count;
+            }
+            pocket_contents.push_back( std::move( contents ) );
+        }
+        if( valid_payloads && content_count == target_contents ) {
+            return {
+                case_id,
+                seed,
+                wrapper_type.str(),
+                payload_type.str(),
+                std::move( pocket_contents ),
+                rng( 0, 9999 )
+            };
+        }
+    }
+    FAIL( "could not find exact production multi-pocket wrapper witness" );
+    return {};
+}
+
 container_observation observe_container_group( const std::string &case_id,
         const item_group_id &group_id )
 {
@@ -1587,6 +1633,23 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
                 "discard", item_group_id( "test_truncating_to_container" ) );
     const container_observation spilled = observe_container_group(
                 "spill", item_group_id( "test_spilling_from_container" ) );
+    const std::vector<multi_pocket_trace> multi_pocket_wrappers = {
+        observe_multi_pocket_wrapper( "leg_sheath_minimum", item_group_id( "costume_accessories" ),
+                                      itype_id( "leg_sheath6" ), itype_id( "throwing_knife" ), 1 ),
+        observe_multi_pocket_wrapper( "leg_sheath_maximum", item_group_id( "costume_accessories" ),
+                                      itype_id( "leg_sheath6" ), itype_id( "throwing_knife" ), 6 ),
+        observe_multi_pocket_wrapper( "hard_hat_mandible", item_group_id( "costume_hats_hoods" ),
+                                      itype_id( "hat_hard" ),
+                                      itype_id( "plastic_mandible_guard" ), 1 )
+    };
+    REQUIRE( multi_pocket_wrappers[0].pocket_contents.size() == 6 );
+    REQUIRE( multi_pocket_wrappers[0].pocket_contents[0].size() == 1 );
+    REQUIRE( multi_pocket_wrappers[1].pocket_contents ==
+             std::vector<std::vector<std::string>>( 6,
+                     std::vector<std::string>{ "throwing_knife" } ) );
+    REQUIRE( multi_pocket_wrappers[2].pocket_contents.size() == 6 );
+    REQUIRE( multi_pocket_wrappers[2].pocket_contents[3] ==
+             std::vector<std::string>{ "plastic_mandible_guard" } );
     const corpse_observation corpses = observe_everyday_corpses();
     const phone_case_observation phone_cases = observe_civilian_phone_cases();
     REQUIRE( phone_cases.valid_shapes );
@@ -2120,6 +2183,25 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.member( "hot", trace.hot );
             json.member( "cold", trace.cold );
             json.member( "frozen", trace.frozen );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "multi_pocket_wrappers" );
+        json.start_array();
+        for( const multi_pocket_trace &trace : multi_pocket_wrappers ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "seed", trace.seed );
+            json.member( "wrapper_type", trace.wrapper_type );
+            json.member( "payload_type", trace.payload_type );
+            json.member( "pocket_contents" );
+            json.start_array();
+            for( const std::vector<std::string> &contents : trace.pocket_contents ) {
+                write_trace( json, contents );
+            }
+            json.end_array();
+            json.member( "downstream_draw", trace.downstream_draw );
             json.end_object();
         }
         json.end_array();

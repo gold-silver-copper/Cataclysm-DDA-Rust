@@ -646,6 +646,35 @@
         "frozen": false
       }
     ],
+    "multi_pocket_wrappers": [
+      {
+        "case_id": "leg_sheath_minimum",
+        "seed": 814,
+        "wrapper_type": "leg_sheath6",
+        "payload_type": "throwing_knife",
+        "pocket_contents": [["throwing_knife"], [], [], [], [], []],
+        "downstream_draw": 6123
+      },
+      {
+        "case_id": "leg_sheath_maximum",
+        "seed": 2862,
+        "wrapper_type": "leg_sheath6",
+        "payload_type": "throwing_knife",
+        "pocket_contents": [
+          ["throwing_knife"], ["throwing_knife"], ["throwing_knife"],
+          ["throwing_knife"], ["throwing_knife"], ["throwing_knife"]
+        ],
+        "downstream_draw": 9021
+      },
+      {
+        "case_id": "hard_hat_mandible",
+        "seed": 212,
+        "wrapper_type": "hat_hard",
+        "payload_type": "plastic_mandible_guard",
+        "pocket_contents": [[], [], [], ["plastic_mandible_guard"], [], []],
+        "downstream_draw": 7327
+      }
+    ],
     "containers": [
       {
         "case_id": "discard",

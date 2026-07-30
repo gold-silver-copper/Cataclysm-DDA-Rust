@@ -22,11 +22,12 @@ pub use item_groups::{
     MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
     MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_GROUP_DEFINITIONS,
     MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
-    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, initial_item_temperature_state,
-    item_description_expansion_is_valid, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
-    item_temperature_state_matches_phase, item_variant_is_valid,
-    spawn_pocket_external_volume_milliliters, valid_item_variables,
+    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, SPAWN_POCKET_SINGLE_ITEM_MARKER,
+    initial_item_temperature_state, item_description_expansion_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
+    item_snippet_is_valid, item_temperature_state_matches_phase, item_variant_is_valid,
+    spawn_pocket_external_volume_milliliters, spawn_pocket_has_item_restrictions,
+    spawn_pocket_is_single_item, valid_item_variables,
 };
 use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
@@ -1270,15 +1271,14 @@ pub fn item_snapshot_is_compatible_with_spawn_rules(
         return content.containment.estorable;
     }
     let profile = &content.containment;
-    let restricted = !rules.item_restrictions.is_empty() || !rules.flag_restrictions.is_empty();
-    let accepted_restriction = rules
-        .item_restrictions
-        .binary_search(&content.type_id)
-        .is_ok()
-        || rules
-            .flag_restrictions
-            .iter()
-            .any(|flag| profile.flags.binary_search(flag).is_ok());
+    let restricted =
+        spawn_pocket_has_item_restrictions(rules) || !rules.flag_restrictions.is_empty();
+    let accepted_restriction = rules.item_restrictions.iter().any(|restriction| {
+        restriction != SPAWN_POCKET_SINGLE_ITEM_MARKER && restriction == &content.type_id
+    }) || rules
+        .flag_restrictions
+        .iter()
+        .any(|flag| profile.flags.binary_search(flag).is_ok());
     let compatibility_volume = if profile.count_by_charges {
         item_containment_single_charge_volume_milliliters(profile)
     } else {
@@ -4954,6 +4954,10 @@ fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
         && rules.flag_restrictions.len() <= 256
         && rules.item_restrictions.iter().all(|id| valid_recipe_id(id))
         && rules.flag_restrictions.iter().all(|id| valid_recipe_id(id))
+        && !rules
+            .flag_restrictions
+            .iter()
+            .any(|restriction| restriction == SPAWN_POCKET_SINGLE_ITEM_MARKER)
         && rules
             .item_restrictions
             .windows(2)
@@ -4976,6 +4980,7 @@ fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
                 rules.rigid
                     && rules.magazine_well_volume_milliliters == 0
                     && !rules.contents_collapsed_by_default
+                    && !spawn_pocket_is_single_item(rules)
             }
         }
 }
@@ -4996,6 +5001,11 @@ fn valid_ammunition_container_snapshot(
     };
     valid_ammunition_container_prototype(&prototype)
         && pocket.contents.len() <= MAX_AMMUNITION_CONTAINER_CONTENTS
+        && (!pocket
+            .spawn_state
+            .as_ref()
+            .is_some_and(|state| spawn_pocket_is_single_item(&state.rules))
+            || pocket.contents.len() <= 1)
         && pocket
             .contents
             .windows(2)
@@ -5121,6 +5131,9 @@ fn item_snapshot_is_container_full(item: &ItemSnapshot) -> Option<bool> {
         let Some(first) = pocket.contents.first() else {
             return Some(false);
         };
+        if spawn_pocket_is_single_item(rules) {
+            continue;
+        }
         let (used_volume, used_weight) =
             pocket
                 .contents
@@ -9363,6 +9376,30 @@ mod tests {
             }),
         }];
         assert!(valid_item_snapshot(&generic_owner));
+        let mut single_item_owner = generic_owner.clone();
+        {
+            let single_item_state = single_item_owner.ammunition_containers[0]
+                .spawn_state
+                .as_mut()
+                .expect("spawn state should exist");
+            single_item_state.rules.item_restrictions = vec![
+                String::from(SPAWN_POCKET_SINGLE_ITEM_MARKER),
+                String::from("smart_phone"),
+            ];
+            single_item_state.sealed = false;
+        }
+        assert!(valid_item_snapshot(&single_item_owner));
+        let single_item_pocket = &mut single_item_owner.ammunition_containers[0];
+        let mut second_phone = single_item_pocket.contents[0].clone();
+        second_phone.id = ItemId(3);
+        single_item_pocket.contents.push(second_phone);
+        assert!(
+            !valid_item_snapshot(&single_item_owner),
+            "holster/ablative recovery must reject two canonical item identities"
+        );
+        let mut marker_as_flag = rules.clone();
+        marker_as_flag.flag_restrictions = vec![String::from(SPAWN_POCKET_SINGLE_ITEM_MARKER)];
+        assert!(!valid_spawn_pocket_rules(&marker_as_flag));
         let mut flexible_wrapper = generic_owner.clone();
         flexible_wrapper.type_id = String::from("wrapper");
         flexible_wrapper.containment.weight_milligrams = 3_000;

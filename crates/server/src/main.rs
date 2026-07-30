@@ -32,24 +32,23 @@ use cdda_protocol::ChunkCoord;
 #[cfg(test)]
 use cdda_protocol::worldgen_catalog_is_valid;
 use cdda_protocol::{
-    ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, AmmunitionCapacityV1,
-    AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, BashFieldEffectV1, BookStudyV1,
-    ConstructionRecipeV1, ConstructionResultV1, ContentIdentity, CraftBookRequirementV1,
-    CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1, CraftProficiencyV1,
-    CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1, CraftSkillRequirementV1,
-    CraftToolRequirementV1, CreatureCorpsePrototypeV1, CreaturePathSettingsV1, CreatureSizeV1,
-    DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1,
-    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN,
-    IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
-    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
-    MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
-    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, SpawnPocketKindV1, SpawnPocketRulesV1,
-    TerrainBashTypeV1, TerrainTileSnapshot, adjusted_book_study_time_moves,
+    ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, BASELINE_COMMIT,
+    BashFieldEffectV1, BookStudyV1, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
+    CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
+    CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
+    CraftSkillRequirementV1, CraftToolRequirementV1, CreatureCorpsePrototypeV1,
+    CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1, DisassemblyRecipeV1,
+    ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
+    FurnitureTileSnapshot, GAME_ALPN, IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT,
+    MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES,
+    MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION,
+    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1,
+    TerrainTileSnapshot, adjusted_book_study_time_moves,
 };
 #[cfg(test)]
 use cdda_protocol::{
-    ItemGroupChargeRangeV1, ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    item_group_source_max_outputs,
+    AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, ItemGroupChargeRangeV1,
+    ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1, item_group_source_max_outputs,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -71,11 +70,15 @@ mod item_groups;
 mod worldgen;
 
 use item_groups::{
-    RuntimeItemGroupContent, runtime_bash_item_group_catalog, runtime_bash_item_group_source,
-    runtime_item_temperature_capability, runtime_item_tracks_temperature,
+    RuntimeItemGroupContent, runtime_ammunition_containers, runtime_bash_item_group_catalog,
+    runtime_bash_item_group_source, runtime_item_temperature_capability,
+    runtime_item_tracks_temperature,
 };
 #[cfg(test)]
-use item_groups::{runtime_item_group_charges, runtime_item_group_graph, runtime_item_group_item};
+use item_groups::{
+    assert_regional_field_multi_pocket_closure, runtime_item_group_charges,
+    runtime_item_group_graph, runtime_item_group_item,
+};
 use worldgen::{RuntimeMapgenContent, bootstrap_lmoe_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
 use worldgen::{runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice};
@@ -905,7 +908,7 @@ fn open_world(
         let quiver = items
             .get("quiver")
             .ok_or("pinned default content has no starter quiver")?;
-        let quiver_containers = runtime_ammunition_containers(quiver);
+        let quiver_containers = runtime_ammunition_containers(quiver)?;
         if quiver_containers.is_empty() {
             return Err("pinned starter quiver has no strict ammunition container".into());
         }
@@ -2077,7 +2080,7 @@ fn craft_item_prototype_with_ammunition(
         magazine_capacity,
         integral_magazines,
         magazine_wells,
-        ammunition_containers: runtime_ammunition_containers(item),
+        ammunition_containers: runtime_ammunition_containers(item)?,
         residual_energy_millijoules: 0,
         powered_tool: runtime_powered_tool(item, items)?,
         containment: cdda_protocol::ItemContainmentProfileV1 {
@@ -2153,75 +2156,6 @@ fn runtime_integral_magazines(item: &ItemDefinition) -> Vec<IntegralMagazinePock
             })
         })
         .collect()
-}
-
-fn runtime_ammunition_containers(
-    item: &ItemDefinition,
-) -> Vec<AmmunitionContainerPocketPrototypeV1> {
-    let mut pockets = item
-        .ammunition_containers
-        .iter()
-        .map(|pocket| AmmunitionContainerPocketPrototypeV1 {
-            pocket_index: pocket.pocket_index,
-            pocket_id: pocket.pocket_id.clone(),
-            capacities: pocket
-                .capacities
-                .iter()
-                .map(|(ammunition_type, capacity)| AmmunitionCapacityV1 {
-                    ammunition_type: ammunition_type.clone(),
-                    capacity: *capacity,
-                })
-                .collect(),
-            rigid: pocket.rigid,
-            access_moves: pocket.access_moves,
-            reloadable: !item.flags.contains("NO_RELOAD"),
-            unloadable: !item.flags.contains("NO_UNLOAD"),
-            spawn_rules: None,
-        })
-        .collect::<Vec<_>>();
-    pockets.extend(
-        item.spawn_pockets
-            .iter()
-            .map(|pocket| AmmunitionContainerPocketPrototypeV1 {
-                pocket_index: pocket.pocket_index,
-                pocket_id: pocket.pocket_id.clone(),
-                capacities: Vec::new(),
-                rigid: pocket.rigid,
-                access_moves: pocket.access_moves,
-                reloadable: false,
-                unloadable: !pocket.forbidden && !item.flags.contains("NO_UNLOAD"),
-                spawn_rules: Some(SpawnPocketRulesV1 {
-                    kind: match pocket.kind {
-                        cdda_content::SpawnPocketKindDefinition::Container => {
-                            SpawnPocketKindV1::Container
-                        }
-                        cdda_content::SpawnPocketKindDefinition::EFileStorage => {
-                            SpawnPocketKindV1::EFileStorage
-                        }
-                    },
-                    max_contains_volume_milliliters: pocket.max_contains_volume_milliliters,
-                    magazine_well_volume_milliliters: pocket.magazine_well_volume_milliliters,
-                    contents_collapsed_by_default: matches!(
-                        pocket.kind,
-                        cdda_content::SpawnPocketKindDefinition::Container
-                    ) && item.flags.contains("COLLAPSE_CONTENTS"),
-                    max_contains_weight_milligrams: pocket.max_contains_weight_milligrams,
-                    max_item_volume_milliliters: pocket.max_item_volume_milliliters,
-                    min_item_volume_milliliters: pocket.min_item_volume_milliliters,
-                    max_item_length_millimeters: pocket.max_item_length_millimeters,
-                    item_restrictions: pocket.item_restrictions.iter().cloned().collect(),
-                    flag_restrictions: pocket.flag_restrictions.iter().cloned().collect(),
-                    access_moves: pocket.access_moves,
-                    rigid: pocket.rigid,
-                    watertight: pocket.watertight,
-                    transparent: pocket.transparent,
-                    forbidden: pocket.forbidden,
-                    sealable: pocket.sealable,
-                }),
-            }),
-    );
-    pockets.sort_by_key(|pocket| pocket.pocket_index);
-    pockets
 }
 
 #[cfg(test)]
@@ -4774,15 +4708,7 @@ mod tests {
                 .binary_search_by(|flag| flag.as_str().cmp("VARSIZE"))
                 .is_ok()
         );
-        let field_runtime_errors = field_graph
-            .groups
-            .values()
-            .filter_map(|definition| {
-                runtime_item_group_graph(definition, item_group_content)
-                    .err()
-                    .map(|error| (definition.id.as_str(), error.to_string()))
-            })
-            .collect::<Vec<_>>();
+        assert_regional_field_multi_pocket_closure(&field_graph, item_group_content);
         let painkillers = runtime_item_group_graph(
             field_graph
                 .groups
@@ -4899,22 +4825,6 @@ mod tests {
                 if ammunition.type_id == "battery"
                     && eink_tablet.prototype.integral_magazines[0].capacity == 85
         ));
-        assert_eq!(
-            field_runtime_errors.first(),
-            Some(&(
-                "costume_accessories",
-                String::from(
-                    "item-group wrapper leg_sheath6 requires exactly one physical container pocket",
-                ),
-            )),
-            "the field closure must retain its exact next unsupported semantic boundary"
-        );
-        assert!(field_runtime_errors.iter().all(|(group, error)| {
-            !matches!(*group, "accessory_weaponcarry" | "ammo_light_batteries")
-                && !error.contains("variable-size FIT")
-                && !error.contains("unimplemented ammunition loading")
-        }));
-
         let phone_case_graph = item_groups
             .strict_graph("civilian_phones_case")
             .expect("the phone-case containment family should parse as one strict closure");
@@ -5697,7 +5607,8 @@ mod tests {
         let quiver = items
             .get("quiver")
             .expect("pinned default content should contain the starter quiver");
-        let quiver_containers = runtime_ammunition_containers(quiver);
+        let quiver_containers =
+            runtime_ammunition_containers(quiver).expect("starter quiver pockets should normalize");
         assert_eq!(
             quiver_containers,
             [AmmunitionContainerPocketPrototypeV1 {
@@ -5723,7 +5634,8 @@ mod tests {
         let mut sealed_quiver = quiver.clone();
         sealed_quiver.flags.insert(String::from("NO_RELOAD"));
         sealed_quiver.flags.insert(String::from("NO_UNLOAD"));
-        let sealed_projection = runtime_ammunition_containers(&sealed_quiver);
+        let sealed_projection = runtime_ammunition_containers(&sealed_quiver)
+            .expect("sealed quiver pockets should normalize");
         assert!(
             sealed_projection
                 .iter()
@@ -5761,7 +5673,8 @@ mod tests {
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                 },
-                runtime_ammunition_containers(quiver),
+                runtime_ammunition_containers(quiver)
+                    .expect("starter quiver pockets should normalize"),
             )
             .expect("strict starter quiver should spawn");
         let arrow_id = container_world

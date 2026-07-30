@@ -132,6 +132,7 @@ struct ItemGroupOracleObservationV1 {
     default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
     flexible_wrappers: Vec<ItemGroupFlexibleWrapperTraceV1>,
     temperature_constructors: Vec<ItemGroupTemperatureConstructorTraceV1>,
+    multi_pocket_wrappers: Vec<ItemGroupMultiPocketTraceV1>,
     containers: Vec<ItemGroupContainerObservationV1>,
     everyday_corpse: ItemGroupCorpseObservationV1,
     civilian_phone_case: ItemGroupPhoneCaseObservationV1,
@@ -578,6 +579,36 @@ struct ItemGroupContainerObservationV1 {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ItemGroupMultiPocketTraceV1 {
+    case_id: String,
+    seed: u32,
+    wrapper_type: String,
+    payload_type: String,
+    pocket_contents: Vec<Vec<String>>,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupMultiPocketDirectV1 {
+    case_id: String,
+    wrapper_type: String,
+    payload_type: String,
+    pocket_contents: Vec<Vec<String>>,
+}
+
+impl ItemGroupMultiPocketTraceV1 {
+    fn direct_projection(&self) -> ItemGroupMultiPocketDirectV1 {
+        ItemGroupMultiPocketDirectV1 {
+            case_id: self.case_id.clone(),
+            wrapper_type: self.wrapper_type.clone(),
+            payload_type: self.payload_type.clone(),
+            pocket_contents: self.pocket_contents.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ItemGroupContainerTraceV1 {
     witness: String,
     seed: u32,
@@ -886,6 +917,15 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                     .map(ItemGroupChargeCapacitySentinelTraceV1::direct_projection)
                     .collect::<Vec<_>>(),
                 &rust_item_group_charge_capacity_sentinel_observation()?,
+            )?;
+            compare_direct_observation(
+                "item-group multi-pocket first-compatible selection",
+                &observation
+                    .multi_pocket_wrappers
+                    .iter()
+                    .map(ItemGroupMultiPocketTraceV1::direct_projection)
+                    .collect::<Vec<_>>(),
+                &rust_item_group_multi_pocket_observation()?,
             )?;
             println!(
                 "{}",
@@ -2008,6 +2048,53 @@ fn validate_item_group_observation(
         )
         .into());
     }
+    let expected_multi_pocket = [
+        (
+            "leg_sheath_minimum",
+            "leg_sheath6",
+            "throwing_knife",
+            vec![1, 0, 0, 0, 0, 0],
+        ),
+        (
+            "leg_sheath_maximum",
+            "leg_sheath6",
+            "throwing_knife",
+            vec![1, 1, 1, 1, 1, 1],
+        ),
+        (
+            "hard_hat_mandible",
+            "hat_hard",
+            "plastic_mandible_guard",
+            vec![0, 0, 0, 1, 0, 0],
+        ),
+    ];
+    if observation.multi_pocket_wrappers.len() != expected_multi_pocket.len()
+        || observation
+            .multi_pocket_wrappers
+            .iter()
+            .zip(expected_multi_pocket)
+            .any(
+                |(actual, (case_id, wrapper_type, payload_type, pocket_counts))| {
+                    actual.case_id != case_id
+                        || actual.seed == 0
+                        || actual.wrapper_type != wrapper_type
+                        || actual.payload_type != payload_type
+                        || !(0..10_000).contains(&actual.downstream_draw)
+                        || actual
+                            .pocket_contents
+                            .iter()
+                            .map(Vec::len)
+                            .ne(pocket_counts)
+                        || actual
+                            .pocket_contents
+                            .iter()
+                            .flatten()
+                            .any(|payload| payload != payload_type)
+                },
+            )
+    {
+        return Err("item-group multi-pocket characterization is incomplete".into());
+    }
     let expected_containers = [
         ("discard", 1, 1, Vec::<String>::new()),
         (
@@ -2987,6 +3074,150 @@ fn rust_item_group_flexible_wrapper_observation()
             pocket_remaining_volume_ml: projection.pocket_remaining_volume_milliliters,
             pocket_remaining_weight_g: projection.pocket_remaining_weight_grams,
             sealed: projection.sealed,
+        })
+    })
+    .collect()
+}
+
+fn rust_item_group_multi_pocket_observation()
+-> Result<Vec<ItemGroupMultiPocketDirectV1>, Box<dyn std::error::Error>> {
+    let plain = |type_id: &str| ItemGroupItemPrototypeV1 {
+        prototype: CraftItemPrototypeV1 {
+            type_id: type_id.to_owned(),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            tracks_temperature: false,
+            thermal_properties: None,
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            containment: ItemContainmentProfileV1::default(),
+        },
+        maximum_raw_damage: 0,
+        variants: Vec::new(),
+        description_expansion: None,
+        snippets: Vec::new(),
+        initial_variables: BTreeMap::new(),
+        default_container: None,
+        modifier_side_effects_supported: true,
+        charges: None,
+        minimum_one_charge: false,
+        tool_charge_storage: None,
+        charges_supported: true,
+        charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
+        contents_insertion_supported: true,
+    };
+    let pocket = |index: u16, volume: u64, weight: u64, length: u64, accepted_flag: &str| {
+        AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: index,
+            pocket_id: String::new(),
+            capacities: Vec::new(),
+            rigid: false,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind: SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: volume,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
+                max_contains_weight_milligrams: weight,
+                max_item_volume_milliliters: u64::MAX,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: length,
+                item_restrictions: vec![String::from(
+                    cdda_protocol::SPAWN_POCKET_SINGLE_ITEM_MARKER,
+                )],
+                flag_restrictions: vec![accepted_flag.to_owned()],
+                access_moves: 100,
+                rigid: false,
+                watertight: false,
+                transparent: false,
+                forbidden: false,
+                sealable: false,
+            }),
+        }
+    };
+    let wrapper = |type_id: &str, pockets| {
+        let mut item = plain(type_id);
+        item.prototype.ammunition_containers = pockets;
+        ItemGroupContainerV1 {
+            item: Box::new(item),
+            variant_id: None,
+            sealed: false,
+            overflow: ItemGroupOverflowV1::None,
+        }
+    };
+
+    let mut knife = plain("throwing_knife");
+    knife.prototype.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 200_000,
+        volume_milliliters: 56,
+        longest_side_millimeters: 350,
+        flags: vec![String::from("SHEATH_KNIFE")],
+        ..ItemContainmentProfileV1::default()
+    };
+    let sheath = || {
+        wrapper(
+            "leg_sheath6",
+            (0..6)
+                .map(|index| pocket(index, 100, 500_000, 350, "SHEATH_KNIFE"))
+                .collect(),
+        )
+    };
+
+    let mut guard = plain("plastic_mandible_guard");
+    guard.prototype.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 250_000,
+        volume_milliliters: 200,
+        longest_side_millimeters: 100,
+        flags: vec![String::from("HELMET_MANDIBLE_GUARD_STRAPPED")],
+        ..ItemContainmentProfileV1::default()
+    };
+    let hard_hat = wrapper(
+        "hat_hard",
+        [
+            (500, 500_000, u64::MAX, "HELMET_FACE_SHIELD"),
+            (500, 400_000, u64::MAX, "HELMET_EAR_ATTACHMENT"),
+            (500, 250_000, u64::MAX, "HELMET_NAPE_PROTECTOR"),
+            (500, 400_000, u64::MAX, "HELMET_MANDIBLE_GUARD_STRAPPED"),
+            (400, 400_000, u64::MAX, "HELMET_BACK_POUCH"),
+            (300, 500_000, 140, "HELMET_HEAD_ATTACHMENT"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (volume, weight, length, flag))| {
+            pocket(index as u16, volume, weight, length, flag)
+        })
+        .collect(),
+    );
+
+    [
+        ("leg_sheath_minimum", &knife, sheath(), 1_u16),
+        ("leg_sheath_maximum", &knife, sheath(), 6_u16),
+        ("hard_hat_mandible", &guard, hard_hat, 1_u16),
+    ]
+    .into_iter()
+    .map(|(case_id, payload, wrapper, count)| {
+        let projection = cdda_sim::item_group_multi_pocket_projection(payload, wrapper, count)
+            .map_err(|error| format!("Rust multi-pocket projection failed: {error}"))?;
+        Ok(ItemGroupMultiPocketDirectV1 {
+            case_id: case_id.to_owned(),
+            wrapper_type: projection.outer_type,
+            payload_type: payload.prototype.type_id.clone(),
+            pocket_contents: projection
+                .pocket_contents
+                .into_iter()
+                .map(|(_, contents)| contents)
+                .collect(),
         })
     })
     .collect()

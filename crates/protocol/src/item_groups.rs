@@ -8,6 +8,29 @@ use super::{
     MAX_ITEM_RAW_DAMAGE, SimTick, SpawnPocketRulesV1, valid_craft_item_prototype, valid_recipe_id,
 };
 
+/// Reserved canonical marker for pinned holster/ablative single-item
+/// insertion. Protocol 95 already carries ordered item restrictions, so the
+/// field-integration milestone can retain this behavior without changing the
+/// frozen wire shape. Content normalization rejects a real restriction with
+/// this identity.
+pub const SPAWN_POCKET_SINGLE_ITEM_MARKER: &str = "__CDDA_SINGLE_ITEM_POCKET__";
+
+#[must_use]
+pub fn spawn_pocket_is_single_item(rules: &SpawnPocketRulesV1) -> bool {
+    rules
+        .item_restrictions
+        .binary_search_by(|restriction| restriction.as_str().cmp(SPAWN_POCKET_SINGLE_ITEM_MARKER))
+        .is_ok()
+}
+
+#[must_use]
+pub fn spawn_pocket_has_item_restrictions(rules: &SpawnPocketRulesV1) -> bool {
+    rules
+        .item_restrictions
+        .iter()
+        .any(|restriction| restriction != SPAWN_POCKET_SINGLE_ITEM_MARKER)
+}
+
 /// Additional external volume contributed by one physical spawn pocket.
 /// Flexible pockets reserve pinned `magazine_well` volume inside the owning
 /// item's base volume; rigid pockets never expand their owner.
@@ -1395,7 +1418,7 @@ fn item_group_container_insertion_support(container: &ItemGroupContainerV1) -> (
         .filter_map(|pocket| pocket.spawn_rules.as_ref())
         .filter(|rules| rules.kind == super::SpawnPocketKindV1::Container)
         .count();
-    if physical != 1 {
+    if physical == 0 {
         return (false, false);
     }
     item_contents_insertion_support(&container.item)
@@ -1425,9 +1448,6 @@ fn item_contents_insertion_support(item: &ItemGroupItemPrototypeV1) -> (bool, bo
             }
         }
     }
-    if physical > 1 || efiles > 1 {
-        return (false, false);
-    }
     let has_reload_only_pocket = !item.prototype.integral_magazines.is_empty()
         || !item.prototype.magazine_wells.is_empty()
         || item
@@ -1435,11 +1455,15 @@ fn item_contents_insertion_support(item: &ItemGroupItemPrototypeV1) -> (bool, bo
             .ammunition_containers
             .iter()
             .any(|pocket| pocket.spawn_rules.is_none());
+    let has_no_declared_pockets = physical == 0 && efiles == 0 && !has_reload_only_pocket;
     // Estorable payloads choose EFILE first and otherwise follow an exactly
     // represented general-container/drop path. A non-estorable payload can
     // select an integral magazine, magazine well, or ammunition container;
     // those generalized spawn-insertion branches remain fail-closed.
-    (true, !has_reload_only_pocket)
+    (
+        has_no_declared_pockets || physical > 0 || efiles > 0,
+        has_no_declared_pockets || (physical > 0 && !has_reload_only_pocket),
+    )
 }
 
 fn valid_item_group_variants(variants: &[ItemGroupVariantOptionV1]) -> bool {

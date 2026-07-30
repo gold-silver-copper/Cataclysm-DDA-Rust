@@ -341,6 +341,9 @@ pub struct StrictSpawnPocketDefinition {
     pub transparent: bool,
     pub forbidden: bool,
     pub sealable: bool,
+    /// Pinned holster/ablative pockets accept at most one non-combinable item.
+    /// This remains an insertion rule rather than armor presentation state.
+    pub single_item: bool,
 }
 
 impl PocketDefinition {
@@ -432,10 +435,14 @@ impl PocketDefinition {
     pub fn strict_spawn_pocket(&self) -> Option<StrictSpawnPocketDefinition> {
         const FIELDS: &[&str] = &[
             "//",
+            "ablative",
+            "description",
             "ememory_max",
             "flag_restriction",
             "forbidden",
+            "holster",
             "id",
+            "inherits_flags",
             "item_restriction",
             "magazine_well",
             "max_contains_volume",
@@ -448,6 +455,7 @@ impl PocketDefinition {
             "rigid",
             "sealed_data",
             "transparent",
+            "volume_encumber_modifier",
             "watertight",
             "weight_multiplier",
         ];
@@ -512,6 +520,25 @@ impl PocketDefinition {
             }
             Some(_) => return None,
         };
+        if self
+            .raw_fields
+            .get("description")
+            .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+            || self
+                .raw_fields
+                .get("inherits_flags")
+                .is_some_and(|value| !value.is_boolean())
+            || self
+                .raw_fields
+                .get("volume_encumber_modifier")
+                .is_some_and(|value| {
+                    value
+                        .as_f64()
+                        .is_none_or(|value| !value.is_finite() || value < 0.0)
+                })
+        {
+            return None;
+        }
         let max_contains_volume_milliliters = quantity(
             "max_contains_volume",
             QuantityKind::Volume,
@@ -567,6 +594,7 @@ impl PocketDefinition {
             transparent: boolean("transparent", false)?,
             forbidden: boolean("forbidden", false)?,
             sealable,
+            single_item: boolean("holster", false)? || boolean("ablative", false)?,
         })
     }
 }
@@ -3456,6 +3484,7 @@ mod tests {
                 transparent: true,
                 forbidden: false,
                 sealable: true,
+                single_item: false,
             }
         );
         assert_eq!(pockets[1].kind, SpawnPocketKindDefinition::EFileStorage);
@@ -3534,6 +3563,43 @@ mod tests {
             assert!(items[id].spawn_pockets.is_empty());
             assert!(items[id].unsupported_fields.contains("pocket_data"));
         }
+    }
+
+    #[test]
+    fn strict_spawn_pockets_retain_holster_and_ablative_single_item_semantics() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let host = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_multi_pocket_host",
+            "name": "multi-pocket host",
+            "pocket_data": [
+                {
+                    "holster": true,
+                    "magazine_well": "50 ml",
+                    "max_contains_volume": "100 ml",
+                    "max_contains_weight": "500 g",
+                    "max_item_length": "35 cm",
+                    "flag_restriction": ["SHEATH_KNIFE"]
+                },
+                {
+                    "pocket_type": "CONTAINER",
+                    "ablative": true,
+                    "description": "attachment slot",
+                    "inherits_flags": true,
+                    "volume_encumber_modifier": 0,
+                    "max_contains_volume": "500 ml",
+                    "max_contains_weight": "400 g",
+                    "flag_restriction": ["HELMET_EAR_ATTACHMENT"]
+                }
+            ]
+        }));
+        assert!(load_one(&host, &mut items, &mut abstracts).expect("host should load"));
+        let pockets = &items["test_multi_pocket_host"].spawn_pockets;
+        assert_eq!(pockets.len(), 2);
+        assert!(pockets.iter().all(|pocket| pocket.single_item));
+        assert_eq!(pockets[0].magazine_well_volume_milliliters, 50);
+        assert_eq!(pockets[1].pocket_index, 1);
     }
 
     #[test]
@@ -3666,11 +3732,29 @@ mod tests {
             }]
         );
         assert!(items["stone_pouch"].ammunition_containers.is_empty());
-        assert!(
-            items["quiver_takedown_bow"]
-                .ammunition_containers
-                .is_empty()
+        assert_eq!(
+            items["quiver_takedown_bow"].ammunition_containers,
+            [StrictAmmunitionContainerDefinition {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                capacities: BTreeMap::from([
+                    (String::from("arrow"), 16),
+                    (String::from("bolt"), 16),
+                ]),
+                access_moves: 20,
+                rigid: false,
+            }]
         );
+        let takedown_spawn_pockets = &items["quiver_takedown_bow"].spawn_pockets;
+        assert_eq!(takedown_spawn_pockets.len(), 2);
+        assert_eq!(takedown_spawn_pockets[0].pocket_index, 1);
+        assert!(takedown_spawn_pockets[0].single_item);
+        assert_eq!(
+            takedown_spawn_pockets[0].item_restrictions,
+            BTreeSet::from([String::from("takedown_recurbow_folded")])
+        );
+        assert_eq!(takedown_spawn_pockets[1].pocket_index, 2);
+        assert!(!takedown_spawn_pockets[1].single_item);
     }
 
     #[test]

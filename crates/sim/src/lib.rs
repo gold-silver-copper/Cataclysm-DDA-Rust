@@ -56,10 +56,11 @@ use cdda_protocol::{
 
 pub use items::{
     ItemGroupDefaultContainerMode, ItemGroupDefaultContainerProjection,
-    ItemGroupFlexibleWrapperProjection, ItemGroupIntegralChargeProjection, expand_item_description,
+    ItemGroupFlexibleWrapperProjection, ItemGroupIntegralChargeProjection,
+    ItemGroupMultiPocketProjection, expand_item_description,
     item_group_default_container_projection, item_group_fitted_after_phase,
     item_group_flexible_wrapper_projection, item_group_integral_charge_projection,
-    resolve_item_group_charge_range,
+    item_group_multi_pocket_projection, resolve_item_group_charge_range,
 };
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
@@ -1368,6 +1369,10 @@ fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
             .iter()
             .chain(&rules.flag_restrictions)
             .all(|id| validate_item_type_id(id).is_ok())
+        && !rules
+            .flag_restrictions
+            .iter()
+            .any(|restriction| restriction == cdda_protocol::SPAWN_POCKET_SINGLE_ITEM_MARKER)
         && rules
             .item_restrictions
             .windows(2)
@@ -1390,6 +1395,7 @@ fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
                 rules.rigid
                     && rules.magazine_well_volume_milliliters == 0
                     && !rules.contents_collapsed_by_default
+                    && !cdda_protocol::spawn_pocket_is_single_item(rules)
             }
         }
 }
@@ -1430,6 +1436,11 @@ fn validate_ammunition_container_snapshot(
 ) -> Result<(), SimError> {
     validate_ammunition_container_prototype(&ammunition_container_prototype_from_snapshot(pocket))?;
     if pocket.contents.len() > MAX_AMMUNITION_CONTAINER_CONTENTS
+        || (pocket
+            .spawn_state
+            .as_ref()
+            .is_some_and(|state| cdda_protocol::spawn_pocket_is_single_item(&state.rules))
+            && pocket.contents.len() > 1)
         || pocket
             .contents
             .windows(2)
