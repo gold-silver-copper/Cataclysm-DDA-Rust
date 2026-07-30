@@ -14,15 +14,15 @@ pub use item_groups::{
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
     ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1,
     ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupVariantOptionV1, ItemSnippetV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH,
-    MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_SNIPPETS,
-    MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, item_group_catalog_is_valid,
+    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1,
+    ItemSnippetV1, ItemVariableValueV1, ItemVariantV1, MAX_ITEM_GROUP_DEFINITIONS,
+    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
+    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, item_group_catalog_is_valid,
     item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
     item_variant_is_valid, valid_item_variables,
 };
 
-pub const PROTOCOL_VERSION: u16 = 87;
+pub const PROTOCOL_VERSION: u16 = 88;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -941,6 +941,8 @@ pub struct MagazineWellPrototypeV1 {
     pub pocket_id: String,
     /// Concrete compatible MAGAZINE item type IDs in stable order.
     pub compatible_magazine_type_ids: Vec<String>,
+    /// Whether installed magazine volume is already included by the owner.
+    pub rigid: bool,
     /// False when the owning item carries pinned `NO_UNLOAD`.
     pub unloadable: bool,
 }
@@ -2349,6 +2351,7 @@ pub struct MagazineWellSnapshotV1 {
     pub pocket_index: u16,
     pub pocket_id: String,
     pub compatible_magazine_type_ids: Vec<String>,
+    pub rigid: bool,
     pub unloadable: bool,
     pub installed_magazine: Option<Box<ItemSnapshot>>,
 }
@@ -3966,6 +3969,7 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
                 pocket_index: well.pocket_index,
                 pocket_id: well.pocket_id.clone(),
                 compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                rigid: well.rigid,
                 unloadable: well.unloadable,
                 installed_magazine: None,
             })
@@ -5149,16 +5153,6 @@ pub fn item_snapshot_containment_weight_milligrams(item: &ItemSnapshot) -> Optio
 
 #[must_use]
 pub fn item_snapshot_containment_volume_milliliters(item: &ItemSnapshot) -> Option<u64> {
-    // The strict generalized spawn path never installs detachable magazines.
-    // Their well-volume displacement is not represented yet, so a nested
-    // installed well remains fail-closed instead of being estimated.
-    if item
-        .magazine_wells
-        .iter()
-        .any(|well| well.installed_magazine.is_some())
-    {
-        return None;
-    }
     let own = item_containment_volume_milliliters(&item.containment, item.charges)?;
     let integral = item
         .integral_magazines
@@ -5171,6 +5165,14 @@ pub fn item_snapshot_containment_volume_milliliters(item: &ItemSnapshot) -> Opti
                 Some(_) | None => Some(total),
             }
         })?;
+    let wells = item.magazine_wells.iter().try_fold(0_u64, |total, well| {
+        match well.installed_magazine.as_deref() {
+            Some(installed) if !well.rigid => {
+                total.checked_add(item_snapshot_containment_volume_milliliters(installed)?)
+            }
+            Some(_) | None => Some(total),
+        }
+    })?;
     let containers = item
         .ammunition_containers
         .iter()
@@ -5182,7 +5184,9 @@ pub fn item_snapshot_containment_volume_milliliters(item: &ItemSnapshot) -> Opti
                 total.checked_add(item_snapshot_containment_volume_milliliters(content)?)
             })
         })?;
-    own.checked_add(integral)?.checked_add(containers)
+    own.checked_add(integral)?
+        .checked_add(wells)?
+        .checked_add(containers)
 }
 
 fn valid_ammunition_container_prototypes(pockets: &[AmmunitionContainerPocketPrototypeV1]) -> bool {
@@ -5211,6 +5215,7 @@ fn valid_magazine_well_snapshot(well: &MagazineWellSnapshotV1, depth: usize) -> 
         pocket_index: well.pocket_index,
         pocket_id: well.pocket_id.clone(),
         compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+        rigid: well.rigid,
         unloadable: well.unloadable,
     };
     valid_magazine_well_prototype(&prototype)
@@ -6022,7 +6027,7 @@ mod tests {
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
-            charge_ammunition: None,
+            tool_charge_storage: None,
             charges_supported: true,
             modifier_container_capacity_applies: true,
             contents_insertion_supported: true,
@@ -7130,7 +7135,7 @@ mod tests {
         };
         let mut ammunition = ammunition.prototype;
         ammunition.ammunition_type = String::from("battery");
-        tool.charge_ammunition = Some(ammunition);
+        tool.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Integral { ammunition });
         let charged_child =
             definition("a_charged_child", item_group_entry(100, 1, 1, charged_tool));
         let mut charge_modifier = item_group_modifier_entry(
@@ -7157,11 +7162,12 @@ mod tests {
             else {
                 unreachable!("fixture is a direct item")
             };
-            mutate(
-                tool.charge_ammunition
-                    .as_mut()
-                    .expect("charge ammunition exists"),
-            );
+            let Some(ItemGroupToolChargeStorageV1::Integral { ammunition }) =
+                tool.tool_charge_storage.as_mut()
+            else {
+                unreachable!("integral charge storage exists")
+            };
+            mutate(ammunition);
             malformed
         };
         assert!(!item_group_catalog_is_valid(&[malformed_charge_catalog(
@@ -8650,7 +8656,10 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
-            containment: Default::default(),
+            containment: ItemContainmentProfileV1 {
+                volume_milliliters: 17,
+                ..ItemContainmentProfileV1::default()
+            },
         };
         assert!(valid_item_snapshot(&magazine));
         let mut tool = ItemSnapshot {
@@ -8675,6 +8684,7 @@ mod tests {
                 pocket_index: 3,
                 pocket_id: String::from("MAGAZINE_WELL"),
                 compatible_magazine_type_ids: vec![String::from("medium_battery")],
+                rigid: true,
                 unloadable: true,
                 installed_magazine: Some(Box::new(magazine.clone())),
             }],
@@ -8682,7 +8692,10 @@ mod tests {
             residual_energy_millijoules: 0,
             powered_tool: None,
             creature_corpse: None,
-            containment: Default::default(),
+            containment: ItemContainmentProfileV1 {
+                volume_milliliters: 10,
+                ..ItemContainmentProfileV1::default()
+            },
         };
         let mut second_magazine = magazine.clone();
         second_magazine.id = ItemId::new(1, 3);
@@ -8691,10 +8704,26 @@ mod tests {
             pocket_index: 7,
             pocket_id: String::from("AUXILIARY"),
             compatible_magazine_type_ids: vec![String::from("large_battery")],
+            rigid: true,
             unloadable: true,
             installed_magazine: Some(Box::new(second_magazine.clone())),
         });
         assert!(valid_item_snapshot(&tool));
+        assert_eq!(
+            item_snapshot_containment_volume_milliliters(&tool),
+            Some(10)
+        );
+        let mut non_rigid_primary = tool.clone();
+        non_rigid_primary.magazine_wells[0].rigid = false;
+        assert_eq!(
+            item_snapshot_containment_volume_milliliters(&non_rigid_primary),
+            Some(27)
+        );
+        non_rigid_primary.magazine_wells[1].rigid = false;
+        assert_eq!(
+            item_snapshot_containment_volume_milliliters(&non_rigid_primary),
+            Some(44)
+        );
         let mut ids = BTreeSet::new();
         assert!(collect_stable_item_ids(&tool, 1, &mut ids));
         assert_eq!(
@@ -8719,6 +8748,7 @@ mod tests {
                 pocket_index,
                 pocket_id: String::new(),
                 compatible_magazine_type_ids: vec![String::from("large_battery")],
+                rigid: true,
                 unloadable: true,
                 installed_magazine: None,
             });
@@ -9417,6 +9447,7 @@ mod tests {
             pocket_index: 4,
             pocket_id: String::from("COLLISION"),
             compatible_magazine_type_ids: vec![String::from("test_magazine")],
+            rigid: true,
             unloadable: true,
             installed_magazine: None,
         }];

@@ -54,7 +54,7 @@ use cdda_protocol::{
     ItemGroupTargetV1,
 };
 
-use items::{ItemInstance, PlannedItemSpawn, plan_item_group_source};
+use items::{ItemInstance, PlannedItemSpawn, item_from_planned_spawn, plan_item_group_source};
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
 pub const DEFAULT_ACTOR_HP: i32 = 100;
@@ -1264,6 +1264,7 @@ fn validate_magazine_well_snapshot(
         pocket_index: well.pocket_index,
         pocket_id: well.pocket_id.clone(),
         compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+        rigid: well.rigid,
         unloadable: well.unloadable,
     })?;
     if let Some(installed) = &well.installed_magazine
@@ -3164,6 +3165,7 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
                 pocket_index: well.pocket_index,
                 pocket_id: well.pocket_id.clone(),
                 compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                rigid: well.rigid,
                 unloadable: well.unloadable,
                 installed_magazine: None,
             })
@@ -3193,57 +3195,6 @@ fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> It
         creature_corpse: None,
         containment: prototype.containment.clone(),
     }
-}
-
-fn item_from_planned_spawn(
-    id: ItemId,
-    planned: &PlannedItemSpawn,
-    allocator: &mut IdAllocator,
-) -> Result<ItemInstance, SimError> {
-    let mut item = item_from_craft_prototype(id, &planned.prototype);
-    item.raw_damage = planned.raw_damage;
-    item.damage = cdda_protocol::item_damage_level(planned.raw_damage);
-    item.variant.clone_from(&planned.variant);
-    item.snippet.clone_from(&planned.snippet);
-    item.variables.clone_from(&planned.initial_variables);
-    for (pocket_index, ammunition) in &planned.integral_ammunition {
-        let pocket = item
-            .integral_magazines
-            .iter_mut()
-            .find(|pocket| pocket.pocket_index == *pocket_index)
-            .ok_or(SimError::InvalidItem)?;
-        let ammunition_id = allocator.allocate_item()?;
-        pocket.loaded_ammunition = Some(Box::new(
-            item_from_planned_spawn(ammunition_id, ammunition, allocator)?.snapshot(),
-        ));
-    }
-    for (pocket_index, contents) in &planned.pocket_contents {
-        let pocket = item
-            .ammunition_containers
-            .iter_mut()
-            .find(|pocket| pocket.pocket_index == *pocket_index)
-            .ok_or(SimError::InvalidItem)?;
-        for content in contents {
-            let content_id = allocator.allocate_item()?;
-            pocket
-                .contents
-                .push(item_from_planned_spawn(content_id, content, allocator)?.snapshot());
-        }
-    }
-    for pocket_index in &planned.sealed_pockets {
-        let state = item
-            .ammunition_containers
-            .iter_mut()
-            .find(|pocket| pocket.pocket_index == *pocket_index)
-            .and_then(|pocket| pocket.spawn_state.as_mut())
-            .ok_or(SimError::InvalidItem)?;
-        if !state.rules.sealable {
-            return Err(SimError::InvalidItem);
-        }
-        state.sealed = true;
-    }
-    validate_item_snapshot(&item.snapshot())?;
-    Ok(item)
 }
 
 fn planned_item_count(planned: &[PlannedItemSpawn]) -> Result<u64, SimError> {
@@ -3294,6 +3245,7 @@ fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemI
                 pocket_index: well.pocket_index,
                 pocket_id: well.pocket_id.clone(),
                 compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                rigid: well.rigid,
                 unloadable: well.unloadable,
                 installed_magazine: None,
             })
@@ -3390,6 +3342,7 @@ fn component_from_consumed(
                 pocket_index: well.pocket_index,
                 pocket_id: well.pocket_id.clone(),
                 compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                rigid: well.rigid,
                 unloadable: well.unloadable,
             })
             .collect(),
@@ -5198,6 +5151,7 @@ impl WorldState {
                             pocket_index: well.pocket_index,
                             pocket_id: well.pocket_id,
                             compatible_magazine_type_ids: well.compatible_magazine_type_ids,
+                            rigid: well.rigid,
                             unloadable: well.unloadable,
                             installed_magazine: None,
                         })
@@ -13761,7 +13715,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV63");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV64");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13981,7 +13935,7 @@ mod tests {
             modifier_side_effects_supported: true,
             charges,
             minimum_one_charge,
-            charge_ammunition: None,
+            tool_charge_storage: None,
             charges_supported: true,
             modifier_container_capacity_applies: true,
             contents_insertion_supported: true,
@@ -14139,6 +14093,7 @@ mod tests {
                 pocket_index: 0,
                 pocket_id: String::new(),
                 compatible_magazine_type_ids: vec![String::from("light_minus_battery_cell")],
+                rigid: true,
                 unloadable: true,
                 installed_magazine: Some(Box::new(ItemSnapshot {
                     id: world
@@ -20550,6 +20505,7 @@ mod tests {
                 pocket_index: 0,
                 pocket_id: String::new(),
                 compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+                rigid: true,
                 unloadable: true,
                 installed_magazine: Some(Box::new(ItemSnapshot {
                     id: ItemId::new(13, 3),
@@ -24715,6 +24671,7 @@ mod tests {
                     pocket_index: 1,
                     pocket_id: String::from("POWER"),
                     compatible_magazine_type_ids: vec![String::from("test_cell")],
+                    rigid: true,
                     unloadable: true,
                 }],
                 0,
@@ -25054,12 +25011,14 @@ mod tests {
                         pocket_index: 1,
                         pocket_id: String::from("PRIMARY"),
                         compatible_magazine_type_ids: vec![String::from("light_battery")],
+                        rigid: true,
                         unloadable: true,
                     },
                     MagazineWellPrototypeV1 {
                         pocket_index: 4,
                         pocket_id: String::from("AUXILIARY"),
                         compatible_magazine_type_ids: vec![String::from("heavy_battery")],
+                        rigid: true,
                         unloadable: true,
                     },
                 ],
@@ -25277,6 +25236,7 @@ mod tests {
             pocket_index: 0,
             pocket_id: String::new(),
             compatible_magazine_type_ids: vec![String::from("medium_battery")],
+            rigid: true,
             unloadable: true,
         };
         assert!(matches!(
@@ -25598,6 +25558,7 @@ mod tests {
                     pocket_index: 0,
                     pocket_id: String::new(),
                     compatible_magazine_type_ids: vec![String::from("medium_battery")],
+                    rigid: true,
                     unloadable: true,
                 }),
                 0,
@@ -27139,7 +27100,7 @@ mod tests {
                                 modifier_side_effects_supported: true,
                                 charges: None,
                                 minimum_one_charge: false,
-                                charge_ammunition: None,
+                                tool_charge_storage: None,
                                 charges_supported: true,
                                 modifier_container_capacity_applies: true,
                                 contents_insertion_supported: true,

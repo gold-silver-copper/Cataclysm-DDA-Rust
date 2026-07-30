@@ -6414,6 +6414,7 @@ mod tests {
                 pocket_index: 0,
                 pocket_id: String::new(),
                 compatible_magazine_type_ids: vec![String::from("light_minus_battery_cell")],
+                rigid: true,
                 unloadable: true,
                 installed_magazine: Some(Box::new(cdda_protocol::ItemSnapshot {
                     id: cdda_protocol::ItemId::new(31, 111),
@@ -6539,6 +6540,7 @@ mod tests {
                     pocket_index: 0,
                     pocket_id: String::new(),
                     compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+                    rigid: true,
                     unloadable: true,
                     installed_magazine: Some(Box::new(cdda_protocol::ItemSnapshot {
                         id: cdda_protocol::ItemId::new(31, 101),

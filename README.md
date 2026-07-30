@@ -752,6 +752,23 @@ places its drops inside a sealed rigid wrapper and proves identical nested IDs
 and item state through all four execution modes. Databases below schema 65 that
 contain serialized state are rejected before mutation.
 
+Protocol 88 advances to schema 66 and CanonicalStateV64 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Tool charge
+modifiers now resolve either integral storage or one default detachable
+magazine plus its default ammunition before entering simulation. The
+generalized planner always installs the detachable magazine for an explicit
+zero charge, creates ammunition only for a positive charge, and clamps the
+loaded amount to the magazine pocket capacity. Magazine-well rigidity is
+canonical, so rigid wells exclude installed-magazine volume while non-rigid
+wells include it recursively in wrapper fit checks. Exact C++ traces cover
+requests 0, 1, 56, and 100. A production named-group trace also proves that a
+later charge modifier reuses the installed magazine, replaces only its
+ammunition, and preserves the downstream RNG phase; direct Rust comparison and
+direct/snapshot/SQLite/replay conformance preserve the resulting nested stable IDs. The real field
+loot closure now passes `wearable_light` and fails closed at the next retained
+semantic edge, `saint_necklace` description snippet expansion. Databases below
+schema 66 that contain serialized state are rejected before mutation.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

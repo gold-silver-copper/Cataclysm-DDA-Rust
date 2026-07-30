@@ -1,26 +1,32 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    BashDefinition, BashItemGroupSource, ItemDefinition, ItemGroupContentsSource, ItemGroupEvent,
-    ItemGroupOverflow, ItemGroupRegistry, ItemGroupSubtype, ItemRegistry,
-    ItemVariableValueDefinition, PocketTypeDefinition, StrictItemGroupDefinition,
-    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
+    AmmunitionRegistry, BashDefinition, BashItemGroupSource, ItemDefinition,
+    ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
+    ItemGroupSubtype, ItemRegistry, ItemVariableValueDefinition, PocketTypeDefinition,
+    StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
     CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupContainerV1,
     ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
     ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupVariantOptionV1,
-    ItemSnippetV1, ItemVariableValueV1, ItemVariantV1, MAX_ITEM_RAW_DAMAGE,
-    item_group_catalog_is_valid, item_group_source_max_outputs,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1,
+    MAX_ITEM_RAW_DAMAGE, item_group_catalog_is_valid, item_group_source_max_outputs,
 };
 
 use super::{craft_item_prototype, default_instance_charges};
 
+#[derive(Clone, Copy)]
+pub(super) struct RuntimeItemGroupContent<'a> {
+    pub(super) items: &'a ItemRegistry,
+    pub(super) ammunition: &'a AmmunitionRegistry,
+}
+
 pub(super) fn runtime_bash_item_group_source(
     bash: &BashDefinition,
     item_groups: &ItemGroupRegistry,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
     owner_kind: &str,
     owner_id: &str,
 ) -> Result<Option<ItemGroupSourceV1>, Box<dyn std::error::Error>> {
@@ -34,11 +40,11 @@ pub(super) fn runtime_bash_item_group_source(
         )
         .into());
     }
-    let catalog = runtime_strict_item_group_catalog(&graph, items)?;
+    let catalog = runtime_strict_item_group_catalog(&graph, content)?;
     let source = match bash.item_group.as_ref() {
         Some(BashItemGroupSource::Named(group_id)) => ItemGroupSourceV1::Group(group_id.clone()),
         Some(BashItemGroupSource::InlineCollection(_)) => {
-            ItemGroupSourceV1::Inline(runtime_item_group_graph(&graph.root, items)?)
+            ItemGroupSourceV1::Inline(runtime_item_group_graph(&graph.root, content)?)
         }
         None => return Err("bash item-group source disappeared during normalization".into()),
     };
@@ -70,7 +76,7 @@ fn strict_bash_item_group_graph(
 pub(super) fn runtime_bash_item_group_catalog<'a>(
     bashes: impl IntoIterator<Item = &'a BashDefinition>,
     item_groups: &ItemGroupRegistry,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
     let mut reachable = BTreeMap::<String, StrictItemGroupDefinition>::new();
     for bash in bashes {
@@ -101,7 +107,7 @@ pub(super) fn runtime_bash_item_group_catalog<'a>(
     }
     let catalog = reachable
         .values()
-        .map(|definition| runtime_item_group_definition(definition, items))
+        .map(|definition| runtime_item_group_definition(definition, content))
         .collect::<Result<Vec<_>, _>>()?;
     if !item_group_catalog_is_valid(&catalog) {
         return Err("reachable bash item-group catalog is invalid for the current protocol".into());
@@ -111,12 +117,12 @@ pub(super) fn runtime_bash_item_group_catalog<'a>(
 
 fn runtime_strict_item_group_catalog(
     graph: &StrictItemGroupGraph,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
     let catalog = graph
         .groups
         .values()
-        .map(|definition| runtime_item_group_definition(definition, items))
+        .map(|definition| runtime_item_group_definition(definition, content))
         .collect::<Result<Vec<_>, _>>()?;
     if !item_group_catalog_is_valid(&catalog) {
         return Err(format!(
@@ -130,17 +136,17 @@ fn runtime_strict_item_group_catalog(
 
 fn runtime_item_group_definition(
     definition: &StrictItemGroupDefinition,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupDefinitionV1, Box<dyn std::error::Error>> {
     Ok(ItemGroupDefinitionV1 {
         group_id: definition.id.clone(),
-        graph: runtime_item_group_graph(definition, items)?,
+        graph: runtime_item_group_graph(definition, content)?,
     })
 }
 
 pub(super) fn runtime_item_group_graph(
     definition: &StrictItemGroupDefinition,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupGraphV1, Box<dyn std::error::Error>> {
     if definition.ammo_chance != 0 || definition.magazine_chance != 0 {
         return Err(format!(
@@ -169,7 +175,7 @@ pub(super) fn runtime_item_group_graph(
         entries: definition
             .roots
             .iter()
-            .map(|node_id| runtime_item_group_entry(definition, *node_id, &composite_ids, items))
+            .map(|node_id| runtime_item_group_entry(definition, *node_id, &composite_ids, content))
             .collect::<Result<Vec<_>, _>>()?,
     }];
     for (content_node_id, protocol_node_id) in &composite_ids {
@@ -195,7 +201,7 @@ pub(super) fn runtime_item_group_graph(
             entries: children
                 .iter()
                 .map(|node_id| {
-                    runtime_item_group_entry(definition, *node_id, &composite_ids, items)
+                    runtime_item_group_entry(definition, *node_id, &composite_ids, content)
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
         });
@@ -207,7 +213,7 @@ pub(super) fn runtime_item_group_graph(
             .wrapper
             .as_ref()
             .map(|wrapper| {
-                let item = items.get(&wrapper.item).ok_or_else(|| {
+                let item = content.items.get(&wrapper.item).ok_or_else(|| {
                     format!(
                         "item group {} references missing wrapper item {}",
                         definition.id, wrapper.item
@@ -218,7 +224,7 @@ pub(super) fn runtime_item_group_graph(
                     wrapper.variant.clone(),
                     wrapper.sealed,
                     wrapper.overflow,
-                    items,
+                    content,
                 )
             })
             .transpose()?,
@@ -277,7 +283,7 @@ fn runtime_item_group_entry(
     definition: &StrictItemGroupDefinition,
     node_id: u32,
     composite_ids: &BTreeMap<u32, u16>,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupEntryV1, Box<dyn std::error::Error>> {
     let node = strict_item_group_node(definition, node_id)?;
     let raw_damage = node
@@ -299,7 +305,7 @@ fn runtime_item_group_entry(
         });
     let target = match &node.kind {
         StrictItemGroupNodeKind::Item(item_id) => {
-            let item = items.get(item_id).ok_or_else(|| {
+            let item = content.items.get(item_id).ok_or_else(|| {
                 format!(
                     "item group {} references missing concrete item {item_id}",
                     definition.id
@@ -308,7 +314,7 @@ fn runtime_item_group_entry(
             ItemGroupTargetV1::Item(Box::new(runtime_item_group_item(
                 item,
                 node.charges,
-                items,
+                content,
             )?))
         }
         StrictItemGroupNodeKind::Group(group_id) => ItemGroupTargetV1::Group(group_id.clone()),
@@ -346,14 +352,14 @@ fn runtime_item_group_entry(
             .iter()
             .map(|contents| match contents {
                 ItemGroupContentsSource::Item(item_id) => {
-                    let item = items.get(item_id).ok_or_else(|| {
+                    let item = content.items.get(item_id).ok_or_else(|| {
                         format!(
                             "item group {} references missing contents item {item_id}",
                             definition.id
                         )
                     })?;
                     Ok(ItemGroupContentsSourceV1::Item(Box::new(
-                        runtime_item_group_item(item, None, items)?,
+                        runtime_item_group_item(item, None, content)?,
                     )))
                 }
                 ItemGroupContentsSource::Group(group_id) => {
@@ -366,7 +372,7 @@ fn runtime_item_group_entry(
             .direct_wrapper
             .as_ref()
             .map(|wrapper| {
-                let item = items.get(&wrapper.item).ok_or_else(|| {
+                let item = content.items.get(&wrapper.item).ok_or_else(|| {
                     format!(
                         "item group {} references missing entry wrapper {}",
                         definition.id, wrapper.item
@@ -380,7 +386,7 @@ fn runtime_item_group_entry(
                     // the pinned implementation.
                     true,
                     ItemGroupOverflow::None,
-                    items,
+                    content,
                 )
             })
             .transpose()?,
@@ -389,7 +395,7 @@ fn runtime_item_group_entry(
             .as_ref()
             .filter(|item_id| item_id.as_str() != "null")
             .map(|item_id| {
-                let item = items.get(item_id).ok_or_else(|| {
+                let item = content.items.get(item_id).ok_or_else(|| {
                     format!(
                         "item group {} references missing modifier container {item_id}",
                         definition.id
@@ -400,7 +406,7 @@ fn runtime_item_group_entry(
                     None,
                     node.modifier_sealed.unwrap_or(true),
                     ItemGroupOverflow::None,
-                    items,
+                    content,
                 )
             })
             .transpose()?,
@@ -411,46 +417,22 @@ fn runtime_item_group_entry(
 fn runtime_item_group_item(
     item: &ItemDefinition,
     charges: Option<cdda_content::ItemGroupChargesRange>,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
     let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
-    let prototype = craft_item_prototype(item, default_instance_charges(item), items)?;
+    let prototype = craft_item_prototype(item, default_instance_charges(item), content.items)?;
     validate_item_group_item_spawn(item, &prototype, false)?;
     let modifier_side_effects_supported =
         validate_item_group_item_spawn(item, &prototype, true).is_ok();
-    let charges_supported = item_group_charges_supported(item);
+    let tool_charge_storage = runtime_tool_charge_storage(item, &prototype, content)?;
+    let charges_supported = if item.subtypes.contains("TOOL") {
+        tool_charge_storage.is_some()
+    } else {
+        item_group_charges_supported(item)
+    };
     if charges.is_some() && !charges_supported {
         return Err(format!("item group item {} cannot retain charge modifiers", item.id).into());
     }
-    let charge_ammunition = if charges_supported && item.subtypes.contains("TOOL") {
-        let [pocket] = prototype.integral_magazines.as_slice() else {
-            return Err(format!(
-                "item-group charges for tool {} require exactly one integral magazine",
-                item.id
-            )
-            .into());
-        };
-        let ammunition_definition = items.get(&pocket.ammunition_type).ok_or_else(|| {
-            format!(
-                "item-group tool {} has no concrete default ammunition {}",
-                item.id, pocket.ammunition_type
-            )
-        })?;
-        validate_charge_ammunition_constructor_state(ammunition_definition)?;
-        let mut ammunition = craft_item_prototype(ammunition_definition, 1, items)?;
-        validate_item_group_item_spawn(ammunition_definition, &ammunition, false)?;
-        if ammunition.ammunition_type != pocket.ammunition_type {
-            return Err(format!(
-                "item-group tool {} default ammunition does not match {}",
-                item.id, pocket.ammunition_type
-            )
-            .into());
-        }
-        ammunition.charges = 1;
-        Some(ammunition)
-    } else {
-        None
-    };
     let contents_insertion_supported = item_group_contents_insertion_supported(item, &prototype);
     Ok(ItemGroupItemPrototypeV1 {
         prototype,
@@ -486,7 +468,7 @@ fn runtime_item_group_item(
         modifier_side_effects_supported,
         charges,
         minimum_one_charge,
-        charge_ammunition,
+        tool_charge_storage,
         charges_supported,
         modifier_container_capacity_applies: matches!(item.phase.as_str(), "LIQUID" | "liquid")
             || !item
@@ -495,6 +477,106 @@ fn runtime_item_group_item(
                 .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE")),
         contents_insertion_supported,
     })
+}
+
+fn runtime_tool_charge_storage(
+    item: &ItemDefinition,
+    prototype: &CraftItemPrototypeV1,
+    content: RuntimeItemGroupContent<'_>,
+) -> Result<Option<ItemGroupToolChargeStorageV1>, Box<dyn std::error::Error>> {
+    if !item.subtypes.contains("TOOL") {
+        return Ok(None);
+    }
+    if let [pocket] = prototype.integral_magazines.as_slice()
+        && prototype.magazine_wells.is_empty()
+    {
+        let ammunition =
+            runtime_default_ammunition_prototype(item, &pocket.ammunition_type, content)?;
+        return Ok(Some(ItemGroupToolChargeStorageV1::Integral { ammunition }));
+    }
+    let ([well], [raw_well]) = (
+        prototype.magazine_wells.as_slice(),
+        item.magazine_wells.as_slice(),
+    ) else {
+        return Ok(None);
+    };
+    if !prototype.integral_magazines.is_empty()
+        || raw_well.pocket_index != well.pocket_index
+        || raw_well.default_magazine.is_empty()
+    {
+        return Ok(None);
+    }
+    let magazine_definition = content
+        .items
+        .get(&raw_well.default_magazine)
+        .ok_or_else(|| {
+            format!(
+                "item-group tool {} references missing default magazine {}",
+                item.id, raw_well.default_magazine
+            )
+        })?;
+    let magazine_shape = magazine_definition.strict_magazine().ok_or_else(|| {
+        format!(
+            "item-group tool {} default magazine {} is not a strict single-pocket magazine",
+            item.id, magazine_definition.id
+        )
+    })?;
+    if well
+        .compatible_magazine_type_ids
+        .binary_search(&magazine_definition.id)
+        .is_err()
+    {
+        return Err(format!(
+            "item-group tool {} default magazine {} is incompatible with well {}",
+            item.id, magazine_definition.id, well.pocket_index
+        )
+        .into());
+    }
+    validate_charge_item_constructor_state(magazine_definition)?;
+    let magazine = craft_item_prototype(magazine_definition, 0, content.items)?;
+    validate_item_group_item_spawn(magazine_definition, &magazine, false)?;
+    let ammunition =
+        runtime_default_ammunition_prototype(item, &magazine_shape.ammunition_type, content)?;
+    Ok(Some(ItemGroupToolChargeStorageV1::Detachable {
+        well_pocket_index: well.pocket_index,
+        magazine,
+        ammunition: Box::new(ammunition),
+    }))
+}
+
+fn runtime_default_ammunition_prototype(
+    tool: &ItemDefinition,
+    ammunition_type: &str,
+    content: RuntimeItemGroupContent<'_>,
+) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
+    let default_id = &content
+        .ammunition
+        .get(ammunition_type)
+        .ok_or_else(|| {
+            format!(
+                "item-group tool {} references missing ammunition type {ammunition_type}",
+                tool.id
+            )
+        })?
+        .default_item;
+    let definition = content.items.get(default_id).ok_or_else(|| {
+        format!(
+            "item-group tool {} has no concrete default ammunition {} for {ammunition_type}",
+            tool.id, default_id
+        )
+    })?;
+    validate_charge_item_constructor_state(definition)?;
+    let mut ammunition = craft_item_prototype(definition, 1, content.items)?;
+    validate_item_group_item_spawn(definition, &ammunition, false)?;
+    if ammunition.ammunition_type != ammunition_type {
+        return Err(format!(
+            "item-group tool {} default ammunition {} does not match {ammunition_type}",
+            tool.id, definition.id
+        )
+        .into());
+    }
+    ammunition.charges = 1;
+    Ok(ammunition)
 }
 
 fn item_group_contents_insertion_supported(
@@ -528,16 +610,16 @@ fn item_group_contents_insertion_supported(
     })
 }
 
-fn validate_charge_ammunition_constructor_state(
-    ammunition: &ItemDefinition,
+fn validate_charge_item_constructor_state(
+    item: &ItemDefinition,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !runtime_item_variants(ammunition)?.is_empty()
-        || !ammunition.snippets.is_empty()
-        || !ammunition.variables.is_empty()
+    if !runtime_item_variants(item)?.is_empty()
+        || !item.snippets.is_empty()
+        || !item.variables.is_empty()
     {
         return Err(format!(
-            "charge ammunition {} has constructor variant, snippet, or variable state that is not represented by ItemGroupItemPrototypeV1::charge_ammunition",
-            ammunition.id
+            "tool-charge item {} has constructor variant, snippet, or variable state that is not represented by ItemGroupToolChargeStorageV1",
+            item.id
         )
         .into());
     }
@@ -549,9 +631,9 @@ fn runtime_item_group_container(
     variant_id: Option<String>,
     sealed: bool,
     overflow: ItemGroupOverflow,
-    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
-    let item = runtime_item_group_item(item, None, items)?;
+    let item = runtime_item_group_item(item, None, content)?;
     let physical_pockets = item
         .prototype
         .ammunition_containers
@@ -869,12 +951,17 @@ fn item_group_charges_supported(item: &ItemDefinition) -> bool {
         return true;
     }
     if item.subtypes.contains("TOOL") {
-        return item
+        let integral = item
             .pockets
             .iter()
             .filter(|pocket| pocket.strict_integral_magazine().is_some())
-            .count()
-            == 1;
+            .count();
+        let detachable = item
+            .magazine_wells
+            .iter()
+            .filter(|well| !well.default_magazine.is_empty())
+            .count();
+        return (integral == 1 && detachable == 0) || (integral == 0 && detachable == 1);
     }
     item.flags.contains("CAN_HAVE_CHARGES")
 }
@@ -933,33 +1020,33 @@ mod tests {
     }
 
     #[test]
-    fn charge_ammunition_constructor_state_fails_closed() {
+    fn charge_item_constructor_state_fails_closed() {
         let plain = ItemDefinition {
             id: String::from("plain_ammunition"),
             ..ItemDefinition::default()
         };
-        assert!(validate_charge_ammunition_constructor_state(&plain).is_ok());
+        assert!(validate_charge_item_constructor_state(&plain).is_ok());
 
         let mut variant = plain.clone();
         variant.variants = vec![ItemVariantDefinition {
             id: String::from("tracer"),
             ..ItemVariantDefinition::default()
         }];
-        assert!(validate_charge_ammunition_constructor_state(&variant).is_err());
+        assert!(validate_charge_item_constructor_state(&variant).is_err());
 
         let mut snippet = plain.clone();
         snippet.snippets = vec![cdda_content::ItemSnippetDefinition {
             id: String::from("marked"),
             text: String::from("Marked lot"),
         }];
-        assert!(validate_charge_ammunition_constructor_state(&snippet).is_err());
+        assert!(validate_charge_item_constructor_state(&snippet).is_err());
 
         let mut variable = plain;
         variable.variables.insert(
             String::from("lot"),
             cdda_content::ItemVariableValueDefinition::Integer(7),
         );
-        assert!(validate_charge_ammunition_constructor_state(&variable).is_err());
+        assert!(validate_charge_item_constructor_state(&variable).is_err());
     }
 
     #[test]

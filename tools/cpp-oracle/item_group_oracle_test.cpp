@@ -210,6 +210,103 @@ int create_with_charges( unsigned int seed, int minimum, int maximum )
     return items.front().charges;
 }
 
+struct tool_charge_trace {
+    int requested_charges = 0;
+    std::string tool_type;
+    bool magazine_present = false;
+    std::string magazine_type;
+    std::string ammunition_type;
+    int ammunition_remaining = 0;
+    int remaining_capacity = 0;
+};
+
+tool_charge_trace observe_tool_charges( int requested_charges )
+{
+    Single_item_creator creator( "wearable_light", Single_item_creator::S_ITEM, 100,
+                                 "Rust item-group detachable tool charge oracle" );
+    creator.modifier.emplace();
+    creator.modifier->charges = { requested_charges, requested_charges };
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( 8675309 );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    const item &tool = items.front();
+    const item *magazine = tool.magazine_current();
+    return {
+        requested_charges,
+        tool.typeId().str(),
+        magazine != nullptr,
+        magazine == nullptr ? "" : magazine->typeId().str(),
+        tool.ammo_current().str(),
+        tool.ammo_remaining(),
+        tool.remaining_ammo_capacity()
+    };
+}
+
+struct repeated_tool_charge_trace {
+    std::string source_group;
+    unsigned int seed = 0;
+    int leaf_minimum = 0;
+    int leaf_maximum = 0;
+    int replacement_requested = 0;
+    std::string tool_type;
+    std::string magazine_type;
+    std::string ammunition_type;
+    int ammunition_remaining = 0;
+    int downstream_draw = 0;
+};
+
+repeated_tool_charge_trace observe_repeated_tool_charges()
+{
+    constexpr const char *source_group = "accesories_personal_unisex_child";
+    constexpr int replacement_requested = 1;
+    unsigned int selected_seed = 0;
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        Single_item_creator selector( source_group, Single_item_creator::S_ITEM_GROUP, 100,
+                                      "Rust repeated detachable tool charge seed search" );
+        Item_spawn_data::ItemList items;
+        Item_spawn_data::RecursionList recursion;
+        rng_set_engine_seed( seed );
+        selector.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+        if( items.size() == 1 && items.front().typeId() == itype_id( "wearable_light" ) ) {
+            selected_seed = seed;
+            break;
+        }
+    }
+    if( selected_seed == 0 ) {
+        FAIL( "could not select the repeated detachable tool-charge witness" );
+        return {};
+    }
+    Single_item_creator creator( source_group, Single_item_creator::S_ITEM_GROUP, 100,
+                                 "Rust repeated detachable tool charge oracle" );
+    creator.modifier.emplace();
+    creator.modifier->charges = { replacement_requested, replacement_requested };
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( selected_seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    if( items.size() != 1 || items.front().typeId() != itype_id( "wearable_light" ) ||
+        items.front().magazine_current() == nullptr ) {
+        FAIL( "repeated detachable tool-charge witness changed after modifier application" );
+        return {};
+    }
+    const item &tool = items.front();
+    const item &magazine = *tool.magazine_current();
+    return {
+        source_group,
+        selected_seed,
+        0,
+        100,
+        replacement_requested,
+        tool.typeId().str(),
+        magazine.typeId().str(),
+        tool.ammo_current().str(),
+        tool.ammo_remaining(),
+        rng( 0, 9999 )
+    };
+}
+
 struct modifier_container_capacity_trace {
     unsigned int seed = 0;
     std::string container_type;
@@ -706,6 +803,12 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     const unsigned int maximum_charges_seed = seed_for_observed_charges( 1, 4, 4 );
     const int minimum_charges = create_with_charges( minimum_charges_seed, 1, 4 );
     const int maximum_charges = create_with_charges( maximum_charges_seed, 1, 4 );
+    std::vector<tool_charge_trace> tool_charges;
+    for( const int requested : { 0, 1, 56, 100 } ) {
+        tool_charges.push_back( observe_tool_charges( requested ) );
+    }
+    const repeated_tool_charge_trace repeated_tool_charges = observe_repeated_tool_charges();
+    REQUIRE( repeated_tool_charges.seed > 0 );
 
     constexpr unsigned int modifier_rng_seed = 73;
     rng_set_engine_seed( modifier_rng_seed );
@@ -901,6 +1004,35 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "observed", maximum_charges );
         json.end_object();
         json.end_array();
+
+        json.member( "tool_charges" );
+        json.start_array();
+        for( const tool_charge_trace &trace : tool_charges ) {
+            json.start_object();
+            json.member( "requested_charges", trace.requested_charges );
+            json.member( "tool_type", trace.tool_type );
+            json.member( "magazine_present", trace.magazine_present );
+            json.member( "magazine_type", trace.magazine_type );
+            json.member( "ammunition_type", trace.ammunition_type );
+            json.member( "ammunition_remaining", trace.ammunition_remaining );
+            json.member( "remaining_capacity", trace.remaining_capacity );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "repeated_tool_charges" );
+        json.start_object();
+        json.member( "source_group", repeated_tool_charges.source_group );
+        json.member( "seed", repeated_tool_charges.seed );
+        json.member( "leaf_minimum", repeated_tool_charges.leaf_minimum );
+        json.member( "leaf_maximum", repeated_tool_charges.leaf_maximum );
+        json.member( "replacement_requested", repeated_tool_charges.replacement_requested );
+        json.member( "tool_type", repeated_tool_charges.tool_type );
+        json.member( "magazine_type", repeated_tool_charges.magazine_type );
+        json.member( "ammunition_type", repeated_tool_charges.ammunition_type );
+        json.member( "ammunition_remaining", repeated_tool_charges.ammunition_remaining );
+        json.member( "downstream_draw", repeated_tool_charges.downstream_draw );
+        json.end_object();
 
         json.member( "modifier_rng_phase" );
         json.start_object();

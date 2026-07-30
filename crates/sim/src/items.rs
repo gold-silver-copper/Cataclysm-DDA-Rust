@@ -5,10 +5,10 @@ use cdda_protocol::{
     IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupContainerV1,
     ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
     ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupOverflowV1, ItemGroupSourceV1,
-    ItemGroupTargetV1, ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH,
-    MAX_ITEM_GROUP_OUTPUTS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1,
-    PoweredToolStateV1, RangedWeaponSnapshot, SpawnPocketKindV1,
+    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemId,
+    ItemSnapshot, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1, MAX_ITEM_COMPONENT_DEPTH,
+    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MILLIJOULES_PER_BATTERY_CHARGE,
+    MagazineWellSnapshotV1, PoweredToolStateV1, RangedWeaponSnapshot, SpawnPocketKindV1,
     item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
     item_containment_weight_milligrams,
 };
@@ -17,9 +17,10 @@ use rand_core::Rng;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    SimError, debit_integral_magazine_charges, debit_snapshot_ammunition_charges,
-    inclusive_rng_u64, powered_light_effective_emission, snapshot_ammunition_capacity,
-    snapshot_stored_ammunition_charges, validate_craft_item_prototype, validate_item_snapshot,
+    IdAllocator, SimError, debit_integral_magazine_charges, debit_snapshot_ammunition_charges,
+    inclusive_rng_u64, item_from_craft_prototype, powered_light_effective_emission,
+    snapshot_ammunition_capacity, snapshot_stored_ammunition_charges,
+    validate_craft_item_prototype, validate_item_snapshot,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -350,12 +351,75 @@ pub(super) struct PlannedItemSpawn {
     modifier_side_effects_supported: bool,
     charges_supported: bool,
     modifier_container_capacity_applies: bool,
-    charge_ammunition: Option<CraftItemPrototypeV1>,
+    tool_charge_storage: Option<ItemGroupToolChargeStorageV1>,
     minimum_one_charge: bool,
     default_charge_range: Option<cdda_protocol::InclusiveI32RangeV1>,
     pub(super) pocket_contents: BTreeMap<u16, Vec<PlannedItemSpawn>>,
     pub(super) sealed_pockets: BTreeSet<u16>,
     pub(super) integral_ammunition: BTreeMap<u16, Box<PlannedItemSpawn>>,
+    pub(super) detachable_magazines: BTreeMap<u16, Box<PlannedItemSpawn>>,
+}
+
+pub(super) fn item_from_planned_spawn(
+    id: ItemId,
+    planned: &PlannedItemSpawn,
+    allocator: &mut IdAllocator,
+) -> Result<ItemInstance, SimError> {
+    let mut item = item_from_craft_prototype(id, &planned.prototype);
+    item.raw_damage = planned.raw_damage;
+    item.damage = cdda_protocol::item_damage_level(planned.raw_damage);
+    item.variant.clone_from(&planned.variant);
+    item.snippet.clone_from(&planned.snippet);
+    item.variables.clone_from(&planned.initial_variables);
+    for (pocket_index, ammunition) in &planned.integral_ammunition {
+        let pocket = item
+            .integral_magazines
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .ok_or(SimError::InvalidItem)?;
+        let ammunition_id = allocator.allocate_item()?;
+        pocket.loaded_ammunition = Some(Box::new(
+            item_from_planned_spawn(ammunition_id, ammunition, allocator)?.snapshot(),
+        ));
+    }
+    for (pocket_index, magazine) in &planned.detachable_magazines {
+        let pocket = item
+            .magazine_wells
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .ok_or(SimError::InvalidItem)?;
+        let magazine_id = allocator.allocate_item()?;
+        pocket.installed_magazine = Some(Box::new(
+            item_from_planned_spawn(magazine_id, magazine, allocator)?.snapshot(),
+        ));
+    }
+    for (pocket_index, contents) in &planned.pocket_contents {
+        let pocket = item
+            .ammunition_containers
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .ok_or(SimError::InvalidItem)?;
+        for content in contents {
+            let content_id = allocator.allocate_item()?;
+            pocket
+                .contents
+                .push(item_from_planned_spawn(content_id, content, allocator)?.snapshot());
+        }
+    }
+    for pocket_index in &planned.sealed_pockets {
+        let state = item
+            .ammunition_containers
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .and_then(|pocket| pocket.spawn_state.as_mut())
+            .ok_or(SimError::InvalidItem)?;
+        if !state.rules.sealable {
+            return Err(SimError::InvalidItem);
+        }
+        state.sealed = true;
+    }
+    validate_item_snapshot(&item.snapshot())?;
+    Ok(item)
 }
 
 pub(super) fn plan_item_group_source(
@@ -623,12 +687,13 @@ fn construct_item_group_item_with_fit_phase(
         modifier_side_effects_supported: item.modifier_side_effects_supported,
         charges_supported: item.charges_supported,
         modifier_container_capacity_applies: item.modifier_container_capacity_applies,
-        charge_ammunition: item.charge_ammunition.clone(),
+        tool_charge_storage: item.tool_charge_storage.clone(),
         minimum_one_charge: item.minimum_one_charge,
         default_charge_range: item.charges,
         pocket_contents: BTreeMap::new(),
         sealed_pockets: BTreeSet::new(),
         integral_ammunition: BTreeMap::new(),
+        detachable_magazines: BTreeMap::new(),
     })
 }
 
@@ -655,12 +720,13 @@ fn construct_charge_ammunition(
         modifier_side_effects_supported: true,
         charges_supported: true,
         modifier_container_capacity_applies: false,
-        charge_ammunition: None,
+        tool_charge_storage: None,
         minimum_one_charge: true,
         default_charge_range: None,
         pocket_contents: BTreeMap::new(),
         sealed_pockets: BTreeSet::new(),
         integral_ammunition: BTreeMap::new(),
+        detachable_magazines: BTreeMap::new(),
     })
 }
 
@@ -740,20 +806,63 @@ fn apply_item_group_charges(
     } else {
         rolled
     };
-    if let Some(ammunition) = &planned.charge_ammunition {
-        let [pocket] = planned.prototype.integral_magazines.as_slice() else {
-            return Err(SimError::InvalidItem);
-        };
-        planned.integral_ammunition.remove(&pocket.pocket_index);
-        if rolled > 0 {
-            let capacity = i32::try_from(pocket.capacity).map_err(|_| SimError::NumericOverflow)?;
-            let loaded = construct_charge_ammunition(ammunition, rolled.min(capacity), rng)?;
-            planned
-                .integral_ammunition
-                .insert(pocket.pocket_index, Box::new(loaded));
+    match planned.tool_charge_storage.clone() {
+        Some(ItemGroupToolChargeStorageV1::Integral { ammunition }) => {
+            let [pocket] = planned.prototype.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            planned.integral_ammunition.remove(&pocket.pocket_index);
+            if rolled > 0 {
+                let capacity =
+                    i32::try_from(pocket.capacity).map_err(|_| SimError::NumericOverflow)?;
+                let loaded = construct_charge_ammunition(&ammunition, rolled.min(capacity), rng)?;
+                planned
+                    .integral_ammunition
+                    .insert(pocket.pocket_index, Box::new(loaded));
+            }
         }
-    } else {
-        planned.prototype.charges = rolled;
+        Some(ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index,
+            magazine,
+            ammunition,
+            ..
+        }) => {
+            let [well] = planned.prototype.magazine_wells.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            if well.pocket_index != well_pocket_index
+                || well
+                    .compatible_magazine_type_ids
+                    .binary_search(&magazine.type_id)
+                    .is_err()
+            {
+                return Err(SimError::InvalidItem);
+            }
+            let [magazine_pocket] = magazine.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            let capacity =
+                i32::try_from(magazine_pocket.capacity).map_err(|_| SimError::NumericOverflow)?;
+            let mut loaded_magazine = match planned.detachable_magazines.remove(&well_pocket_index)
+            {
+                Some(installed) if installed.prototype == magazine => *installed,
+                Some(_) => return Err(SimError::InvalidItem),
+                None => construct_charge_ammunition(&magazine, 0, rng)?,
+            };
+            loaded_magazine
+                .integral_ammunition
+                .remove(&magazine_pocket.pocket_index);
+            if rolled > 0 {
+                let loaded = construct_charge_ammunition(&ammunition, rolled.min(capacity), rng)?;
+                loaded_magazine
+                    .integral_ammunition
+                    .insert(magazine_pocket.pocket_index, Box::new(loaded));
+            }
+            planned
+                .detachable_magazines
+                .insert(well_pocket_index, Box::new(loaded_magazine));
+        }
+        None => planned.prototype.charges = rolled,
     }
     Ok(())
 }
@@ -762,7 +871,7 @@ fn modifier_container_charge_capacity(
     planned: &PlannedItemSpawn,
     container: &PlannedItemSpawn,
 ) -> Result<Option<i32>, SimError> {
-    if !planned.modifier_container_capacity_applies || planned.charge_ammunition.is_some() {
+    if !planned.modifier_container_capacity_applies || planned.tool_charge_storage.is_some() {
         // Tool ammunition capacity is owned by the tool/magazine rather than
         // by the modifier container in pinned Item_modifier.
         return Ok(None);
@@ -891,7 +1000,7 @@ fn construct_item_group_container(
     rng: &mut ChaCha8Rng,
     consumes_fit_phase: bool,
 ) -> Result<PlannedItemSpawn, SimError> {
-    if wrapper.item.charges.is_some() || wrapper.item.charge_ammunition.is_some() {
+    if wrapper.item.charges.is_some() || wrapper.item.tool_charge_storage.is_some() {
         return Err(SimError::InvalidItem);
     }
     let mut container =
@@ -1003,6 +1112,7 @@ impl PlannedItemSpawn {
             .values()
             .flatten()
             .chain(self.integral_ammunition.values().map(Box::as_ref))
+            .chain(self.detachable_magazines.values().map(Box::as_ref))
             .try_fold(1_u64, |total, child| {
                 total.checked_add(child.object_count()?)
             })
@@ -1013,6 +1123,7 @@ impl PlannedItemSpawn {
             .values()
             .flatten()
             .chain(self.integral_ammunition.values().map(Box::as_ref))
+            .chain(self.detachable_magazines.values().map(Box::as_ref))
             .try_fold(0_usize, |depth, child| {
                 child
                     .containment_depth()?
@@ -1041,6 +1152,12 @@ impl PlannedItemSpawn {
             .try_fold(0_u64, |total, child| {
                 total.checked_add(child.total_weight_milligrams()?)
             })?;
+        let detachable = self
+            .detachable_magazines
+            .values()
+            .try_fold(0_u64, |total, child| {
+                total.checked_add(child.total_weight_milligrams()?)
+            })?;
         let pocketed =
             self.pocket_contents
                 .iter()
@@ -1061,7 +1178,9 @@ impl PlannedItemSpawn {
                         total.checked_add(child.total_weight_milligrams()?)
                     })
                 })?;
-        own.checked_add(integral)?.checked_add(pocketed)
+        own.checked_add(integral)?
+            .checked_add(detachable)?
+            .checked_add(pocketed)
     }
 
     fn total_volume_milliliters(&self) -> Option<u64> {
@@ -1084,6 +1203,16 @@ impl PlannedItemSpawn {
                         total.checked_add(child.total_volume_milliliters()?)
                     }
                 })?;
+        let detachable =
+            self.detachable_magazines
+                .iter()
+                .try_fold(0_u64, |total, (pocket_index, child)| {
+                    if self.detachable_well_is_rigid(*pocket_index)? {
+                        Some(total)
+                    } else {
+                        total.checked_add(child.total_volume_milliliters()?)
+                    }
+                })?;
         let pocketed =
             self.pocket_contents
                 .iter()
@@ -1100,11 +1229,22 @@ impl PlannedItemSpawn {
                         total.checked_add(child.total_volume_milliliters()?)
                     })
                 })?;
-        own.checked_add(integral)?.checked_add(pocketed)
+        own.checked_add(integral)?
+            .checked_add(detachable)?
+            .checked_add(pocketed)
+    }
+
+    fn detachable_well_is_rigid(&self, pocket_index: u16) -> Option<bool> {
+        self.prototype
+            .magazine_wells
+            .iter()
+            .find(|well| well.pocket_index == pocket_index)
+            .map(|well| well.rigid)
     }
 
     fn has_no_contained_items(&self) -> bool {
         self.integral_ammunition.is_empty()
+            && self.detachable_magazines.is_empty()
             && self.pocket_contents.values().all(std::vec::Vec::is_empty)
     }
 
@@ -1113,6 +1253,7 @@ impl PlannedItemSpawn {
             .integral_ammunition
             .values()
             .map(Box::as_ref)
+            .chain(self.detachable_magazines.values().map(Box::as_ref))
             .collect::<Vec<_>>();
         for (pocket_index, pocket_contents) in &self.pocket_contents {
             let pocket = self
@@ -1269,7 +1410,9 @@ fn spawn_pocket_accepts(
         return Ok(profile.estorable);
     }
     if profile.count_by_charges
-        && (!payload.pocket_contents.is_empty() || !payload.integral_ammunition.is_empty())
+        && (!payload.pocket_contents.is_empty()
+            || !payload.integral_ammunition.is_empty()
+            || !payload.detachable_magazines.is_empty())
     {
         // Pinned max-item-volume recursively inspects soft count-by-charge
         // contents. Rigidity/charge apportionment for that shape is not in the
@@ -1361,6 +1504,8 @@ fn planned_items_can_combine_for_containment(
         || !right.pocket_contents.is_empty()
         || !left.integral_ammunition.is_empty()
         || !right.integral_ammunition.is_empty()
+        || !left.detachable_magazines.is_empty()
+        || !right.detachable_magazines.is_empty()
     {
         return false;
     }
@@ -1449,7 +1594,7 @@ mod tests {
     use cdda_protocol::{
         AmmunitionContainerPocketPrototypeV1, IntegralMagazinePocketPrototypeV1,
         ItemContainmentProfileV1, ItemGroupEventV1, ItemGroupItemPrototypeV1, ItemGroupNodeV1,
-        ItemPhaseV1, SpawnPocketRulesV1,
+        ItemPhaseV1, MagazineWellPrototypeV1, SpawnPocketRulesV1,
     };
     use rand_core::SeedableRng;
 
@@ -1479,7 +1624,7 @@ mod tests {
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
-            charge_ammunition: None,
+            tool_charge_storage: None,
             charges_supported: true,
             modifier_container_capacity_applies: true,
             contents_insertion_supported: true,
@@ -1744,7 +1889,7 @@ mod tests {
             stack_size: 1,
             ..ItemContainmentProfileV1::default()
         };
-        target.charge_ammunition = Some(ammunition);
+        target.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Integral { ammunition });
         let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
             root_node: 0,
             nodes: vec![ItemGroupNodeV1 {
@@ -1792,6 +1937,165 @@ mod tests {
             expected_charges as i32
         );
         assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn detachable_tool_charges_install_the_default_magazine_and_clamp_ammunition() {
+        let source = |charges: i32| {
+            let mut target = leaf_item("wearable_light");
+            target.prototype.charges = 0;
+            target.prototype.magazine_wells = vec![MagazineWellPrototypeV1 {
+                pocket_index: 4,
+                pocket_id: String::from("BATTERY_WELL"),
+                compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+                rigid: true,
+                unloadable: true,
+            }];
+            target.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+                minimum: charges,
+                maximum: charges,
+            });
+            let mut magazine = leaf_item("medium_battery_cell").prototype;
+            magazine.charges = 0;
+            magazine.ammunition_type.clear();
+            magazine.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("MAGAZINE"),
+                ammunition_type: String::from("battery"),
+                capacity: 56,
+                rigid: true,
+                reloadable: false,
+                unloadable: false,
+            }];
+            let mut ammunition = leaf_item("battery").prototype;
+            ammunition.ammunition_type = String::from("battery");
+            ammunition.containment = ItemContainmentProfileV1 {
+                count_by_charges: true,
+                stack_size: 100,
+                ..ItemContainmentProfileV1::default()
+            };
+            target.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Detachable {
+                well_pocket_index: 4,
+                magazine,
+                ammunition: Box::new(ammunition),
+            });
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        variant_id: None,
+                        event: None,
+                        target: ItemGroupTargetV1::Item(Box::new(target)),
+                        modifier_charges: None,
+                        contents: Vec::new(),
+                        seal_contents: false,
+                        direct_wrapper: None,
+                        modifier_container: None,
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+
+        for (requested, expected, expected_objects, expected_draws) in [
+            (0, 0, 2, 9),
+            (1, 1, 3, 11),
+            (56, 56, 3, 11),
+            (100, 56, 3, 11),
+        ] {
+            let seed = 97;
+            let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+            let planned =
+                plan_item_group_source(&source(requested), &BTreeMap::new(), &mut actual_rng)
+                    .expect("detachable tool charge modifier should plan");
+            let magazine = &planned[0].detachable_magazines[&4];
+            assert_eq!(magazine.prototype.type_id, "medium_battery_cell");
+            assert_eq!(
+                magazine
+                    .integral_ammunition
+                    .get(&0)
+                    .map(|ammunition| ammunition.prototype.charges)
+                    .unwrap_or(0),
+                expected
+            );
+            assert_eq!(planned[0].object_count(), Some(expected_objects));
+            let actual_next = actual_rng.next_u64();
+            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+            let observed_draws = (0..20)
+                .find(|_| expected_rng.next_u64() == actual_next)
+                .expect("downstream draw should remain on the deterministic stream");
+            assert_eq!(
+                observed_draws, expected_draws,
+                "requested charges {requested}"
+            );
+        }
+
+        let ItemGroupSourceV1::Inline(inner_graph) = source(56) else {
+            unreachable!("the fixture uses an inline inner group")
+        };
+        let groups = BTreeMap::from([(
+            String::from("inner_tool_charge"),
+            ItemGroupDefinitionV1 {
+                group_id: String::from("inner_tool_charge"),
+                graph: inner_graph,
+            },
+        )]);
+        let repeated = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Group(String::from("inner_tool_charge")),
+                    modifier_charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+                        minimum: 1,
+                        maximum: 1,
+                    }),
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: None,
+        });
+        let seed = 97;
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(&repeated, &groups, &mut actual_rng)
+            .expect("an outer modifier should reuse the installed default magazine");
+        let magazine = &planned[0].detachable_magazines[&4];
+        assert_eq!(planned[0].object_count(), Some(3));
+        assert_eq!(
+            magazine.integral_ammunition[&0].prototype.charges, 1,
+            "the outer modifier should replace only the installed ammunition"
+        );
+        let actual_next = actual_rng.next_u64();
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        let observed_draws = (0..30)
+            .find(|_| expected_rng.next_u64() == actual_next)
+            .expect("the downstream draw should stay on the deterministic stream");
+        assert_eq!(
+            observed_draws, 17,
+            "the second modifier constructs ammunition but not another magazine"
+        );
     }
 
     #[test]

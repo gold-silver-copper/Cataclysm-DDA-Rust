@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x80, 0xe0, 0x72, 0xe7, 0x55, 0xe6, 0x8b, 0xe0, 0xaa, 0xd7, 0x82, 0x13, 0x2f,
-                    0x71, 0x18, 0xf4, 0x26, 0x9b, 0x5f, 0x66, 0x4e, 0xad, 0x99, 0xbc, 0x50, 0xa1,
-                    0xb1, 0xcd, 0x8b, 0x27, 0xd3, 0x35,
+                    0xc4, 0x76, 0xa1, 0xcc, 0xd1, 0x53, 0xec, 0xe5, 0x71, 0xeb, 0xf4, 0xa9, 0x8b,
+                    0xe1, 0x32, 0x42, 0xab, 0x3a, 0x71, 0x63, 0x12, 0x4a, 0xbf, 0xf4, 0x17, 0x3d,
+                    0x9c, 0x90, 0x50, 0xc1, 0xf9, 0xb7,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1052,6 +1052,19 @@ mod tests {
         assert!(actor.inventory.is_empty());
         assert_eq!(actor.wielded, None);
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
+        let encoded = postcard::to_stdvec(&observation.final_snapshot)
+            .expect("the audited snapshot should encode");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV63");
+        legacy_hasher.update(&encoded);
+        assert_eq!(
+            legacy_hasher.finalize().as_bytes(),
+            &[
+                0x80, 0xe0, 0x72, 0xe7, 0x55, 0xe6, 0x8b, 0xe0, 0xaa, 0xd7, 0x82, 0x13, 0x2f, 0x71,
+                0x18, 0xf4, 0x26, 0x9b, 0x5f, 0x66, 0x4e, 0xad, 0x99, 0xbc, 0x50, 0xa1, 0xb1, 0xcd,
+                0x8b, 0x27, 0xd3, 0x35,
+            ],
+            "the representative state bytes stay fixed; only the hash domain advances"
+        );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
             "rock"
@@ -1262,7 +1275,7 @@ mod tests {
                     modifier_side_effects_supported: true,
                     minimum_one_charge: charges.is_some(),
                     charges,
-                    charge_ammunition: None,
+                    tool_charge_storage: None,
                     charges_supported: true,
                     modifier_container_capacity_applies: true,
                     contents_insertion_supported: true,
@@ -1300,6 +1313,57 @@ mod tests {
                     sealable: true,
                 }),
             }];
+        let mut wearable_light = item_leaf(
+            "wearable_light",
+            Some(cdda_protocol::InclusiveI32RangeV1 {
+                minimum: 100,
+                maximum: 100,
+            }),
+        );
+        let cdda_protocol::ItemGroupTargetV1::Item(wearable_light_item) = &mut wearable_light
+        else {
+            unreachable!("headlamp fixture is a direct item")
+        };
+        wearable_light_item.minimum_one_charge = false;
+        wearable_light_item.modifier_container_capacity_applies = false;
+        wearable_light_item.prototype.charges = 0;
+        wearable_light_item.prototype.magazine_wells =
+            vec![cdda_protocol::MagazineWellPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("MAGAZINE_WELL"),
+                compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+                rigid: true,
+                unloadable: true,
+            }];
+        let mut magazine = item_leaf("medium_battery_cell", None);
+        let cdda_protocol::ItemGroupTargetV1::Item(magazine) = &mut magazine else {
+            unreachable!("magazine fixture is a direct item")
+        };
+        magazine.prototype.charges = 0;
+        magazine.prototype.integral_magazines =
+            vec![cdda_protocol::IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("MAGAZINE"),
+                ammunition_type: String::from("battery"),
+                capacity: 56,
+                rigid: true,
+                reloadable: false,
+                unloadable: false,
+            }];
+        let mut ammunition = item_leaf("battery", None);
+        let cdda_protocol::ItemGroupTargetV1::Item(ammunition) = &mut ammunition else {
+            unreachable!("ammunition fixture is a direct item")
+        };
+        ammunition.prototype.charges = 1;
+        ammunition.prototype.ammunition_type = String::from("battery");
+        ammunition.prototype.containment.count_by_charges = true;
+        ammunition.prototype.containment.stack_size = 100;
+        wearable_light_item.tool_charge_storage =
+            Some(cdda_protocol::ItemGroupToolChargeStorageV1::Detachable {
+                well_pocket_index: 0,
+                magazine: magazine.prototype.clone(),
+                ammunition: Box::new(ammunition.prototype.clone()),
+            });
         let mut item_groups = vec![ItemGroupDefinitionV1 {
             group_id: String::from("wall_bash_results"),
             graph: cdda_protocol::ItemGroupGraphV1 {
@@ -1356,6 +1420,23 @@ mod tests {
                                     maximum: 6,
                                 }),
                             ),
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                        },
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                                minimum: 0,
+                                maximum: 0,
+                            }),
+                            variant_id: None,
+                            event: None,
+                            target: wearable_light,
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
@@ -1517,6 +1598,10 @@ mod tests {
                 event_batches: None,
             },
         };
+        assert!(
+            cdda_protocol::item_group_catalog_is_valid(&scenario.item_groups),
+            "detachable-tool conformance catalog should validate"
+        );
         let direct = run_scenario(&scenario, ScenarioMode::Direct)
             .expect("named item-group bash should run directly");
         for mode in [
@@ -1545,7 +1630,7 @@ mod tests {
                 .is_some_and(|state| state.sealed),
             "the group-level seal must survive every recovery mode"
         );
-        assert_eq!(pocket.contents.len(), 3);
+        assert_eq!(pocket.contents.len(), 4);
         assert!(
             pocket
                 .contents
@@ -1561,9 +1646,31 @@ mod tests {
         contained.sort_unstable();
         assert_eq!(
             contained,
-            [("nail", 6), ("splinter", 1), ("splinter", 1)],
+            [
+                ("nail", 6),
+                ("splinter", 1),
+                ("splinter", 1),
+                ("wearable_light", 0),
+            ],
             "the fixed seed must include each generated item's constructor, variant, fit, and wrapper phases"
         );
+        let headlamp = pocket
+            .contents
+            .iter()
+            .find(|item| item.type_id == "wearable_light")
+            .expect("the generalized tool-charge path should generate a headlamp");
+        let installed = headlamp.magazine_wells[0]
+            .installed_magazine
+            .as_deref()
+            .expect("the headlamp should retain its default magazine");
+        let battery = installed.integral_magazines[0]
+            .loaded_ammunition
+            .as_deref()
+            .expect("the default magazine should retain clamped battery charge");
+        assert_eq!(installed.type_id, "medium_battery_cell");
+        assert_eq!(battery.type_id, "battery");
+        assert_eq!(battery.charges, 56);
+        assert!(headlamp.id < installed.id && installed.id < battery.id);
         let splinters = pocket
             .contents
             .iter()
@@ -1698,12 +1805,14 @@ mod tests {
                             pocket_index: 1,
                             pocket_id: String::from("PRIMARY"),
                             compatible_magazine_type_ids: vec![String::from("light_battery")],
+                            rigid: true,
                             unloadable: true,
                         },
                         MagazineWellPrototypeV1 {
                             pocket_index: 4,
                             pocket_id: String::from("AUXILIARY"),
                             compatible_magazine_type_ids: vec![String::from("heavy_battery")],
+                            rigid: true,
                             unloadable: true,
                         },
                     ],

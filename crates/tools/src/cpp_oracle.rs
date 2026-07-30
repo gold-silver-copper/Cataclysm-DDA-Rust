@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,14 +9,18 @@ use cdda_content::{
     StartLocationRegistry,
 };
 use cdda_protocol::{
-    BASELINE_COMMIT, ChunkCoord, FurnitureTileSnapshot, TerrainTileSnapshot,
+    BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1, FurnitureTileSnapshot,
+    IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, MagazineWellPrototypeV1, TerrainTileSnapshot,
     WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH,
     WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1,
-    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
-    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedTerrainTargetV1, worldgen_omt_matches,
+    WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
+    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
+    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_omt_matches,
 };
-use cdda_sim::WorldState;
+use cdda_sim::{ReservedIdBlock, WorldState};
 use serde::{Deserialize, Serialize};
 
 const ORACLE_FORMAT_VERSION: u16 = 1;
@@ -108,6 +112,8 @@ struct ItemGroupOracleObservationV1 {
     distribution: Vec<ItemGroupDistributionObservationV1>,
     counts: Vec<ItemGroupRangeObservationV1>,
     charges: Vec<ItemGroupRangeObservationV1>,
+    tool_charges: Vec<ItemGroupToolChargeObservationV1>,
+    repeated_tool_charges: ItemGroupRepeatedToolChargeObservationV1,
     modifier_rng_phase: ItemGroupModifierRngPhaseObservationV1,
     constructor_variants: Vec<ItemGroupConstructorVariantTraceV1>,
     nested: ItemGroupNestedObservationV1,
@@ -155,6 +161,58 @@ struct ItemGroupModifierRngPhaseObservationV1 {
     expected_downstream: i32,
     actual_downstream: i32,
     downstream_draw_matches: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupToolChargeObservationV1 {
+    requested_charges: i32,
+    tool_type: String,
+    magazine_present: bool,
+    magazine_type: String,
+    ammunition_type: String,
+    ammunition_remaining: i32,
+    remaining_capacity: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupRepeatedToolChargeObservationV1 {
+    source_group: String,
+    seed: u32,
+    leaf_minimum: i32,
+    leaf_maximum: i32,
+    replacement_requested: i32,
+    tool_type: String,
+    magazine_type: String,
+    ammunition_type: String,
+    ammunition_remaining: i32,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupRepeatedToolChargeDirectV1 {
+    leaf_minimum: i32,
+    leaf_maximum: i32,
+    replacement_requested: i32,
+    tool_type: String,
+    magazine_type: String,
+    ammunition_type: String,
+    ammunition_remaining: i32,
+}
+
+impl ItemGroupRepeatedToolChargeObservationV1 {
+    fn direct_projection(&self) -> ItemGroupRepeatedToolChargeDirectV1 {
+        ItemGroupRepeatedToolChargeDirectV1 {
+            leaf_minimum: self.leaf_minimum,
+            leaf_maximum: self.leaf_maximum,
+            replacement_requested: self.replacement_requested,
+            tool_type: self.tool_type.clone(),
+            magazine_type: self.magazine_type.clone(),
+            ammunition_type: self.ammunition_type.clone(),
+            ammunition_remaining: self.ammunition_remaining,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -476,13 +534,24 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
             let scenario = load_item_group_scenario(&scenario_path)?;
             let observation = run_item_group_binary(workspace, &upstream, &binary)?;
             compare_item_group(&scenario, &observation)?;
+            let rust_tool_charges = rust_item_group_tool_charge_observation()?;
+            compare_direct_observation(
+                "item-group detachable tool charges",
+                &observation.tool_charges,
+                &rust_tool_charges,
+            )?;
+            compare_direct_observation(
+                "item-group repeated detachable tool charges",
+                &observation.repeated_tool_charges.direct_projection(),
+                &rust_repeated_item_group_tool_charge_observation()?,
+            )?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&observation)
                     .map_err(|error| format!("could not encode oracle observation: {error}"))?
             );
             eprintln!(
-                "C++ oracle verified bounded item-group generation against pinned {}",
+                "C++ oracle and direct Rust comparison verified bounded item-group generation against pinned {}",
                 BASELINE_COMMIT
             );
         }
@@ -701,6 +770,49 @@ fn validate_item_group_observation(
         || !ranges_match(&observation.charges, &expected_charges)
     {
         return Err("item-group count or charges observation is incomplete".into());
+    }
+    let expected_tool_charges = [
+        (0, "null", 0),
+        (1, "battery", 1),
+        (56, "battery", 56),
+        (100, "battery", 56),
+    ];
+    if observation.tool_charges.len() != expected_tool_charges.len()
+        || observation
+            .tool_charges
+            .iter()
+            .zip(expected_tool_charges)
+            .any(|(trace, (requested, ammunition_type, remaining))| {
+                trace.requested_charges != requested
+                    || trace.tool_type != "wearable_light"
+                    || !trace.magazine_present
+                    || trace.magazine_type != "medium_battery_cell"
+                    || trace.ammunition_type != ammunition_type
+                    || trace.ammunition_remaining != remaining
+                    || trace.remaining_capacity != 0
+            })
+    {
+        return Err(format!(
+            "item-group detachable tool-charge traces are incomplete: {}",
+            serde_json::to_string(&observation.tool_charges)?
+        )
+        .into());
+    }
+    if observation.repeated_tool_charges.source_group != "accesories_personal_unisex_child"
+        || observation.repeated_tool_charges.seed == 0
+        || observation.repeated_tool_charges.leaf_minimum != 0
+        || observation.repeated_tool_charges.leaf_maximum != 100
+        || observation.repeated_tool_charges.replacement_requested != 1
+        || observation.repeated_tool_charges.tool_type != "wearable_light"
+        || observation.repeated_tool_charges.magazine_type != "medium_battery_cell"
+        || observation.repeated_tool_charges.ammunition_type != "battery"
+        || observation.repeated_tool_charges.ammunition_remaining != 1
+    {
+        return Err(format!(
+            "item-group repeated detachable tool-charge trace is incomplete: {}",
+            serde_json::to_string(&observation.repeated_tool_charges)?
+        )
+        .into());
     }
     if observation.modifier_rng_phase.case_id != "direct_fixed_count"
         || observation.modifier_rng_phase.rolls_consumed != 4
@@ -1141,6 +1253,290 @@ fn validate_mapgen_observation(
         return Err("mapgen production start-location observation is incomplete".into());
     }
     Ok(())
+}
+
+fn rust_item_group_tool_charge_observation()
+-> Result<Vec<ItemGroupToolChargeObservationV1>, Box<dyn std::error::Error>> {
+    [0, 1, 56, 100]
+        .into_iter()
+        .map(rust_item_group_tool_charge_case)
+        .collect()
+}
+
+fn rust_item_group_tool_charge_case(
+    requested_charges: i32,
+) -> Result<ItemGroupToolChargeObservationV1, Box<dyn std::error::Error>> {
+    rust_item_group_tool_charge_case_with_replacement(requested_charges, requested_charges, None)
+}
+
+fn rust_repeated_item_group_tool_charge_observation()
+-> Result<ItemGroupRepeatedToolChargeDirectV1, Box<dyn std::error::Error>> {
+    let observed = rust_item_group_tool_charge_case_with_replacement(0, 100, Some(1))?;
+    Ok(ItemGroupRepeatedToolChargeDirectV1 {
+        leaf_minimum: 0,
+        leaf_maximum: 100,
+        replacement_requested: 1,
+        tool_type: observed.tool_type,
+        magazine_type: observed.magazine_type,
+        ammunition_type: observed.ammunition_type,
+        ammunition_remaining: observed.ammunition_remaining,
+    })
+}
+
+fn rust_item_group_tool_charge_case_with_replacement(
+    leaf_minimum: i32,
+    leaf_maximum: i32,
+    replacement_requested: Option<i32>,
+) -> Result<ItemGroupToolChargeObservationV1, Box<dyn std::error::Error>> {
+    let plain = |type_id: &str| CraftItemPrototypeV1 {
+        type_id: type_id.to_owned(),
+        charges: 0,
+        melee_damage_milli: BTreeMap::new(),
+        calories: 0,
+        quench: 0,
+        comestible_type: String::new(),
+        ammunition_type: String::new(),
+        ranged_weapon: None,
+        magazine_capacity: 0,
+        integral_magazines: Vec::new(),
+        magazine_wells: Vec::new(),
+        ammunition_containers: Vec::new(),
+        residual_energy_millijoules: 0,
+        powered_tool: None,
+        containment: ItemContainmentProfileV1::default(),
+    };
+    let mut ammunition = plain("battery");
+    ammunition.charges = 1;
+    ammunition.ammunition_type = String::from("battery");
+    ammunition.containment = ItemContainmentProfileV1 {
+        volume_milliliters: 100,
+        count_by_charges: true,
+        stack_size: 100,
+        ..ItemContainmentProfileV1::default()
+    };
+    let mut magazine = plain("medium_battery_cell");
+    magazine.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 85_000,
+        volume_milliliters: 17,
+        longest_side_millimeters: 65,
+        ..ItemContainmentProfileV1::default()
+    };
+    magazine.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+        pocket_index: 0,
+        pocket_id: String::from("MAGAZINE"),
+        ammunition_type: String::from("battery"),
+        capacity: 56,
+        rigid: true,
+        reloadable: false,
+        unloadable: false,
+    }];
+    let mut tool = plain("wearable_light");
+    tool.magazine_wells = vec![MagazineWellPrototypeV1 {
+        pocket_index: 0,
+        pocket_id: String::from("MAGAZINE_WELL"),
+        compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+        rigid: true,
+        unloadable: true,
+    }];
+    let item = ItemGroupItemPrototypeV1 {
+        prototype: tool,
+        maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+        variants: Vec::new(),
+        snippets: Vec::new(),
+        initial_variables: BTreeMap::new(),
+        modifier_side_effects_supported: true,
+        charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+            minimum: leaf_minimum,
+            maximum: leaf_maximum,
+        }),
+        minimum_one_charge: false,
+        tool_charge_storage: Some(ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index: 0,
+            magazine,
+            ammunition: Box::new(ammunition),
+        }),
+        charges_supported: true,
+        modifier_container_capacity_applies: false,
+        contents_insertion_supported: true,
+    };
+    let definition = ItemGroupDefinitionV1 {
+        group_id: String::from("direct_tool_charge"),
+        graph: ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Collection,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    variant_id: None,
+                    event: None,
+                    target: ItemGroupTargetV1::Item(Box::new(item)),
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    direct_wrapper: None,
+                    modifier_container: None,
+                }],
+            }],
+            wrapper: None,
+        },
+    };
+    let (definitions, placement_group_id) =
+        if let Some(replacement_requested) = replacement_requested {
+            let outer = ItemGroupDefinitionV1 {
+                group_id: String::from("repeated_tool_charge"),
+                graph: ItemGroupGraphV1 {
+                    root_node: 0,
+                    nodes: vec![ItemGroupNodeV1 {
+                        node_id: 0,
+                        kind: ItemGroupKindV1::Collection,
+                        entries: vec![ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                                minimum: 0,
+                                maximum: 0,
+                            }),
+                            variant_id: None,
+                            event: None,
+                            target: ItemGroupTargetV1::Group(definition.group_id.clone()),
+                            modifier_charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+                                minimum: replacement_requested,
+                                maximum: replacement_requested,
+                            }),
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                        }],
+                    }],
+                    wrapper: None,
+                },
+            };
+            (
+                vec![definition, outer],
+                String::from("repeated_tool_charge"),
+            )
+        } else {
+            (vec![definition], String::from("direct_tool_charge"))
+        };
+    let terrain = TerrainTileSnapshot {
+        terrain_id: String::from("t_dirt"),
+        move_cost: 2,
+        transparent: true,
+        flat: true,
+        open: String::new(),
+        open_move_cost: None,
+        open_transparent: None,
+        open_flat: None,
+        close: String::new(),
+        close_move_cost: None,
+        close_transparent: None,
+        close_flat: None,
+    };
+    let mut cells = vec![
+        WorldgenCellV1 {
+            terrain: vec![WorldgenWeightedTerrainTargetV1 {
+                target: WorldgenTerrainTargetV1::Prototype(0),
+                weight: 1,
+            }],
+            furniture: vec![WorldgenWeightedFurnitureTargetV1 {
+                target: WorldgenFurnitureTargetV1::None,
+                weight: 1,
+            }],
+            item_group: None,
+        };
+        WORLDGEN_CELLS_PER_OMT
+    ];
+    cells[0].item_group = Some(WorldgenItemGroupPlacementV1 {
+        group_id: placement_group_id,
+        chance: 100,
+    });
+    let identity = WorldgenOmtIdentityV1 {
+        full_id: String::from("direct_tool_charge_north"),
+        type_id: String::from("direct_tool_charge"),
+        subtype_id: String::from("direct_tool_charge"),
+        generator_id: String::from("direct_tool_charge"),
+        rotation: 0,
+    };
+    let catalog = WorldgenCatalogV1 {
+        generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        overmap: WorldgenOvermapLayoutV1 {
+            origin_x: -90,
+            origin_y: -90,
+            identities: vec![identity.clone()],
+            layers: vec![WorldgenOvermapLayerV1 {
+                z: 0,
+                runs: vec![WorldgenOvermapRunV1 {
+                    identity_index: 0,
+                    length: u32::from(WORLDGEN_OVERMAP_WIDTH) * u32::from(WORLDGEN_OVERMAP_HEIGHT),
+                }],
+            }],
+        },
+        start_location: None,
+        terrain_prototypes: vec![terrain],
+        furniture_prototypes: Vec::new(),
+        regional_terrain: Vec::new(),
+        regional_furniture: Vec::new(),
+        omt_generators: vec![WorldgenOmtGeneratorV1 {
+            omt_id: identity.generator_id,
+            templates: vec![WorldgenTemplateV1 { weight: 1, cells }],
+        }],
+    };
+    let mut world = WorldState::new(5, [u8::try_from(leaf_maximum.min(255))?; 32]);
+    world.install_reserved_block(ReservedIdBlock::new(1, 4_096)?)?;
+    world
+        .register_item_group_catalog(definitions)
+        .map_err(|error| format!("Rust direct tool-charge catalog failed: {error}"))?;
+    world
+        .configure_worldgen(catalog)
+        .map_err(|error| format!("Rust direct tool-charge worldgen failed: {error}"))?;
+    world
+        .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+        .map_err(|error| format!("Rust direct tool-charge generation failed: {error}"))?;
+    let snapshot = world.snapshot();
+    let ground = snapshot
+        .ground_items
+        .first()
+        .ok_or("Rust direct tool-charge world generated no ground item")?;
+    if snapshot
+        .ground_items
+        .iter()
+        .any(|ground| ground.item.type_id != "wearable_light")
+    {
+        return Err("Rust direct tool-charge world generated a heterogeneous item trace".into());
+    }
+    let [well] = ground.item.magazine_wells.as_slice() else {
+        return Err("Rust direct tool-charge item lost its magazine well".into());
+    };
+    let magazine = well
+        .installed_magazine
+        .as_deref()
+        .ok_or("Rust direct tool-charge item did not install a magazine")?;
+    let ammunition = magazine
+        .integral_magazines
+        .first()
+        .and_then(|pocket| pocket.loaded_ammunition.as_deref());
+    Ok(ItemGroupToolChargeObservationV1 {
+        requested_charges: replacement_requested.unwrap_or(leaf_minimum),
+        tool_type: ground.item.type_id.clone(),
+        magazine_present: true,
+        magazine_type: magazine.type_id.clone(),
+        ammunition_type: ammunition
+            .map_or_else(|| String::from("null"), |item| item.ammunition_type.clone()),
+        ammunition_remaining: ammunition.map_or(0, |item| item.charges),
+        // Pinned `item::remaining_ammo_capacity()` reports zero for the
+        // detachable tool itself; magazine capacity is asserted separately by
+        // server normalization and the Rust clamp result.
+        remaining_capacity: 0,
+    })
 }
 
 fn direct_mapgen_projection(observation: &MapgenOracleObservationV1) -> MapgenDirectObservationV1 {

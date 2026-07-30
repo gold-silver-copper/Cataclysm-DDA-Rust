@@ -69,7 +69,9 @@ use tracing_subscriber::EnvFilter;
 mod item_groups;
 mod worldgen;
 
-use item_groups::{runtime_bash_item_group_catalog, runtime_bash_item_group_source};
+use item_groups::{
+    RuntimeItemGroupContent, runtime_bash_item_group_catalog, runtime_bash_item_group_source,
+};
 #[cfg(test)]
 use item_groups::{runtime_item_group_charges, runtime_item_group_graph};
 use worldgen::{RuntimeMapgenContent, bootstrap_lmoe_overmap, runtime_mapgen_worldgen};
@@ -92,6 +94,7 @@ struct OpenedWorld {
 }
 
 struct RuntimeWorldContent<'a> {
+    ammunition: &'a AmmunitionRegistry,
     items: &'a ItemRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
@@ -362,6 +365,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = open_world(
         &database_path,
         &RuntimeWorldContent {
+            ammunition: &ammunition,
             items: &items,
             item_groups: &item_groups,
             monsters: &monsters,
@@ -687,6 +691,10 @@ fn open_world(
     path: &Path,
     content: &RuntimeWorldContent<'_>,
 ) -> Result<OpenedWorld, Box<dyn std::error::Error>> {
+    let item_group_content = RuntimeItemGroupContent {
+        items: content.items,
+        ammunition: content.ammunition,
+    };
     let items = content.items;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
@@ -735,8 +743,13 @@ fn open_world(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let furniture_bashes =
-        runtime_furniture_bash_types(furniture, bash_profiles, fields, items, item_groups)?;
+    let furniture_bashes = runtime_furniture_bash_types(
+        furniture,
+        bash_profiles,
+        fields,
+        item_group_content,
+        item_groups,
+    )?;
     let item_group_catalog = runtime_bash_item_group_catalog(
         terrain_bash_definitions
             .iter()
@@ -747,7 +760,7 @@ fn open_world(
                     .and_then(|definition| definition.bash.as_ref())
             })),
         item_groups,
-        items,
+        item_group_content,
     )?;
     let worldgen = runtime_mapgen_worldgen(
         bootstrap_lmoe_overmap(overmap_terrain)?,
@@ -771,7 +784,7 @@ fn open_world(
             bash_profiles,
             fields,
             terrain,
-            items,
+            item_group_content,
             item_groups,
             dynamic_floor_result,
         )?)?;
@@ -1987,13 +2000,15 @@ fn craft_item_prototype_with_ammunition(
     } else {
         String::new()
     };
-    let charges = if integral_magazines.is_empty() {
+    let charges = if integral_magazines.is_empty() && magazine_wells.is_empty() {
         charges
     } else {
-        // Integral ammunition is represented only by the explicit pocket
-        // snapshots. Keeping the ordinary one-instance sentinel here would
-        // describe the same ammunition twice and cannot round-trip through
-        // canonical item validation.
+        // Pocketed ammunition is represented only by the explicit integral or
+        // detachable storage snapshots. Keeping the ordinary one-instance
+        // sentinel here would describe aggregate charges beside that storage
+        // and cannot round-trip through canonical item validation. This also
+        // covers inherited wells on definitions whose derived subtype list no
+        // longer includes TOOL.
         0
     };
     Ok(CraftItemPrototypeV1 {
@@ -2048,6 +2063,7 @@ fn runtime_magazine_storage(
                 pocket_index: projection.pocket_index,
                 pocket_id: projection.pocket_id,
                 compatible_magazine_type_ids: projection.compatible_magazine_type_ids,
+                rigid: projection.rigid,
                 unloadable: !item.flags.contains("NO_UNLOAD"),
             }],
         ));
@@ -2206,6 +2222,11 @@ fn strict_detachable_magazine_wells(
             pocket_index: well.pocket_index,
             pocket_id: well.pocket_id.clone(),
             compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
+            rigid: pocket
+                .raw_fields
+                .get("rigid")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             unloadable: !item.flags.contains("NO_UNLOAD"),
         });
     }
@@ -2225,6 +2246,7 @@ struct DetachableBatteryLightProjection {
     pocket_index: u16,
     pocket_id: String,
     compatible_magazine_type_ids: Vec<String>,
+    rigid: bool,
 }
 
 fn strict_battery_magazine_capacity(item: &ItemDefinition) -> Option<u32> {
@@ -2338,6 +2360,13 @@ fn strict_detachable_battery_light(
         pocket_index: well.pocket_index,
         pocket_id: well.pocket_id.clone(),
         compatible_magazine_type_ids: compatible.into_iter().map(str::to_owned).collect(),
+        rigid: inactive
+            .pockets
+            .iter()
+            .find(|pocket| pocket.pocket_index == well.pocket_index)
+            .and_then(|pocket| pocket.raw_fields.get("rigid"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     }))
 }
 
@@ -2456,7 +2485,7 @@ fn runtime_terrain_bash_type(
     profiles: &BashDamageProfileRegistry,
     fields: &FieldTypeRegistry,
     terrain: &TerrainRegistry,
-    items: &ItemRegistry,
+    item_group_content: RuntimeItemGroupContent<'_>,
     item_groups: &ItemGroupRegistry,
     dynamic_floor_result: Option<&str>,
 ) -> Result<TerrainBashTypeV1, Box<dyn std::error::Error>> {
@@ -2520,7 +2549,7 @@ fn runtime_terrain_bash_type(
         drop_source: runtime_bash_item_group_source(
             bash,
             item_groups,
-            items,
+            item_group_content,
             "terrain",
             &definition.id,
         )?,
@@ -2538,7 +2567,7 @@ fn runtime_furniture_bash_type(
     profiles: &BashDamageProfileRegistry,
     fields: &FieldTypeRegistry,
     furniture: &FurnitureRegistry,
-    items: &ItemRegistry,
+    item_group_content: RuntimeItemGroupContent<'_>,
     item_groups: &ItemGroupRegistry,
 ) -> Result<FurnitureBashTypeV1, Box<dyn std::error::Error>> {
     let bash = definition
@@ -2588,7 +2617,7 @@ fn runtime_furniture_bash_type(
         drop_source: runtime_bash_item_group_source(
             bash,
             item_groups,
-            items,
+            item_group_content,
             "furniture",
             &definition.id,
         )?,
@@ -2605,12 +2634,14 @@ fn runtime_furniture_bash_types(
     furniture: &FurnitureRegistry,
     profiles: &BashDamageProfileRegistry,
     fields: &FieldTypeRegistry,
-    items: &ItemRegistry,
+    item_group_content: RuntimeItemGroupContent<'_>,
     item_groups: &ItemGroupRegistry,
 ) -> Result<Vec<FurnitureBashTypeV1>, Box<dyn std::error::Error>> {
     let mut admitted = furniture
         .iter()
-        .filter(|definition| furniture_bash_is_runtime_admitted(definition, item_groups, items))
+        .filter(|definition| {
+            furniture_bash_is_runtime_admitted(definition, item_groups, item_group_content)
+        })
         .map(|definition| definition.id.clone())
         .collect::<BTreeSet<_>>();
     loop {
@@ -2641,7 +2672,7 @@ fn runtime_furniture_bash_types(
                 profiles,
                 fields,
                 furniture,
-                items,
+                item_group_content,
                 item_groups,
             )
         })
@@ -2693,7 +2724,7 @@ fn runtime_smash_item_types(items: &ItemRegistry) -> Vec<SmashItemTypeV1> {
 fn furniture_bash_is_runtime_admitted(
     definition: &FurnitureDefinition,
     item_groups: &ItemGroupRegistry,
-    items: &ItemRegistry,
+    item_group_content: RuntimeItemGroupContent<'_>,
 ) -> bool {
     let Some(bash) = definition.bash.as_ref() else {
         return false;
@@ -2713,9 +2744,14 @@ fn furniture_bash_is_runtime_admitted(
         .iter()
         .chain(bash.destroyed_field.iter())
         .all(|effect| matches!(effect.field_type_id.as_str(), "fd_dust" | "fd_splinters"));
-    let bounded_drops =
-        runtime_bash_item_group_source(bash, item_groups, items, "furniture", &definition.id)
-            .is_ok();
+    let bounded_drops = runtime_bash_item_group_source(
+        bash,
+        item_groups,
+        item_group_content,
+        "furniture",
+        &definition.id,
+    )
+    .is_ok();
     bash.is_fully_supported()
         && ordinary_bounds
         && modeled_fields
@@ -4387,6 +4423,13 @@ mod tests {
             .expect("default mods should resolve");
         let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("items should load");
+        let ammunition =
+            AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("ammunition should load");
+        let item_group_content = RuntimeItemGroupContent {
+            items: &items,
+            ammunition: &ammunition,
+        };
         let item_groups =
             ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("item groups should load");
@@ -4394,11 +4437,52 @@ mod tests {
             .strict_graph("field")
             .expect("the complete field loot closure should retain every supported definition");
         assert_eq!(field_graph.maximum_output, 760);
+        let child_accessories = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("accesories_personal_unisex_child")
+                .expect("field closure should retain child accessories"),
+            item_group_content,
+        )
+        .expect("detachable tool charges should admit the child-accessory definition");
+        let wearable_light = child_accessories
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .find_map(|entry| match &entry.target {
+                ItemGroupTargetV1::Item(item) if item.prototype.type_id == "wearable_light" => {
+                    Some(item)
+                }
+                ItemGroupTargetV1::Item(_)
+                | ItemGroupTargetV1::Group(_)
+                | ItemGroupTargetV1::Node(_) => None,
+            })
+            .expect("child accessories should retain the charged headlamp");
+        assert_eq!(
+            wearable_light.charges,
+            Some(InclusiveI32RangeV1 {
+                minimum: 0,
+                maximum: 100,
+            })
+        );
+        let Some(cdda_protocol::ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index,
+            magazine,
+            ammunition: charge_ammunition,
+        }) = &wearable_light.tool_charge_storage
+        else {
+            panic!("headlamp charges should resolve detachable storage")
+        };
+        assert_eq!(*well_pocket_index, 0);
+        assert!(wearable_light.prototype.magazine_wells[0].rigid);
+        assert_eq!(magazine.type_id, "medium_battery_cell");
+        assert_eq!(magazine.integral_magazines[0].capacity, 56);
+        assert_eq!(charge_ammunition.type_id, "battery");
         let next_field_runtime_blocker = field_graph
             .groups
             .values()
             .find_map(|definition| {
-                runtime_item_group_graph(definition, &items)
+                runtime_item_group_graph(definition, item_group_content)
                     .err()
                     .map(|error| (definition.id.as_str(), error.to_string()))
             })
@@ -4406,9 +4490,9 @@ mod tests {
         assert_eq!(
             next_field_runtime_blocker,
             (
-                "accesories_personal_unisex_child",
+                "accessory_necklace",
                 String::from(
-                    "item-group charges for wearable_light require unimplemented ammunition loading"
+                    "item-group item holy_symbol variant saint_necklace requires unsupported fields {\"expand_snippets\"}"
                 ),
             )
         );
@@ -4417,13 +4501,13 @@ mod tests {
             .strict_graph("civilian_phones_case")
             .expect("the phone-case containment family should parse as one strict closure");
         assert_eq!(phone_case_graph.maximum_output, 11);
-        runtime_item_group_graph(&phone_case_graph.root, &items)
+        runtime_item_group_graph(&phone_case_graph.root, item_group_content)
             .expect("the phone-case root should normalize for the authoritative runtime");
         let phone_case_runtime_errors = phone_case_graph
             .groups
             .values()
             .filter_map(|definition| {
-                runtime_item_group_graph(definition, &items)
+                runtime_item_group_graph(definition, item_group_content)
                     .err()
                     .map(|error| (definition.id.as_str(), error.to_string()))
             })
@@ -4467,7 +4551,7 @@ mod tests {
                 .collect(),
         };
         assert_eq!(
-            runtime_item_group_graph(&event_definition, &items)
+            runtime_item_group_graph(&event_definition, item_group_content)
                 .expect("every holiday qualifier should project")
                 .nodes[0]
                 .entries
@@ -4488,7 +4572,7 @@ mod tests {
             minimum: 1,
             maximum: 4,
         });
-        let damage_graph = runtime_item_group_graph(&damage_definition, &items)
+        let damage_graph = runtime_item_group_graph(&damage_definition, item_group_content)
             .expect("raw damage should project exactly");
         assert_eq!(
             damage_graph.nodes[0].entries[0].raw_damage,
@@ -4503,8 +4587,10 @@ mod tests {
             variant: None,
         });
         entry_wrapper_definition.nodes[0].modifier_sealed = Some(false);
-        let entry_wrapper_graph = runtime_item_group_graph(&entry_wrapper_definition, &items)
-            .expect("entry containment should normalize through the generalized wrapper engine");
+        let entry_wrapper_graph =
+            runtime_item_group_graph(&entry_wrapper_definition, item_group_content).expect(
+                "entry containment should normalize through the generalized wrapper engine",
+            );
         let entry_wrapper = entry_wrapper_graph.nodes[0].entries[0]
             .direct_wrapper
             .as_ref()
@@ -4527,16 +4613,17 @@ mod tests {
         contents_definition.nodes[0].contents = vec![cdda_content::ItemGroupContentsSource::Item(
             String::from("rock"),
         )];
-        let contents_graph = runtime_item_group_graph(&contents_definition, &items)
+        let contents_graph = runtime_item_group_graph(&contents_definition, item_group_content)
             .expect("explicit unsealed modifier contents should normalize");
         assert!(!contents_graph.nodes[0].entries[0].seal_contents);
         contents_definition.nodes[0].modifier_sealed = None;
-        let default_sealed_contents = runtime_item_group_graph(&contents_definition, &items)
-            .expect("default-sealed modifier contents should normalize");
+        let default_sealed_contents =
+            runtime_item_group_graph(&contents_definition, item_group_content)
+                .expect("default-sealed modifier contents should normalize");
         assert!(default_sealed_contents.nodes[0].entries[0].seal_contents);
         let mut variant_definition = event_definition.clone();
         variant_definition.nodes[0].variant = Some(String::from("oracle_variant"));
-        let variant_graph = runtime_item_group_graph(&variant_definition, &items)
+        let variant_graph = runtime_item_group_graph(&variant_definition, item_group_content)
             .expect("explicit variants should project");
         assert_eq!(
             variant_graph.nodes[0].entries[0].variant_id.as_deref(),
@@ -4556,7 +4643,7 @@ mod tests {
             sealed: true,
             overflow: ItemGroupOverflow::Discard,
         });
-        let wrapper_graph = runtime_item_group_graph(&wrapper_definition, &items)
+        let wrapper_graph = runtime_item_group_graph(&wrapper_definition, item_group_content)
             .expect("whole-group containment should normalize through the generalized engine");
         let wrapper = wrapper_graph
             .wrapper
@@ -4570,9 +4657,6 @@ mod tests {
             wrapper.overflow,
             cdda_protocol::ItemGroupOverflowV1::Discard
         );
-        let ammunition =
-            AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
-                .expect("ammunition should load");
         let skills = SkillRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("skills should load");
         let monsters = MonsterRegistry::load_selected(&manifest, content_root, &mods, &enabled)
@@ -4711,7 +4795,7 @@ mod tests {
             &bash_profiles,
             &fields,
             &terrain,
-            &items,
+            item_group_content,
             &item_groups,
             Some("t_floor"),
         )
@@ -4724,7 +4808,7 @@ mod tests {
         let wall_catalog = runtime_bash_item_group_catalog(
             [wall_definition.bash.as_ref().expect("wall bash")],
             &item_groups,
-            &items,
+            item_group_content,
         )
         .expect("wall item-group closure should normalize");
         assert_eq!(wall_catalog.len(), 1);
@@ -4835,7 +4919,7 @@ mod tests {
             .root;
         dressed_wall.ammo_chance = 1;
         assert!(
-            runtime_item_group_graph(&dressed_wall, &items).is_err(),
+            runtime_item_group_graph(&dressed_wall, item_group_content).is_err(),
             "unimplemented ammunition dressing must fail closed"
         );
         for (terrain_id, dynamic_floor_result, multiplier) in [
@@ -4848,7 +4932,7 @@ mod tests {
                 &bash_profiles,
                 &fields,
                 &terrain,
-                &items,
+                item_group_content,
                 &item_groups,
                 dynamic_floor_result,
             )
@@ -4871,9 +4955,14 @@ mod tests {
                 assert_eq!(bash.result.terrain_id, "t_floor");
             }
         }
-        let furniture_bashes =
-            runtime_furniture_bash_types(&furniture, &bash_profiles, &fields, &items, &item_groups)
-                .expect("admitted furniture bashes should normalize");
+        let furniture_bashes = runtime_furniture_bash_types(
+            &furniture,
+            &bash_profiles,
+            &fields,
+            item_group_content,
+            &item_groups,
+        )
+        .expect("admitted furniture bashes should normalize");
         assert_eq!(
             furniture_bashes.len(),
             524,
@@ -4990,7 +5079,7 @@ mod tests {
                     .and_then(|definition| definition.bash.as_ref())
             }),
             &item_groups,
-            &items,
+            item_group_content,
         )
         .expect("admitted furniture group closure should normalize");
         bash_validation
@@ -5421,16 +5510,29 @@ mod tests {
                 ("wearable_light", false),
             ]
         );
-        assert_eq!(empty_charge_targets.len(), 67);
+        assert_eq!(empty_charge_targets.len(), 54);
         assert_eq!(
             generalized_detachable_targets,
             [
                 "circsaw_off",
                 "cordless_drill",
+                "creepy_doll",
+                "crude_firestarter",
                 "elec_chainsaw_off",
                 "elec_hairtrimmer",
+                "electric_blanket",
+                "game_watch",
+                "heavy_flashlight",
+                "mask_filter",
                 "mask_gas",
+                "ph_meter",
+                "radio_car",
+                "radiocontrol",
+                "small_repairkit",
                 "soldering_iron_portable",
+                "spectrophotometer",
+                "talking_doll",
+                "two_way_radio",
             ]
         );
         assert_eq!(generalized_multi_well_targets, Vec::<&str>::new());

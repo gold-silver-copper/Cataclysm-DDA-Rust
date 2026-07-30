@@ -341,6 +341,7 @@ impl PocketDefinition {
             "id",
             "item_restriction",
             "pocket_type",
+            "rigid",
         ];
         self.pocket_type == PocketTypeDefinition::MagazineWell
             && (!self.item_restrictions.is_empty()
@@ -350,6 +351,7 @@ impl PocketDefinition {
                 .raw_fields
                 .keys()
                 .all(|field| FIELDS.contains(&field.as_str()))
+            && self.raw_fields.get("rigid").is_none_or(Value::is_boolean)
     }
 
     /// A strict ammunition container uses only category capacities and the

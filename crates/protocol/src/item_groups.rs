@@ -93,6 +93,21 @@ pub struct InclusiveU16RangeV1 {
     pub maximum: u16,
 }
 
+/// Canonical storage selected by pinned `Item_modifier::charges` for a tool.
+/// The server resolves content defaults before this reaches simulation so the
+/// interpreter never guesses either a magazine or an ammunition item.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemGroupToolChargeStorageV1 {
+    Integral {
+        ammunition: CraftItemPrototypeV1,
+    },
+    Detachable {
+        well_pocket_index: u16,
+        magazine: CraftItemPrototypeV1,
+        ammunition: Box<CraftItemPrototypeV1>,
+    },
+}
+
 /// A direct item leaf in a normalized item-group graph. The server resolves
 /// immutable content into the same prototype used by crafting before the
 /// graph enters canonical simulation state.
@@ -116,9 +131,9 @@ pub struct ItemGroupItemPrototypeV1 {
     /// Count-by-charge items clamp an explicit zero charge roll to one in the
     /// pinned implementation. Non-charge items leave this false.
     pub minimum_one_charge: bool,
-    /// Loose ammunition prototype used when `charges` targets an integral
-    /// magazine. `None` means charges remain on the owning instance.
-    pub charge_ammunition: Option<CraftItemPrototypeV1>,
+    /// Fully resolved nested storage used when `charges` targets tool ammo.
+    /// `None` means charges remain on the owning instance.
+    pub tool_charge_storage: Option<ItemGroupToolChargeStorageV1>,
     pub charges_supported: bool,
     /// Whether pinned `Item_modifier` derives a charge ceiling from a
     /// modifier-owned container for this finalized item type. This is true for
@@ -221,8 +236,11 @@ struct ItemGroupMetrics {
     outputs: u64,
     depth: usize,
     containment_depth: usize,
-    /// Upper bound on top-level items whose charge modifier can materialize
-    /// one nested integral-ammunition object.
+    /// Upper bound on top-level items whose charge modifier can materialize a
+    /// detachable magazine even for an explicit zero-charge result.
+    charge_magazine_candidates: u64,
+    /// Upper bound on top-level items whose positive charge modifier can
+    /// materialize one nested ammunition object.
     charge_ammunition_candidates: u64,
     modifier_side_effects_supported: bool,
     charges_supported: bool,
@@ -422,6 +440,7 @@ impl<'a> ItemGroupEvaluator<'a> {
         let mut outputs = 0_u64;
         let mut depth = 0_usize;
         let mut containment_depth = 0_usize;
+        let mut charge_magazine_candidates = 0_u64;
         let mut charge_ammunition_candidates = 0_u64;
         let mut modifier_side_effects_supported = true;
         let mut charges_supported = true;
@@ -484,6 +503,10 @@ impl<'a> ItemGroupEvaluator<'a> {
             let positive_modifier_charges = entry
                 .modifier_charges
                 .is_some_and(|charges| charges.maximum > 0);
+            if entry.modifier_charges.is_some() {
+                entry_outputs = entry_outputs
+                    .checked_add(target.charge_magazine_candidates.checked_mul(count)?)?;
+            }
             if positive_modifier_charges {
                 entry_outputs = entry_outputs
                     .checked_add(target.charge_ammunition_candidates.checked_mul(count)?)?;
@@ -498,6 +521,8 @@ impl<'a> ItemGroupEvaluator<'a> {
                 entry_outputs = entry_outputs.checked_add(1)?;
             }
             let mut entry_result = target;
+            entry_result.charge_magazine_candidates =
+                entry_result.charge_magazine_candidates.checked_mul(count)?;
             entry_result.charge_ammunition_candidates = entry_result
                 .charge_ammunition_candidates
                 .checked_mul(count)?;
@@ -505,6 +530,7 @@ impl<'a> ItemGroupEvaluator<'a> {
                 // Modifier containers replace every modified top-level item;
                 // unlike whole-output wrappers, their overflow policy is not
                 // part of the pinned Item_modifier behavior.
+                entry_result.charge_magazine_candidates = 0;
                 entry_result.charge_ammunition_candidates = 0;
                 entry_result.modifier_side_effects_supported =
                     wrapper.item.modifier_side_effects_supported;
@@ -519,7 +545,15 @@ impl<'a> ItemGroupEvaluator<'a> {
             }
             let entry_depth = target.depth.checked_add(1)?;
             let mut entry_containment_depth = target.containment_depth;
-            if positive_modifier_charges && target.charge_ammunition_candidates > 0 {
+            if entry.modifier_charges.is_some() && target.charge_magazine_candidates > 0 {
+                entry_containment_depth = entry_containment_depth.max(1);
+            }
+            if positive_modifier_charges
+                && target.charge_magazine_candidates > 0
+                && target.charge_ammunition_candidates > 0
+            {
+                entry_containment_depth = entry_containment_depth.max(2);
+            } else if positive_modifier_charges && target.charge_ammunition_candidates > 0 {
                 entry_containment_depth = entry_containment_depth.max(1);
             }
             if entry.modifier_container.is_some() {
@@ -541,11 +575,15 @@ impl<'a> ItemGroupEvaluator<'a> {
             match kind {
                 ItemGroupKindV1::Collection => {
                     outputs = outputs.checked_add(entry_outputs)?;
+                    charge_magazine_candidates = charge_magazine_candidates
+                        .checked_add(entry_result.charge_magazine_candidates)?;
                     charge_ammunition_candidates = charge_ammunition_candidates
                         .checked_add(entry_result.charge_ammunition_candidates)?;
                 }
                 ItemGroupKindV1::Distribution => {
                     outputs = outputs.max(entry_outputs);
+                    charge_magazine_candidates =
+                        charge_magazine_candidates.max(entry_result.charge_magazine_candidates);
                     charge_ammunition_candidates =
                         charge_ammunition_candidates.max(entry_result.charge_ammunition_candidates);
                 }
@@ -565,6 +603,7 @@ impl<'a> ItemGroupEvaluator<'a> {
             outputs,
             depth,
             containment_depth,
+            charge_magazine_candidates,
             charge_ammunition_candidates,
             modifier_side_effects_supported,
             charges_supported,
@@ -599,6 +638,7 @@ fn apply_output_wrapper_metrics(metrics: &mut ItemGroupMetrics, wrapper: &ItemGr
     metrics.all_top_level_estorable = wrapper.item.prototype.containment.estorable
         && (!retains_spilled_payloads || metrics.all_top_level_estorable);
     if !retains_spilled_payloads {
+        metrics.charge_magazine_candidates = 0;
         metrics.charge_ammunition_candidates = 0;
     }
 }
@@ -753,22 +793,16 @@ fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
             .flags
             .windows(2)
             .all(|pair| pair[0] < pair[1])
-        && item.charge_ammunition.as_ref().is_none_or(|ammunition| {
-            valid_craft_item_prototype(ammunition)
-                && item
-                    .prototype
-                    .integral_magazines
-                    .first()
-                    .is_some_and(|pocket| {
-                        valid_charge_ammunition_for_integral_pocket(ammunition, pocket)
-                    })
-        })
         && item
-            .charge_ammunition
+            .tool_charge_storage
             .as_ref()
-            .is_none_or(|_| item.charges_supported && item.prototype.integral_magazines.len() == 1)
+            .is_none_or(|storage| valid_tool_charge_storage(&item.prototype, storage))
+        && item
+            .tool_charge_storage
+            .as_ref()
+            .is_none_or(|_| item.charges_supported)
         && (!item.modifier_container_capacity_applies
-            || (item.charge_ammunition.is_none()
+            || (item.tool_charge_storage.is_none()
                 && item.prototype.ranged_weapon.is_none()
                 && item.prototype.magazine_capacity == 0))
         && (item.prototype.containment.phase != super::ItemPhaseV1::Liquid
@@ -777,17 +811,17 @@ fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
             if charges.minimum < 0 || charges.maximum < charges.minimum {
                 return false;
             }
-            if let Some(ammunition) = &item.charge_ammunition {
-                let Some(pocket) = item.prototype.integral_magazines.first() else {
+            if let Some(storage) = &item.tool_charge_storage {
+                let Some((ammunition, capacity)) =
+                    tool_charge_ammunition_and_capacity(&item.prototype, storage)
+                else {
                     return false;
                 };
-                return u32::try_from(charges.maximum)
-                    .is_ok_and(|maximum| maximum <= pocket.capacity)
-                    && [charges.minimum, charges.maximum].into_iter().all(|value| {
-                        let mut effective = ammunition.clone();
-                        effective.charges = value;
-                        value == 0 || valid_craft_item_prototype(&effective)
-                    });
+                return [charges.minimum, charges.maximum].into_iter().all(|value| {
+                    let mut effective = ammunition.clone();
+                    effective.charges = value.min(i32::try_from(capacity).unwrap_or(i32::MAX));
+                    value == 0 || valid_craft_item_prototype(&effective)
+                });
             }
             [charges.minimum, charges.maximum].into_iter().all(|value| {
                 let mut effective = item.prototype.clone();
@@ -801,6 +835,70 @@ fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
         })
         && (!item.minimum_one_charge || item.charges.is_some())
         && (item.charges.is_none() || item.charges_supported)
+}
+
+fn valid_tool_charge_storage(
+    owner: &CraftItemPrototypeV1,
+    storage: &ItemGroupToolChargeStorageV1,
+) -> bool {
+    match storage {
+        ItemGroupToolChargeStorageV1::Integral { ammunition } => {
+            let [pocket] = owner.integral_magazines.as_slice() else {
+                return false;
+            };
+            owner.magazine_wells.is_empty()
+                && valid_craft_item_prototype(ammunition)
+                && valid_charge_ammunition_for_integral_pocket(ammunition, pocket)
+        }
+        ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index,
+            magazine,
+            ammunition,
+            ..
+        } => {
+            let [well] = owner.magazine_wells.as_slice() else {
+                return false;
+            };
+            let [magazine_pocket] = magazine.integral_magazines.as_slice() else {
+                return false;
+            };
+            owner.integral_magazines.is_empty()
+                && well.pocket_index == *well_pocket_index
+                && well
+                    .compatible_magazine_type_ids
+                    .binary_search(&magazine.type_id)
+                    .is_ok()
+                && magazine.charges == 0
+                && magazine.magazine_capacity == 0
+                && magazine.magazine_wells.is_empty()
+                && magazine.ammunition_containers.is_empty()
+                && magazine.residual_energy_millijoules == 0
+                && magazine.powered_tool.is_none()
+                && valid_craft_item_prototype(magazine)
+                && valid_craft_item_prototype(ammunition)
+                && valid_charge_ammunition_for_integral_pocket(ammunition, magazine_pocket)
+        }
+    }
+}
+
+fn tool_charge_ammunition_and_capacity<'a>(
+    owner: &'a CraftItemPrototypeV1,
+    storage: &'a ItemGroupToolChargeStorageV1,
+) -> Option<(&'a CraftItemPrototypeV1, u32)> {
+    match storage {
+        ItemGroupToolChargeStorageV1::Integral { ammunition } => owner
+            .integral_magazines
+            .first()
+            .map(|pocket| (ammunition, pocket.capacity)),
+        ItemGroupToolChargeStorageV1::Detachable {
+            magazine,
+            ammunition,
+            ..
+        } => magazine
+            .integral_magazines
+            .first()
+            .map(|pocket| (ammunition.as_ref(), pocket.capacity)),
+    }
 }
 
 fn valid_charge_ammunition_for_integral_pocket(
@@ -819,9 +917,18 @@ fn valid_charge_ammunition_for_integral_pocket(
 }
 
 fn item_group_item_containment_depth(item: &ItemGroupItemPrototypeV1) -> usize {
-    usize::from(
-        item.charge_ammunition.is_some() && item.charges.is_some_and(|charges| charges.maximum > 0),
-    )
+    let Some(storage) = &item.tool_charge_storage else {
+        return 0;
+    };
+    match storage {
+        ItemGroupToolChargeStorageV1::Integral { .. } => {
+            usize::from(item.charges.is_some_and(|charges| charges.maximum > 0))
+        }
+        ItemGroupToolChargeStorageV1::Detachable { .. } => {
+            usize::from(item.charges.is_some())
+                + usize::from(item.charges.is_some_and(|charges| charges.maximum > 0))
+        }
+    }
 }
 
 fn item_group_item_metrics(item: &ItemGroupItemPrototypeV1) -> ItemGroupMetrics {
@@ -830,7 +937,11 @@ fn item_group_item_metrics(item: &ItemGroupItemPrototypeV1) -> ItemGroupMetrics 
         outputs: item_group_item_max_outputs(item),
         depth: 0,
         containment_depth: item_group_item_containment_depth(item),
-        charge_ammunition_candidates: u64::from(item.charge_ammunition.is_some()),
+        charge_magazine_candidates: u64::from(matches!(
+            &item.tool_charge_storage,
+            Some(ItemGroupToolChargeStorageV1::Detachable { .. })
+        )),
+        charge_ammunition_candidates: u64::from(item.tool_charge_storage.is_some()),
         modifier_side_effects_supported: item.modifier_side_effects_supported,
         charges_supported: item.charges_supported,
         estorable_contents_supported: contents_support.0,
@@ -893,7 +1004,7 @@ fn valid_item_group_contents(contents: &ItemGroupContentsSourceV1) -> bool {
 fn valid_item_group_container(container: &ItemGroupContainerV1) -> bool {
     valid_item_group_item(&container.item)
         && container.item.charges.is_none()
-        && container.item.charge_ammunition.is_none()
+        && container.item.tool_charge_storage.is_none()
         && item_group_container_insertion_supported(container)
         && container.variant_id.as_ref().is_none_or(|variant| {
             variant != "<any>"

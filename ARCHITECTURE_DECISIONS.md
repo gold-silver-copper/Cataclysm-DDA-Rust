@@ -3067,3 +3067,40 @@ to
 isolating the new serialized defaults and CanonicalStateV62 domain. General
 `contents-group` ownership, wrapper stable IDs, and overflow remain the next
 regional-field dependency and require their own representation batch.
+
+## Canonical detachable tool-charge storage
+
+Protocol 88 advances to schema 66 and CanonicalStateV64 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Normalization
+resolves every admitted tool-charge modifier into one explicit storage plan:
+either the existing single integral magazine or one single detachable well,
+its pinned default magazine prototype, and that magazine's pinned default
+ammunition prototype. Simulation never guesses content defaults.
+
+The generalized planner follows the characterized `Item_modifier::charges`
+boundaries. A detachable tool receives its default magazine even for an exact
+zero request; positive requests create nested ammunition and clamp to the
+magazine pocket capacity. The tool, magazine, and ammunition receive recursive
+preorder stable IDs and use the same direct, snapshot, SQLite, and portable
+replay path as other item-group containment. Requests 0, 1, 56, and 100 are
+retained as exact C++ traces and directly compared with the Rust engine. If an
+outer named-group modifier applies charges again, both engines retain the
+already-installed magazine and replace only its ammunition. The production
+`accesories_personal_unisex_child` seed-235 trace pins the final one-charge
+battery and downstream draw, while the Rust phase test proves no second
+magazine-constructor draws occur.
+
+Magazine-well rigidity belongs to the canonical well prototype and snapshot,
+not to an item-group-only descriptor. Rigid wells exclude installed-magazine
+volume from recursive wrapper fit; non-rigid wells include the complete nested
+magazine volume. The production content gate also proves that modeling this
+field moves exactly 13 pinned disassembly targets from an empty-charge guard to
+general detachable storage while keeping the total admitted surface fixed.
+
+The serialized well and item-group descriptor shapes require the protocol and
+schema change. The representative fixed snapshot bytes still reproduce the
+old CanonicalStateV63 root under the V63 domain, proving its only fixture change
+is the intentional V64 domain. The next retained regional-field edge is
+`saint_necklace` variant description snippet expansion; real field generation
+and runtime progress credit remain closed until that full closure and a normal
+client exploration/loot path are green.

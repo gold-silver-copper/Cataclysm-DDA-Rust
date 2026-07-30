@@ -8,11 +8,12 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
   (`Address mapgen checkpoint review findings`).
 - Active milestone: `regional-terrain-base`. The three runnable mapgen/overmap
   families now have their reusable direct Rust-to-C++ comparator and complete
-  six-part evidence; field admission resumes at the retained tool-charge
-  boundary.
-- Verified representation: protocol 87, worldgen algorithm 2, persistence
-  schema/minimum recoverable schema 65, replay format 3, CanonicalStateV63, and
-  CanonicalEventsV18.
+  six-part evidence. The active worktree admits detachable tool-charge storage;
+  field admission now resumes at variant description snippet expansion.
+- Active representation pending checkpoint: protocol 88, worldgen algorithm 2,
+  persistence schema/minimum recoverable schema 66, replay format 3,
+  CanonicalStateV64, and CanonicalEventsV18. The last bound green commit uses
+  protocol 87/schema 65/CanonicalStateV63.
 - Conformance: scenario 7 and observation 6.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only. The server and
   simulation are plain Rust; iroh 1.0.3 owns networking and authentication.
@@ -32,9 +33,10 @@ Mapgen/overmap progress is split into durable submilestones:
   Rust-specific multiplayer occupied-tile fallback agree through all four
   recovery modes.
 - `regional-terrain-base`: `in_progress`; the containment engine removes the
-  `civilian_phones_case` blocker. The exact field closure now stops at
-  `accesories_personal_unisex_child` because `wearable_light` tool charge
-  modifiers still require an unrepresented ammunition-loading path.
+  `civilian_phones_case` blocker, and detachable tool-charge storage admits
+  `accesories_personal_unisex_child`. The exact field closure now stops at
+  `accessory_necklace` because `saint_necklace` requires description snippet
+  expansion.
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
@@ -58,7 +60,7 @@ terrain/furniture/item rotation, matching start selection, durable chunks, and
 ordinary blocked layout edges are implemented. The real default `field` layer
 is not admitted until its entire loot/containment closure is exact.
 
-## Verified Protocol 87 containment family
+## Active Protocol 88 containment extension
 
 - One generalized planner covers whole-group, direct-entry, and modifier-owned
   wrappers; `contents-item` and `contents-group`; sealing; spill/discard;
@@ -75,10 +77,18 @@ is not admitted until its entire loot/containment closure is exact.
   weight or volume.
 - Charge modifiers preserve constructor/dressing RNG order, clamp liquids and
   count-by-charge items to at least one even through outer named groups, and
-  apply modifier-container capacity/default liquid fill before insertion.
-- The pinned item-group oracle has 65 exact assertions, including representative
+  apply modifier-container capacity/default liquid fill before insertion. Tool
+  modifiers now resolve one integral or detachable storage plan; a detachable
+  default magazine is present at zero charges, positive ammunition clamps to
+  capacity, and every nested object receives a stable ID.
+- Magazine-well rigidity is canonical. Recursive fit excludes an installed
+  magazine from rigid wells and includes its complete volume in non-rigid wells.
+- The pinned item-group oracle has 70 exact assertions, including representative
   traces and boundary/downstream-RNG witnesses rather than aggregate ranges
-  alone. The server normalization admits the complete
+  alone. Its production `accesories_personal_unisex_child` witness proves that
+  an outer charge modifier reuses the installed magazine and replaces only its
+  ammunition; the Rust regression retains the same 17-draw phase boundary. The
+  server normalization admits the complete
   `civilian_phones_case` closure and 524 furniture-bash definitions.
 - The structural-bash conformance path now generates a sealed rigid wrapper
   with contained drops and proves its nested ownership through direct,
@@ -107,12 +117,12 @@ new-world selection; mutually exclusive configurations still contribute their
 distinct playable definitions. Ordinary playable loops remain listed separately
 from parser and weighted coverage.
 
-Current ownership sizes are 29,339 lines in `sim/lib.rs`, 3,265 in
-`sim/items.rs`, 9,722 in `protocol/lib.rs`, 1,192 in
-`protocol/item_groups.rs`, 13,064 in persistence, 8,791 in the server library,
-and 1,111 in server item-group normalization. Against the green implementation,
+Current ownership sizes are 29,300 lines in `sim/lib.rs`, 3,569 in
+`sim/items.rs`, 9,753 in `protocol/lib.rs`, 1,303 in
+`protocol/item_groups.rs`, 13,065 in persistence, 8,793 in the server library,
+and 1,198 in server item-group normalization. Against the green implementation,
 the containment family primarily grows the three bounded owners:
-`sim/items.rs` +2,115 net lines, `protocol/item_groups.rs` +552, and
+`sim/items.rs` +2,181 net lines, `protocol/item_groups.rs` +552, and
 `server/item_groups.rs` +446. Central growth is limited to canonical/wire
 integration: `sim/lib.rs` +643, `protocol/lib.rs` +1,542, server `lib.rs` +15,
 and persistence +6. The protocol exception is large because item snapshots and
@@ -120,6 +130,14 @@ their validators have not yet been mechanically extracted; after this
 checkpoint, further item-group behavior has a zero-growth budget in central
 `lib.rs` files unless a review record identifies an unavoidable schema-only
 integration. New behavior belongs in the three bounded owners.
+
+Against the immediately preceding documentation-bound tree, this detachable
+tool-charge increment adds 304 lines to `sim/items.rs`, 111 to
+`protocol/item_groups.rs`, and 87 to `server/item_groups.rs`; it removes 39
+lines from `sim/lib.rs`. The 31-line `protocol/lib.rs` increase is the canonical
+well field, recursive-volume implementation, and focused tests, while the
+two-line server-library increase updates fixtures only. No new item behavior
+was added to a central `lib.rs`.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain explicit
@@ -133,9 +151,9 @@ mechanical extraction milestones before anatomy or EOC expansion.
   material-derived softness, and unprojected constructor/pocket semantics remain
   unavailable. They are retained explicitly and rejected rather than guessed.
 - The real field base is not normalization-ready yet: its next exact retained
-  blocker is the `wearable_light` tool charge path. It remains outside the
-  production surface until the full closure, exploration/loot client proof,
-  and fixed-tree review are green.
+  blocker is `saint_necklace` variant description snippet expansion. It remains
+  outside the production surface until the full closure, exploration/loot
+  client proof, and fixed-tree review are green.
 - Adjacent overmaps, additional generated z-levels, cities, forests, roads,
   rivers, specials, extras, spawn groups/populations, zones, vehicles, and
   mapgen monsters remain unavailable.
@@ -186,14 +204,15 @@ oracle gates, and found no remaining P0-P3 issue. Scope, findings, resolutions,
 verification, rejected concerns, and residual limitations are recorded in
 [docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
 
-The only checked canonical fixture hash changed from
-`8f8710e06937a50c14bcad35a17dbc41a059128061f4be9316c4c6449358dc66` to
-`80e072e755e68be0aad782132f7118f4269b5f664ead99bc50a1b1cd8b27d335`.
-This is the expected CanonicalStateV62-to-V63 domain change plus serialized
-containment defaults; the tick, actors, inventory, ground items, commands, and
-CanonicalEventsV18 trace/hash remain unchanged. No other checked canonical hash
-was edited. The direct, per-tick snapshot, SQLite, and portable-replay modes all
-reproduce this representation.
+The active worktree's only checked canonical fixture hash changes from
+`80e072e755e68be0aad782132f7118f4269b5f664ead99bc50a1b1cd8b27d335` to
+`c476a1ccd153ece571ebf4a98be13242ab3a7163124abff4173d9c9050c1f9b7`.
+A durable audit assertion hashes the same representative Postcard bytes under
+CanonicalStateV63 and reproduces the old root, proving the fixture change is
+only the intentional CanonicalStateV64 domain. Tick, actors, inventory, ground
+items, commands, and the CanonicalEventsV18 trace/hash remain unchanged. No
+other checked canonical hash was edited. Direct, per-tick snapshot, SQLite, and
+portable-replay modes all reproduce the new representation.
 
 The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
