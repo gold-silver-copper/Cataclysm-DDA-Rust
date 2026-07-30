@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 mod astronomy_table;
 mod item_groups;
 
-use item_groups::item_group_sources_have_exact_named_closure;
 pub use item_groups::{
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
     ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
@@ -24,8 +23,11 @@ pub use item_groups::{
     item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
     item_snippet_is_valid, item_variant_is_valid, valid_item_variables,
 };
+use item_groups::{
+    initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
+};
 
-pub const PROTOCOL_VERSION: u16 = 89;
+pub const PROTOCOL_VERSION: u16 = 90;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2293,6 +2295,10 @@ pub struct ItemSnapshot {
     /// Exact upstream item damage. `damage` is the derived display level.
     #[serde(default)]
     pub raw_damage: u16,
+    /// Per-instance upstream `FIT` state. A fitted item must have a finalized
+    /// `VARSIZE` or `FIT` capability in its immutable containment flags.
+    #[serde(default)]
+    pub fitted: bool,
     /// Selected immutable appearance variant, if any. The state is
     /// self-contained so snapshot/replay recovery never consults live content.
     #[serde(default)]
@@ -2399,6 +2405,8 @@ pub struct ItemComponentSnapshotV1 {
     pub damage: u16,
     #[serde(default)]
     pub raw_damage: u16,
+    #[serde(default)]
+    pub fitted: bool,
     #[serde(default)]
     pub variant: Option<ItemVariantV1>,
     #[serde(default)]
@@ -3939,6 +3947,7 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
         charges: item.charges,
         damage: 0,
         raw_damage: 0,
+        fitted: initial_item_fit_state(&item.containment),
         variant: None,
         snippet: None,
         variables: BTreeMap::new(),
@@ -4598,6 +4607,7 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
         && item.damage <= MAX_ITEM_DAMAGE_LEVEL
         && item.raw_damage <= MAX_ITEM_RAW_DAMAGE
         && item.damage == item_damage_level(item.raw_damage)
+        && valid_item_fit_state(item.fitted, &item.containment)
         && item.variant.as_ref().is_none_or(item_variant_is_valid)
         && item.snippet.as_ref().is_none_or(item_snippet_is_valid)
         && valid_item_variables(&item.variables)
@@ -5335,6 +5345,7 @@ fn valid_item_component(
         && component.damage <= MAX_ITEM_DAMAGE_LEVEL
         && component.raw_damage <= MAX_ITEM_RAW_DAMAGE
         && component.damage == item_damage_level(component.raw_damage)
+        && valid_item_fit_state(component.fitted, &component.containment)
         && component.variant.as_ref().is_none_or(item_variant_is_valid)
         && component.snippet.as_ref().is_none_or(item_snippet_is_valid)
         && valid_item_variables(&component.variables)
@@ -5992,6 +6003,7 @@ mod tests {
                     charges: 1,
                     damage: 0,
                     raw_damage: 0,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -7382,6 +7394,12 @@ mod tests {
         efile.prototype.containment.estorable = true;
         assert!(valid_craft_item_prototype(&phone_item.prototype));
         assert!(valid_craft_item_prototype(&efile.prototype));
+        let mut immutable_fit = efile.prototype.clone();
+        immutable_fit.containment.flags = vec![String::from("FIT")];
+        assert!(
+            valid_craft_item_prototype(&immutable_fit),
+            "prototype validation must synthesize the immutable FIT state"
+        );
         assert!(
             item_group_catalog_is_valid(&[definition(phone.clone(), efile.clone())]),
             "estorable contents choose EFILE before the phone-like reload pocket"
@@ -8178,6 +8196,7 @@ mod tests {
                 charges: 1,
                 damage: 0,
                 raw_damage: 0,
+                fitted: false,
                 variant: None,
                 snippet: None,
                 variables: BTreeMap::new(),
@@ -8468,6 +8487,7 @@ mod tests {
                 charges: i32::MAX,
                 damage: MAX_ITEM_DAMAGE_LEVEL,
                 raw_damage: MAX_ITEM_RAW_DAMAGE,
+                fitted: false,
                 variant: None,
                 snippet: None,
                 variables: BTreeMap::new(),
@@ -8644,6 +8664,7 @@ mod tests {
             charges: 0,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -8673,6 +8694,7 @@ mod tests {
             charges: 0,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -8714,6 +8736,16 @@ mod tests {
             installed_magazine: Some(Box::new(second_magazine.clone())),
         });
         assert!(valid_item_snapshot(&tool));
+        let mut fitted_without_capability = tool.clone();
+        fitted_without_capability.fitted = true;
+        assert!(!valid_item_snapshot(&fitted_without_capability));
+        fitted_without_capability.containment.flags = vec![String::from("VARSIZE")];
+        assert!(valid_item_snapshot(&fitted_without_capability));
+        let mut immutable_fit = tool.clone();
+        immutable_fit.containment.flags = vec![String::from("FIT")];
+        assert!(!valid_item_snapshot(&immutable_fit));
+        immutable_fit.fitted = true;
+        assert!(valid_item_snapshot(&immutable_fit));
         assert_eq!(
             item_snapshot_containment_volume_milliliters(&tool),
             Some(10)
@@ -8826,6 +8858,7 @@ mod tests {
             charges: 6,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -8865,6 +8898,7 @@ mod tests {
             charges: 0,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -8954,6 +8988,7 @@ mod tests {
             charges,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -8993,6 +9028,7 @@ mod tests {
             charges: 1,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -9467,6 +9503,7 @@ mod tests {
             charges,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -9572,6 +9609,7 @@ mod tests {
             charges: 1,
             damage: 1,
             raw_damage: 1,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -9650,6 +9688,7 @@ mod tests {
             charges: 1,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),

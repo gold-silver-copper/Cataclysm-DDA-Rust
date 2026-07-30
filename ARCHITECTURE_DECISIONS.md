@@ -3148,3 +3148,44 @@ the real field is still neither generated nor traversable as ordinary
 gameplay. Its next exact fail-closed boundary is variable-size `FIT` state on
 `leg_sheath6`; that generalized constructor family must complete before the
 field/client exploration-and-loot unlock.
+
+## Variable-size FIT is canonical item-instance state
+
+Protocol 90 advances to schema 68 and CanonicalStateV66 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. `VARSIZE` is an
+immutable finalized type capability; `FIT` is a per-instance boolean owned by
+the authoritative item. A fitted snapshot without `VARSIZE` or an explicit
+`FIT` capability is invalid. The state remains self-contained across nested
+ownership, component provenance, SQLite recovery, and portable replay.
+
+The generalized item-group constructor preserves upstream phase ownership.
+Every direct item leaf consumes one one-in-three FIT draw, including
+non-variable controls. The result changes state only for `VARSIZE` items, and
+an already-fitted item remains fitted. A named group delegates to its selected
+leaf and does not add another phase. Raw direct wrappers likewise do not add a
+phase, while a modifier-created container follows the ordinary item constructor
+path. These rules live in `sim/items.rs`; the central simulation file only
+coordinates crafting and disassembly ownership boundaries.
+
+Crafted variable-size primary outputs and byproducts are always fitted.
+Disassembly preserves exact retained component state; when it reconstructs a
+default component, a fitted target transfers FIT only to a variable-size
+output. The client derives the upstream `(poor fit)` suffix solely from the
+replicated immutable capability and canonical boolean. It never rerolls or
+consults live item content for this state.
+
+The pinned oracle retains representative direct and production traces instead
+of aggregate outcomes: seeds 1 and 2 cover unfitted/fitted `leg_sheath6`, seed
+2 supplies the same successful draw to a non-variable control, and production
+seeds 219 and 97 cover both states through `accessory_weaponcarry`. Each trace
+also fixes the rendered name and downstream draw. A direct Rust projection
+executes the reusable transition, and shared direct/snapshot/SQLite/replay
+conformance plus the normal client menu cover the multiplayer path.
+
+This removes `accessory_weaponcarry` from the real `field` closure. The field
+is still fail-closed: its next deterministic boundary is ammunition loading for
+`ammo_light_batteries`, followed by separate retained families such as default
+containers, food temperature, corpse construction, and generalized wrapper
+shapes. Those must be completed as coherent engines; FIT does not earn runtime
+progress until the real field is generated, explored, looted, persisted, and
+client-accessible.

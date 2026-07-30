@@ -19,9 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     IdAllocator, SimError, debit_integral_magazine_charges, debit_snapshot_ammunition_charges,
-    inclusive_rng_u64, item_from_craft_prototype, powered_light_effective_emission,
-    snapshot_ammunition_capacity, snapshot_stored_ammunition_charges,
-    validate_craft_item_prototype, validate_item_snapshot,
+    inclusive_rng_u64, powered_light_effective_emission, snapshot_ammunition_capacity,
+    snapshot_stored_ammunition_charges, validate_craft_item_prototype, validate_item_snapshot,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,6 +30,7 @@ pub(super) struct ItemInstance {
     pub(super) charges: i32,
     pub(super) damage: u16,
     pub(super) raw_damage: u16,
+    pub(super) fitted: bool,
     pub(super) variant: Option<ItemVariantV1>,
     pub(super) snippet: Option<ItemSnippetV1>,
     pub(super) variables: BTreeMap<String, ItemVariableValueV1>,
@@ -52,6 +52,12 @@ pub(super) struct ItemInstance {
 }
 
 impl ItemInstance {
+    pub(super) fn force_fit_if_variable_size(&mut self) {
+        if item_profile_has_flag(&self.containment, "VARSIZE") {
+            self.fitted = true;
+        }
+    }
+
     pub(super) fn integral_ammunition_charges(&self) -> i32 {
         self.integral_magazines
             .iter()
@@ -289,6 +295,7 @@ impl ItemInstance {
             charges: self.charges,
             damage: self.damage,
             raw_damage: self.raw_damage,
+            fitted: self.fitted,
             variant: self.variant.clone(),
             snippet: self.snippet.clone(),
             variables: self.variables.clone(),
@@ -318,6 +325,7 @@ impl ItemInstance {
             charges: snapshot.charges,
             damage: snapshot.damage,
             raw_damage: snapshot.raw_damage,
+            fitted: snapshot.fitted,
             variant: snapshot.variant.clone(),
             snippet: snapshot.snippet.clone(),
             variables: snapshot.variables.clone(),
@@ -344,6 +352,7 @@ impl ItemInstance {
 pub(super) struct PlannedItemSpawn {
     pub(super) prototype: CraftItemPrototypeV1,
     pub(super) raw_damage: u16,
+    pub(super) fitted: bool,
     pub(super) variant: Option<ItemVariantV1>,
     maximum_raw_damage: u16,
     variants: Vec<ItemGroupVariantOptionV1>,
@@ -361,6 +370,155 @@ pub(super) struct PlannedItemSpawn {
     pub(super) detachable_magazines: BTreeMap<u16, Box<PlannedItemSpawn>>,
 }
 
+pub(super) fn item_from_craft_prototype(
+    id: ItemId,
+    prototype: &CraftItemPrototypeV1,
+) -> ItemInstance {
+    ItemInstance {
+        id,
+        type_id: prototype.type_id.clone(),
+        charges: prototype.charges,
+        damage: 0,
+        raw_damage: 0,
+        fitted: item_profile_has_flag(&prototype.containment, "FIT"),
+        variant: None,
+        snippet: None,
+        variables: BTreeMap::new(),
+        melee_damage_milli: prototype.melee_damage_milli.clone(),
+        calories: prototype.calories,
+        quench: prototype.quench,
+        comestible_type: prototype.comestible_type.clone(),
+        ammunition_type: prototype.ammunition_type.clone(),
+        ranged_weapon: prototype.ranged_weapon.clone(),
+        component_provenance: None,
+        magazine_capacity: prototype.magazine_capacity,
+        integral_magazines: prototype
+            .integral_magazines
+            .iter()
+            .map(|pocket| IntegralMagazinePocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: pocket.ammunition_type.clone(),
+                capacity: pocket.capacity,
+                rigid: pocket.rigid,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                loaded_ammunition: None,
+                residual_energy_millijoules: 0,
+            })
+            .collect(),
+        magazine_wells: prototype
+            .magazine_wells
+            .iter()
+            .map(|well| MagazineWellSnapshotV1 {
+                pocket_index: well.pocket_index,
+                pocket_id: well.pocket_id.clone(),
+                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                rigid: well.rigid,
+                unloadable: well.unloadable,
+                installed_magazine: None,
+            })
+            .collect(),
+        ammunition_containers: prototype
+            .ammunition_containers
+            .iter()
+            .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                capacities: pocket.capacities.clone(),
+                access_moves: pocket.access_moves,
+                rigid: pocket.rigid,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                spawn_state: pocket.spawn_rules.clone().map(|rules| {
+                    cdda_protocol::SpawnPocketStateV1 {
+                        rules,
+                        sealed: false,
+                    }
+                }),
+                contents: Vec::new(),
+            })
+            .collect(),
+        residual_energy_millijoules: prototype.residual_energy_millijoules,
+        powered_tool: prototype.powered_tool.clone(),
+        creature_corpse: None,
+        containment: prototype.containment.clone(),
+    }
+}
+
+pub(super) fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemInstance {
+    ItemInstance {
+        id,
+        type_id: component.type_id.clone(),
+        charges: component.charges,
+        damage: component.damage,
+        raw_damage: component.raw_damage,
+        fitted: component.fitted,
+        variant: component.variant.clone(),
+        snippet: component.snippet.clone(),
+        variables: component.variables.clone(),
+        melee_damage_milli: component.melee_damage_milli.clone(),
+        calories: component.calories,
+        quench: component.quench,
+        comestible_type: component.comestible_type.clone(),
+        ammunition_type: component.ammunition_type.clone(),
+        ranged_weapon: component.ranged_weapon.clone(),
+        component_provenance: component.component_provenance.clone(),
+        magazine_capacity: component.magazine_capacity,
+        integral_magazines: component
+            .integral_magazines
+            .iter()
+            .map(|pocket| IntegralMagazinePocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                ammunition_type: pocket.ammunition_type.clone(),
+                capacity: pocket.capacity,
+                rigid: pocket.rigid,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                loaded_ammunition: None,
+                residual_energy_millijoules: 0,
+            })
+            .collect(),
+        magazine_wells: component
+            .magazine_wells
+            .iter()
+            .map(|well| MagazineWellSnapshotV1 {
+                pocket_index: well.pocket_index,
+                pocket_id: well.pocket_id.clone(),
+                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
+                rigid: well.rigid,
+                unloadable: well.unloadable,
+                installed_magazine: None,
+            })
+            .collect(),
+        ammunition_containers: component
+            .ammunition_containers
+            .iter()
+            .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: pocket.pocket_index,
+                pocket_id: pocket.pocket_id.clone(),
+                capacities: pocket.capacities.clone(),
+                access_moves: pocket.access_moves,
+                rigid: pocket.rigid,
+                reloadable: pocket.reloadable,
+                unloadable: pocket.unloadable,
+                spawn_state: pocket.spawn_rules.clone().map(|rules| {
+                    cdda_protocol::SpawnPocketStateV1 {
+                        rules,
+                        sealed: false,
+                    }
+                }),
+                contents: Vec::new(),
+            })
+            .collect(),
+        residual_energy_millijoules: component.residual_energy_millijoules,
+        powered_tool: component.powered_tool.clone(),
+        creature_corpse: None,
+        containment: component.containment.clone(),
+    }
+}
+
 pub(super) fn item_from_planned_spawn(
     id: ItemId,
     planned: &PlannedItemSpawn,
@@ -369,6 +527,7 @@ pub(super) fn item_from_planned_spawn(
     let mut item = item_from_craft_prototype(id, &planned.prototype);
     item.raw_damage = planned.raw_damage;
     item.damage = cdda_protocol::item_damage_level(planned.raw_damage);
+    item.fitted = planned.fitted;
     item.variant.clone_from(&planned.variant);
     item.snippet.clone_from(&planned.snippet);
     item.variables.clone_from(&planned.initial_variables);
@@ -714,12 +873,21 @@ fn construct_item_group_item_with_fit_phase(
             expand_item_description(expansion, rng)?,
         )?;
     }
-    if consumes_fit_phase {
-        let _ = rng.next_u64();
-    }
+    let initially_fitted = item_profile_has_flag(&item.prototype.containment, "FIT");
+    let fitted = if consumes_fit_phase {
+        let roll_succeeded = rng.next_u64().is_multiple_of(3);
+        item_group_fitted_after_phase(
+            item_profile_has_flag(&item.prototype.containment, "VARSIZE"),
+            initially_fitted,
+            roll_succeeded,
+        )
+    } else {
+        initially_fitted
+    };
     Ok(PlannedItemSpawn {
         prototype: item.prototype.clone(),
         raw_damage: 0,
+        fitted,
         variant,
         maximum_raw_damage: item.maximum_raw_damage,
         variants: item.variants.clone(),
@@ -738,6 +906,37 @@ fn construct_item_group_item_with_fit_phase(
     })
 }
 
+/// Pure transition used by the production item-group constructor and the
+/// direct C++ differential projection. The phase always consumes its roll;
+/// only variable-size items gain `FIT`, and prior fitted state is idempotent.
+#[must_use]
+pub fn item_group_fitted_after_phase(
+    variable_size: bool,
+    already_fitted: bool,
+    one_in_three_succeeded: bool,
+) -> bool {
+    already_fitted || (variable_size && one_in_three_succeeded)
+}
+
+pub(super) fn item_profile_has_flag(
+    profile: &cdda_protocol::ItemContainmentProfileV1,
+    expected: &str,
+) -> bool {
+    profile
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp(expected))
+        .is_ok()
+}
+
+pub(super) fn item_fit_state_is_valid(
+    fitted: bool,
+    profile: &cdda_protocol::ItemContainmentProfileV1,
+) -> bool {
+    let immutable_fit = item_profile_has_flag(profile, "FIT");
+    let variable_size = item_profile_has_flag(profile, "VARSIZE");
+    (!immutable_fit || fitted) && (!fitted || immutable_fit || variable_size)
+}
+
 fn construct_charge_ammunition(
     prototype: &CraftItemPrototypeV1,
     charges: i32,
@@ -750,9 +949,11 @@ fn construct_charge_ammunition(
     if validate_craft_item_prototype(&prototype).is_err() {
         return Err(SimError::InvalidItem);
     }
+    let fitted = item_profile_has_flag(&prototype.containment, "FIT");
     Ok(PlannedItemSpawn {
         prototype,
         raw_damage: 0,
+        fitted,
         variant: None,
         maximum_raw_damage: 0,
         variants: Vec::new(),
@@ -1665,6 +1866,7 @@ fn planned_items_can_combine_for_containment(
     right_prototype.charges = 0;
     left_prototype == right_prototype
         && left.raw_damage == right.raw_damage
+        && left.fitted == right.fitted
         && left.variant == right.variant
         && left.snippet == right.snippet
         && left.initial_variables == right.initial_variables
@@ -1875,6 +2077,57 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn variable_size_fit_phase_is_generalized_and_preserves_the_rng_schedule() {
+        assert!(!item_group_fitted_after_phase(false, false, true));
+        assert!(!item_group_fitted_after_phase(true, false, false));
+        assert!(item_group_fitted_after_phase(true, false, true));
+        assert!(item_group_fitted_after_phase(true, true, false));
+
+        let mut variable = leaf_item("variable_item");
+        variable.prototype.containment.flags = vec![String::from("VARSIZE")];
+        for expected_fitted in [false, true] {
+            let seed = (0..10_000)
+                .find(|seed| {
+                    let mut rng = ChaCha8Rng::seed_from_u64(*seed);
+                    let _presentation = rng.next_u64();
+                    let _variant = rng.next_u64();
+                    rng.next_u64().is_multiple_of(3) == expected_fitted
+                })
+                .expect("both FIT outcomes should have a bounded witness");
+            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+            let _presentation = expected_rng.next_u64();
+            let _variant = expected_rng.next_u64();
+            let _fit = expected_rng.next_u64();
+            let expected_downstream = expected_rng.next_u64();
+            let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+            let planned = construct_item_group_item(&variable, &mut actual_rng)
+                .expect("variable-size item should construct");
+            assert_eq!(planned.fitted, expected_fitted);
+            assert_eq!(actual_rng.next_u64(), expected_downstream);
+        }
+
+        let mut control_rng = ChaCha8Rng::seed_from_u64(2);
+        let control = construct_item_group_item(&leaf_item("ordinary"), &mut control_rng)
+            .expect("ordinary control should construct");
+        assert!(!control.fitted);
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(2);
+        let _presentation = expected_rng.next_u64();
+        let _variant = expected_rng.next_u64();
+        let _fit = expected_rng.next_u64();
+        assert_eq!(control_rng.next_u64(), expected_rng.next_u64());
+
+        let mut immutable_fit = leaf_item("immutable_fit");
+        immutable_fit.prototype.containment.flags = vec![String::from("FIT")];
+        let planned = construct_item_group_item(&immutable_fit, &mut control_rng)
+            .expect("immutable FIT item should construct in the fitted state");
+        assert!(planned.fitted);
+        assert!(item_fit_state_is_valid(
+            planned.fitted,
+            &planned.prototype.containment
+        ));
     }
 
     #[test]
@@ -3198,6 +3451,57 @@ mod tests {
             insert_planned_item(&mut too_small, liquid),
             Ok(Err(_))
         ));
+    }
+
+    #[test]
+    fn count_by_charge_containment_keeps_fitted_states_distinct() {
+        let mut target_definition = leaf_item("rigid_case");
+        target_definition.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            100,
+            100,
+            Vec::new(),
+            false,
+        )];
+        let mut payload_definition = leaf_item("variable_powder");
+        payload_definition.prototype.charges = 2;
+        payload_definition.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: 1,
+            volume_milliliters: 1,
+            longest_side_millimeters: 1,
+            flags: vec![String::from("VARSIZE")],
+            count_by_charges: true,
+            stack_size: 1,
+            ..ItemContainmentProfileV1::default()
+        };
+
+        let mut rng = ChaCha8Rng::seed_from_u64(29);
+        let mut target = construct_item_group_item(&target_definition, &mut rng)
+            .expect("target should construct");
+        let mut unfitted = construct_item_group_item(&payload_definition, &mut rng)
+            .expect("payload should construct");
+        unfitted.fitted = false;
+        let mut fitted = unfitted.clone();
+        fitted.fitted = true;
+
+        assert!(!planned_items_can_combine_for_containment(
+            &unfitted, &fitted
+        ));
+        assert!(matches!(
+            insert_planned_item(&mut target, unfitted),
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            insert_planned_item(&mut target, fitted),
+            Ok(Ok(()))
+        ));
+        let contents = &target.pocket_contents[&0];
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0].prototype.charges, 2);
+        assert!(contents[0].fitted);
+        assert_eq!(contents[1].prototype.charges, 2);
+        assert!(!contents[1].fitted);
     }
 
     #[test]

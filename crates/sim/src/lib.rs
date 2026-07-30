@@ -54,8 +54,11 @@ use cdda_protocol::{
     ItemGroupTargetV1,
 };
 
-pub use items::expand_item_description;
-use items::{ItemInstance, PlannedItemSpawn, item_from_planned_spawn, plan_item_group_source};
+use items::{
+    ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
+    item_from_craft_prototype, item_from_planned_spawn, plan_item_group_source,
+};
+pub use items::{expand_item_description, item_group_fitted_after_phase};
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
 pub const DEFAULT_ACTOR_HP: i32 = 100;
@@ -952,6 +955,7 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
         || snapshot.damage > MAX_ITEM_DAMAGE_LEVEL
         || snapshot.raw_damage > cdda_protocol::MAX_ITEM_RAW_DAMAGE
         || snapshot.damage != cdda_protocol::item_damage_level(snapshot.raw_damage)
+        || !item_fit_state_is_valid(snapshot.fitted, &snapshot.containment)
         || snapshot
             .variant
             .as_ref()
@@ -1623,6 +1627,7 @@ fn validate_item_component(
         || component.damage > MAX_ITEM_DAMAGE_LEVEL
         || component.raw_damage > cdda_protocol::MAX_ITEM_RAW_DAMAGE
         || component.damage != cdda_protocol::item_damage_level(component.raw_damage)
+        || !item_fit_state_is_valid(component.fitted, &component.containment)
         || component
             .variant
             .as_ref()
@@ -3020,6 +3025,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
     left.type_id == right.type_id
         && left.damage == right.damage
         && left.raw_damage == right.raw_damage
+        && left.fitted == right.fitted
         && left.variant == right.variant
         && left.snippet == right.snippet
         && left.variables == right.variables
@@ -3126,156 +3132,12 @@ fn debit_snapshot_ammunition_charges(
     }
 }
 
-fn item_from_craft_prototype(id: ItemId, prototype: &CraftItemPrototypeV1) -> ItemInstance {
-    ItemInstance {
-        id,
-        type_id: prototype.type_id.clone(),
-        charges: prototype.charges,
-        damage: 0,
-        raw_damage: 0,
-        variant: None,
-        snippet: None,
-        variables: BTreeMap::new(),
-        melee_damage_milli: prototype.melee_damage_milli.clone(),
-        calories: prototype.calories,
-        quench: prototype.quench,
-        comestible_type: prototype.comestible_type.clone(),
-        ammunition_type: prototype.ammunition_type.clone(),
-        ranged_weapon: prototype.ranged_weapon.clone(),
-        component_provenance: None,
-        magazine_capacity: prototype.magazine_capacity,
-        integral_magazines: prototype
-            .integral_magazines
-            .iter()
-            .map(|pocket| IntegralMagazinePocketSnapshotV1 {
-                pocket_index: pocket.pocket_index,
-                pocket_id: pocket.pocket_id.clone(),
-                ammunition_type: pocket.ammunition_type.clone(),
-                capacity: pocket.capacity,
-                rigid: pocket.rigid,
-                reloadable: pocket.reloadable,
-                unloadable: pocket.unloadable,
-                loaded_ammunition: None,
-                residual_energy_millijoules: 0,
-            })
-            .collect(),
-        magazine_wells: prototype
-            .magazine_wells
-            .iter()
-            .map(|well| MagazineWellSnapshotV1 {
-                pocket_index: well.pocket_index,
-                pocket_id: well.pocket_id.clone(),
-                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
-                rigid: well.rigid,
-                unloadable: well.unloadable,
-                installed_magazine: None,
-            })
-            .collect(),
-        ammunition_containers: prototype
-            .ammunition_containers
-            .iter()
-            .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
-                pocket_index: pocket.pocket_index,
-                pocket_id: pocket.pocket_id.clone(),
-                capacities: pocket.capacities.clone(),
-                access_moves: pocket.access_moves,
-                rigid: pocket.rigid,
-                reloadable: pocket.reloadable,
-                unloadable: pocket.unloadable,
-                spawn_state: pocket.spawn_rules.clone().map(|rules| {
-                    cdda_protocol::SpawnPocketStateV1 {
-                        rules,
-                        sealed: false,
-                    }
-                }),
-                contents: Vec::new(),
-            })
-            .collect(),
-        residual_energy_millijoules: prototype.residual_energy_millijoules,
-        powered_tool: prototype.powered_tool.clone(),
-        creature_corpse: None,
-        containment: prototype.containment.clone(),
-    }
-}
-
 fn planned_item_count(planned: &[PlannedItemSpawn]) -> Result<u64, SimError> {
     planned.iter().try_fold(0_u64, |total, item| {
         total
             .checked_add(item.object_count().ok_or(SimError::NumericOverflow)?)
             .ok_or(SimError::NumericOverflow)
     })
-}
-
-fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV1) -> ItemInstance {
-    ItemInstance {
-        id,
-        type_id: component.type_id.clone(),
-        charges: component.charges,
-        damage: component.damage,
-        raw_damage: component.raw_damage,
-        variant: component.variant.clone(),
-        snippet: component.snippet.clone(),
-        variables: component.variables.clone(),
-        melee_damage_milli: component.melee_damage_milli.clone(),
-        calories: component.calories,
-        quench: component.quench,
-        comestible_type: component.comestible_type.clone(),
-        ammunition_type: component.ammunition_type.clone(),
-        ranged_weapon: component.ranged_weapon.clone(),
-        component_provenance: component.component_provenance.clone(),
-        magazine_capacity: component.magazine_capacity,
-        integral_magazines: component
-            .integral_magazines
-            .iter()
-            .map(|pocket| IntegralMagazinePocketSnapshotV1 {
-                pocket_index: pocket.pocket_index,
-                pocket_id: pocket.pocket_id.clone(),
-                ammunition_type: pocket.ammunition_type.clone(),
-                capacity: pocket.capacity,
-                rigid: pocket.rigid,
-                reloadable: pocket.reloadable,
-                unloadable: pocket.unloadable,
-                loaded_ammunition: None,
-                residual_energy_millijoules: 0,
-            })
-            .collect(),
-        magazine_wells: component
-            .magazine_wells
-            .iter()
-            .map(|well| MagazineWellSnapshotV1 {
-                pocket_index: well.pocket_index,
-                pocket_id: well.pocket_id.clone(),
-                compatible_magazine_type_ids: well.compatible_magazine_type_ids.clone(),
-                rigid: well.rigid,
-                unloadable: well.unloadable,
-                installed_magazine: None,
-            })
-            .collect(),
-        ammunition_containers: component
-            .ammunition_containers
-            .iter()
-            .map(|pocket| AmmunitionContainerPocketSnapshotV1 {
-                pocket_index: pocket.pocket_index,
-                pocket_id: pocket.pocket_id.clone(),
-                capacities: pocket.capacities.clone(),
-                access_moves: pocket.access_moves,
-                rigid: pocket.rigid,
-                reloadable: pocket.reloadable,
-                unloadable: pocket.unloadable,
-                spawn_state: pocket.spawn_rules.clone().map(|rules| {
-                    cdda_protocol::SpawnPocketStateV1 {
-                        rules,
-                        sealed: false,
-                    }
-                }),
-                contents: Vec::new(),
-            })
-            .collect(),
-        residual_energy_millijoules: component.residual_energy_millijoules,
-        powered_tool: component.powered_tool.clone(),
-        creature_corpse: None,
-        containment: component.containment.clone(),
-    }
 }
 
 fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftItemPrototypeV1 {
@@ -3308,6 +3170,7 @@ fn component_from_consumed(
         charges: consumed.item.charges,
         damage: consumed.item.damage,
         raw_damage: consumed.item.raw_damage,
+        fitted: consumed.item.fitted,
         variant: consumed.item.variant.clone(),
         snippet: consumed.item.snippet.clone(),
         variables: consumed.item.variables.clone(),
@@ -3484,6 +3347,7 @@ fn same_item_definition(item: &ItemInstance, snapshot: &ItemSnapshot) -> bool {
     item.type_id == snapshot.type_id
         && item.damage == snapshot.damage
         && item.raw_damage == snapshot.raw_damage
+        && item.fitted == snapshot.fitted
         && item.variant == snapshot.variant
         && item.melee_damage_milli == snapshot.melee_damage_milli
         && item.calories == snapshot.calories
@@ -5062,6 +4926,7 @@ impl WorldState {
                 charges: ammunition.charges,
                 damage: 0,
                 raw_damage: 0,
+                fitted: false,
                 variant: None,
                 snippet: None,
                 variables: BTreeMap::new(),
@@ -5134,6 +4999,7 @@ impl WorldState {
                     charges: spawn.charges,
                     damage: 0,
                     raw_damage: 0,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -9157,6 +9023,7 @@ impl WorldState {
                     charges: 1,
                     damage: cdda_protocol::item_damage_level(raw_damage),
                     raw_damage,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -11276,6 +11143,7 @@ impl WorldState {
                 .enumerate()
             {
                 let mut item = item_from_craft_prototype(*item_id, prototype);
+                item.force_fit_if_variable_size();
                 if index < usize::from(activity.recipe.output_instances) {
                     item.component_provenance = output_provenance
                         .as_ref()
@@ -12206,10 +12074,15 @@ impl WorldState {
                 let damage_success = component_rng.next_u32() % 10_000 < damage_chance;
                 let recovered_component = skill_success && damage_success;
                 if recovered_component {
-                    let item = component.output_state.as_ref().map_or_else(
-                        || item_from_craft_prototype(item_id, &component.output),
-                        |state| item_from_component(item_id, state),
-                    );
+                    let item = if let Some(state) = &component.output_state {
+                        item_from_component(item_id, state)
+                    } else {
+                        let mut item = item_from_craft_prototype(item_id, &component.output);
+                        if activity.target_item.fitted {
+                            item.force_fit_if_variable_size();
+                        }
+                        item
+                    };
                     recovered.push((item_id, item));
                 } else {
                     let count = if component.count_by_charges {
@@ -13716,7 +13589,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV65");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV66");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -14079,6 +13952,7 @@ mod tests {
             charges: 0,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -14106,6 +13980,7 @@ mod tests {
                     charges: 1,
                     damage: 0,
                     raw_damage: 0,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -14303,6 +14178,7 @@ mod tests {
                     charges: 1,
                     damage: 0,
                     raw_damage: 0,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -16031,6 +15907,7 @@ mod tests {
             charges: 23,
             damage: 1,
             raw_damage: 1,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -16102,6 +15979,7 @@ mod tests {
             charges: 7,
             damage: 2,
             raw_damage: 1_000,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -16237,6 +16115,7 @@ mod tests {
             charges: 1,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -16390,6 +16269,13 @@ mod tests {
             .and_then(|actor| actor.inventory.get_mut(&target_item_id))
             .expect("target is carried")
             .raw_damage = 0;
+        let target = world
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|actor| actor.inventory.get_mut(&target_item_id))
+            .expect("target is carried before disassembly");
+        target.containment.flags = vec![String::from("VARSIZE")];
+        target.fitted = true;
         let practiced_at = world.tick();
         world
             .actors
@@ -16417,7 +16303,7 @@ mod tests {
                 rng.next_u32().is_multiple_of(4)
             })
             .expect("a deterministic learning sequence should exist");
-        let recipe = test_disassembly_recipe(
+        let mut recipe = test_disassembly_recipe(
             200,
             0,
             vec![CraftSkillRequirementV1 {
@@ -16425,6 +16311,8 @@ mod tests {
                 level: 1,
             }],
         );
+        recipe.components[0].output.containment.flags = vec![String::from("VARSIZE")];
+        recipe.components[0].output_state = None;
         let mut learned_craft = test_craft_recipe(100, 1, vec![vec![("test_component", 1, false)]]);
         learned_craft.recipe_id = recipe.recipe_id.clone();
         learned_craft.autolearn = false;
@@ -16560,6 +16448,10 @@ mod tests {
                 .expect("recovered component should be on the ground");
             assert_eq!(ground.position, actor.position);
             assert_eq!(ground.item.type_id, "test_component");
+            assert!(
+                ground.item.fitted,
+                "default variable-size components inherit FIT from a fitted disassembly target"
+            );
         }
     }
 
@@ -18069,6 +17961,7 @@ mod tests {
         make_actor_act_each_tick(&mut world, actor_id);
         let log = spawn_and_pick_up(&mut world, actor_id, 1, "log", 1);
         let mut recipe = test_craft_recipe(100, 1, vec![vec![("log", 1, false)]]);
+        recipe.output.containment.flags = vec![String::from("VARSIZE")];
         recipe.byproducts = vec![cdda_protocol::CraftByproductV1 {
             output_instances: 2,
             output: CraftItemPrototypeV1 {
@@ -18086,7 +17979,10 @@ mod tests {
                 ammunition_containers: Vec::new(),
                 residual_energy_millijoules: 0,
                 powered_tool: None,
-                containment: Default::default(),
+                containment: cdda_protocol::ItemContainmentProfileV1 {
+                    flags: vec![String::from("VARSIZE")],
+                    ..Default::default()
+                },
             },
         }];
         world
@@ -18139,6 +18035,10 @@ mod tests {
                 .map(|item| item.type_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["test_output", "splinter", "splinter"]
+        );
+        assert!(
+            actor.inventory.iter().all(|item| item.fitted),
+            "crafted variable-size primary outputs and byproducts are always fitted upstream"
         );
         assert!(!restored.item_id_exists(log));
     }
@@ -19802,6 +19702,23 @@ mod tests {
             !same_item_stack_state(&base, &distinct_containment),
             "self-contained physical state also participates in stack identity"
         );
+        let mut unfitted = base.clone();
+        unfitted.containment.flags = vec![String::from("VARSIZE")];
+        let mut fitted = unfitted.clone();
+        fitted.fitted = true;
+        assert!(validate_item_snapshot(&fitted).is_ok());
+        assert!(
+            !same_item_stack_state(&unfitted, &fitted),
+            "fitted and unfitted instances must not merge into one stack"
+        );
+        let mut immutable_fit = base.clone();
+        immutable_fit.containment.flags = vec![String::from("FIT")];
+        assert!(matches!(
+            validate_item_snapshot(&immutable_fit),
+            Err(SimError::InvalidItem)
+        ));
+        immutable_fit.fitted = true;
+        assert!(validate_item_snapshot(&immutable_fit).is_ok());
 
         let mut empty_snippet = valid.clone();
         empty_snippet
@@ -19871,6 +19788,14 @@ mod tests {
             validate_item_component_root(&component_duplicate_flags),
             Err(SimError::InvalidItem)
         ));
+        let mut component_immutable_fit = component.clone();
+        component_immutable_fit.containment.flags = vec![String::from("FIT")];
+        assert!(matches!(
+            validate_item_component_root(&component_immutable_fit),
+            Err(SimError::InvalidItem)
+        ));
+        component_immutable_fit.fitted = true;
+        assert!(validate_item_component_root(&component_immutable_fit).is_ok());
         let mut component_charge_mode_mismatch = component.clone();
         component_charge_mode_mismatch.containment.count_by_charges = true;
         assert!(matches!(
@@ -20491,6 +20416,7 @@ mod tests {
             charges: 0,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -20515,6 +20441,7 @@ mod tests {
                     charges: 37,
                     damage: 0,
                     raw_damage: 0,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -22089,6 +22016,7 @@ mod tests {
                     charges: 1,
                     damage: 0,
                     raw_damage: 0,
+                    fitted: false,
                     variant: None,
                     snippet: None,
                     variables: BTreeMap::new(),
@@ -23635,6 +23563,7 @@ mod tests {
                 charges: 1,
                 damage: 0,
                 raw_damage: 0,
+                fitted: false,
                 variant: None,
                 snippet: None,
                 variables: BTreeMap::new(),

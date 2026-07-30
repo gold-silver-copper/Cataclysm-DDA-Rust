@@ -86,6 +86,18 @@
       "expanded_description": "A necklace made of a fine gold chain with a medallion bearing the image of a Catholic saint.  The back reads \"St. Mary, Mother of God, pray for us\".",
       "downstream_draw": 1652
     },
+    "variable_size_fit": {
+      "production_group": "accessory_weaponcarry",
+      "direct": [
+        { "case_id": "non_variable_control", "seed": 2, "item_type": "test_pipe", "variable_size": false, "fitted": false, "name": "TEST pipe", "downstream_draw": 7599 },
+        { "case_id": "variable_unfitted", "seed": 1, "item_type": "leg_sheath6", "variable_size": true, "fitted": false, "name": "throwing knives leg sheath (poor fit)", "downstream_draw": 6855 },
+        { "case_id": "variable_fitted", "seed": 2, "item_type": "leg_sheath6", "variable_size": true, "fitted": true, "name": "throwing knives leg sheath", "downstream_draw": 7599 }
+      ],
+      "production": [
+        { "case_id": "production_unfitted", "seed": 219, "item_type": "leg_sheath6", "variable_size": true, "fitted": false, "name": "throwing knives leg sheath (poor fit)", "downstream_draw": 3293 },
+        { "case_id": "production_fitted", "seed": 97, "item_type": "leg_sheath6", "variable_size": true, "fitted": true, "name": "throwing knives leg sheath", "downstream_draw": 8155 }
+      ]
+    },
     "nested": {
       "rolls_consumed": 4,
       "expected_trace": ["child_conditional", "child_always", "root_last"],

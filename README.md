@@ -780,8 +780,23 @@ item-group oracle pins recursive/literal expansion and a real
 `saint_necklace`; production gates also retain the complete `dog_tag_id` name
 closure. Replicated descriptions render in the ordinary client item menu and
 survive direct, snapshot, SQLite, and replay execution. The real field closure
-now stops at `leg_sheath6` variable-size `FIT` state; Protocol 89 does not yet
-earn runtime points because the field is not generated or playable.
+then stops at `leg_sheath6` variable-size `FIT` state; Protocol 89 does not earn
+runtime points because the field is not generated or playable.
+
+Protocol 90/schema 68/CanonicalStateV66 add canonical per-instance `FIT` state
+without changing replay format 3 or CanonicalEventsV18. Every direct item-group
+leaf consumes the pinned one-in-three phase; only `VARSIZE` items gain `FIT`,
+and raw wrapper construction does not consume a second FIT phase. Crafting
+always fits variable-size outputs and byproducts, while default disassembly
+components inherit fit from a fitted target and exact retained components keep
+their own state. The pinned 80-assertion C++ oracle records exact direct and
+production fitted/unfitted witnesses for `leg_sheath6`, including names and
+downstream RNG, and compares the transition directly with Rust. The normal
+client item menu renders `(poor fit)` from replicated state. Direct, per-tick
+snapshot, SQLite, and portable replay execution preserve FIT. The field closure
+now passes `accessory_weaponcarry`; its next exact boundary is battery loading
+for `ammo_light_batteries`. Runtime points remain unchanged until the real
+field is generated, explored, looted, persisted, and client-accessible.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned

@@ -838,13 +838,6 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    if item.flags.contains("VARSIZE") {
-        return Err(format!(
-            "item group item {} requires unimplemented variable-size FIT state",
-            item.id
-        )
-        .into());
-    }
     if item.unsupported_fields.contains("container") {
         return Err(format!(
             "item group item {} requires unimplemented default containment",

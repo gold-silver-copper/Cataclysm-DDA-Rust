@@ -4564,24 +4564,57 @@ mod tests {
                 .len(),
             1_219
         );
-        let next_field_runtime_blocker = field_graph
+        let weapon_carry = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("accessory_weaponcarry")
+                .expect("field closure should retain weapon-carry accessories"),
+            item_group_content,
+        )
+        .expect("the generalized variable-size constructor should admit weapon-carry accessories");
+        let leg_sheath = weapon_carry
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .find_map(|entry| match &entry.target {
+                ItemGroupTargetV1::Item(item) if item.prototype.type_id == "leg_sheath6" => {
+                    Some(item)
+                }
+                ItemGroupTargetV1::Item(_)
+                | ItemGroupTargetV1::Group(_)
+                | ItemGroupTargetV1::Node(_) => None,
+            })
+            .expect("weapon-carry accessories should retain the six-knife leg sheath");
+        assert!(
+            leg_sheath
+                .prototype
+                .containment
+                .flags
+                .binary_search_by(|flag| flag.as_str().cmp("VARSIZE"))
+                .is_ok()
+        );
+        let field_runtime_errors = field_graph
             .groups
             .values()
-            .find_map(|definition| {
+            .filter_map(|definition| {
                 runtime_item_group_graph(definition, item_group_content)
                     .err()
                     .map(|error| (definition.id.as_str(), error.to_string()))
             })
-            .expect("field loot must retain its next unsupported runtime semantic edge");
+            .collect::<Vec<_>>();
         assert_eq!(
-            next_field_runtime_blocker,
-            (
-                "accessory_weaponcarry",
+            field_runtime_errors.first(),
+            Some(&(
+                "ammo_light_batteries",
                 String::from(
-                    "item group item leg_sheath6 requires unimplemented variable-size FIT state"
+                    "item-group charges for light_battery_cell require unimplemented ammunition loading"
                 ),
-            )
+            )),
+            "the field closure must retain its exact next unsupported semantic boundary"
         );
+        assert!(field_runtime_errors.iter().all(|(group, error)| {
+            *group != "accessory_weaponcarry" && !error.contains("variable-size FIT")
+        }));
 
         let phone_case_graph = item_groups
             .strict_graph("civilian_phones_case")

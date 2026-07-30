@@ -15,6 +15,7 @@
 
 #include "calendar.h"
 #include "cata_catch.h"
+#include "flag.h"
 #include "item.h"
 #include "item_group.h"
 #include "item_pocket.h"
@@ -380,6 +381,95 @@ struct description_expansion_trace {
     std::string expanded_description;
     int downstream_draw = 0;
 };
+
+struct variable_size_fit_trace {
+    std::string case_id;
+    unsigned int seed = 0;
+    std::string item_type;
+    bool variable_size = false;
+    bool fitted = false;
+    std::string name;
+    int downstream_draw = 0;
+};
+
+struct variable_size_fit_observation {
+    std::string production_group;
+    std::vector<variable_size_fit_trace> direct;
+    std::vector<variable_size_fit_trace> production;
+};
+
+variable_size_fit_trace observe_direct_fit( const std::string &case_id,
+        const itype_id &item_type, bool target_fitted, unsigned int first_seed = 1 )
+{
+    for( unsigned int seed = first_seed; seed <= maximum_seed_search; ++seed ) {
+        Single_item_creator creator( item_type.str(), Single_item_creator::S_ITEM, 100,
+                                     "Rust item-group variable-size FIT oracle" );
+        Item_spawn_data::ItemList items;
+        Item_spawn_data::RecursionList recursion;
+        rng_set_engine_seed( seed );
+        creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+        REQUIRE( items.size() == 1 );
+        const item &generated = items.front();
+        if( generated.has_flag( flag_FIT ) != target_fitted ) {
+            continue;
+        }
+        return {
+            case_id,
+            seed,
+            generated.typeId().str(),
+            generated.has_flag( flag_VARSIZE ),
+            generated.has_flag( flag_FIT ),
+            generated.tname( 1, false ),
+            rng( 0, 9999 )
+        };
+    }
+    FAIL( "could not find a bounded direct variable-size FIT witness" );
+    return {};
+}
+
+variable_size_fit_trace observe_production_fit( const std::string &case_id,
+        const item_group_id &group_id, const itype_id &item_type, bool target_fitted )
+{
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item_group::ItemList items = item_group::items_from( group_id );
+        if( items.size() != 1 || items.front().typeId() != item_type ||
+            items.front().has_flag( flag_FIT ) != target_fitted ) {
+            continue;
+        }
+        const item &generated = items.front();
+        return {
+            case_id,
+            seed,
+            generated.typeId().str(),
+            generated.has_flag( flag_VARSIZE ),
+            generated.has_flag( flag_FIT ),
+            generated.tname( 1, false ),
+            rng( 0, 9999 )
+        };
+    }
+    FAIL( "could not find a bounded production variable-size FIT witness" );
+    return {};
+}
+
+variable_size_fit_observation observe_variable_size_fit()
+{
+    variable_size_fit_observation observation;
+    observation.production_group = "accessory_weaponcarry";
+    observation.direct.push_back( observe_direct_fit(
+                                      "non_variable_control", itype_id( "test_pipe" ), false, 2 ) );
+    observation.direct.push_back( observe_direct_fit(
+                                      "variable_unfitted", itype_id( "leg_sheath6" ), false ) );
+    observation.direct.push_back( observe_direct_fit(
+                                      "variable_fitted", itype_id( "leg_sheath6" ), true ) );
+    observation.production.push_back( observe_production_fit(
+                                          "production_unfitted", item_group_id( observation.production_group ),
+                                          itype_id( "leg_sheath6" ), false ) );
+    observation.production.push_back( observe_production_fit(
+                                          "production_fitted", item_group_id( observation.production_group ),
+                                          itype_id( "leg_sheath6" ), true ) );
+    return observation;
+}
 
 description_expansion_trace observe_description_expansion()
 {
@@ -872,6 +962,7 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     const std::vector<constructor_variant_trace> constructor_variants =
         observe_constructor_variants();
     const description_expansion_trace description_expansion = observe_description_expansion();
+    const variable_size_fit_observation variable_size_fit = observe_variable_size_fit();
 
     const unsigned int nested_seed = seed_for_collection_branch( branch_probability );
     rng_set_engine_seed( nested_seed );
@@ -1120,6 +1211,30 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "variant_id", description_expansion.variant_id );
         json.member( "expanded_description", description_expansion.expanded_description );
         json.member( "downstream_draw", description_expansion.downstream_draw );
+        json.end_object();
+
+        const auto write_fit_traces = [&]( const std::vector<variable_size_fit_trace> &traces ) {
+            json.start_array();
+            for( const variable_size_fit_trace &trace : traces ) {
+                json.start_object();
+                json.member( "case_id", trace.case_id );
+                json.member( "seed", trace.seed );
+                json.member( "item_type", trace.item_type );
+                json.member( "variable_size", trace.variable_size );
+                json.member( "fitted", trace.fitted );
+                json.member( "name", trace.name );
+                json.member( "downstream_draw", trace.downstream_draw );
+                json.end_object();
+            }
+            json.end_array();
+        };
+        json.member( "variable_size_fit" );
+        json.start_object();
+        json.member( "production_group", variable_size_fit.production_group );
+        json.member( "direct" );
+        write_fit_traces( variable_size_fit.direct );
+        json.member( "production" );
+        write_fit_traces( variable_size_fit.production );
         json.end_object();
 
         json.member( "nested" );

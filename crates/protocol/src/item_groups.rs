@@ -4,9 +4,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CraftItemPrototypeV1, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    CraftItemPrototypeV1, ItemContainmentProfileV1, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_RAW_DAMAGE,
     valid_craft_item_prototype, valid_recipe_id,
 };
+
+pub(super) fn valid_item_fit_state(fitted: bool, containment: &ItemContainmentProfileV1) -> bool {
+    let immutable_fit = initial_item_fit_state(containment);
+    let variable_size = item_profile_has_flag(containment, "VARSIZE");
+    (!immutable_fit || fitted) && (!fitted || immutable_fit || variable_size)
+}
+
+pub(super) fn initial_item_fit_state(containment: &ItemContainmentProfileV1) -> bool {
+    item_profile_has_flag(containment, "FIT")
+}
+
+fn item_profile_has_flag(containment: &ItemContainmentProfileV1, expected: &str) -> bool {
+    containment
+        .flags
+        .binary_search_by(|candidate| candidate.as_str().cmp(expected))
+        .is_ok()
+}
 
 pub const MAX_ITEM_VARIANTS: usize = 256;
 pub const MAX_ITEM_SNIPPETS: usize = 256;

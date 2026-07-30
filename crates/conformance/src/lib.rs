@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x08, 0x78, 0xf4, 0x7b, 0x5e, 0x8e, 0x15, 0x9f, 0xde, 0xe5, 0xa5, 0x7a, 0x6c,
-                    0x7f, 0x90, 0xba, 0xb5, 0xe1, 0x3e, 0x6b, 0xb9, 0x44, 0x82, 0x0a, 0x10, 0x58,
-                    0x5b, 0x83, 0x5f, 0xb8, 0x57, 0xbe,
+                    0x7f, 0xff, 0xb3, 0xbc, 0xca, 0xd5, 0x9a, 0x52, 0xe6, 0x45, 0x40, 0xae, 0xb4,
+                    0x21, 0xcd, 0xe5, 0xf1, 0xfd, 0x89, 0x12, 0xe3, 0xa1, 0x19, 0x46, 0x36, 0x81,
+                    0x70, 0xb2, 0xee, 0xec, 0x91, 0xcb,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1054,16 +1054,16 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV64");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV65");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0xc4, 0x76, 0xa1, 0xcc, 0xd1, 0x53, 0xec, 0xe5, 0x71, 0xeb, 0xf4, 0xa9, 0x8b, 0xe1,
-                0x32, 0x42, 0xab, 0x3a, 0x71, 0x63, 0x12, 0x4a, 0xbf, 0xf4, 0x17, 0x3d, 0x9c, 0x90,
-                0x50, 0xc1, 0xf9, 0xb7,
+                0x24, 0xe4, 0x29, 0x80, 0x46, 0x76, 0x91, 0x83, 0xc3, 0x6e, 0xe4, 0x73, 0x34, 0xb1,
+                0xac, 0xc6, 0x28, 0x95, 0x6a, 0x92, 0xfa, 0x21, 0x76, 0xdf, 0xff, 0x4d, 0xea, 0xc3,
+                0x2f, 0xbe, 0xf2, 0xdb,
             ],
-            "the representative state bytes stay fixed; only the hash domain advances"
+            "the audited Protocol 90 bytes differ under the old V65 domain because FIT is canonical"
         );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
@@ -1464,6 +1464,7 @@ mod tests {
             unreachable!("splinter fixture is a direct item")
         };
         splinter_item.maximum_raw_damage = cdda_protocol::MAX_ITEM_RAW_DAMAGE;
+        splinter_item.prototype.containment.flags = vec![String::from("VARSIZE")];
         splinter_item.variants = vec![cdda_protocol::ItemGroupVariantOptionV1 {
             variant: cdda_protocol::ItemVariantV1 {
                 id: String::from("weathered"),
@@ -1691,6 +1692,7 @@ mod tests {
         assert!(splinters.iter().all(|item| {
             item.raw_damage == 1_000
                 && item.damage == 2
+                && item.containment.flags == ["VARSIZE"]
                 && item
                     .variant
                     .as_ref()

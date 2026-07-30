@@ -2966,10 +2966,21 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
                 .and_then(|content| content.0.get(&item.type_id))
                 .map_or(item.type_id.as_str(), |definition| definition.name.as_str())
         });
-    let name = item.snippet.as_ref().map_or_else(
-        || name.to_owned(),
-        |snippet| format!("{name} — {}", snippet.text),
-    );
+    let name = if !item.fitted
+        && item
+            .containment
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("VARSIZE"))
+            .is_ok()
+    {
+        format!("{name} (poor fit)")
+    } else {
+        name.to_owned()
+    };
+    let name = match &item.snippet {
+        Some(snippet) => format!("{name} — {}", snippet.text),
+        None => name,
+    };
     let name = match item.variables.get("description") {
         Some(cdda_protocol::ItemVariableValueV1::String(description)) => {
             format!("{name} — {description}")
@@ -3112,6 +3123,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
     left.type_id == right.type_id
         && left.damage == right.damage
         && left.raw_damage == right.raw_damage
+        && left.fitted == right.fitted
         && left.variant == right.variant
         && left.snippet == right.snippet
         && left.variables == right.variables
@@ -5198,6 +5210,7 @@ mod tests {
                 charges: 5,
                 damage: 0,
                 raw_damage: 0,
+                fitted: false,
                 variant: None,
                 snippet: None,
                 variables: std::collections::BTreeMap::new(),
@@ -5251,6 +5264,22 @@ mod tests {
             item_menu_label(&variant_item, None).starts_with("weathered splinter x5"),
             "the authoritative selected variant should be visible in normal item menus"
         );
+        let mut variable_size = item(7, "", "", None);
+        variable_size.type_id = String::from("throwing knives leg sheath");
+        variable_size.containment.flags = vec![String::from("VARSIZE")];
+        let unfitted_variable_size = variable_size.clone();
+        assert!(
+            item_menu_label(&variable_size, None)
+                .starts_with("throwing knives leg sheath (poor fit) x5"),
+            "replicated unfitted variable-size state should be visible in the normal client menu"
+        );
+        variable_size.fitted = true;
+        assert!(item_menu_label(&variable_size, None).starts_with("throwing knives leg sheath x5"));
+        assert!(!item_menu_label(&variable_size, None).contains("poor fit"));
+        assert!(!same_item_stack_state(
+            &unfitted_variable_size,
+            &variable_size
+        ));
         variant_item.snippet = Some(cdda_protocol::ItemSnippetV1 {
             id: String::from("provenance"),
             text: String::from("Found near the river"),
@@ -5672,6 +5701,7 @@ mod tests {
             charges: 1,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: BTreeMap::new(),
@@ -6346,6 +6376,7 @@ mod tests {
             charges: 1,
             damage: 0,
             raw_damage: 0,
+            fitted: false,
             variant: None,
             snippet: None,
             variables: std::collections::BTreeMap::new(),

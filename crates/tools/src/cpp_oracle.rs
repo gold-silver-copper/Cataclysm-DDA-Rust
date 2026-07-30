@@ -119,6 +119,7 @@ struct ItemGroupOracleObservationV1 {
     modifier_rng_phase: ItemGroupModifierRngPhaseObservationV1,
     constructor_variants: Vec<ItemGroupConstructorVariantTraceV1>,
     description_expansion: ItemGroupDescriptionExpansionObservationV1,
+    variable_size_fit: ItemGroupVariableSizeFitObservationV1,
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
@@ -254,6 +255,46 @@ impl ItemGroupDescriptionExpansionObservationV1 {
             direct_input: self.direct_input.clone(),
             direct_output: self.direct_output.clone(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupVariableSizeFitTraceV1 {
+    case_id: String,
+    seed: u32,
+    item_type: String,
+    variable_size: bool,
+    fitted: bool,
+    name: String,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupVariableSizeFitObservationV1 {
+    production_group: String,
+    direct: Vec<ItemGroupVariableSizeFitTraceV1>,
+    production: Vec<ItemGroupVariableSizeFitTraceV1>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupVariableSizeFitDirectV1 {
+    case_id: String,
+    variable_size: bool,
+    fitted: bool,
+}
+
+impl ItemGroupVariableSizeFitObservationV1 {
+    fn direct_projection(&self) -> Vec<ItemGroupVariableSizeFitDirectV1> {
+        self.direct
+            .iter()
+            .map(|trace| ItemGroupVariableSizeFitDirectV1 {
+                case_id: trace.case_id.clone(),
+                variable_size: trace.variable_size,
+                fitted: trace.fitted,
+            })
+            .collect()
     }
 }
 
@@ -581,6 +622,11 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 "item description snippet expansion",
                 &observation.description_expansion.direct_projection(),
                 &rust_item_group_description_expansion_observation()?,
+            )?;
+            compare_direct_observation(
+                "item-group variable-size FIT transition",
+                &observation.variable_size_fit.direct_projection(),
+                &rust_item_group_variable_size_fit_observation(),
             )?;
             println!(
                 "{}",
@@ -913,6 +959,74 @@ fn validate_item_group_observation(
         || !(0..=9_999).contains(&description_expansion.downstream_draw)
     {
         return Err("item-group description expansion characterization is incomplete".into());
+    }
+    let expected_fit_traces = [
+        (
+            "non_variable_control",
+            2,
+            "test_pipe",
+            false,
+            false,
+            "TEST pipe",
+            7_599,
+        ),
+        (
+            "variable_unfitted",
+            1,
+            "leg_sheath6",
+            true,
+            false,
+            "throwing knives leg sheath (poor fit)",
+            6_855,
+        ),
+        (
+            "variable_fitted",
+            2,
+            "leg_sheath6",
+            true,
+            true,
+            "throwing knives leg sheath",
+            7_599,
+        ),
+        (
+            "production_unfitted",
+            219,
+            "leg_sheath6",
+            true,
+            false,
+            "throwing knives leg sheath (poor fit)",
+            3_293,
+        ),
+        (
+            "production_fitted",
+            97,
+            "leg_sheath6",
+            true,
+            true,
+            "throwing knives leg sheath",
+            8_155,
+        ),
+    ];
+    if observation.variable_size_fit.production_group != "accessory_weaponcarry"
+        || observation.variable_size_fit.direct.len() != 3
+        || observation.variable_size_fit.production.len() != 2
+        || observation
+            .variable_size_fit
+            .direct
+            .iter()
+            .chain(&observation.variable_size_fit.production)
+            .zip(expected_fit_traces)
+            .any(|(trace, expected)| {
+                trace.case_id != expected.0
+                    || trace.seed != expected.1
+                    || trace.item_type != expected.2
+                    || trace.variable_size != expected.3
+                    || trace.fitted != expected.4
+                    || trace.name != expected.5
+                    || trace.downstream_draw != expected.6
+            })
+    {
+        return Err("item-group variable-size FIT characterization is incomplete".into());
     }
     let nested_trace = ["child_conditional", "child_always", "root_last"];
     if observation.nested.rolls_consumed != 4
@@ -1367,6 +1481,27 @@ fn rust_item_group_description_expansion_observation()
         direct_input,
         direct_output,
     })
+}
+
+fn rust_item_group_variable_size_fit_observation() -> Vec<ItemGroupVariableSizeFitDirectV1> {
+    [
+        ("non_variable_control", false, true),
+        ("variable_unfitted", true, false),
+        ("variable_fitted", true, true),
+    ]
+    .into_iter()
+    .map(
+        |(case_id, variable_size, one_in_three_succeeded)| ItemGroupVariableSizeFitDirectV1 {
+            case_id: case_id.to_owned(),
+            variable_size,
+            fitted: cdda_sim::item_group_fitted_after_phase(
+                variable_size,
+                false,
+                one_in_three_succeeded,
+            ),
+        },
+    )
+    .collect()
 }
 
 fn rust_item_group_tool_charge_case_with_replacement(
