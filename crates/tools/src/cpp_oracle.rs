@@ -10,12 +10,13 @@ use cdda_content::{
 };
 use cdda_protocol::{
     AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1,
-    FurnitureTileSnapshot, IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1,
-    ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1,
-    ItemGroupContainerV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
-    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
-    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemPhaseV1,
-    ItemSnippetV1, ItemVariantV1, MagazineWellPrototypeV1, SimTick, SpawnPocketKindV1,
+    FurnitureTileSnapshot, ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE,
+    IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
+    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupTargetV1,
+    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemPhaseV1, ItemSnippetV1,
+    ItemVariableValueV1, ItemVariantV1, MagazineWellPrototypeV1, SimTick, SpawnPocketKindV1,
     SpawnPocketRulesV1, TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE,
     WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldPosition, WorldSnapshotV1,
     WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1,
@@ -702,6 +703,29 @@ struct ItemGroupCorpseTraceV1 {
     content_damage_levels: Vec<i32>,
 }
 
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupCorpseDirectTraceV1 {
+    wrapper_type: String,
+    wrapper_raw_damage: i32,
+    wrapper_damage_level: i32,
+    content_types: Vec<String>,
+    content_raw_damage: Vec<i32>,
+    content_damage_levels: Vec<i32>,
+}
+
+impl ItemGroupCorpseTraceV1 {
+    fn direct_projection(&self) -> ItemGroupCorpseDirectTraceV1 {
+        ItemGroupCorpseDirectTraceV1 {
+            wrapper_type: self.wrapper_type.clone(),
+            wrapper_raw_damage: self.wrapper_raw_damage,
+            wrapper_damage_level: self.wrapper_damage_level,
+            content_types: self.content_types.clone(),
+            content_raw_damage: self.content_raw_damage.clone(),
+            content_damage_levels: self.content_damage_levels.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ItemGroupPhoneCaseObservationV1 {
@@ -999,6 +1023,18 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                     .map(ItemGroupMultiPocketTraceV1::direct_projection)
                     .collect::<Vec<_>>(),
                 &rust_item_group_multi_pocket_observation()?,
+            )?;
+            compare_direct_observation(
+                "item-group static corpse ownership",
+                &observation
+                    .everyday_corpse
+                    .exact_traces
+                    .iter()
+                    .map(ItemGroupCorpseTraceV1::direct_projection)
+                    .collect::<Vec<_>>(),
+                &rust_item_group_static_corpse_observation(
+                    &observation.everyday_corpse.exact_traces,
+                )?,
             )?;
             println!(
                 "{}",
@@ -3469,6 +3505,129 @@ fn rust_item_group_multi_pocket_observation()
     .collect()
 }
 
+fn rust_item_group_static_corpse_observation(
+    traces: &[ItemGroupCorpseTraceV1],
+) -> Result<Vec<ItemGroupCorpseDirectTraceV1>, Box<dyn std::error::Error>> {
+    let plain = |type_id: &str| ItemGroupItemPrototypeV1 {
+        prototype: CraftItemPrototypeV1 {
+            type_id: type_id.to_owned(),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            tracks_temperature: false,
+            thermal_properties: None,
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            containment: ItemContainmentProfileV1 {
+                weight_milligrams: 1,
+                volume_milliliters: 2,
+                longest_side_millimeters: 1,
+                ..ItemContainmentProfileV1::default()
+            },
+        },
+        maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+        variants: Vec::new(),
+        description_expansion: None,
+        snippets: Vec::new(),
+        initial_variables: BTreeMap::new(),
+        default_container: None,
+        modifier_side_effects_supported: true,
+        charges: None,
+        minimum_one_charge: false,
+        tool_charge_storage: None,
+        charges_supported: true,
+        charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
+        contents_insertion_supported: true,
+    };
+    traces
+        .iter()
+        .map(|trace| {
+            if trace.content_types.len() != trace.content_raw_damage.len() {
+                return Err("corpse trace content identity/damage lengths diverged".into());
+            }
+            let mut wrapper = plain(&trace.wrapper_type);
+            wrapper
+                .prototype
+                .containment
+                .flags
+                .push(String::from("CORPSE"));
+            wrapper.initial_variables.insert(
+                ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
+                ItemVariableValueV1::String(String::from(
+                    if trace.wrapper_type == "corpse_child_calm" {
+                        "mon_child"
+                    } else {
+                        "mon_null"
+                    },
+                )),
+            );
+            wrapper.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("CORPSE_CONTENTS"),
+                capacities: Vec::new(),
+                rigid: false,
+                access_moves: 100,
+                reloadable: false,
+                unloadable: false,
+                spawn_rules: Some(SpawnPocketRulesV1 {
+                    kind: SpawnPocketKindV1::Container,
+                    max_contains_volume_milliliters: 1,
+                    magazine_well_volume_milliliters: 0,
+                    contents_collapsed_by_default: false,
+                    max_contains_weight_milligrams: u64::MAX,
+                    max_item_volume_milliliters: 1,
+                    min_item_volume_milliliters: 0,
+                    max_item_length_millimeters: 1,
+                    item_restrictions: Vec::new(),
+                    flag_restrictions: Vec::new(),
+                    access_moves: 100,
+                    rigid: false,
+                    watertight: false,
+                    transparent: true,
+                    forbidden: true,
+                    sealable: false,
+                }),
+            }];
+            let contents = trace
+                .content_types
+                .iter()
+                .zip(&trace.content_raw_damage)
+                .rev()
+                .map(|(type_id, raw_damage)| Ok((plain(type_id), u16::try_from(*raw_damage)?)))
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+            let projection = cdda_sim::item_group_static_corpse_projection(
+                &wrapper,
+                u16::try_from(trace.wrapper_raw_damage)?,
+                &contents,
+            )?;
+            Ok(ItemGroupCorpseDirectTraceV1 {
+                wrapper_type: projection.wrapper_type,
+                wrapper_raw_damage: i32::from(projection.wrapper_raw_damage),
+                wrapper_damage_level: i32::from(projection.wrapper_damage_level),
+                content_types: projection.content_types,
+                content_raw_damage: projection
+                    .content_raw_damage
+                    .into_iter()
+                    .map(i32::from)
+                    .collect(),
+                content_damage_levels: projection
+                    .content_damage_levels
+                    .into_iter()
+                    .map(i32::from)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 fn rust_item_group_temperature_constructor_observation(
     workspace: &Path,
 ) -> Result<Vec<ItemGroupTemperatureConstructorTraceV1>, Box<dyn std::error::Error>> {
@@ -4978,6 +5137,24 @@ mod tests {
         let item_group = checked_item_group_scenario();
         compare_item_group(&item_group, &item_group.expected_observation)
             .expect("identical item-group observation should compare");
+        let corpse_expected = item_group
+            .expected_observation
+            .everyday_corpse
+            .exact_traces
+            .iter()
+            .map(ItemGroupCorpseTraceV1::direct_projection)
+            .collect::<Vec<_>>();
+        let corpse_actual = rust_item_group_static_corpse_observation(
+            &item_group.expected_observation.everyday_corpse.exact_traces,
+        )
+        .expect("Rust corpse projection should execute the production transition");
+        compare_direct_observation("static corpse", &corpse_expected, &corpse_actual)
+            .expect("representative corpse traces should compare exactly");
+        let mut changed_corpse = corpse_actual;
+        changed_corpse[0].content_raw_damage[0] = 1;
+        assert!(
+            compare_direct_observation("static corpse", &corpse_expected, &changed_corpse).is_err()
+        );
 
         let mapgen = checked_mapgen_scenario();
         compare_mapgen(&mapgen, &mapgen.expected_observation)

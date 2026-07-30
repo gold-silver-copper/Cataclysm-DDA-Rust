@@ -18,6 +18,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "symbol",
     "color",
     "volume",
+    "weight",
     "hp",
     "speed",
     "aggression",
@@ -72,6 +73,9 @@ pub struct MonsterDefinition {
     pub color: String,
     /// Final inherited monster volume in the pinned engine's base milliliters.
     pub volume_milliliters: i64,
+    /// Final inherited monster mass in integer milligrams. Ordinary corpse
+    /// construction uses the monster rather than the item type for mass.
+    pub weight_milligrams: i64,
     pub hp: i32,
     pub speed: i32,
     pub aggression: i32,
@@ -102,6 +106,7 @@ impl Default for MonsterDefinition {
             symbol: String::new(),
             color: String::from("white"),
             volume_milliliters: 62_499,
+            weight_milligrams: 81_499_000,
             hp: 1,
             speed: 0,
             aggression: 0,
@@ -307,6 +312,7 @@ fn apply_fields(
     apply_string(object, "symbol", &mut monster.symbol, source)?;
     apply_string(object, "color", &mut monster.color, source)?;
     apply_volume(object, &mut monster.volume_milliliters, source)?;
+    apply_mass(object, &mut monster.weight_milligrams, source)?;
     apply_integer(object, "hp", &mut monster.hp, 1, i32::MAX, source)?;
     apply_integer(object, "speed", &mut monster.speed, 0, i32::MAX, source)?;
     apply_integer(
@@ -502,8 +508,59 @@ fn apply_volume(
     Ok(())
 }
 
+fn apply_mass(
+    object: &Map<String, Value>,
+    target: &mut i64,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    for modifier_name in ["extend", "delete"] {
+        if modifier(object, modifier_name, "weight", source)?.is_some() {
+            return Err(invalid(source, &format!("{modifier_name}.weight")));
+        }
+    }
+    if let Some(value) = object.get("weight") {
+        *target = parse_mass(value, source)?;
+    } else if let Some(value) = modifier(object, "proportional", "weight", source)? {
+        let multiplier = value
+            .as_f64()
+            .filter(|value| *value > 0.0 && *value != 1.0)
+            .ok_or_else(|| invalid(source, "weight"))?;
+        let adjusted = (*target as f64) * multiplier;
+        if !adjusted.is_finite() || adjusted < 0.0 || adjusted >= i64::MAX as f64 {
+            return Err(invalid(source, "weight"));
+        }
+        *target = adjusted as i64;
+    } else if let Some(value) = modifier(object, "relative", "weight", source)? {
+        *target = target
+            .checked_add(parse_mass(value, source)?)
+            .ok_or_else(|| invalid(source, "weight"))?;
+    }
+    if *target < 0 {
+        return Err(invalid(source, "weight"));
+    }
+    Ok(())
+}
+
+fn parse_mass(value: &Value, source: &str) -> Result<i64, MonsterRegistryError> {
+    parse_monster_quantity(
+        value,
+        source,
+        "weight",
+        &[("mg", 1), ("g", 1_000), ("kg", 1_000_000)],
+    )
+}
+
 fn parse_volume(value: &Value, source: &str) -> Result<i64, MonsterRegistryError> {
-    let text = value.as_str().ok_or_else(|| invalid(source, "volume"))?;
+    parse_monster_quantity(value, source, "volume", &[("ml", 1), ("L", 1_000)])
+}
+
+fn parse_monster_quantity(
+    value: &Value,
+    source: &str,
+    field: &str,
+    units: &[(&str, i64)],
+) -> Result<i64, MonsterRegistryError> {
+    let text = value.as_str().ok_or_else(|| invalid(source, field))?;
     let mut tokens = Vec::new();
     for token in text.split_whitespace() {
         if let Some(unit_start) = token.find(char::is_alphabetic)
@@ -516,28 +573,25 @@ fn parse_volume(value: &Value, source: &str) -> Result<i64, MonsterRegistryError
         }
     }
     if tokens.is_empty() || !tokens.len().is_multiple_of(2) {
-        return Err(invalid(source, "volume"));
+        return Err(invalid(source, field));
     }
     let mut total = 0_i64;
     for pair in tokens.chunks_exact(2) {
-        let amount = pair[0]
-            .parse::<i64>()
-            .map_err(|_| invalid(source, "volume"))?;
-        let multiplier = match pair[1] {
-            "ml" => 1,
-            "L" => 1_000,
-            _ => return Err(invalid(source, "volume")),
-        };
+        let amount = pair[0].parse::<i64>().map_err(|_| invalid(source, field))?;
+        let multiplier = units
+            .iter()
+            .find_map(|(unit, multiplier)| (*unit == pair[1]).then_some(*multiplier))
+            .ok_or_else(|| invalid(source, field))?;
         total = total
             .checked_add(
                 amount
                     .checked_mul(multiplier)
-                    .ok_or_else(|| invalid(source, "volume"))?,
+                    .ok_or_else(|| invalid(source, field))?,
             )
-            .ok_or_else(|| invalid(source, "volume"))?;
+            .ok_or_else(|| invalid(source, field))?;
     }
     if total < 0 {
-        return Err(invalid(source, "volume"));
+        return Err(invalid(source, field));
     }
     Ok(total)
 }
@@ -758,6 +812,49 @@ mod tests {
         )
         .expect("relative volume");
         assert_eq!(monster.volume_milliliters, 21_000);
+    }
+
+    #[test]
+    fn mass_uses_pinned_units_defaults_and_inheritance_arithmetic() {
+        let mut monster = MonsterDefinition::default();
+        assert_eq!(monster.weight_milligrams, 81_499_000);
+        apply_fields(
+            &mut monster,
+            json!({ "proportional": { "weight": 0.5 } })
+                .as_object()
+                .expect("object"),
+            "proportional",
+        )
+        .expect("proportional mass");
+        assert_eq!(monster.weight_milligrams, 40_749_500);
+        apply_fields(
+            &mut monster,
+            json!({ "weight": "30 kg" }).as_object().expect("object"),
+            "direct",
+        )
+        .expect("direct mass");
+        assert_eq!(monster.weight_milligrams, 30_000_000);
+        apply_fields(
+            &mut monster,
+            json!({ "relative": { "weight": "250 g" } })
+                .as_object()
+                .expect("object"),
+            "relative",
+        )
+        .expect("relative mass");
+        assert_eq!(monster.weight_milligrams, 30_250_000);
+
+        assert!(matches!(
+            apply_fields(
+                &mut monster,
+                json!({ "delete": { "weight": "1 kg" } })
+                    .as_object()
+                    .expect("object"),
+                "delete",
+            ),
+            Err(MonsterRegistryError::InvalidField { field, .. })
+                if field == "delete.weight"
+        ));
     }
 
     #[test]

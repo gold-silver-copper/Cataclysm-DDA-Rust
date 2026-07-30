@@ -39,6 +39,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "charges",
     "phase",
     "freezing_point",
+    "source_monster",
     "container",
     "container_variant",
     "sealed",
@@ -126,6 +127,10 @@ pub struct ItemDefinition {
     /// stores this as Celsius and defaults it to zero; fixed-point retention
     /// avoids carrying a platform-dependent float into authoritative content.
     pub freezing_point_millicelsius: i32,
+    /// Final inherited monster identity assigned by the ordinary item
+    /// constructor to definitions carrying the `CORPSE` flag. An empty value
+    /// is upstream's `mon_null` sentinel.
+    pub source_monster: String,
     /// Finalized item-type default container. The literal `null` sentinel is
     /// retained because it explicitly disables inherited containment.
     pub default_container: String,
@@ -1086,6 +1091,15 @@ fn apply_common_fields(
         &mut item.freezing_point_millicelsius,
         source,
     )?;
+    for modifier_name in ["extend", "delete", "relative", "proportional"] {
+        if modifier(object, modifier_name, "source_monster", source)?.is_some() {
+            return Err(invalid_field(
+                source,
+                &format!("{modifier_name}.source_monster"),
+            ));
+        }
+    }
+    apply_string(object, "source_monster", &mut item.source_monster, source)?;
     apply_string(object, "container", &mut item.default_container, source)?;
     apply_string(
         object,
@@ -3093,6 +3107,58 @@ mod tests {
         assert!(matches!(
             load_one(&invalid, &mut items, &mut abstracts),
             Err(ItemRegistryError::InvalidField { field, .. }) if field == "freezing_point"
+        ));
+    }
+
+    #[test]
+    fn corpse_source_monster_inherits_and_replaces_exact_identity() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        for definition in [
+            serde_json::json!({
+                "type": "ITEM",
+                "abstract": "corpse_base",
+                "name": "corpse base",
+                "source_monster": "mon_child"
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "inherited_corpse",
+                "copy-from": "corpse_base",
+                "name": "inherited corpse"
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "replaced_corpse",
+                "copy-from": "corpse_base",
+                "name": "replaced corpse",
+                "source_monster": "mon_human"
+            }),
+        ] {
+            assert!(
+                load_one(&raw(definition), &mut items, &mut abstracts)
+                    .expect("corpse identity should load")
+            );
+        }
+        assert_eq!(items["inherited_corpse"].source_monster, "mon_child");
+        assert_eq!(items["replaced_corpse"].source_monster, "mon_human");
+        assert!(
+            !items["inherited_corpse"]
+                .unsupported_fields
+                .contains("source_monster")
+        );
+
+        let invalid_modifier = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "invalid_corpse_source_modifier",
+            "copy-from": "corpse_base",
+            "name": "invalid corpse source modifier",
+            "relative": { "source_monster": "mon_human" }
+        }));
+        assert!(matches!(
+            load_one(&invalid_modifier, &mut items, &mut abstracts),
+            Err(ItemRegistryError::InvalidField { field, .. })
+                if field == "relative.source_monster"
         ));
     }
 

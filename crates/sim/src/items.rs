@@ -2,15 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
-    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
-    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1,
-    ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
-    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1, ItemTemperatureStateV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH,
-    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
+    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
+    ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS, IntegralMagazinePocketSnapshotV1,
+    ItemComponentSnapshotV1, ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1,
+    ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1, ItemGroupContainerV1,
+    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
+    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
+    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1,
+    ItemId, ItemSnapshot, ItemSnippetV1, ItemTemperatureStateV1, ItemVariableValueV1,
+    ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH,
+    MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_RAW_DAMAGE, MAX_ITEM_VARIABLES,
     MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
     RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, decode_item_group_dressing_marker,
     initial_item_temperature_state, is_reserved_item_group_dressing_marker,
@@ -782,7 +783,10 @@ pub(super) fn plan_item_group_source(
     if output.iter().any(|item| {
         item.containment_depth()
             .is_none_or(|depth| depth > MAX_ITEM_COMPONENT_DEPTH)
-    }) {
+    }) || output
+        .iter()
+        .any(|item| !planned_static_corpses_are_nonreviving(item))
+    {
         return Err(SimError::InvalidItem);
     }
     Ok(output)
@@ -1212,6 +1216,18 @@ pub struct ItemGroupMultiPocketProjection {
     pub pocket_contents: Vec<(u16, Vec<String>)>,
 }
 
+/// Exact post-modifier ownership trace for the static, maximum-damaged corpse
+/// constructor supported by the frozen item-group model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupStaticCorpseProjection {
+    pub wrapper_type: String,
+    pub wrapper_raw_damage: u16,
+    pub wrapper_damage_level: u16,
+    pub content_types: Vec<String>,
+    pub content_raw_damage: Vec<u16>,
+    pub content_damage_levels: Vec<u16>,
+}
+
 /// Exact uniform snippet selection used by production item construction and
 /// the direct C++ differential comparator. The caller owns the RNG draw so an
 /// empty category consumes no entropy, matching the production constructor.
@@ -1402,6 +1418,84 @@ pub fn item_group_multi_pocket_projection(
     Ok(ItemGroupMultiPocketProjection {
         outer_type: planned.prototype.type_id,
         pocket_contents,
+    })
+}
+
+/// Renderer-free direct projection for already selected corpse-wrapper
+/// content. The input content order is constructor traversal order; the
+/// returned order is canonical pocket ownership order.
+pub fn item_group_static_corpse_projection(
+    wrapper: &ItemGroupItemPrototypeV1,
+    wrapper_raw_damage: u16,
+    contents: &[(ItemGroupItemPrototypeV1, u16)],
+) -> Result<ItemGroupStaticCorpseProjection, SimError> {
+    let mut rng = ChaCha8Rng::from_seed([0; 32]);
+    let mut planned = construct_item_group_item_with_fit_phase(wrapper, &mut rng, false)?;
+    let fixed_damage_entry = |raw_damage| ItemGroupEntryV1 {
+        probability: 100,
+        count_min: 1,
+        count_max: 1,
+        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+            minimum: raw_damage,
+            maximum: raw_damage,
+        }),
+        variant_id: None,
+        event: None,
+        target: ItemGroupTargetV1::Item(Box::new(wrapper.clone())),
+        modifier_charges: None,
+        contents: Vec::new(),
+        seal_contents: false,
+        modifier_default_container_sealed: None,
+        direct_wrapper: None,
+        modifier_container: None,
+    };
+    apply_item_group_modifier_state(
+        &mut planned,
+        &fixed_damage_entry(wrapper_raw_damage),
+        &mut rng,
+    )?;
+    for (content, raw_damage) in contents {
+        let mut content = construct_item_group_item(content, &mut rng)?;
+        apply_item_group_modifier_state(&mut content, &fixed_damage_entry(*raw_damage), &mut rng)?;
+        if let Err(content) = insert_planned_item(&mut planned, content)? {
+            if !planned_item_is_static_corpse(&planned) {
+                return Err(SimError::InvalidItem);
+            }
+            force_insert_planned_corpse_content(&mut planned, content)?;
+        }
+    }
+    if !planned_static_corpses_are_nonreviving(&planned) {
+        return Err(SimError::InvalidItem);
+    }
+    let pocket_index = planned
+        .prototype
+        .ammunition_containers
+        .iter()
+        .find_map(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.kind == SpawnPocketKindV1::Container)
+                .then_some(pocket.pocket_index)
+        })
+        .ok_or(SimError::InvalidItem)?;
+    let contents = planned
+        .pocket_contents
+        .get(&pocket_index)
+        .ok_or(SimError::InvalidItem)?;
+    Ok(ItemGroupStaticCorpseProjection {
+        wrapper_type: planned.prototype.type_id,
+        wrapper_raw_damage: planned.raw_damage,
+        wrapper_damage_level: cdda_protocol::item_damage_level(planned.raw_damage),
+        content_types: contents
+            .iter()
+            .map(|content| content.prototype.type_id.clone())
+            .collect(),
+        content_raw_damage: contents.iter().map(|content| content.raw_damage).collect(),
+        content_damage_levels: contents
+            .iter()
+            .map(|content| cdda_protocol::item_damage_level(content.raw_damage))
+            .collect(),
     })
 }
 
@@ -2356,6 +2450,10 @@ fn wrap_item_group_output(
     let mut excess = Vec::new();
     for payload in payloads {
         if let Err(payload) = insert_planned_item(&mut container, payload)? {
+            if planned_item_is_static_corpse(&container) {
+                force_insert_planned_corpse_content(&mut container, payload)?;
+                continue;
+            }
             match wrapper.overflow {
                 ItemGroupOverflowV1::Spill => excess.push(payload),
                 ItemGroupOverflowV1::None | ItemGroupOverflowV1::Discard => {}
@@ -2369,6 +2467,83 @@ fn wrap_item_group_output(
     output.extend(excess);
     output.push(container);
     validate_planned_output_bound(output)
+}
+
+fn planned_item_is_static_corpse(item: &PlannedItemSpawn) -> bool {
+    item.prototype
+        .containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+        .is_ok()
+        && matches!(
+            item.initial_variables
+                .get(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE),
+            Some(ItemVariableValueV1::String(source)) if !source.is_empty()
+        )
+}
+
+fn planned_static_corpses_are_nonreviving(item: &PlannedItemSpawn) -> bool {
+    let corpse_flag = item
+        .prototype
+        .containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+        .is_ok();
+    let corpse_source = item
+        .initial_variables
+        .get(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE);
+    let valid_self = match (corpse_flag, corpse_source) {
+        (true, Some(ItemVariableValueV1::String(source))) => {
+            !source.is_empty() && item.raw_damage == MAX_ITEM_RAW_DAMAGE
+        }
+        (false, None) => true,
+        (true, Some(ItemVariableValueV1::Integer(_))) | (true, None) | (false, Some(_)) => false,
+    };
+    valid_self
+        && item
+            .pocket_contents
+            .values()
+            .flatten()
+            .all(planned_static_corpses_are_nonreviving)
+        && item
+            .integral_ammunition
+            .values()
+            .all(|ammunition| planned_static_corpses_are_nonreviving(ammunition))
+        && item
+            .detachable_magazines
+            .values()
+            .all(|magazine| planned_static_corpses_are_nonreviving(magazine))
+}
+
+fn force_insert_planned_corpse_content(
+    target: &mut PlannedItemSpawn,
+    payload: PlannedItemSpawn,
+) -> Result<(), SimError> {
+    let pocket_index = target
+        .prototype
+        .ammunition_containers
+        .iter()
+        .find_map(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.kind == SpawnPocketKindV1::Container)
+                .then_some(pocket.pocket_index)
+        })
+        .ok_or(SimError::InvalidItem)?;
+    if payload
+        .containment_depth()
+        .and_then(|depth| depth.checked_add(1))
+        .is_none_or(|depth| depth > MAX_ITEM_COMPONENT_DEPTH)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    target
+        .pocket_contents
+        .entry(pocket_index)
+        .or_default()
+        .insert(0, payload);
+    Ok(())
 }
 
 fn insert_item_group_contents(
@@ -5864,6 +6039,100 @@ mod tests {
         assert_eq!(flexible.pocket_contents[&0][0].prototype.type_id, "payload");
         assert_eq!(flexible.total_volume_milliliters(), Some(1));
         assert_eq!(flexible.collapsed_pockets, BTreeSet::from([0]));
+    }
+
+    #[test]
+    fn static_corpse_wrappers_force_contents_but_require_final_maximum_damage() {
+        let mut corpse = leaf_item("corpse_child_calm");
+        corpse.maximum_raw_damage = MAX_ITEM_RAW_DAMAGE;
+        corpse
+            .prototype
+            .containment
+            .flags
+            .push(String::from("CORPSE"));
+        corpse.initial_variables.insert(
+            ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
+            ItemVariableValueV1::String(String::from("mon_child")),
+        );
+        corpse.prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            false,
+            1,
+            1,
+            Vec::new(),
+            false,
+        )];
+        let mut payload = leaf_item("oversized_loot");
+        payload.prototype.containment.volume_milliliters = 2;
+        payload.prototype.containment.longest_side_millimeters = 1;
+        let inner = ItemGroupDefinitionV1 {
+            group_id: String::from("static_corpse_inner"),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        target: ItemGroupTargetV1::Item(Box::new(payload)),
+                        ..entry(100, None, "unused")
+                    }],
+                }],
+                wrapper: Some(ItemGroupContainerV1 {
+                    item: Box::new(corpse),
+                    variant_id: None,
+                    sealed: false,
+                    overflow: ItemGroupOverflowV1::None,
+                }),
+            },
+        };
+        let catalog = BTreeMap::from([(inner.group_id.clone(), inner.clone())]);
+        let source = |damage| {
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: damage,
+                            maximum: damage,
+                        }),
+                        target: ItemGroupTargetV1::Group(inner.group_id.clone()),
+                        ..entry(100, None, "unused")
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+
+        let planned = plan_item_group_source(
+            &source(MAX_ITEM_RAW_DAMAGE),
+            &catalog,
+            &mut ChaCha8Rng::seed_from_u64(11),
+        )
+        .expect("maximum-damaged static corpse should be non-reviving and retain forced contents");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].raw_damage, MAX_ITEM_RAW_DAMAGE);
+        assert_eq!(
+            planned[0].pocket_contents[&0][0].prototype.type_id,
+            "oversized_loot"
+        );
+        assert!(matches!(
+            plan_item_group_source(
+                &source(MAX_ITEM_RAW_DAMAGE - 1),
+                &catalog,
+                &mut ChaCha8Rng::seed_from_u64(11),
+            ),
+            Err(SimError::InvalidItem)
+        ));
+        assert!(matches!(
+            plan_item_group_source(
+                &ItemGroupSourceV1::Group(inner.group_id),
+                &catalog,
+                &mut ChaCha8Rng::seed_from_u64(11),
+            ),
+            Err(SimError::InvalidItem)
+        ));
     }
 
     #[test]

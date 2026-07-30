@@ -4,18 +4,19 @@ use cdda_content::{
     AmmunitionRegistry, BashDefinition, BashItemGroupSource, DescriptionSnippetRegistry,
     ItemDefinition, ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
     ItemGroupSubtype, ItemRegistry, ItemTemperatureRuntimeClass, ItemVariableValueDefinition,
-    MaterialRegistry, PocketTypeDefinition, StrictItemGroupDefinition, StrictItemGroupGraph,
-    StrictItemGroupNode, StrictItemGroupNodeKind, StrictSpawnPocketDefinition,
+    MaterialRegistry, MonsterRegistry, PocketTypeDefinition, StrictItemGroupDefinition,
+    StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
+    StrictSpawnPocketDefinition,
 };
 use cdda_protocol::{
     AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, CraftItemPrototypeV1,
-    InclusiveU16RangeV1, ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1,
-    ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1,
-    ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
-    ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
-    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
+    ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
     SPAWN_POCKET_SINGLE_ITEM_MARKER, SpawnPocketKindV1, SpawnPocketRulesV1,
     encode_item_group_dressing_marker, is_reserved_item_group_dressing_marker,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
@@ -30,6 +31,7 @@ pub(super) struct RuntimeItemGroupContent<'a> {
     pub(super) materials: &'a MaterialRegistry,
     pub(super) ammunition: &'a AmmunitionRegistry,
     pub(super) snippets: &'a DescriptionSnippetRegistry,
+    pub(super) monsters: &'a MonsterRegistry,
 }
 
 #[cfg(test)]
@@ -330,6 +332,61 @@ pub(super) fn assert_regional_field_item_group_closure(
         Some(996_300)
     );
 
+    for (group_id, item_id, source_monster, weight_milligrams, volume_milliliters) in [
+        (
+            "everyday_corpse_child",
+            "corpse_child_calm",
+            "mon_child",
+            30_000_000,
+            31_250,
+        ),
+        (
+            "everyday_corpse_female",
+            "corpse_generic_female",
+            "mon_null",
+            81_499_000,
+            62_499,
+        ),
+        (
+            "everyday_corpse_male",
+            "corpse_generic_male",
+            "mon_null",
+            81_499_000,
+            62_499,
+        ),
+    ] {
+        let definition = field_graph
+            .groups
+            .get(group_id)
+            .expect("field closure should retain the corpse family");
+        assert_eq!(
+            definition
+                .wrapper
+                .as_ref()
+                .expect("corpse family should retain its whole-group wrapper")
+                .item,
+            item_id
+        );
+        let item = content
+            .items
+            .get(item_id)
+            .expect("corpse wrapper should retain its concrete item definition");
+        let mut prototype = craft_item_prototype(
+            item,
+            default_instance_charges(item),
+            content.items,
+            content.materials,
+        )
+        .expect("corpse base prototype should normalize");
+        let actual_source = runtime_static_corpse_identity(item, &mut prototype, content.monsters)
+            .expect("static corpse physical constructor should normalize")
+            .expect("CORPSE definitions should retain a typed source");
+        assert_eq!(actual_source, source_monster);
+        assert_eq!(prototype.containment.weight_milligrams, weight_milligrams);
+        assert_eq!(prototype.containment.volume_milliliters, volume_milliliters);
+        assert!(item_group_contents_insertion_supported(item, &prototype));
+    }
+
     let field_runtime_errors = field_graph
         .groups
         .values()
@@ -347,15 +404,15 @@ pub(super) fn assert_regional_field_item_group_closure(
         [
             (
                 "everyday_corpse_child",
-                "item group item corpse_child_calm requires unimplemented corpse construction",
+                "item group corpse corpse_child_calm requires unimplemented 24-hour rot state",
             ),
             (
                 "everyday_corpse_female",
-                "item group item corpse_generic_female requires unimplemented corpse construction",
+                "item group corpse corpse_generic_female requires unimplemented 24-hour rot state",
             ),
             (
                 "everyday_corpse_male",
-                "item group item corpse_generic_male requires unimplemented corpse construction",
+                "item group corpse corpse_generic_male requires unimplemented 24-hour rot state",
             ),
             (
                 "lunchbox_food",
@@ -1021,12 +1078,13 @@ fn runtime_item_group_item_inner(
     default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
     let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
-    let prototype = craft_item_prototype(
+    let mut prototype = craft_item_prototype(
         item,
         default_instance_charges(item),
         content.items,
         content.materials,
     )?;
+    let corpse_source = runtime_static_corpse_identity(item, &mut prototype, content.monsters)?;
     validate_item_group_item_spawn(item, &prototype, false)?;
     let modifier_side_effects_supported =
         validate_item_group_item_spawn(item, &prototype, true).is_ok();
@@ -1044,6 +1102,33 @@ fn runtime_item_group_item_inner(
         return Err(format!("item group item {} cannot retain charge modifiers", item.id).into());
     }
     let contents_insertion_supported = item_group_contents_insertion_supported(item, &prototype);
+    let mut initial_variables = item
+        .variables
+        .iter()
+        .map(|(key, value)| {
+            let value = match value {
+                ItemVariableValueDefinition::Integer(value) => ItemVariableValueV1::Integer(*value),
+                ItemVariableValueDefinition::String(value) => {
+                    ItemVariableValueV1::String(value.clone())
+                }
+            };
+            (key.clone(), value)
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some(corpse_source) = corpse_source
+        && initial_variables
+            .insert(
+                ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
+                ItemVariableValueV1::String(corpse_source),
+            )
+            .is_some()
+    {
+        return Err(format!(
+            "item group corpse {} collides with reserved constructor metadata",
+            item.id
+        )
+        .into());
+    }
     Ok(ItemGroupItemPrototypeV1 {
         prototype,
         maximum_raw_damage: if item.count_by_charges() {
@@ -1057,21 +1142,7 @@ fn runtime_item_group_item_inner(
             .then(|| runtime_description_expansion(&item.description, content.snippets))
             .transpose()?,
         snippets: runtime_item_snippets(item, content.snippets)?,
-        initial_variables: item
-            .variables
-            .iter()
-            .map(|(key, value)| {
-                let value = match value {
-                    ItemVariableValueDefinition::Integer(value) => {
-                        ItemVariableValueV1::Integer(*value)
-                    }
-                    ItemVariableValueDefinition::String(value) => {
-                        ItemVariableValueV1::String(value.clone())
-                    }
-                };
-                (key.clone(), value)
-            })
-            .collect(),
+        initial_variables,
         default_container: runtime_default_item_container(item, content, default_container_stack)?,
         modifier_side_effects_supported,
         charges,
@@ -1081,6 +1152,70 @@ fn runtime_item_group_item_inner(
         charge_capacity: runtime_item_group_charge_capacity(item),
         contents_insertion_supported,
     })
+}
+
+fn runtime_static_corpse_identity(
+    item: &ItemDefinition,
+    prototype: &mut CraftItemPrototypeV1,
+    monsters: &MonsterRegistry,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !item.flags.contains("CORPSE") {
+        if !item.source_monster.is_empty() {
+            return Err(format!(
+                "item group item {} assigns source_monster without the CORPSE flag",
+                item.id
+            )
+            .into());
+        }
+        return Ok(None);
+    }
+    if item.id == "corpse" {
+        return Err("item group item corpse requires a live creature corpse prototype".into());
+    }
+    let (source_id, source_weight_milligrams, source_volume_milliliters) =
+        if item.source_monster.is_empty() {
+            (String::from("mon_null"), 81_499_000_i64, 62_499_i64)
+        } else {
+            let monster = monsters.get(&item.source_monster).ok_or_else(|| {
+                format!(
+                    "item group corpse {} references missing source monster {}",
+                    item.id, item.source_monster
+                )
+            })?;
+            (
+                monster.id.clone(),
+                monster.weight_milligrams,
+                monster.volume_milliliters,
+            )
+        };
+    let (weight_milligrams, volume_milliliters, longest_side_millimeters) =
+        runtime_corpse_physical_profile(source_weight_milligrams, source_volume_milliliters)
+            .ok_or_else(|| format!("item group corpse {} has invalid source size", item.id))?;
+    prototype.containment.weight_milligrams = weight_milligrams;
+    prototype.containment.volume_milliliters = volume_milliliters;
+    prototype.containment.longest_side_millimeters = longest_side_millimeters;
+    Ok(Some(source_id))
+}
+
+fn runtime_corpse_physical_profile(
+    weight_milligrams: i64,
+    source_volume_milliliters: i64,
+) -> Option<(u64, u64, u64)> {
+    let weight_milligrams = u64::try_from(weight_milligrams).ok()?;
+    let source_volume_milliliters = u64::try_from(source_volume_milliliters).ok()?;
+    // Pinned `item::base_volume` caps corpse volume at one tile (1,000 L),
+    // while `item::length` deliberately derives from the uncapped monster
+    // volume. Keep those two physical projections distinct.
+    let volume_milliliters = source_volume_milliliters.min(1_000_000);
+    let centimeters = (source_volume_milliliters as f64).cbrt().round();
+    if !centimeters.is_finite() || centimeters < 0.0 {
+        return None;
+    }
+    Some((
+        weight_milligrams,
+        volume_milliliters,
+        (centimeters as u64).checked_mul(10)?,
+    ))
 }
 
 fn runtime_item_snippets(
@@ -1600,9 +1735,9 @@ fn validate_item_group_item_spawn(
     if item.id == "null" {
         return Err("item-group null leaves do not materialize an item upstream".into());
     }
-    if item.id == "corpse" || item.flags.contains("CORPSE") {
+    if item.flags.contains("CORPSE") {
         return Err(format!(
-            "item group item {} requires unimplemented corpse construction",
+            "item group corpse {} requires unimplemented 24-hour rot state",
             item.id
         )
         .into());
@@ -1827,6 +1962,16 @@ mod tests {
             contents: Vec::new(),
             event: None,
         }
+    }
+
+    #[test]
+    fn corpse_physical_profile_caps_volume_but_not_derived_length() {
+        assert_eq!(
+            runtime_corpse_physical_profile(12, 8_000_000),
+            Some((12, 1_000_000, 2_000))
+        );
+        assert_eq!(runtime_corpse_physical_profile(-1, 1), None);
+        assert_eq!(runtime_corpse_physical_profile(1, -1), None);
     }
 
     #[test]

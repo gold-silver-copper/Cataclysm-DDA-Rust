@@ -15,6 +15,12 @@ use super::{
 /// this identity.
 pub const SPAWN_POCKET_SINGLE_ITEM_MARKER: &str = "__CDDA_SINGLE_ITEM_POCKET__";
 
+/// Reserved constructor metadata used to retain the pinned monster identity
+/// of a static corpse item inside Protocol 95's existing typed variable map.
+/// Maximum damage prevents revival but does not prevent decay, so production
+/// admission must additionally retain the corpse's rot state.
+pub const ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE: &str = "__CDDA_CORPSE_SOURCE_MONSTER_V1__";
+
 #[must_use]
 pub fn spawn_pocket_is_single_item(rules: &SpawnPocketRulesV1) -> bool {
     rules
@@ -1173,6 +1179,15 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
             .variants
             .iter()
             .any(|variant| variant.description_expansion.is_some());
+    let corpse_flag = item
+        .prototype
+        .containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+        .is_ok();
+    let corpse_source = item
+        .initial_variables
+        .get(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE);
     valid_craft_item_prototype(&item.prototype)
         && matches!(item.maximum_raw_damage, 0 | MAX_ITEM_RAW_DAMAGE)
         && valid_item_group_variants(&item.variants)
@@ -1182,6 +1197,11 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
             .is_none_or(item_description_expansion_is_valid)
         && valid_item_snippets(&item.snippets)
         && valid_item_variables(&item.initial_variables)
+        && match corpse_source {
+            Some(ItemVariableValueV1::String(source)) => corpse_flag && valid_recipe_id(source),
+            Some(ItemVariableValueV1::Integer(_)) => false,
+            None => !corpse_flag,
+        }
         && (!generates_description
             || item.initial_variables.contains_key("description")
             || item.initial_variables.len() < MAX_ITEM_VARIABLES)
@@ -2454,5 +2474,32 @@ mod tests {
             ItemVariableValueV1::String(String::from("old")),
         );
         assert!(valid_item_group_item(&item));
+    }
+
+    #[test]
+    fn static_corpse_metadata_is_typed_and_bound_to_the_corpse_flag() {
+        let mut corpse = valid_test_item();
+        corpse
+            .prototype
+            .containment
+            .flags
+            .push(String::from("CORPSE"));
+        assert!(!valid_item_group_item(&corpse));
+
+        corpse.initial_variables.insert(
+            ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
+            ItemVariableValueV1::String(String::from("mon_child")),
+        );
+        assert!(valid_item_group_item(&corpse));
+
+        let mut integer_source = corpse.clone();
+        integer_source.initial_variables.insert(
+            ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(1),
+        );
+        assert!(!valid_item_group_item(&integer_source));
+
+        corpse.prototype.containment.flags.clear();
+        assert!(!valid_item_group_item(&corpse));
     }
 }

@@ -721,6 +721,7 @@ fn open_world(
         materials: content.materials,
         ammunition: content.ammunition,
         snippets: content.snippets,
+        monsters: content.monsters,
     };
     let items = content.items;
     let item_groups = content.item_groups;
@@ -4506,11 +4507,14 @@ mod tests {
         let snippets =
             DescriptionSnippetRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("description snippets should load");
+        let monsters = MonsterRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+            .expect("monsters should load");
         let item_group_content = RuntimeItemGroupContent {
             items: &items,
             materials: &materials,
             ammunition: &ammunition,
             snippets: &snippets,
+            monsters: &monsters,
         };
         let item_groups =
             ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
@@ -4985,8 +4989,6 @@ mod tests {
         );
         let skills = SkillRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("skills should load");
-        let monsters = MonsterRegistry::load_selected(&manifest, content_root, &mods, &enabled)
-            .expect("monsters should load");
         let fields = FieldTypeRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("field types should load");
         let bash_profiles =
