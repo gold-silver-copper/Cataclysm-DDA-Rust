@@ -5,17 +5,15 @@ tree `210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
 ## Live checkpoint
 
-- Verified green commit: `d863ea545ff5ab0ca18d95a14f06391a2ae3c6d7`,
-  tree `6e016ac1f7881a76908ce1147329c0e4262b9c44`.
-- Audited checkpoint: generalized flexible containment. The fixed-tree review
+- Verified green commit: `40037fbb1db9eaac8d4889b811d29f8c00380e6b`,
+  tree `a893a64a3928b299489d91ce66285a5534527f50`.
+- Audited checkpoint: generalized nonperishable material thermodynamics. The
+  fixed-tree review
   and repair cycle is recorded in
-  `docs/reviews/protocol-93-flexible-containment.md`.
-- Checkpoint representation: protocol 93, persistence schema/minimum recoverable
-  schema 71, CanonicalStateV69, CanonicalEventsV18, replay format 3, worldgen
+  `docs/reviews/protocol-94-nonperishable-material-thermodynamics.md`.
+- Checkpoint representation: protocol 94, persistence schema/minimum recoverable
+  schema 72, CanonicalStateV70, CanonicalEventsV18, replay format 3, worldgen
   algorithm 2, scenario format 7, observation format 6.
-- Candidate representation under verification: protocol 94, persistence
-  schema/minimum recoverable schema 72, CanonicalStateV70, with event/replay/
-  worldgen/scenario/observation formats unchanged.
 - Active milestone: `regional-terrain-base`.
 - Hosts remain macOS, Linux, and Windows. Bevy 0.19 is client-only; server and
   simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
@@ -29,7 +27,7 @@ Mapgen/overmap milestone states:
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
-## Candidate family: nonperishable material thermodynamics
+## Active family: nonperishable material thermodynamics
 
 - A generalized selected-content material registry resolves inheritance,
   defaults, positive item portions, upstream `float` accumulation, and fixed
@@ -83,7 +81,7 @@ proven as an ordinary gameplay surface.
 
 ## Module-growth budget
 
-Candidate sizes are 29,592 lines in `sim/lib.rs`, 5,047 in `sim/items.rs`,
+Verified sizes are 29,592 lines in `sim/lib.rs`, 5,047 in `sim/items.rs`,
 9,973 in `protocol/lib.rs`, 2,101 in `protocol/item_groups.rs`, 13,077 in
 persistence, 8,807 in the server library, 1,527 in `server/item_groups.rs`,
 7,070 in the server executable, and 596 in the new `content/material.rs`.
@@ -107,7 +105,7 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Latest verification
 
-Passing checks on the candidate implementation:
+Passing checks on the verified implementation:
 
 - formatting and diff checks;
 - content material inheritance and exact weighted profiles;
@@ -132,6 +130,9 @@ Hashing the same Postcard bytes under V69 still yields
 the changed hash is therefore the deliberate domain bump for the newly
 serialized item family. CanonicalEventsV18 is unchanged.
 
-The broad workspace gates pass. A fixed committed-tree independent review
-remains before this candidate becomes the live verified checkpoint. No failure
-is known.
+The first fixed committed-tree review found one P1 recovery-integrity issue,
+two P2 generalized-validation issues, and two P3 boundary/documentation issues.
+The first corrected tree then exposed one P2 immutable-phase relation and stale
+growth accounting. All confirmed findings were fixed. A final independent pass
+reviewed the complete replacement commit from a clean detached worktree and
+found no remaining P0-P3 issue. No known failure remains.
