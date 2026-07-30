@@ -448,7 +448,7 @@
       "state": "complete",
       "priority": 30,
       "depends_on": [],
-      "upstream_sources": ["../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/item.cpp"],
+      "upstream_sources": ["../Cataclysm-DDA/src/generic_factory.h", "../Cataclysm-DDA/src/material.h", "../Cataclysm-DDA/src/material.cpp", "../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/item.cpp"],
       "rust_paths": ["crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/server/src/item_groups.rs", "crates/conformance/src/lib.rs", "crates/client/src/main.rs", "crates/tools/src/cpp_oracle.rs"],
       "scenario_families": ["material-inheritance-and-defaults", "upstream-float-weighted-mixtures", "fixed-point-ambient-energy", "constructor-processing-and-four-mode-recovery", "normal-client-temperature-rendering"],
       "differential_oracle": "verified",

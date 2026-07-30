@@ -11,6 +11,12 @@ const DEFAULT_SPECIFIC_HEAT_LIQUID_UJ_PER_G_K: i64 = 4_186_000;
 const DEFAULT_SPECIFIC_HEAT_SOLID_UJ_PER_G_K: i64 = 2_108_000;
 const DEFAULT_LATENT_HEAT_UJ_PER_G: i64 = 334_000_000;
 const THERMAL_SCALE: f64 = 1_000_000.0;
+const THERMAL_FIELDS: [&str; 4] = [
+    "specific_heat_liquid",
+    "specific_heat_solid",
+    "latent_heat",
+    "freezing_point",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialThermalDefinition {
@@ -66,6 +72,7 @@ impl MaterialRegistry {
             .map_err(MaterialRegistryError::Catalog)?;
         let mut pending = read_materials(content_root.as_ref(), files)?;
         let mut materials = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
         while !pending.is_empty() {
             let pass_size = pending.len();
             let mut loaded = 0;
@@ -73,7 +80,7 @@ impl MaterialRegistry {
                 let raw = pending
                     .pop_front()
                     .ok_or(MaterialRegistryError::InternalQueue)?;
-                if load_one(&raw, &mut materials)? {
+                if load_one(&raw, &mut materials, &mut abstracts)? {
                     loaded += 1;
                 } else {
                     pending.push_back(raw);
@@ -84,7 +91,12 @@ impl MaterialRegistry {
                     pending
                         .iter()
                         .take(20)
-                        .filter_map(|raw| raw.object.get("id").and_then(Value::as_str))
+                        .filter_map(|raw| {
+                            raw.object
+                                .get("id")
+                                .or_else(|| raw.object.get("abstract"))
+                                .and_then(Value::as_str)
+                        })
                         .map(str::to_owned)
                         .collect(),
                 ));
@@ -173,7 +185,7 @@ impl MaterialRegistry {
 
 fn quantize_microjoules(value: f32) -> Result<i64, MaterialRegistryError> {
     let scaled = f64::from(value) * THERMAL_SCALE;
-    if !scaled.is_finite() || scaled <= 0.0 || scaled > i64::MAX as f64 {
+    if !scaled.is_finite() || scaled <= 0.0 || scaled >= i64::MAX as f64 {
         return Err(MaterialRegistryError::ThermalOverflow);
     }
     Ok(scaled.round() as i64)
@@ -223,14 +235,25 @@ fn collect_material(
 fn load_one(
     raw: &RawMaterial,
     materials: &mut BTreeMap<String, MaterialThermalDefinition>,
+    abstracts: &mut BTreeMap<String, MaterialThermalDefinition>,
 ) -> Result<bool, MaterialRegistryError> {
-    let id = raw
+    let concrete_id = raw
         .object
         .get("id")
-        .or_else(|| raw.object.get("abstract"))
         .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .ok_or(MaterialRegistryError::InvalidIdentity)?;
+        .filter(|id| !id.is_empty());
+    let abstract_id = raw
+        .object
+        .get("abstract")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let (id, is_abstract) = match (concrete_id, abstract_id) {
+        (Some(id), None) => (id, false),
+        (None, Some(id)) => (id, true),
+        (None, None) | (Some(_), Some(_)) => {
+            return Err(MaterialRegistryError::InvalidIdentity);
+        }
+    };
     let parent = raw.object.get("copy-from").map(|value| {
         value
             .as_str()
@@ -238,7 +261,7 @@ fn load_one(
             .ok_or_else(|| invalid(&raw.file.upstream_path, "copy-from"))
     });
     let mut material = if let Some(parent) = parent.transpose()? {
-        let Some(base) = materials.get(parent) else {
+        let Some(base) = materials.get(parent).or_else(|| abstracts.get(parent)) else {
             return Ok(false);
         };
         base.clone()
@@ -248,6 +271,7 @@ fn load_one(
     material.id = id.to_owned();
     material.source.clone_from(&raw.file.upstream_path);
     let source = format!("{}#{id}", raw.file.upstream_path);
+    reject_unsupported_thermal_modifiers(&raw.object, &source)?;
     apply_scaled_positive(
         &raw.object,
         "specific_heat_liquid",
@@ -273,8 +297,31 @@ fn load_one(
             .filter(|temperature| *temperature > 0)
             .ok_or_else(|| invalid(&source, "freezing_point"))?;
     }
-    materials.insert(id.to_owned(), material);
+    if is_abstract {
+        abstracts.insert(id.to_owned(), material);
+    } else {
+        materials.insert(id.to_owned(), material);
+    }
     Ok(true)
+}
+
+fn reject_unsupported_thermal_modifiers(
+    object: &Map<String, Value>,
+    source: &str,
+) -> Result<(), MaterialRegistryError> {
+    for modifier in ["relative", "proportional"] {
+        let Some(value) = object.get(modifier) else {
+            continue;
+        };
+        let fields = value.as_object().ok_or_else(|| invalid(source, modifier))?;
+        if let Some(field) = THERMAL_FIELDS
+            .iter()
+            .find(|field| fields.contains_key(**field))
+        {
+            return Err(invalid(source, &format!("{modifier}.{field}")));
+        }
+    }
+    Ok(())
 }
 
 fn apply_scaled_positive(
@@ -303,7 +350,7 @@ fn scaled_i64(
     let scaled = value * scale;
     if !scaled.is_finite()
         || scaled < i64::MIN as f64
-        || scaled > i64::MAX as f64
+        || scaled >= i64::MAX as f64
         || (scaled - scaled.round()).abs() > 1.0e-6
     {
         return Err(invalid(source, field));
@@ -422,18 +469,81 @@ mod tests {
     #[test]
     fn thermal_inheritance_resets_without_copy_and_rejects_sub_micro_precision() {
         let mut materials = BTreeMap::new();
-        assert!(load_one(&raw("base", None, Some(1.2)), &mut materials).expect("base"));
-        assert!(load_one(&raw("child", Some("base"), None), &mut materials).expect("child"));
+        let mut abstracts = BTreeMap::new();
+        assert!(
+            load_one(
+                &raw("base", None, Some(1.2)),
+                &mut materials,
+                &mut abstracts
+            )
+            .expect("base")
+        );
+        assert!(
+            load_one(
+                &raw("child", Some("base"), None),
+                &mut materials,
+                &mut abstracts
+            )
+            .expect("child")
+        );
         assert_eq!(
             materials["child"].specific_heat_liquid_microjoules_per_gram_kelvin,
             1_200_000
         );
-        assert!(load_one(&raw("child", None, None), &mut materials).expect("replacement"));
+        assert!(
+            load_one(&raw("child", None, None), &mut materials, &mut abstracts)
+                .expect("replacement")
+        );
         assert_eq!(
             materials["child"].specific_heat_liquid_microjoules_per_gram_kelvin,
             DEFAULT_SPECIFIC_HEAT_LIQUID_UJ_PER_G_K
         );
-        assert!(load_one(&raw("too_precise", None, Some(1.000_000_1)), &mut materials).is_err());
+        assert!(
+            load_one(
+                &raw("too_precise", None, Some(1.000_000_1)),
+                &mut materials,
+                &mut abstracts
+            )
+            .is_err()
+        );
+
+        let mut template = raw("generic", None, Some(1.7));
+        template.object.remove("id");
+        template.object.insert(
+            String::from("abstract"),
+            Value::String(String::from("generic")),
+        );
+        assert!(load_one(&template, &mut materials, &mut abstracts).expect("abstract template"));
+        assert!(!materials.contains_key("generic"));
+        assert!(
+            load_one(
+                &raw("concrete", Some("generic"), None),
+                &mut materials,
+                &mut abstracts
+            )
+            .expect("concrete abstract child")
+        );
+        assert_eq!(
+            materials["concrete"].specific_heat_liquid_microjoules_per_gram_kelvin,
+            1_700_000
+        );
+
+        let mut relative = raw("relative", None, None);
+        relative.object.insert(
+            String::from("relative"),
+            serde_json::json!({"specific_heat_liquid": 1.0}),
+        );
+        assert!(load_one(&relative, &mut materials, &mut abstracts).is_err());
+        assert!(
+            scaled_i64(&Value::from(i64::MAX), 1.0, "test", "upper_bound").is_err(),
+            "f64's 2^63 alias must not saturate into an accepted i64"
+        );
+        let mut ambiguous = raw("ambiguous", None, None);
+        ambiguous.object.insert(
+            String::from("abstract"),
+            Value::String(String::from("ambiguous")),
+        );
+        assert!(load_one(&ambiguous, &mut materials, &mut abstracts).is_err());
     }
 
     #[test]
@@ -449,7 +559,8 @@ mod tests {
         let items =
             crate::ItemRegistry::load_selected(&manifest, root, &catalog, &enabled).expect("items");
 
-        assert_eq!(materials.len(), 202);
+        assert_eq!(materials.len(), 201);
+        assert!(materials.get("generic_polymer_resin").is_none());
         assert_eq!(
             materials.get("drug_filler").expect("drug filler"),
             &MaterialThermalDefinition {

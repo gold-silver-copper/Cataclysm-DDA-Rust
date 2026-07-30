@@ -83,18 +83,23 @@ proven as an ordinary gameplay surface.
 
 ## Module-growth budget
 
-Candidate sizes are 29,408 lines in `sim/lib.rs`, 5,047 in `sim/items.rs`,
-9,959 in `protocol/lib.rs`, 2,082 in `protocol/item_groups.rs`, 13,077 in
+Candidate sizes are 29,592 lines in `sim/lib.rs`, 5,047 in `sim/items.rs`,
+9,973 in `protocol/lib.rs`, 2,101 in `protocol/item_groups.rs`, 13,077 in
 persistence, 8,807 in the server library, 1,527 in `server/item_groups.rs`,
-7,070 in the server executable, and 485 in the new `content/material.rs`.
-Relative to verified implementation `d863ea5`, the central simulation grows 15
-net lines only for prototype recovery, fixtures, and the canonical domain;
-temperature behavior grows `sim/items.rs` by 50 net lines. The central protocol
-grows 23 net wire/fixture lines while `protocol/item_groups.rs` grows 69 net
+7,070 in the server executable, and 596 in the new `content/material.rs`.
+Relative to verified implementation `d863ea5`, the central simulation grows
+199 net lines to mirror Protocol 94's snapshot, component, prototype,
+phase-ownership, and provenance invariants and to retain the independently
+requested negative recovery regression, mechanical fixtures, and canonical
+domain. Temperature processing behavior grows
+`sim/items.rs` by 50 net lines. The central protocol grows 37 net wire,
+validation, and fixture lines while `protocol/item_groups.rs` grows 88 net
 engine/validation lines. The server executable grows 107 net lines solely for
 registry threading, catalog integration, and the fixed production-content
 audit; capability logic grows `server/item_groups.rs` by 63 net lines. The
-server library grows three fixture lines and no runtime behavior.
+server library grows three fixture lines and no runtime behavior. This larger
+central simulation exception is confined to fail-closed recovery validation;
+future temperature behavior remains owned by `sim/items.rs`.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
@@ -107,6 +112,7 @@ Passing checks on the candidate implementation:
 - formatting and diff checks;
 - content material inheritance and exact weighted profiles;
 - protocol and simulation constructor/processing boundaries;
+- negative snapshot/component/prototype recovery and immutable phase ownership;
 - normal Bevy pending/initialized material-energy rendering;
 - named item-group direct/snapshot/SQLite/portable-replay conformance;
 - representative item-flow four-mode conformance and explicit V69/V70 domain

@@ -130,6 +130,17 @@ pub(super) fn valid_item_temperature_state(state: &ItemTemperatureStateV1) -> bo
                     })))
 }
 
+/// Returns whether canonical item-temperature state is within the currently
+/// represented constructor and normal-ambient lifecycle for its immutable
+/// containment phase.
+#[must_use]
+pub fn item_temperature_state_matches_phase(
+    state: &ItemTemperatureStateV1,
+    containment_phase: ItemPhaseV1,
+) -> bool {
+    valid_item_temperature_state(state) && state.current_phase == containment_phase
+}
+
 pub(super) fn valid_item_fit_state(fitted: bool, containment: &ItemContainmentProfileV1) -> bool {
     let immutable_fit = initial_item_fit_state(containment);
     let variable_size = item_profile_has_flag(containment, "VARSIZE");
@@ -1723,6 +1734,14 @@ mod tests {
         );
         let mut material = initial_item_temperature_state(birth, ItemPhaseV1::Liquid, Some(water));
         assert!(valid_item_temperature_state(&material));
+        assert!(item_temperature_state_matches_phase(
+            &material,
+            ItemPhaseV1::Liquid
+        ));
+        assert!(!item_temperature_state_matches_phase(
+            &material,
+            ItemPhaseV1::Solid
+        ));
         material.temperature_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
         material.specific_energy_millijoules_per_gram = Some(992_520);
         assert!(valid_item_temperature_state(&material));

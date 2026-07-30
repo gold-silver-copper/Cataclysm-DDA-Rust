@@ -24,8 +24,8 @@ pub use item_groups::{
     MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS,
     initial_item_temperature_state, item_description_expansion_is_valid,
     item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
-    item_snippet_is_valid, item_variant_is_valid, spawn_pocket_external_volume_milliliters,
-    valid_item_variables,
+    item_snippet_is_valid, item_temperature_state_matches_phase, item_variant_is_valid,
+    spawn_pocket_external_volume_milliliters, valid_item_variables,
 };
 use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
@@ -4676,6 +4676,10 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
             .temperature
             .as_ref()
             .is_none_or(valid_item_temperature_state)
+        && item
+            .temperature
+            .as_ref()
+            .is_none_or(|temperature| temperature.current_phase == item.containment.phase)
         && (item.temperature.is_none() || !item.comestible_type.is_empty())
         && item.ammunition_type.len() <= 64
         && item
@@ -5361,7 +5365,13 @@ fn component_state_matches_prototype(
         && state.calories == prototype.calories
         && state.quench == prototype.quench
         && state.comestible_type == prototype.comestible_type
-        && state.temperature.is_some() == prototype.tracks_temperature
+        && state
+            .temperature
+            .as_ref()
+            .map(|temperature| temperature.current_phase)
+            == prototype
+                .tracks_temperature
+                .then_some(prototype.containment.phase)
         && state
             .temperature
             .as_ref()
@@ -5436,6 +5446,10 @@ fn valid_item_component(
             .temperature
             .as_ref()
             .is_none_or(valid_item_temperature_state)
+        && component
+            .temperature
+            .as_ref()
+            .is_none_or(|temperature| temperature.current_phase == component.containment.phase)
         && (component.temperature.is_none() || !component.comestible_type.is_empty())
         && component.ammunition_type.len() <= 64
         && component

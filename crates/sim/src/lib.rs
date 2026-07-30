@@ -978,6 +978,10 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
         || snapshot.comestible_type.len() > 32
         || snapshot.comestible_type.chars().any(char::is_control)
         || (!snapshot.comestible_type.is_empty() && snapshot.charges <= 0)
+        || snapshot.temperature.as_ref().is_some_and(|state| {
+            !cdda_protocol::item_temperature_state_matches_phase(state, snapshot.containment.phase)
+        })
+        || (snapshot.temperature.is_some() && snapshot.comestible_type.is_empty())
         || snapshot.ammunition_type.len() > 64
         || snapshot.ammunition_type.chars().any(char::is_control)
         || (!snapshot.ammunition_type.is_empty()
@@ -1659,6 +1663,10 @@ fn validate_item_component(
         || component.comestible_type.len() > 32
         || component.comestible_type.chars().any(char::is_control)
         || (!component.comestible_type.is_empty() && component.charges <= 0)
+        || component.temperature.as_ref().is_some_and(|state| {
+            !cdda_protocol::item_temperature_state_matches_phase(state, component.containment.phase)
+        })
+        || (component.temperature.is_some() && component.comestible_type.is_empty())
         || component.ammunition_type.len() > 64
         || component.ammunition_type.chars().any(char::is_control)
         || (!component.ammunition_type.is_empty()
@@ -1764,6 +1772,18 @@ fn component_state_matches_prototype(
         && state.calories == prototype.calories
         && state.quench == prototype.quench
         && state.comestible_type == prototype.comestible_type
+        && state
+            .temperature
+            .as_ref()
+            .map(|temperature| temperature.current_phase)
+            == prototype
+                .tracks_temperature
+                .then_some(prototype.containment.phase)
+        && state
+            .temperature
+            .as_ref()
+            .and_then(|temperature| temperature.thermal_properties.as_ref())
+            == prototype.thermal_properties.as_ref()
         && state.ammunition_type == prototype.ammunition_type
         && state.ranged_weapon == prototype.ranged_weapon
         && state.magazine_capacity == prototype.magazine_capacity
@@ -2016,7 +2036,7 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
         || item.comestible_type.len() > 32
         || item.comestible_type.chars().any(char::is_control)
         || (!item.comestible_type.is_empty() && item.charges <= 0)
-        || (!item.tracks_temperature && item.thermal_properties.is_some())
+        || !craft_item_temperature_is_valid(item)
         || item.ammunition_type.len() > 64
         || item.ammunition_type.chars().any(char::is_control)
         || (!item.ammunition_type.is_empty()
@@ -2097,6 +2117,23 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
         return Err(SimError::InvalidCraft);
     }
     Ok(())
+}
+
+fn craft_item_temperature_is_valid(item: &CraftItemPrototypeV1) -> bool {
+    if !item.tracks_temperature {
+        return item.thermal_properties.is_none();
+    }
+    if item.comestible_type.is_empty() {
+        return false;
+    }
+    cdda_protocol::item_temperature_state_matches_phase(
+        &cdda_protocol::initial_item_temperature_state(
+            SimTick(0),
+            item.containment.phase,
+            item.thermal_properties,
+        ),
+        item.containment.phase,
+    )
 }
 
 fn validate_craft_activity(
@@ -19863,6 +19900,51 @@ mod tests {
             Err(SimError::InvalidItem)
         ));
 
+        let thermal_properties = cdda_protocol::ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 1_500_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 1_200_000,
+            latent_heat_microjoules_per_gram: 10_000_000,
+            freezing_point_millikelvin: 273_150,
+        };
+        let mut temperature_item = base.clone();
+        temperature_item.type_id = String::from("temperature_fixture");
+        temperature_item.comestible_type = String::from("MED");
+        temperature_item.temperature = Some(cdda_protocol::initial_item_temperature_state(
+            SimTick(0),
+            cdda_protocol::ItemPhaseV1::Solid,
+            Some(thermal_properties),
+        ));
+        assert!(validate_item_snapshot(&temperature_item).is_ok());
+        let mut invalid_temperature = temperature_item.clone();
+        invalid_temperature
+            .temperature
+            .as_mut()
+            .expect("temperature exists")
+            .thermal_properties
+            .as_mut()
+            .expect("thermal properties exist")
+            .specific_heat_liquid_microjoules_per_gram_kelvin = 0;
+        assert!(matches!(
+            validate_item_snapshot(&invalid_temperature),
+            Err(SimError::InvalidItem)
+        ));
+        let mut phase_mismatch = temperature_item.clone();
+        phase_mismatch
+            .temperature
+            .as_mut()
+            .expect("temperature exists")
+            .current_phase = cdda_protocol::ItemPhaseV1::Liquid;
+        assert!(matches!(
+            validate_item_snapshot(&phase_mismatch),
+            Err(SimError::InvalidItem)
+        ));
+        let mut noncomestible_temperature = base.clone();
+        noncomestible_temperature.temperature = temperature_item.temperature;
+        assert!(matches!(
+            validate_item_snapshot(&noncomestible_temperature),
+            Err(SimError::InvalidItem)
+        ));
+
         let consumed = CraftConsumedItemV1 {
             item: valid,
             split_from: None,
@@ -19912,6 +19994,33 @@ mod tests {
             Err(SimError::InvalidItem)
         ));
 
+        let temperature_consumed = CraftConsumedItemV1 {
+            item: temperature_item.clone(),
+            split_from: None,
+        };
+        let temperature_component = component_from_consumed(&temperature_consumed, false, true);
+        assert!(validate_item_component_root(&temperature_component).is_ok());
+        let mut invalid_temperature_component = temperature_component.clone();
+        invalid_temperature_component
+            .temperature
+            .as_mut()
+            .expect("temperature exists")
+            .hot = true;
+        assert!(matches!(
+            validate_item_component_root(&invalid_temperature_component),
+            Err(SimError::InvalidItem)
+        ));
+        let mut phase_mismatched_component = temperature_component.clone();
+        phase_mismatched_component
+            .temperature
+            .as_mut()
+            .expect("temperature exists")
+            .current_phase = cdda_protocol::ItemPhaseV1::Liquid;
+        assert!(matches!(
+            validate_item_component_root(&phase_mismatched_component),
+            Err(SimError::InvalidItem)
+        ));
+
         let mut prototype = test_craft_item_prototype("metadata_fixture");
         prototype.containment = component.containment.clone();
         validate_craft_item_prototype(&prototype).expect("prototype should be valid");
@@ -19928,6 +20037,81 @@ mod tests {
         assert!(component_state_matches_prototype(&component, &prototype));
         prototype.containment.weight_milligrams = 1;
         assert!(!component_state_matches_prototype(&component, &prototype));
+
+        let mut temperature_prototype = test_craft_item_prototype("temperature_fixture");
+        temperature_prototype.comestible_type = String::from("MED");
+        temperature_prototype.tracks_temperature = true;
+        temperature_prototype.thermal_properties = Some(thermal_properties);
+        validate_craft_item_prototype(&temperature_prototype)
+            .expect("represented thermal prototype should be valid");
+        let mut noncomestible_temperature_prototype = temperature_prototype.clone();
+        noncomestible_temperature_prototype.comestible_type.clear();
+        assert!(matches!(
+            validate_craft_item_prototype(&noncomestible_temperature_prototype),
+            Err(SimError::InvalidCraft)
+        ));
+        assert!(component_state_matches_prototype(
+            &temperature_component,
+            &temperature_prototype
+        ));
+        let mut invalid_temperature_prototype = temperature_prototype.clone();
+        invalid_temperature_prototype
+            .thermal_properties
+            .as_mut()
+            .expect("thermal properties exist")
+            .freezing_point_millikelvin = 273_149;
+        assert!(matches!(
+            validate_craft_item_prototype(&invalid_temperature_prototype),
+            Err(SimError::InvalidCraft)
+        ));
+        let mut mismatched_temperature_prototype = temperature_prototype;
+        mismatched_temperature_prototype.thermal_properties = None;
+        assert!(!component_state_matches_prototype(
+            &temperature_component,
+            &mismatched_temperature_prototype
+        ));
+
+        let recovery_id = world
+            .allocator
+            .allocate_item()
+            .expect("recovery item ID should allocate");
+        temperature_item.id = recovery_id;
+        let temperature_instance = ItemInstance::from_snapshot(&temperature_item)
+            .expect("temperature item should restore");
+        world
+            .actors
+            .get_mut(&actor_id)
+            .expect("actor exists")
+            .inventory
+            .insert(recovery_id, temperature_instance);
+        let mut malformed_recovery = world.snapshot();
+        malformed_recovery.actors[0]
+            .inventory
+            .iter_mut()
+            .find(|item| item.id == recovery_id)
+            .expect("temperature recovery item exists")
+            .temperature
+            .as_mut()
+            .expect("temperature exists")
+            .specific_energy_millijoules_per_gram = Some(123);
+        assert!(matches!(
+            WorldState::from_snapshot(&malformed_recovery),
+            Err(SimError::InvalidItem)
+        ));
+        let mut phase_mismatched_recovery = world.snapshot();
+        phase_mismatched_recovery.actors[0]
+            .inventory
+            .iter_mut()
+            .find(|item| item.id == recovery_id)
+            .expect("temperature recovery item exists")
+            .temperature
+            .as_mut()
+            .expect("temperature exists")
+            .current_phase = cdda_protocol::ItemPhaseV1::Liquid;
+        assert!(matches!(
+            WorldState::from_snapshot(&phase_mismatched_recovery),
+            Err(SimError::InvalidItem)
+        ));
     }
 
     #[test]
