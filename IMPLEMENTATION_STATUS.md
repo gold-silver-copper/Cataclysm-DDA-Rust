@@ -5,13 +5,13 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
 
 ## Live checkpoint
 
-- Exact green parent: `d95790301fbe89b7eff291681d0135ab8d853480`,
-  tree `7b19b5fecaa9b32879c3b8fa746c653920176866`.
-- Candidate family: generalized item-type default-container ownership. The
-  implementation and local gates are green; checkpoint binding remains pending
-  until the committed tree receives an independent fixed-context review.
+- Verified green commit: `a80f6c2a8c23c29146f67a843f8cbc34d0cbb6ec`,
+  tree `22de91ca31f00f87ac269459b8317bcf362655b6`.
+- Completed family checkpoint: generalized item-type default-container
+  ownership. The fixed committed tree passed the complete local gates and an
+  independent detached-context review with no P0-P3 finding.
 - Active milestone: `regional-terrain-base`.
-- Candidate representation: protocol 91, worldgen algorithm 2, persistence
+- Current representation: protocol 91, worldgen algorithm 2, persistence
   schema/minimum recoverable schema 69, replay format 3, CanonicalStateV67,
   and CanonicalEventsV18. Scenario format 7 and observation format 6 are
   unchanged.
@@ -50,7 +50,7 @@ layout edges are runnable. The real default `field` layer remains outside the
 production surface until its complete loot closure and ordinary exploration
 loop are exact.
 
-## Candidate default-container family
+## Completed default-container family
 
 - Finalized ITEM inheritance now retains `container`, `container_variant`, and
   `sealed`. Recursive normalized descriptors are cycle- and depth-bounded.
@@ -118,15 +118,15 @@ mechanical extraction milestones before anatomy or EOC expansion.
   vehicles, adjacent overmaps, and additional generated z-levels remain
   unavailable.
 
-## Latest candidate verification
+## Latest verified checkpoint
 
-The candidate passes formatting and diff checks, workspace
-all-target/all-feature checking, strict Clippy, 388 workspace tests plus
-doc-tests, warning-free rustdoc, dependency boundaries, parity ledger, runtime
-progress, the 364-day astronomy table, all 7,992 vendored content files, the
-6,571-file schema inventory, and all three pinned C++ oracles: 8 pocket, 104
-item-group, and 1,179 mapgen assertions. The item-group and mapgen gates also
-run reusable direct Rust comparisons.
+The exact implementation commit `a80f6c2` passes formatting and diff checks,
+workspace all-target/all-feature checking, strict Clippy, 388 workspace tests
+plus doc-tests, warning-free rustdoc, dependency boundaries, parity ledger,
+runtime progress, the 364-day astronomy table, all 7,992 vendored content
+files, the 6,571-file schema inventory, and all three pinned C++ oracles: 8
+pocket, 104 item-group, and 1,179 mapgen assertions. The item-group and mapgen
+gates also run reusable direct Rust comparisons.
 
 The representative empty-item-group-catalog fixture has unchanged Postcard
 bytes. Hashing them under CanonicalStateV66 reproduces
@@ -136,10 +136,14 @@ the deliberate CanonicalStateV67 domain produces
 Serialized catalogs containing item prototypes do change shape. The event trace
 and CanonicalEventsV18 remain unchanged.
 
-No independent review is claimed for a moving worktree. The next checkpoint
-must review the committed candidate from a separate fixed context, record exact
-files/findings/resolutions, rerun affected gates after any fix, and then bind the
-status and runtime-progress documents to the reviewed commit.
+An independent reviewer inspected the complete 21-file implementation diff
+from a clean detached worktree at exact commit `a80f6c2`, tree `22de91c`. The
+review covered content inheritance, protocol bounds, server normalization,
+simulation capacity/sealing/order, stable IDs, persistence/replay, client and
+four-mode paths, oracle evidence, documentation, and module growth. It found no
+confirmed P0, P1, P2, or P3 issue. Concrete scope, rejected concerns, focused
+commands, and residual risks are recorded in
+[docs/reviews/protocol-91-default-container-ownership.md](docs/reviews/protocol-91-default-container-ownership.md).
 
 ## Next dependency boundary
 
