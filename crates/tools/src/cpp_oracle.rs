@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cdda_content::{
-    ContentManifest, ModCatalog, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    ContentManifest, ItemRegistry, ModCatalog, OvermapTerrainMatchType, OvermapTerrainRegistry,
     StartLocationRegistry,
 };
 use cdda_protocol::{
@@ -14,14 +14,14 @@ use cdda_protocol::{
     ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1,
     ItemGroupContainerV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
     ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
-    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemPhaseV1, MagazineWellPrototypeV1,
+    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemPhaseV1, MagazineWellPrototypeV1, SimTick,
     SpawnPocketKindV1, SpawnPocketRulesV1, TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT,
     WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldPosition,
     WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1,
     WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
     WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
     WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_omt_matches,
+    WorldgenWeightedTerrainTargetV1, initial_item_temperature_state, worldgen_omt_matches,
 };
 use cdda_sim::{ReservedIdBlock, WorldState};
 use rand::{SeedableRng, rngs::StdRng};
@@ -127,6 +127,7 @@ struct ItemGroupOracleObservationV1 {
     modifiers: ItemGroupModifierObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
     default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
+    temperature_constructors: Vec<ItemGroupTemperatureConstructorTraceV1>,
     containers: Vec<ItemGroupContainerObservationV1>,
     everyday_corpse: ItemGroupCorpseObservationV1,
     civilian_phone_case: ItemGroupPhoneCaseObservationV1,
@@ -388,6 +389,26 @@ struct ItemGroupModifierContainerCapacityObservationV1 {
     explicit_downstream_draw: i32,
     fixed_downstream_draw: i32,
     downstream_draw_matches: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupTemperatureConstructorTraceV1 {
+    case_id: String,
+    item_type: String,
+    birth_turn: i32,
+    has_temperature: bool,
+    active: bool,
+    processing_speed: i32,
+    temperature_millikelvin: i32,
+    specific_energy_millijoules_per_gram: i32,
+    serialized_last_temp_check_present: bool,
+    serialized_last_temp_check: i32,
+    solid: bool,
+    liquid: bool,
+    hot: bool,
+    cold: bool,
+    frozen: bool,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -725,6 +746,11 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                     .map(ItemGroupDefaultContainerTraceV1::direct_projection)
                     .collect::<Vec<_>>(),
                 &rust_item_group_default_container_observation()?,
+            )?;
+            compare_direct_observation(
+                "item constructor temperature state",
+                &observation.temperature_constructors,
+                &rust_item_group_temperature_constructor_observation(workspace)?,
             )?;
             println!(
                 "{}",
@@ -1390,6 +1416,92 @@ fn validate_item_group_observation(
         )
         .into());
     }
+    let expected_temperature_constructors = [
+        (
+            "materialless_comestible",
+            "chaw",
+            true,
+            true,
+            600,
+            true,
+            true,
+            false,
+        ),
+        (
+            "material_comestible",
+            "water_clean",
+            true,
+            true,
+            600,
+            true,
+            false,
+            true,
+        ),
+        (
+            "no_temp_comestible",
+            "caffeine",
+            false,
+            false,
+            600,
+            false,
+            true,
+            false,
+        ),
+        (
+            "ordinary_control",
+            "rock",
+            false,
+            false,
+            10_000,
+            false,
+            true,
+            false,
+        ),
+    ];
+    if observation.temperature_constructors.len() != expected_temperature_constructors.len()
+        || observation
+            .temperature_constructors
+            .iter()
+            .zip(expected_temperature_constructors)
+            .any(
+                |(
+                    actual,
+                    (
+                        case_id,
+                        item_type,
+                        has_temperature,
+                        active,
+                        processing_speed,
+                        has_last_temp_check,
+                        solid,
+                        liquid,
+                    ),
+                )| {
+                    actual.case_id != case_id
+                        || actual.item_type != item_type
+                        || actual.birth_turn != 123
+                        || actual.has_temperature != has_temperature
+                        || actual.active != active
+                        || actual.processing_speed != processing_speed
+                        || actual.temperature_millikelvin != 0
+                        || actual.specific_energy_millijoules_per_gram != -10_000
+                        || actual.serialized_last_temp_check_present != has_last_temp_check
+                        || actual.serialized_last_temp_check
+                            != if has_last_temp_check { 123 } else { 0 }
+                        || actual.solid != solid
+                        || actual.liquid != liquid
+                        || actual.hot
+                        || actual.cold
+                        || actual.frozen
+                },
+            )
+    {
+        return Err(format!(
+            "item temperature-constructor characterization is incomplete: {:?}",
+            observation.temperature_constructors
+        )
+        .into());
+    }
     let expected_containers = [
         ("discard", 1, 1, Vec::<String>::new()),
         (
@@ -1782,6 +1894,7 @@ fn rust_item_group_magazine_charge_case(
         calories: 0,
         quench: 0,
         comestible_type: String::new(),
+        tracks_temperature: false,
         ammunition_type: String::new(),
         ranged_weapon: None,
         magazine_capacity: 0,
@@ -1920,6 +2033,7 @@ fn rust_item_group_default_container_observation()
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -2080,6 +2194,73 @@ fn rust_item_group_default_container_observation()
     .collect()
 }
 
+fn rust_item_group_temperature_constructor_observation(
+    workspace: &Path,
+) -> Result<Vec<ItemGroupTemperatureConstructorTraceV1>, Box<dyn std::error::Error>> {
+    let manifest_path = workspace.join("vendor/cdda-content-manifest.json");
+    let manifest = ContentManifest::load(&manifest_path)?;
+    let content_root = manifest_path
+        .parent()
+        .ok_or("pinned content manifest has no parent directory")?;
+    let mods = ModCatalog::load(&manifest, content_root)?;
+    let enabled = mods.recommended_new_world()?;
+    let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    [
+        ("materialless_comestible", "chaw"),
+        ("material_comestible", "water_clean"),
+        ("no_temp_comestible", "caffeine"),
+        ("ordinary_control", "rock"),
+    ]
+    .into_iter()
+    .map(|(case_id, item_type)| {
+        let item = items
+            .get(item_type)
+            .ok_or_else(|| format!("pinned item {item_type} disappeared"))?;
+        let has_temperature =
+            item.subtypes.contains("COMESTIBLE") && !item.flags.contains("NO_TEMP");
+        let current_phase = match item.phase.to_ascii_lowercase().as_str() {
+            "" | "solid" => ItemPhaseV1::Solid,
+            "liquid" => ItemPhaseV1::Liquid,
+            phase => {
+                return Err(format!(
+                    "oracle item {item_type} has unsupported phase {phase}"
+                ));
+            }
+        };
+        let state = initial_item_temperature_state(SimTick(123), current_phase);
+        Ok(ItemGroupTemperatureConstructorTraceV1 {
+            case_id: case_id.to_owned(),
+            item_type: item_type.to_owned(),
+            birth_turn: 123,
+            has_temperature,
+            active: has_temperature,
+            processing_speed: if item.subtypes.contains("COMESTIBLE") {
+                600
+            } else {
+                10_000
+            },
+            temperature_millikelvin: state.temperature_millikelvin,
+            specific_energy_millijoules_per_gram: state
+                .specific_energy_millijoules_per_gram
+                .ok_or("initial temperature energy disappeared")?,
+            serialized_last_temp_check_present: has_temperature,
+            serialized_last_temp_check: if has_temperature {
+                i32::try_from(state.last_check_tick.0)
+                    .map_err(|_| "temperature tick exceeded oracle range")?
+            } else {
+                0
+            },
+            solid: current_phase == ItemPhaseV1::Solid,
+            liquid: current_phase == ItemPhaseV1::Liquid,
+            hot: state.hot,
+            cold: state.cold,
+            frozen: state.frozen,
+        })
+    })
+    .collect::<Result<Vec<_>, String>>()
+    .map_err(Into::into)
+}
+
 fn rust_item_group_tool_charge_case_with_replacement(
     leaf_minimum: i32,
     leaf_maximum: i32,
@@ -2092,6 +2273,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         calories: 0,
         quench: 0,
         comestible_type: String::new(),
+        tracks_temperature: false,
         ammunition_type: String::new(),
         ranged_weapon: None,
         magazine_capacity: 0,

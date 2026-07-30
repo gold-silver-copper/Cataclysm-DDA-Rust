@@ -6,8 +6,9 @@ use std::path::Path;
 use serde_json::{Map, Number, Value};
 
 use crate::{
-    AmmunitionRegistry, ContentManifest, ItemRegistry, ModCatalog, ModCatalogError,
-    PROFICIENCY_MULTIPLIER_SCALE, ProficiencyRegistry, SelectedContentFile, SkillRegistry,
+    AmmunitionRegistry, ContentManifest, ItemRegistry, ItemTemperatureRuntimeClass, ModCatalog,
+    ModCatalogError, PROFICIENCY_MULTIPLIER_SCALE, ProficiencyRegistry, SelectedContentFile,
+    SkillRegistry,
 };
 
 const RUNTIME_MAX_SUPPORT_GROUPS: usize = 128;
@@ -403,12 +404,23 @@ impl RecipeRegistry {
             let Some(result) = items.get(&recipe.result) else {
                 return false;
             };
+            if !matches!(
+                result.temperature_runtime_class(),
+                ItemTemperatureRuntimeClass::NotTracked
+                    | ItemTemperatureRuntimeClass::MateriallessNonperishable
+            ) {
+                return false;
+            }
             let charge_carrier_is_supported = |ammunition_type: &str| {
                 ammunition
                     .get(ammunition_type)
                     .and_then(|ammunition| items.get(&ammunition.default_item))
                     .is_some_and(|default_item| {
-                        default_item.count_by_charges()
+                        matches!(
+                            default_item.temperature_runtime_class(),
+                            ItemTemperatureRuntimeClass::NotTracked
+                                | ItemTemperatureRuntimeClass::MateriallessNonperishable
+                        ) && default_item.count_by_charges()
                             && default_item.default_charges() > 0
                             && default_item.ammo_types.len() == 1
                             && default_item.ammo_types.contains(ammunition_type)
@@ -493,6 +505,13 @@ impl RecipeRegistry {
                 };
                 if !component.recoverable || item.flags.contains("UNRECOVERABLE") {
                     continue;
+                }
+                if !matches!(
+                    item.temperature_runtime_class(),
+                    ItemTemperatureRuntimeClass::NotTracked
+                        | ItemTemperatureRuntimeClass::MateriallessNonperishable
+                ) {
+                    return false;
                 }
                 let instances = if item.count_by_charges() {
                     1

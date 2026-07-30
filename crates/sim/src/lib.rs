@@ -62,7 +62,8 @@ pub use items::{
 };
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
-    item_from_craft_prototype, item_from_planned_spawn, plan_item_group_source,
+    item_from_craft_prototype, item_from_planned_spawn, item_temperature_timestamps_are_valid,
+    plan_item_group_source, process_item_snapshot_temperature,
 };
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
@@ -3038,6 +3039,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.calories == right.calories
         && left.quench == right.quench
         && left.comestible_type == right.comestible_type
+        && left.temperature == right.temperature
         && left.ammunition_type == right.ammunition_type
         && left.ranged_weapon == right.ranged_weapon
         && left.component_provenance == right.component_provenance
@@ -3055,6 +3057,7 @@ fn plain_ammunition_container_content(item: &ItemSnapshot) -> bool {
     !item.ammunition_type.is_empty()
         && item.charges > 0
         && item.comestible_type.is_empty()
+        && item.temperature.is_none()
         && item.ranged_weapon.is_none()
         && item.component_provenance.is_none()
         && item.magazine_capacity == 0
@@ -3153,6 +3156,7 @@ fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftI
         calories: component.calories,
         quench: component.quench,
         comestible_type: component.comestible_type.clone(),
+        tracks_temperature: component.temperature.is_some(),
         ammunition_type: component.ammunition_type.clone(),
         ranged_weapon: component.ranged_weapon.clone(),
         magazine_capacity: component.magazine_capacity,
@@ -3183,6 +3187,7 @@ fn component_from_consumed(
         calories: consumed.item.calories,
         quench: consumed.item.quench,
         comestible_type: consumed.item.comestible_type.clone(),
+        temperature: consumed.item.temperature,
         ammunition_type: consumed.item.ammunition_type.clone(),
         ranged_weapon: consumed.item.ranged_weapon.clone(),
         count_by_charges,
@@ -4939,6 +4944,7 @@ impl WorldState {
                 calories: ammunition.calories,
                 quench: ammunition.quench,
                 comestible_type: ammunition.comestible_type,
+                temperature: None,
                 ammunition_type: ammunition.ammunition_type,
                 ranged_weapon: None,
                 component_provenance: None,
@@ -5012,6 +5018,7 @@ impl WorldState {
                     calories: spawn.calories,
                     quench: spawn.quench,
                     comestible_type: spawn.comestible_type,
+                    temperature: None,
                     ammunition_type: spawn.ammunition_type,
                     ranged_weapon: spawn.ranged_weapon,
                     component_provenance: None,
@@ -5491,6 +5498,7 @@ impl WorldState {
         let actor_sound_start = events.len();
         self.advance_actor_actions(&mut events)?;
         self.advance_powered_tools(&mut events)?;
+        self.advance_item_temperatures()?;
         self.advance_fields(&mut events)?;
         self.advance_creature_corpses(&mut events)?;
         self.advance_needs(&mut events)?;
@@ -5506,6 +5514,35 @@ impl WorldState {
             events,
             canonical_hash,
         })
+    }
+
+    /// Item-owned traversal coordinator. Temperature arithmetic and recursive
+    /// pocket/component ownership stay in `items.rs`; this method only visits
+    /// the canonical locations that can temporarily own an item.
+    fn advance_item_temperatures(&mut self) -> Result<(), SimError> {
+        let current_tick = self.tick;
+        for actor in self.actors.values_mut() {
+            for item in actor.inventory.values_mut() {
+                item.process_temperature(current_tick)?;
+            }
+            if let Some(activity) = &mut actor.craft_activity {
+                for consumed in &mut activity.consumed_items {
+                    process_item_snapshot_temperature(&mut consumed.item, current_tick)?;
+                }
+            }
+            if let Some(activity) = &mut actor.disassembly_activity {
+                process_item_snapshot_temperature(&mut activity.target_item, current_tick)?;
+            }
+            if let Some(activity) = &mut actor.construction_activity {
+                for consumed in &mut activity.consumed_items {
+                    process_item_snapshot_temperature(&mut consumed.item, current_tick)?;
+                }
+            }
+        }
+        for ground in self.ground_items.values_mut() {
+            ground.item.process_temperature(current_tick)?;
+        }
+        Ok(())
     }
 
     fn apply_held_movement_update(&mut self, input: HeldMovementUpdateV1) -> Result<(), SimError> {
@@ -8817,7 +8854,12 @@ impl WorldState {
                 .insert(
                     item_id,
                     GroundItem {
-                        item: item_from_planned_spawn(item_id, &prototype, &mut self.allocator)?,
+                        item: item_from_planned_spawn(
+                            item_id,
+                            &prototype,
+                            &mut self.allocator,
+                            self.tick,
+                        )?,
                         position,
                     },
                 )
@@ -9036,6 +9078,7 @@ impl WorldState {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    temperature: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     component_provenance: None,
@@ -9685,7 +9728,12 @@ impl WorldState {
                 self.ground_items.insert(
                     item_id,
                     GroundItem {
-                        item: item_from_planned_spawn(item_id, &prototype, &mut self.allocator)?,
+                        item: item_from_planned_spawn(
+                            item_id,
+                            &prototype,
+                            &mut self.allocator,
+                            self.tick,
+                        )?,
                         position: drop_position,
                     },
                 );
@@ -11147,7 +11195,7 @@ impl WorldState {
                 .zip(prototypes)
                 .enumerate()
             {
-                let mut item = item_from_craft_prototype(*item_id, prototype);
+                let mut item = item_from_craft_prototype(*item_id, prototype, self.tick);
                 item.force_fit_if_variable_size();
                 if index < usize::from(activity.recipe.output_instances) {
                     item.component_provenance = output_provenance
@@ -11841,7 +11889,8 @@ impl WorldState {
                     .unload_charges_as
                     .as_ref()
                     .expect("an allocated unload item has a normalized prototype");
-                let mut ammunition = item_from_craft_prototype(unloaded_item_id, prototype);
+                let mut ammunition =
+                    item_from_craft_prototype(unloaded_item_id, prototype, self.tick);
                 ammunition.charges = unload_charges;
                 if let Some(weapon) = target.ranged_weapon.as_mut() {
                     weapon.ammunition_remaining = 0;
@@ -12082,7 +12131,8 @@ impl WorldState {
                     let item = if let Some(state) = &component.output_state {
                         item_from_component(item_id, state)
                     } else {
-                        let mut item = item_from_craft_prototype(item_id, &component.output);
+                        let mut item =
+                            item_from_craft_prototype(item_id, &component.output, self.tick);
                         if activity.target_item.fitted {
                             item.force_fit_if_variable_size();
                         }
@@ -13290,6 +13340,9 @@ impl WorldState {
             maximum_counter = maximum_counter.max(actor.id.counter());
             let mut inventory = BTreeMap::new();
             for item in &actor.inventory {
+                if !item_temperature_timestamps_are_valid(item, snapshot.tick) {
+                    return Err(SimError::InvalidSnapshot);
+                }
                 validate_creature_corpse_context(item, snapshot.tick, &field_types)?;
                 register_stable_item_ids(
                     item,
@@ -13306,6 +13359,9 @@ impl WorldState {
             }
             if let Some(activity) = &actor.craft_activity {
                 for consumed in &activity.consumed_items {
+                    if !item_temperature_timestamps_are_valid(&consumed.item, snapshot.tick) {
+                        return Err(SimError::InvalidSnapshot);
+                    }
                     if consumed.item.creature_corpse.is_some() {
                         return Err(SimError::InvalidSnapshot);
                     }
@@ -13331,6 +13387,9 @@ impl WorldState {
                 }
             }
             if let Some(activity) = &actor.disassembly_activity {
+                if !item_temperature_timestamps_are_valid(&activity.target_item, snapshot.tick) {
+                    return Err(SimError::InvalidSnapshot);
+                }
                 if activity.target_item.creature_corpse.is_some() {
                     return Err(SimError::InvalidSnapshot);
                 }
@@ -13357,6 +13416,9 @@ impl WorldState {
             }
             if let Some(activity) = &actor.construction_activity {
                 for consumed in &activity.consumed_items {
+                    if !item_temperature_timestamps_are_valid(&consumed.item, snapshot.tick) {
+                        return Err(SimError::InvalidSnapshot);
+                    }
                     if consumed.item.creature_corpse.is_some() {
                         return Err(SimError::InvalidSnapshot);
                     }
@@ -13524,6 +13586,9 @@ impl WorldState {
         }
         let mut ground_items = BTreeMap::new();
         for ground in &snapshot.ground_items {
+            if !item_temperature_timestamps_are_valid(&ground.item, snapshot.tick) {
+                return Err(SimError::InvalidSnapshot);
+            }
             validate_creature_corpse_context(&ground.item, snapshot.tick, &field_types)?;
             register_stable_item_ids(
                 &ground.item,
@@ -13594,7 +13659,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV67");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV68");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13788,6 +13853,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -13966,6 +14032,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             component_provenance: None,
             ranged_weapon: None,
@@ -13994,6 +14061,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    temperature: None,
                     ammunition_type: String::from("battery"),
                     ranged_weapon: None,
                     component_provenance: None,
@@ -14090,6 +14158,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -14169,6 +14238,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    tracks_temperature: false,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
@@ -14192,6 +14262,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    temperature: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     count_by_charges: false,
@@ -14879,6 +14950,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::from("test_ammo"),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -15159,6 +15231,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -15921,6 +15994,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             count_by_charges: true,
@@ -15993,6 +16067,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             count_by_charges: false,
@@ -16023,6 +16098,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -16129,6 +16205,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             count_by_charges: false,
@@ -17977,6 +18054,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -18311,6 +18389,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -18444,6 +18523,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -19812,7 +19892,7 @@ mod tests {
         let mut prototype = test_craft_item_prototype("metadata_fixture");
         prototype.containment = component.containment.clone();
         validate_craft_item_prototype(&prototype).expect("prototype should be valid");
-        let reconstructed = item_from_craft_prototype(ItemId::new(1, 99), &prototype);
+        let reconstructed = item_from_craft_prototype(ItemId::new(1, 99), &prototype, SimTick(0));
         validate_item_snapshot(&reconstructed.snapshot())
             .expect("an admitted prototype must reconstruct a valid item");
         let mut empty_charge_prototype = prototype.clone();
@@ -20430,6 +20510,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             component_provenance: None,
@@ -20455,6 +20536,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    temperature: None,
                     ammunition_type: String::from("battery"),
                     ranged_weapon: None,
                     component_provenance: None,
@@ -22030,6 +22112,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    temperature: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     component_provenance: None,
@@ -23577,6 +23660,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                temperature: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 component_provenance: None,
@@ -23683,8 +23767,9 @@ mod tests {
             longest_side_millimeters: 1,
             ..cdda_protocol::ItemContainmentProfileV1::default()
         };
-        let content = item_from_craft_prototype(content_id, &content_prototype).snapshot();
-        let mut owner = item_from_craft_prototype(owner_id, &owner_prototype);
+        let content =
+            item_from_craft_prototype(content_id, &content_prototype, SimTick(0)).snapshot();
+        let mut owner = item_from_craft_prototype(owner_id, &owner_prototype, SimTick(0));
         owner.ammunition_containers[0].contents.push(content);
         owner.ammunition_containers[0]
             .spawn_state
@@ -27027,6 +27112,7 @@ mod tests {
                                     calories: 0,
                                     quench: 0,
                                     comestible_type: String::new(),
+                                    tracks_temperature: false,
                                     ammunition_type: String::new(),
                                     ranged_weapon: None,
                                     magazine_capacity: 0,

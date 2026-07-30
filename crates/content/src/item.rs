@@ -212,6 +212,16 @@ pub struct ItemVariantDefinition {
     pub unsupported_fields: BTreeSet<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ItemTemperatureRuntimeClass {
+    NotTracked,
+    MateriallessNonperishable,
+    RequiresRot,
+    RequiresCustomFreezing,
+    RequiresMaterialThermodynamics,
+    UnsupportedPhase,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemSnippetDefinition {
     pub id: String,
@@ -678,6 +688,31 @@ impl ItemRegistry {
 }
 
 impl ItemDefinition {
+    /// Classifies the finalized pinned constructor without implying support
+    /// for material thermodynamics, rot, or weather.
+    #[must_use]
+    pub fn temperature_runtime_class(&self) -> ItemTemperatureRuntimeClass {
+        if !self.subtypes.contains("COMESTIBLE") || self.flags.contains("NO_TEMP") {
+            return ItemTemperatureRuntimeClass::NotTracked;
+        }
+        if self.unsupported_fields.contains("spoils_in") {
+            return ItemTemperatureRuntimeClass::RequiresRot;
+        }
+        if self.unsupported_fields.contains("freezing_point") {
+            return ItemTemperatureRuntimeClass::RequiresCustomFreezing;
+        }
+        if !self.materials.is_empty() {
+            return ItemTemperatureRuntimeClass::RequiresMaterialThermodynamics;
+        }
+        if !matches!(
+            self.phase.to_ascii_lowercase().as_str(),
+            "" | "solid" | "liquid"
+        ) {
+            return ItemTemperatureRuntimeClass::UnsupportedPhase;
+        }
+        ItemTemperatureRuntimeClass::MateriallessNonperishable
+    }
+
     /// Pinned `Item_factory::finalize_pre` default: round the cube root of the
     /// effective one-charge volume to whole centimeters.
     #[must_use]

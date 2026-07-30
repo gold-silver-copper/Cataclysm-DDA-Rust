@@ -71,6 +71,7 @@ mod worldgen;
 
 use item_groups::{
     RuntimeItemGroupContent, runtime_bash_item_group_catalog, runtime_bash_item_group_source,
+    runtime_item_tracks_temperature,
 };
 #[cfg(test)]
 use item_groups::{runtime_item_group_charges, runtime_item_group_graph, runtime_item_group_item};
@@ -1199,6 +1200,15 @@ fn build_crafting_catalog(
         let result = items
             .get(&recipe.result)
             .ok_or("runnable recipe result disappeared from the item registry")?;
+        if runtime_item_tracks_temperature(result).is_err()
+            || recipe.byproducts.keys().any(|type_id| {
+                items
+                    .get(type_id)
+                    .is_none_or(|item| runtime_item_tracks_temperature(item).is_err())
+            })
+        {
+            continue;
+        }
         let amount = recipe
             .charges
             .unwrap_or(1)
@@ -1738,7 +1748,7 @@ fn build_disassembly_catalog(
         else {
             continue;
         };
-        if result.count_by_charges() {
+        if result.count_by_charges() || runtime_item_tracks_temperature(result).is_err() {
             continue;
         }
         let unload_category = if result.subtypes.contains("GUN") {
@@ -1768,6 +1778,9 @@ fn build_disassembly_catalog(
                 .ok_or_else(|| {
                     format!("item {target_type_id} lost its default charge-carrier item")
                 })?;
+            if runtime_item_tracks_temperature(default_ammunition).is_err() {
+                continue;
+            }
             Some(craft_item_prototype(
                 default_ammunition,
                 default_ammunition.default_charges(),
@@ -1804,6 +1817,10 @@ fn build_disassembly_catalog(
             };
             if !component.recoverable || item.flags.contains("UNRECOVERABLE") {
                 continue;
+            }
+            if runtime_item_tracks_temperature(item).is_err() {
+                supported = false;
+                break;
             }
             let (output_instances, charges) = if item.count_by_charges() {
                 let Ok(charges) = i32::try_from(component.count) else {
@@ -2028,6 +2045,7 @@ fn craft_item_prototype_with_ammunition(
         calories: item.calories,
         quench: item.quench,
         comestible_type: item.comestible_type.clone(),
+        tracks_temperature: runtime_item_tracks_temperature(item)?,
         ammunition_type,
         ranged_weapon: None,
         magazine_capacity,
@@ -4441,6 +4459,58 @@ mod tests {
             .expect("default mods should resolve");
         let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("items should load");
+        let mut temperature_items = items
+            .iter()
+            .filter_map(|(id, item)| {
+                runtime_item_tracks_temperature(item)
+                    .ok()
+                    .filter(|tracks| *tracks)
+                    .map(|_| id)
+            })
+            .collect::<Vec<_>>();
+        temperature_items.sort_unstable();
+        assert_eq!(
+            temperature_items,
+            [
+                "brew_rootbeer",
+                "chaw",
+                "chem_DMSO",
+                "chem_chloroform",
+                "chem_glycerol",
+                "chem_hydrogen_peroxide",
+                "chem_phenol",
+                "cocaine_topical",
+                "dayquil",
+                "ecig",
+                "ether",
+                "eyedrops",
+                "fermentable_fish_mixture",
+                "fermentable_fish_mixture_active",
+                "fermentable_liquid_mixture",
+                "fermented_fertilizer_liquid",
+                "fert_supplement",
+                "fertilizer_liquid",
+                "gelatin_extracted",
+                "gum",
+                "hi_q_distillate",
+                "hi_q_shatter",
+                "hi_q_wax",
+                "latex",
+                "liquid_soap",
+                "lye",
+                "lye_potassium",
+                "nectar",
+                "nic_gum",
+                "nyquil",
+                "pine_resin",
+                "poppysyrup",
+                "royal_jelly",
+                "skunk_spray_neutralizing_solution",
+                "slime_scrap",
+                "steroid_eyedrops",
+            ],
+            "the fixed selected-content snapshot should admit the complete materialless/nonperishable temperature class"
+        );
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("ammunition should load");
@@ -4692,7 +4762,9 @@ mod tests {
             field_runtime_errors.first(),
             Some(&(
                 "chaw_wrapper_1_20",
-                String::from("item group comestible chaw requires unimplemented temperature state"),
+                String::from(
+                    "item-group wrappers require exactly one rigid physical container pocket",
+                ),
             )),
             "the field closure must retain its exact next unsupported semantic boundary"
         );
@@ -5746,7 +5818,11 @@ mod tests {
             73,
             "the generalized wells must replace, not discard, empty-charge admission"
         );
-        assert_eq!(disassembly.len(), 1_227);
+        assert_eq!(
+            disassembly.len(),
+            1_161,
+            "66 formerly admitted recipes depend on material-backed or perishable temperature state and must remain fail-closed"
+        );
         let flashlight_disassembly = disassembly
             .get("flashlight")
             .expect("the canonical detachable-battery tool should remain reversible");
@@ -6038,7 +6114,11 @@ mod tests {
                 source_time_minutes: 15,
             })
         );
-        assert_eq!(crafting.len(), 3_049);
+        assert_eq!(
+            crafting.len(),
+            2_629,
+            "420 recipes remain fail-closed: results require 208 material, 182 rot, and 28 custom-freezing engines; two further recipes have unsupported rot/freezing byproducts"
+        );
         let mut maximum_encoded_recipe = (0_usize, "");
         for (recipe_id, recipe) in crafting.iter() {
             let encoded = encode_control(&ControlMessage::Command(ClientCommand {
@@ -6155,22 +6235,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["socks", "socks_wool"]
         );
-        let vegetable_juice = crafting
-            .get("V8")
-            .expect("pinned LIST recipe should normalize into concrete alternatives");
-        assert_eq!(
-            vegetable_juice.components[1]
-                .iter()
-                .map(|component| (component.type_id.as_str(), component.count))
-                .collect::<Vec<_>>(),
-            vec![("tomato", 1), ("tomato_cut", 1), ("can_tomato", 1)]
-        );
-        assert_eq!(
-            vegetable_juice.components[3]
-                .iter()
-                .map(|component| (component.type_id.as_str(), component.count))
-                .collect::<Vec<_>>(),
-            vec![("zucchini", 1), ("zucchini_cut", 1)]
+        assert!(
+            crafting.get("V8").is_none(),
+            "the parser retains V8's exact LIST alternatives, but its perishable material-backed result must not enter the runtime catalog"
         );
         let makeshift_cards = crafting
             .get("deck_of_cards_deck_of_cards_makeshift")
@@ -6198,17 +6265,10 @@ mod tests {
         assert_eq!(sawn_lumber.byproducts[0].output.type_id, "splinter");
         assert_eq!(sawn_lumber.byproducts[0].output_instances, 10);
         assert_eq!(sawn_lumber.byproducts[0].output.charges, 1);
-        let cream = crafting
-            .get("milk_cream")
-            .expect("pinned charged-liquid byproduct recipe should normalize");
-        assert_eq!(cream.byproducts.len(), 2);
-        let buttermilk = cream
-            .byproducts
-            .iter()
-            .find(|byproduct| byproduct.output.type_id == "buttermilk")
-            .expect("cream recipe should retain its charged byproduct");
-        assert_eq!(buttermilk.output_instances, 1);
-        assert_eq!(buttermilk.output.charges, 7);
+        assert!(
+            crafting.get("milk_cream").is_none(),
+            "cream and its charged buttermilk byproduct require the later material/rot engine"
+        );
         let pointy_stick = crafting
             .get("pointy_stick")
             .expect("inherent CUT quality recipe should be runnable");
@@ -6228,13 +6288,10 @@ mod tests {
                 .is_ok(),
             "circsaw_on CUT 1 at speed 0.5 remains valid for a legacy recipe"
         );
-        let toaster_pastry = crafting
-            .get("toasterpastry_with_toaster")
-            .expect("pinned charged-toaster recipe should be runnable");
-        assert_eq!(toaster_pastry.tools.len(), 1);
-        assert_eq!(toaster_pastry.tools[0][0].type_id, "toaster");
-        assert_eq!(toaster_pastry.tools[0][0].amount, 5);
-        assert!(toaster_pastry.tools[0][0].consumes_charges);
+        assert!(
+            crafting.get("toasterpastry_with_toaster").is_none(),
+            "charged-tool recipe parsing remains characterized, but the pastry result requires material/rot state"
+        );
         let suppressor = crafting
             .get("crafted_suppressor")
             .expect("charged DRILL quality should expose the pinned suppressor recipe");

@@ -1,153 +1,114 @@
 # Implementation Status
 
-Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
-`210f31db2e8b2f0caed1809f1a66781859f9d129`.
+Upstream is fixed at commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05`,
+tree `210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
 ## Live checkpoint
 
-- Verified green commit: `a80f6c2a8c23c29146f67a843f8cbc34d0cbb6ec`,
-  tree `22de91ca31f00f87ac269459b8317bcf362655b6`.
-- Completed family checkpoint: generalized item-type default-container
-  ownership. The fixed committed tree passed the complete local gates and an
-  independent detached-context review with no P0-P3 finding.
+- Verified green commit: `a80f6c2a8c23c29146f67a843f8cbc34d0cbb6ec`.
+  Protocol-92 work above documentation parent
+  `e4f74aff4a84019c35818aa0a6746ce33bf309e8` is intentionally unbound until
+  the full gates and fixed committed-tree review complete.
+- Current worktree representation: protocol 92, persistence schema/minimum
+  recoverable schema 70, CanonicalStateV68, CanonicalEventsV18, replay format
+  3, worldgen algorithm 2, scenario format 7, observation format 6.
 - Active milestone: `regional-terrain-base`.
-- Current representation: protocol 91, worldgen algorithm 2, persistence
-  schema/minimum recoverable schema 69, replay format 3, CanonicalStateV67,
-  and CanonicalEventsV18. Scenario format 7 and observation format 6 are
-  unchanged.
-- Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only; the server and
-  simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
+- Hosts remain macOS, Linux, and Windows. Bevy 0.19 is client-only; the server
+  and simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
 
-Mapgen/overmap completion is split into bounded milestones:
+Mapgen/overmap milestone states:
 
 - `atomic-static-mapgen`: `complete`.
 - `omt-identities-routing`: `complete`.
 - `start-location-selection`: `complete`.
-- `regional-terrain-base`: `in_progress`; `accessory_weaponcarry`,
-  `ammo_light_batteries`, and `bottle_otc_painkiller_1_20` now admit. The
-  complete field scan next stops at unimplemented temperature state for
-  `chaw`.
+- `regional-terrain-base`: `in_progress`.
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
-Mapgen completion evidence is in
-[docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
-Historical protocol narration remains in `docs/history` and scoped reviews.
+## Current family: materialless item temperature
 
-## Runnable behavior
+- Exact pinned C++ traces characterize `chaw`, `water_clean`, `caffeine`, and
+  `rock`: temperature ownership, active state, 600/10,000-turn processing
+  cadence, 0 K, -10 J/g sentinel, birth-tick serialization, phase, and flags.
+  All 119 item-group assertions and the reusable direct Rust comparison pass.
+- Protocol state is integer-only and recursively owned by items, provenance
+  components, integral ammunition, installed magazines, and physical contents.
+  The first ten-minute check initializes the admitted class to 293.150 K;
+  absent energy represents the pinned materialless indeterminate result without
+  a platform-dependent NaN. Recovery rejects future last-check timestamps.
+- The complete selected-content class is 36 definitions. Material
+  thermodynamics, rot, custom freezing, gas phases, and weather-driven ambient
+  changes remain fail closed.
+- Direct, per-tick snapshot, SQLite, and portable replay modes retain exact
+  nested constructor state. The normal Bevy item menu renders pending and
+  initialized temperature and keeps different temperature states stack-distinct.
+- Shared finalized-content classification keeps client and server disassembly
+  eligibility identical. Closing the old unsound boundary removes exactly 420
+  runtime craft recipes (208 material, 182 rot, 28 custom-freezing results,
+  one rot byproduct, one freezing byproduct) and 66 disassembly recipes whose
+  targets or recovered components need those engines.
 
-The persistent server-authoritative multiplayer foundation authenticates with
-iroh, creates and selects durable characters, keeps the world running without
-players, traverses generated terrain, fights admitted creatures, manipulates
-visible and contained items, smashes admitted structures, and runs implemented
-crafting, reading, disassembly, construction, survival, recovery, and replay
-paths. Disconnected characters remain physically present and vulnerable.
+## Runnable behavior and next blocker
 
-Worlds retain a bounded 180x180 z=0 overmap currently filled by the admitted
-`lmoe_north` generator. Coordinate-owned OMT identities, atomic 24x24
-generation, rotation, server-selected starts, durable chunks, and blocked
-layout edges are runnable. The real default `field` layer remains outside the
-production surface until its complete loot closure and ordinary exploration
-loop are exact.
+The persistent authoritative server authenticates through iroh, creates durable
+characters, advances with zero players, keeps disconnected characters present
+and vulnerable, traverses generated terrain, fights admitted creatures,
+manipulates nested items, and runs implemented crafting, reading, disassembly,
+construction, recovery, and replay paths.
 
-## Completed default-container family
+The fixed full `field` scan now passes `chaw` temperature construction and
+stops exactly at `chaw_wrapper_1_20`: item-group wrappers currently require one
+rigid physical container pocket. The next playable unlock is a generalized
+flexible wrapper/containment engine, then admission of the real field base and
+an ordinary exploration/pickup/loot demonstration through the client. Do not
+start cities, roads, rivers, specials, anatomy, or EOCs first.
 
-- Finalized ITEM inheritance now retains `container`, `container_variant`, and
-  `sealed`. Recursive normalized descriptors are cycle- and depth-bounded.
-- Direct construction, modifier fallback, explicit-null suppression, explicit
-  creators whose own default wrapper runs first, and raw whole-group wrappers
-  are distinct paths. Liquids fill physical capacity, failed default insertion
-  remains raw, and only a full sealable container seals.
-- Protocol bounds count the complete creator subtree and reject unsupported
-  dynamic named-group fallback. The server distinguishes raw wrappers from
-  modifier creators; the simulation allocates stable ownership in preorder.
-- Seven exact default-container traces cover direct water/aspirin, modifier
-  fallback, explicit null, the ordered explicit ibuprofen/aspirin creator, and
-  production one/twenty-aspirin boundaries. The item-group oracle passes 104
-  assertions and the reusable direct Rust comparison.
-- Direct, per-tick snapshot, SQLite, and portable replay conformance preserve a
-  pill bottle owning aspirin. The normal Bevy item menu displays its contained
-  count and selects removal by authoritative owner, pocket, and child ID.
-- The serialized item-group catalog shape changed, so Protocol 91/schema 69 are
-  required. Replay and event shapes did not change.
+## Measured runtime progress
 
-## Measured progress and module ownership
+No points are awarded for parser admission or synthetic characterization.
+Temperature earns no production credit until real field definitions are
+generated, interacted with, persisted, client-accessible, and four-mode proven.
 
-Runtime credit remains four core definitions and 44 weighted points. This
-normalization unlock earns no production credit until the real field is
-generated, explored, looted, persisted, exercised in all four recovery modes,
-and accessible through the client.
-
-- Core DDA ordinary-gameplay target: 13,865 definitions and 263,435 possible
+- Core-DDA ordinary-gameplay target: 13,865 definitions, 263,435 possible
   weighted points; 44 earned (0.0167%).
-- Selectable bundled-mod target: 5,967 definitions and 113,373 possible
-  weighted points; zero earned.
-- Parser-only inventory remains separate: 7,621 item groups, 9,520 mapgen
-  objects, 2,712 OMTs, and 150 starts.
+- Selectable bundled-mod target: 5,967 definitions, 113,373 possible weighted
+  points; zero earned.
+- Parser inventory remains separate: 7,621 item groups, 9,520 mapgen objects,
+  2,712 OMTs, and 150 starts.
 
-Current ownership sizes are 29,249 lines in `sim/lib.rs`, 4,545 in
-`sim/items.rs`, 9,801 in `protocol/lib.rs`, 1,916 in
-`protocol/item_groups.rs`, 13,065 in persistence, 8,797 in the server library,
-and 1,406 in `server/item_groups.rs`. Relative to the exact green parent, item
-behavior grows extracted modules by 362 simulation, 273 protocol, and 91 server
-lines. Central simulation grows by 14 lines solely for exports, the hash domain,
-and mechanical fixture fields; central protocol grows by four version/fixture
-lines, while persistence and the server library do not grow. The server
-executable adds 33 production-normalization/test lines. This is the documented
-module-budget justification; future item work remains in the extracted modules.
+## Module-growth budget
+
+Current sizes are 29,335 lines in `sim/lib.rs`, 4,790 in `sim/items.rs`, 9,847
+in `protocol/lib.rs`, 1,999 in `protocol/item_groups.rs`, 13,071 in persistence,
+8,804 in the server library, 1,471 in `server/item_groups.rs`, and 6,904 in the
+server executable. Relative to verified `a80f6c2`, primary item behavior grows
+the extracted simulation/protocol/server item modules by 245/83/65 lines.
+Central simulation growth is 86 lines for birth-tick call sites, canonical-owner
+visitation, recovery validation calls, stack equality, and mechanical fixtures;
+temperature arithmetic and recursive ownership remain in `sim/items.rs`.
+Central protocol growth is 46 lines for the serialized fields, validation, and
+mechanical fixtures; persistence/server-library growth of 6/7 lines is version
+and fixture plumbing. New behavior should continue in the extracted modules.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
 mechanical extraction milestones before anatomy or EOC expansion.
 
-## Explicit boundaries
+## Verification state
 
-- The real field is not runtime-admitted. Its first retained blocker is general
-  comestible temperature state for `chaw`.
-- Named-group modifier fallback remains fail closed when the generated
-  top-level closure may contain item-type defaults.
-- Every gun charge modifier remains unavailable pending a dedicated owner-local
-  and `ammo_set` engine with direct pinned C++ traces.
-- The complete scan retains later corpse-construction, capacity-sentinel,
-  wrapper-shape, dressing, and snippet families. They remain fail closed and
-  must be implemented as generalized engines.
-- Flexible physical spawn pockets, arbitrary player-driven containment,
-  material-derived softness, and other unprojected constructor/pocket semantics
-  remain unavailable.
-- Cities, roads, rivers, specials, extras, spawn groups/populations, zones,
-  vehicles, adjacent overmaps, and additional generated z-levels remain
-  unavailable.
+Latest focused results in the unbound worktree:
 
-## Latest verified checkpoint
+- `cargo check --workspace --all-targets --all-features`: pass.
+- protocol, simulation, client, content, persistence, and conformance targeted
+  suites: pass; conformance is 9/9 across all four execution modes.
+- deterministic selected-content field/catalog test: pass in 97.50 seconds.
+- item-group C++ oracle/direct comparator: pass, 119 assertions.
+- Protocol-92 hash audit: new bytes under old V67 domain are
+  `d0b9e7a84fbdb6ef8a751d3536bfb57a8cd092f17d379ea7a960c14ede43f187`;
+  current V68 is
+  `ecf2ff2770054b46562dd7cad15c3aa9326586594374b2710af84754beef6a6a`.
+  CanonicalEventsV18 is unchanged.
 
-The exact implementation commit `a80f6c2` passes formatting and diff checks,
-workspace all-target/all-feature checking, strict Clippy, 388 workspace tests
-plus doc-tests, warning-free rustdoc, dependency boundaries, parity ledger,
-runtime progress, the 364-day astronomy table, all 7,992 vendored content
-files, the 6,571-file schema inventory, and all three pinned C++ oracles: 8
-pocket, 104 item-group, and 1,179 mapgen assertions. The item-group and mapgen
-gates also run reusable direct Rust comparisons.
-
-The representative empty-item-group-catalog fixture has unchanged Postcard
-bytes. Hashing them under CanonicalStateV66 reproduces
-`7fffb3bccad59a52e64540aeb421cde5f1fd8912e3a11946368170b2eeec91cb`;
-the deliberate CanonicalStateV67 domain produces
-`b5c12b763060907d68bfbd96b4aea6372c17cb02676b5e499b0bc79f5679899e`.
-Serialized catalogs containing item prototypes do change shape. The event trace
-and CanonicalEventsV18 remain unchanged.
-
-An independent reviewer inspected the complete 21-file implementation diff
-from a clean detached worktree at exact commit `a80f6c2`, tree `22de91c`. The
-review covered content inheritance, protocol bounds, server normalization,
-simulation capacity/sealing/order, stable IDs, persistence/replay, client and
-four-mode paths, oracle evidence, documentation, and module growth. It found no
-confirmed P0, P1, P2, or P3 issue. Concrete scope, rejected concerns, focused
-commands, and residual risks are recorded in
-[docs/reviews/protocol-91-default-container-ownership.md](docs/reviews/protocol-91-default-container-ownership.md).
-
-## Next dependency boundary
-
-After the audited checkpoint, implement generalized comestible temperature
-state, rerun the complete field closure, admit the real field base, and
-demonstrate ordinary client exploration and loot. Do not start cities, roads,
-rivers, specials, anatomy, or EOCs first.
+The broad formatting, Clippy, workspace-test, documentation, project-gate, all
+three C++ oracle, and fixed committed-tree independent-review gates remain to
+be run before binding a new verified commit.

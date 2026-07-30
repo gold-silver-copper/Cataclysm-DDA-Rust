@@ -3078,12 +3078,24 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
     } else {
         (item.charges > 1).then(|| format!(" x{}", item.charges))
     };
+    let temperature = item_temperature_suffix(item);
     format!(
-        "{}{} [{}]",
+        "{}{}{} [{}]",
         name,
         charges.as_deref().unwrap_or_default(),
+        temperature,
         item.id
     )
+}
+
+fn item_temperature_suffix(item: &ItemSnapshot) -> &'static str {
+    match item.temperature {
+        Some(state) if state.specific_energy_millijoules_per_gram.is_some() => {
+            " [temperature pending]"
+        }
+        Some(_) => " [20.0 °C]",
+        None => "",
+    }
 }
 
 fn residual_power_suffix(residual_energy_millijoules: u32) -> String {
@@ -3131,6 +3143,7 @@ fn same_item_stack_state(left: &ItemSnapshot, right: &ItemSnapshot) -> bool {
         && left.calories == right.calories
         && left.quench == right.quench
         && left.comestible_type == right.comestible_type
+        && left.temperature == right.temperature
         && left.ammunition_type == right.ammunition_type
         && left.ranged_weapon == right.ranged_weapon
         && left.component_provenance == right.component_provenance
@@ -5218,6 +5231,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::from(comestible_type),
+                temperature: None,
                 ammunition_type: String::from(ammunition_type),
                 ranged_weapon,
                 component_provenance: None,
@@ -5251,6 +5265,27 @@ mod tests {
         );
         let ground = item(4, "", "", None);
         let elsewhere = item(5, "", "", None);
+        let mut temperature_item = item(8, "", "FOOD", None);
+        temperature_item.temperature = Some(cdda_protocol::initial_item_temperature_state(
+            cdda_protocol::SimTick(123),
+            cdda_protocol::ItemPhaseV1::Solid,
+        ));
+        assert!(
+            item_menu_label(&temperature_item, None).contains("[temperature pending]"),
+            "normal client item menus should expose unprocessed authoritative temperature state"
+        );
+        let unprocessed_temperature_item = temperature_item.clone();
+        let state = temperature_item
+            .temperature
+            .as_mut()
+            .expect("temperature state should exist");
+        state.temperature_millikelvin = cdda_protocol::ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
+        state.specific_energy_millijoules_per_gram = None;
+        assert!(item_menu_label(&temperature_item, None).contains("[20.0 °C]"));
+        assert!(!same_item_stack_state(
+            &unprocessed_temperature_item,
+            &temperature_item
+        ));
         let mut variant_item = item(6, "", "", None);
         variant_item.variant = Some(cdda_protocol::ItemVariantV1 {
             id: String::from("weathered"),
@@ -5778,6 +5813,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             component_provenance: None,
@@ -6453,6 +6489,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: Some(cdda_protocol::RangedWeaponSnapshot {
                 ammunition_type: String::from("38"),

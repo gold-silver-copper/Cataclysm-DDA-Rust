@@ -4,9 +4,66 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CraftItemPrototypeV1, ItemContainmentProfileV1, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_RAW_DAMAGE,
-    valid_craft_item_prototype, valid_recipe_id,
+    CraftItemPrototypeV1, ItemContainmentProfileV1, ItemPhaseV1, MAX_ITEM_COMPONENT_DEPTH,
+    MAX_ITEM_RAW_DAMAGE, SimTick, valid_craft_item_prototype, valid_recipe_id,
 };
+
+/// Strict current boundary for nonperishable temperature-tracked items whose
+/// finalized material mix is empty. Pinned C++ constructs these items active
+/// with zero kelvin and -10 J/g sentinel energy; the first ten-minute check
+/// initializes them to the canonical normal ambient. `None` energy retains
+/// the pinned indeterminate materialless result without serializing a float or
+/// platform-dependent NaN payload.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemTemperatureStateV1 {
+    pub temperature_millikelvin: i32,
+    pub specific_energy_millijoules_per_gram: Option<i32>,
+    pub last_check_tick: SimTick,
+    pub current_phase: ItemPhaseV1,
+    pub hot: bool,
+    pub cold: bool,
+    pub frozen: bool,
+}
+
+pub const ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN: i32 = 0;
+pub const ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G: i32 = -10_000;
+pub const ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN: i32 = 293_150;
+pub const ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS: u64 = 10 * 60 * SimTick::HZ;
+
+#[must_use]
+pub fn initial_item_temperature_state(
+    birth_tick: SimTick,
+    current_phase: ItemPhaseV1,
+) -> ItemTemperatureStateV1 {
+    ItemTemperatureStateV1 {
+        temperature_millikelvin: ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
+        specific_energy_millijoules_per_gram: Some(ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G),
+        last_check_tick: birth_tick,
+        current_phase,
+        hot: false,
+        cold: false,
+        frozen: false,
+    }
+}
+
+pub(super) fn valid_item_temperature_state(state: &ItemTemperatureStateV1) -> bool {
+    matches!(
+        state.current_phase,
+        ItemPhaseV1::Solid | ItemPhaseV1::Liquid
+    ) && !state.hot
+        && !state.cold
+        && !state.frozen
+        && matches!(
+            (
+                state.temperature_millikelvin,
+                state.specific_energy_millijoules_per_gram,
+            ),
+            (
+                ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
+                Some(ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G),
+            ) | (ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, None)
+        )
+}
 
 pub(super) fn valid_item_fit_state(fitted: bool, containment: &ItemContainmentProfileV1) -> bool {
     let immutable_fit = initial_item_fit_state(containment);
@@ -1568,6 +1625,31 @@ mod tests {
     use super::*;
     use crate::{AmmunitionContainerPocketPrototypeV1, SpawnPocketKindV1, SpawnPocketRulesV1};
 
+    #[test]
+    fn temperature_state_accepts_only_the_bounded_constructor_lifecycle() {
+        let birth = SimTick(123);
+        let initial = initial_item_temperature_state(birth, ItemPhaseV1::Solid);
+        assert!(valid_item_temperature_state(&initial));
+
+        let mut initialized = initial;
+        initialized.temperature_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
+        initialized.specific_energy_millijoules_per_gram = None;
+        initialized.last_check_tick = SimTick(12_123);
+        assert!(valid_item_temperature_state(&initialized));
+
+        let mut invented_energy = initialized;
+        invented_energy.specific_energy_millijoules_per_gram = Some(0);
+        assert!(!valid_item_temperature_state(&invented_energy));
+
+        let mut invented_flag = initialized;
+        invented_flag.hot = true;
+        assert!(!valid_item_temperature_state(&invented_flag));
+
+        let mut unsupported_phase = initialized;
+        unsupported_phase.current_phase = ItemPhaseV1::Gas;
+        assert!(!valid_item_temperature_state(&unsupported_phase));
+    }
+
     fn valid_test_item() -> ItemGroupItemPrototypeV1 {
         ItemGroupItemPrototypeV1 {
             prototype: CraftItemPrototypeV1 {
@@ -1577,6 +1659,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,

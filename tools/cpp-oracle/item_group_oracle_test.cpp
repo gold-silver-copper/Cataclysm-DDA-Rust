@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -21,6 +23,7 @@
 #include "item_pocket.h"
 #include "itype.h"
 #include "json.h"
+#include "json_loader.h"
 #include "options.h"
 #include "pocket_type.h"
 #include "rng.h"
@@ -421,6 +424,57 @@ struct default_container_trace {
     bool sealed = false;
     int downstream_draw = 0;
 };
+
+struct temperature_constructor_trace {
+    std::string case_id;
+    std::string item_type;
+    int birth_turn;
+    bool has_temperature = false;
+    bool active = false;
+    int processing_speed = 0;
+    int temperature_millikelvin = 0;
+    int specific_energy_millijoules_per_gram = 0;
+    bool serialized_last_temp_check_present = false;
+    int serialized_last_temp_check = 0;
+    bool solid = false;
+    bool liquid = false;
+    bool hot = false;
+    bool cold = false;
+    bool frozen = false;
+};
+
+temperature_constructor_trace observe_temperature_constructor( const std::string &case_id,
+        const std::string &item_id, int birth_turn )
+{
+    const time_point birthday = calendar::turn_zero + time_duration::from_turns( birth_turn );
+    const item observed( itype_id( item_id ), birthday );
+    std::ostringstream serialized;
+    {
+        JsonOut json( serialized );
+        observed.serialize( json );
+    }
+    JsonObject object = json_loader::from_string( serialized.str() ).get_object();
+    const bool has_last_temp_check = object.has_int( "last_temp_check" );
+    object.allow_omitted_members();
+    return {
+        case_id,
+        item_id,
+        birth_turn,
+        observed.has_temperature(),
+        observed.is_active(),
+        observed.processing_speed(),
+        static_cast<int>( std::lround( units::to_kelvin( observed.temperature ) * 1000.0 ) ),
+        static_cast<int>( std::lround( units::to_joule_per_gram( observed.specific_energy ) *
+                                      1000.0 ) ),
+        has_last_temp_check,
+        has_last_temp_check ? object.get_int( "last_temp_check" ) : 0,
+        observed.made_of( phase_id::SOLID ),
+        observed.made_of( phase_id::LIQUID ),
+        observed.has_own_flag( flag_HOT ),
+        observed.has_own_flag( flag_COLD ),
+        observed.has_own_flag( flag_FROZEN )
+    };
+}
 
 enum class default_container_mode {
     unmodified,
@@ -1243,6 +1297,27 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         observe_painkiller_group_boundary( "production_aspirin_minimum", 1 ),
         observe_painkiller_group_boundary( "production_aspirin_maximum", 20 )
     };
+    const std::vector<temperature_constructor_trace> temperature_constructors = {
+        observe_temperature_constructor( "materialless_comestible", "chaw", 123 ),
+        observe_temperature_constructor( "material_comestible", "water_clean", 123 ),
+        observe_temperature_constructor( "no_temp_comestible", "caffeine", 123 ),
+        observe_temperature_constructor( "ordinary_control", "rock", 123 )
+    };
+    REQUIRE( temperature_constructors[0].has_temperature );
+    REQUIRE( temperature_constructors[0].active );
+    REQUIRE( temperature_constructors[0].processing_speed == to_turns<int>( 10_minutes ) );
+    REQUIRE( temperature_constructors[0].temperature_millikelvin == 0 );
+    REQUIRE( temperature_constructors[0].specific_energy_millijoules_per_gram == -10000 );
+    REQUIRE( temperature_constructors[0].serialized_last_temp_check_present );
+    REQUIRE( temperature_constructors[0].solid );
+    REQUIRE_FALSE( temperature_constructors[0].liquid );
+    REQUIRE( temperature_constructors[1].has_temperature );
+    REQUIRE( temperature_constructors[1].active );
+    REQUIRE( temperature_constructors[1].liquid );
+    REQUIRE_FALSE( temperature_constructors[2].has_temperature );
+    REQUIRE_FALSE( temperature_constructors[2].active );
+    REQUIRE_FALSE( temperature_constructors[3].has_temperature );
+    REQUIRE_FALSE( temperature_constructors[3].active );
     REQUIRE( default_containers[0].outer_type == "bottle_plastic" );
     REQUIRE( default_containers[0].content_types == std::vector<std::string>{ "water_clean" } );
     REQUIRE( default_containers[0].payload_charges == 2 );
@@ -1542,6 +1617,31 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.member( "payload_charges", trace.payload_charges );
             json.member( "sealed", trace.sealed );
             json.member( "downstream_draw", trace.downstream_draw );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "temperature_constructors" );
+        json.start_array();
+        for( const temperature_constructor_trace &trace : temperature_constructors ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "item_type", trace.item_type );
+            json.member( "birth_turn", trace.birth_turn );
+            json.member( "has_temperature", trace.has_temperature );
+            json.member( "active", trace.active );
+            json.member( "processing_speed", trace.processing_speed );
+            json.member( "temperature_millikelvin", trace.temperature_millikelvin );
+            json.member( "specific_energy_millijoules_per_gram",
+                         trace.specific_energy_millijoules_per_gram );
+            json.member( "serialized_last_temp_check_present",
+                         trace.serialized_last_temp_check_present );
+            json.member( "serialized_last_temp_check", trace.serialized_last_temp_check );
+            json.member( "solid", trace.solid );
+            json.member( "liquid", trace.liquid );
+            json.member( "hot", trace.hot );
+            json.member( "cold", trace.cold );
+            json.member( "frozen", trace.frozen );
             json.end_object();
         }
         json.end_array();

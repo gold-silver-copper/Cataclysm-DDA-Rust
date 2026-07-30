@@ -832,6 +832,19 @@ The real field closure now passes `bottle_otc_painkiller_1_20` and next fails
 closed on unimplemented temperature state for `chaw`; runtime points remain
 unchanged until that field is an ordinary playable surface.
 
+Protocol 92/schema 70/CanonicalStateV68 add canonical per-item temperature
+ownership for the complete 36-definition materialless/nonperishable constructor
+class. Four exact C++ traces and the reusable Rust comparator pin 0 K,
+-10 J/g, birth-tick ownership, active/cadence/phase/flag state, and serialized
+`last_temp_check`; the ten-minute Rust processor initializes admitted items to
+293.150 K while retaining material thermodynamics, rot, custom freezing, and
+weather as fail-closed families. Nested state agrees through direct, per-tick
+snapshot, SQLite, and portable replay execution, and the Bevy item menu exposes
+pending versus initialized temperature. The full field scan now reaches the
+flexible `chaw_wrapper_1_20` container boundary. No runtime progress credit is
+claimed before that wrapper family unlocks ordinary field exploration and
+loot.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

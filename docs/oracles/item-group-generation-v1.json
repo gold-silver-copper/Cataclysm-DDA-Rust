@@ -216,6 +216,76 @@
         "downstream_draw": 6790
       }
     ],
+    "temperature_constructors": [
+      {
+        "case_id": "materialless_comestible",
+        "item_type": "chaw",
+        "birth_turn": 123,
+        "has_temperature": true,
+        "active": true,
+        "processing_speed": 600,
+        "temperature_millikelvin": 0,
+        "specific_energy_millijoules_per_gram": -10000,
+        "serialized_last_temp_check_present": true,
+        "serialized_last_temp_check": 123,
+        "solid": true,
+        "liquid": false,
+        "hot": false,
+        "cold": false,
+        "frozen": false
+      },
+      {
+        "case_id": "material_comestible",
+        "item_type": "water_clean",
+        "birth_turn": 123,
+        "has_temperature": true,
+        "active": true,
+        "processing_speed": 600,
+        "temperature_millikelvin": 0,
+        "specific_energy_millijoules_per_gram": -10000,
+        "serialized_last_temp_check_present": true,
+        "serialized_last_temp_check": 123,
+        "solid": false,
+        "liquid": true,
+        "hot": false,
+        "cold": false,
+        "frozen": false
+      },
+      {
+        "case_id": "no_temp_comestible",
+        "item_type": "caffeine",
+        "birth_turn": 123,
+        "has_temperature": false,
+        "active": false,
+        "processing_speed": 600,
+        "temperature_millikelvin": 0,
+        "specific_energy_millijoules_per_gram": -10000,
+        "serialized_last_temp_check_present": false,
+        "serialized_last_temp_check": 0,
+        "solid": true,
+        "liquid": false,
+        "hot": false,
+        "cold": false,
+        "frozen": false
+      },
+      {
+        "case_id": "ordinary_control",
+        "item_type": "rock",
+        "birth_turn": 123,
+        "has_temperature": false,
+        "active": false,
+        "processing_speed": 10000,
+        "temperature_millikelvin": 0,
+        "specific_energy_millijoules_per_gram": -10000,
+        "serialized_last_temp_check_present": false,
+        "serialized_last_temp_check": 0,
+        "solid": true,
+        "liquid": false,
+        "hot": false,
+        "cold": false,
+        "frozen": false
+      }
+    ],
     "containers": [
       {
         "case_id": "discard",

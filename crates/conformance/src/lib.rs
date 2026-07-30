@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xb5, 0xc1, 0x2b, 0x76, 0x30, 0x60, 0x90, 0x7d, 0x68, 0xbf, 0xbd, 0x96, 0xb4,
-                    0xae, 0xa6, 0x37, 0x2c, 0x17, 0xcb, 0x02, 0x67, 0x6b, 0x5e, 0x49, 0x9b, 0x0b,
-                    0xc7, 0x9f, 0x56, 0x79, 0x89, 0x9e,
+                    0xec, 0xf2, 0xff, 0x27, 0x70, 0x05, 0x4b, 0x46, 0x56, 0x2d, 0xd7, 0xca, 0xd1,
+                    0x5c, 0x3a, 0xa9, 0x32, 0x65, 0x86, 0x59, 0x43, 0x74, 0xb2, 0x71, 0x0a, 0xf8,
+                    0x47, 0x54, 0xbe, 0xef, 0x6a, 0x6a,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1054,16 +1054,16 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV66");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV67");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0x7f, 0xff, 0xb3, 0xbc, 0xca, 0xd5, 0x9a, 0x52, 0xe6, 0x45, 0x40, 0xae, 0xb4, 0x21,
-                0xcd, 0xe5, 0xf1, 0xfd, 0x89, 0x12, 0xe3, 0xa1, 0x19, 0x46, 0x36, 0x81, 0x70, 0xb2,
-                0xee, 0xec, 0x91, 0xcb,
+                0xd0, 0xb9, 0xe7, 0xa8, 0x4f, 0xbd, 0xb6, 0xef, 0x8a, 0x75, 0x1d, 0x35, 0x36, 0xbf,
+                0xb5, 0x7a, 0x8c, 0xd0, 0x92, 0xf1, 0x7d, 0x37, 0x9e, 0xa7, 0xa9, 0x60, 0xc1, 0x4e,
+                0xde, 0x43, 0xf1, 0x87,
             ],
-            "the representative bytes are unchanged; only the audited CanonicalStateV67 domain changes"
+            "the old V67 domain must pin Protocol 92's changed Postcard bytes independently of the V68 domain bump"
         );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
@@ -1251,6 +1251,7 @@ mod tests {
                         calories: 0,
                         quench: 0,
                         comestible_type: String::new(),
+                        tracks_temperature: false,
                         ammunition_type: String::new(),
                         ranged_weapon: None,
                         magazine_capacity: 0,
@@ -1402,6 +1403,8 @@ mod tests {
         };
         aspirin_item.prototype.containment.volume_milliliters = 1;
         aspirin_item.prototype.containment.weight_milligrams = 1_000;
+        aspirin_item.prototype.comestible_type = String::from("MED");
+        aspirin_item.prototype.tracks_temperature = true;
         let mut painkiller_bottle = item_leaf("bottle_plastic_pill_painkiller", None);
         let cdda_protocol::ItemGroupTargetV1::Item(painkiller_bottle) = &mut painkiller_bottle
         else {
@@ -1822,6 +1825,14 @@ mod tests {
             panic!("the painkiller bottle should own one aspirin");
         };
         assert_eq!(aspirin.type_id, "aspirin");
+        assert_eq!(
+            aspirin.temperature,
+            Some(cdda_protocol::initial_item_temperature_state(
+                SimTick(53),
+                cdda_protocol::ItemPhaseV1::Solid,
+            )),
+            "all four modes should retain the exact nested constructor state and birth tick"
+        );
         assert!(painkiller_bottle.id < aspirin.id);
         let splinters = pocket
             .contents

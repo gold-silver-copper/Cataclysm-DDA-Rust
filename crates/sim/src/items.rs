@@ -2,16 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
+    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
     IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemDescriptionExpansionV1,
     ItemDescriptionSnippetCategoryV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
     ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
     ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
     ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH,
-    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
+    ItemTemperatureStateV1, ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES,
+    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
     MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
-    RangedWeaponSnapshot, SpawnPocketKindV1, item_containment_single_charge_volume_milliliters,
-    item_containment_volume_milliliters, item_containment_weight_milligrams,
+    RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, initial_item_temperature_state,
+    item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
+    item_containment_weight_milligrams,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -38,6 +40,7 @@ pub(super) struct ItemInstance {
     pub(super) calories: i32,
     pub(super) quench: i32,
     pub(super) comestible_type: String,
+    pub(super) temperature: Option<ItemTemperatureStateV1>,
     pub(super) ammunition_type: String,
     pub(super) ranged_weapon: Option<RangedWeaponSnapshot>,
     pub(super) component_provenance: Option<Vec<ItemComponentSnapshotV1>>,
@@ -52,6 +55,31 @@ pub(super) struct ItemInstance {
 }
 
 impl ItemInstance {
+    pub(super) fn process_temperature(&mut self, current_tick: SimTick) -> Result<(), SimError> {
+        process_temperature_state(&mut self.temperature, current_tick)?;
+        if let Some(components) = &mut self.component_provenance {
+            for component in components {
+                process_component_temperature(component, current_tick)?;
+            }
+        }
+        for pocket in &mut self.integral_magazines {
+            if let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() {
+                process_item_snapshot_temperature(ammunition, current_tick)?;
+            }
+        }
+        for well in &mut self.magazine_wells {
+            if let Some(magazine) = well.installed_magazine.as_deref_mut() {
+                process_item_snapshot_temperature(magazine, current_tick)?;
+            }
+        }
+        for pocket in &mut self.ammunition_containers {
+            for content in &mut pocket.contents {
+                process_item_snapshot_temperature(content, current_tick)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn force_fit_if_variable_size(&mut self) {
         if item_profile_has_flag(&self.containment, "VARSIZE") {
             self.fitted = true;
@@ -303,6 +331,7 @@ impl ItemInstance {
             calories: self.calories,
             quench: self.quench,
             comestible_type: self.comestible_type.clone(),
+            temperature: self.temperature,
             ammunition_type: self.ammunition_type.clone(),
             ranged_weapon: self.ranged_weapon.clone(),
             component_provenance: self.component_provenance.clone(),
@@ -333,6 +362,7 @@ impl ItemInstance {
             calories: snapshot.calories,
             quench: snapshot.quench,
             comestible_type: snapshot.comestible_type.clone(),
+            temperature: snapshot.temperature,
             ammunition_type: snapshot.ammunition_type.clone(),
             ranged_weapon: snapshot.ranged_weapon.clone(),
             component_provenance: snapshot.component_provenance.clone(),
@@ -346,6 +376,124 @@ impl ItemInstance {
             containment: snapshot.containment.clone(),
         })
     }
+}
+
+fn process_temperature_state(
+    state: &mut Option<ItemTemperatureStateV1>,
+    current_tick: SimTick,
+) -> Result<(), SimError> {
+    let Some(state) = state else {
+        return Ok(());
+    };
+    let elapsed = current_tick
+        .0
+        .checked_sub(state.last_check_tick.0)
+        .ok_or(SimError::InvalidItem)?;
+    if elapsed < ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS {
+        return Ok(());
+    }
+    if state.specific_energy_millijoules_per_gram.is_some() {
+        state.temperature_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
+        state.specific_energy_millijoules_per_gram = None;
+    } else if state.temperature_millikelvin != ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN {
+        return Err(SimError::InvalidItem);
+    }
+    state.last_check_tick = current_tick;
+    Ok(())
+}
+
+pub(super) fn process_item_snapshot_temperature(
+    item: &mut ItemSnapshot,
+    current_tick: SimTick,
+) -> Result<(), SimError> {
+    process_temperature_state(&mut item.temperature, current_tick)?;
+    if let Some(components) = &mut item.component_provenance {
+        for component in components {
+            process_component_temperature(component, current_tick)?;
+        }
+    }
+    for pocket in &mut item.integral_magazines {
+        if let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() {
+            process_item_snapshot_temperature(ammunition, current_tick)?;
+        }
+    }
+    for well in &mut item.magazine_wells {
+        if let Some(magazine) = well.installed_magazine.as_deref_mut() {
+            process_item_snapshot_temperature(magazine, current_tick)?;
+        }
+    }
+    for pocket in &mut item.ammunition_containers {
+        for content in &mut pocket.contents {
+            process_item_snapshot_temperature(content, current_tick)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn item_temperature_timestamps_are_valid(
+    item: &ItemSnapshot,
+    current_tick: SimTick,
+) -> bool {
+    temperature_timestamp_is_valid(item.temperature.as_ref(), current_tick)
+        && item.component_provenance.as_ref().is_none_or(|components| {
+            components.iter().all(|component| {
+                component_temperature_timestamps_are_valid(component, current_tick)
+            })
+        })
+        && item.integral_magazines.iter().all(|pocket| {
+            pocket
+                .loaded_ammunition
+                .as_deref()
+                .is_none_or(|ammunition| {
+                    item_temperature_timestamps_are_valid(ammunition, current_tick)
+                })
+        })
+        && item.magazine_wells.iter().all(|well| {
+            well.installed_magazine.as_deref().is_none_or(|magazine| {
+                item_temperature_timestamps_are_valid(magazine, current_tick)
+            })
+        })
+        && item.ammunition_containers.iter().all(|pocket| {
+            pocket
+                .contents
+                .iter()
+                .all(|content| item_temperature_timestamps_are_valid(content, current_tick))
+        })
+}
+
+fn temperature_timestamp_is_valid(
+    state: Option<&ItemTemperatureStateV1>,
+    current_tick: SimTick,
+) -> bool {
+    state.is_none_or(|state| state.last_check_tick <= current_tick)
+}
+
+fn component_temperature_timestamps_are_valid(
+    component: &ItemComponentSnapshotV1,
+    current_tick: SimTick,
+) -> bool {
+    temperature_timestamp_is_valid(component.temperature.as_ref(), current_tick)
+        && component
+            .component_provenance
+            .as_ref()
+            .is_none_or(|children| {
+                children
+                    .iter()
+                    .all(|child| component_temperature_timestamps_are_valid(child, current_tick))
+            })
+}
+
+fn process_component_temperature(
+    component: &mut ItemComponentSnapshotV1,
+    current_tick: SimTick,
+) -> Result<(), SimError> {
+    process_temperature_state(&mut component.temperature, current_tick)?;
+    if let Some(children) = &mut component.component_provenance {
+        for child in children {
+            process_component_temperature(child, current_tick)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -374,6 +522,7 @@ pub(super) struct PlannedItemSpawn {
 pub(super) fn item_from_craft_prototype(
     id: ItemId,
     prototype: &CraftItemPrototypeV1,
+    birth_tick: SimTick,
 ) -> ItemInstance {
     ItemInstance {
         id,
@@ -389,6 +538,9 @@ pub(super) fn item_from_craft_prototype(
         calories: prototype.calories,
         quench: prototype.quench,
         comestible_type: prototype.comestible_type.clone(),
+        temperature: prototype
+            .tracks_temperature
+            .then(|| initial_item_temperature_state(birth_tick, prototype.containment.phase)),
         ammunition_type: prototype.ammunition_type.clone(),
         ranged_weapon: prototype.ranged_weapon.clone(),
         component_provenance: None,
@@ -462,6 +614,7 @@ pub(super) fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV
         calories: component.calories,
         quench: component.quench,
         comestible_type: component.comestible_type.clone(),
+        temperature: component.temperature,
         ammunition_type: component.ammunition_type.clone(),
         ranged_weapon: component.ranged_weapon.clone(),
         component_provenance: component.component_provenance.clone(),
@@ -524,8 +677,9 @@ pub(super) fn item_from_planned_spawn(
     id: ItemId,
     planned: &PlannedItemSpawn,
     allocator: &mut IdAllocator,
+    birth_tick: SimTick,
 ) -> Result<ItemInstance, SimError> {
-    let mut item = item_from_craft_prototype(id, &planned.prototype);
+    let mut item = item_from_craft_prototype(id, &planned.prototype, birth_tick);
     item.raw_damage = planned.raw_damage;
     item.damage = cdda_protocol::item_damage_level(planned.raw_damage);
     item.fitted = planned.fitted;
@@ -540,7 +694,7 @@ pub(super) fn item_from_planned_spawn(
             .ok_or(SimError::InvalidItem)?;
         let ammunition_id = allocator.allocate_item()?;
         pocket.loaded_ammunition = Some(Box::new(
-            item_from_planned_spawn(ammunition_id, ammunition, allocator)?.snapshot(),
+            item_from_planned_spawn(ammunition_id, ammunition, allocator, birth_tick)?.snapshot(),
         ));
     }
     for (pocket_index, magazine) in &planned.detachable_magazines {
@@ -551,7 +705,7 @@ pub(super) fn item_from_planned_spawn(
             .ok_or(SimError::InvalidItem)?;
         let magazine_id = allocator.allocate_item()?;
         pocket.installed_magazine = Some(Box::new(
-            item_from_planned_spawn(magazine_id, magazine, allocator)?.snapshot(),
+            item_from_planned_spawn(magazine_id, magazine, allocator, birth_tick)?.snapshot(),
         ));
     }
     for (pocket_index, contents) in &planned.pocket_contents {
@@ -562,9 +716,9 @@ pub(super) fn item_from_planned_spawn(
             .ok_or(SimError::InvalidItem)?;
         for content in contents {
             let content_id = allocator.allocate_item()?;
-            pocket
-                .contents
-                .push(item_from_planned_spawn(content_id, content, allocator)?.snapshot());
+            pocket.contents.push(
+                item_from_planned_spawn(content_id, content, allocator, birth_tick)?.snapshot(),
+            );
         }
     }
     for pocket_index in &planned.sealed_pockets {
@@ -2214,6 +2368,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -2295,6 +2450,96 @@ mod tests {
             direct_wrapper: None,
             modifier_container: None,
         }
+    }
+
+    fn temperature_prototype() -> CraftItemPrototypeV1 {
+        let mut prototype = leaf_item("chaw").prototype;
+        prototype.comestible_type = String::from("MED");
+        prototype.tracks_temperature = true;
+        prototype.containment.phase = ItemPhaseV1::Solid;
+        prototype
+    }
+
+    #[test]
+    fn temperature_constructor_and_ten_minute_processing_are_exact() {
+        let birth_tick = SimTick(123);
+        let mut item =
+            item_from_craft_prototype(ItemId::new(1, 1), &temperature_prototype(), birth_tick);
+        assert_eq!(
+            item.temperature,
+            Some(initial_item_temperature_state(
+                birth_tick,
+                ItemPhaseV1::Solid
+            ))
+        );
+
+        item.process_temperature(SimTick(
+            birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS - 1,
+        ))
+        .expect("temperature should remain pending before the boundary");
+        assert_eq!(
+            item.temperature
+                .expect("temperature state should exist")
+                .specific_energy_millijoules_per_gram,
+            Some(cdda_protocol::ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G)
+        );
+
+        let processing_tick = SimTick(birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS);
+        item.process_temperature(processing_tick)
+            .expect("the exact ten-minute boundary should process");
+        let initialized = item.temperature.expect("temperature state should exist");
+        assert_eq!(
+            initialized.temperature_millikelvin,
+            ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
+        );
+        assert_eq!(initialized.specific_energy_millijoules_per_gram, None);
+        assert_eq!(initialized.last_check_tick, processing_tick);
+        assert_eq!(
+            ItemInstance::from_snapshot(&item.snapshot())
+                .expect("processed temperature state should restore")
+                .snapshot(),
+            item.snapshot()
+        );
+    }
+
+    #[test]
+    fn temperature_processing_walks_physical_container_contents() {
+        let birth_tick = SimTick(77);
+        let child =
+            item_from_craft_prototype(ItemId::new(1, 2), &temperature_prototype(), birth_tick)
+                .snapshot();
+        let mut owner_prototype = leaf_item("wrapper").prototype;
+        owner_prototype.ammunition_containers = vec![spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            1_000,
+            1_000,
+            Vec::new(),
+            false,
+        )];
+        let mut owner = item_from_craft_prototype(ItemId::new(1, 1), &owner_prototype, birth_tick);
+        owner.ammunition_containers[0].contents.push(child);
+        assert!(item_temperature_timestamps_are_valid(
+            &owner.snapshot(),
+            birth_tick
+        ));
+        assert!(
+            !item_temperature_timestamps_are_valid(&owner.snapshot(), SimTick(birth_tick.0 - 1)),
+            "recovery must reject nested temperature checks from the future"
+        );
+
+        let processing_tick = SimTick(birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS);
+        owner
+            .process_temperature(processing_tick)
+            .expect("nested contents should process through their physical owner");
+        let child_state = owner.ammunition_containers[0].contents[0]
+            .temperature
+            .expect("nested temperature state should survive ownership");
+        assert_eq!(
+            child_state.temperature_millikelvin,
+            ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
+        );
+        assert_eq!(child_state.last_check_tick, processing_tick);
     }
 
     fn variant(id: &str, weight: u32) -> ItemGroupVariantOptionV1 {

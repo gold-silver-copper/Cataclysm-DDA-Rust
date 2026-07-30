@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use cdda_content::{
     AmmunitionRegistry, BashDefinition, BashItemGroupSource, DescriptionSnippetRegistry,
     ItemDefinition, ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
-    ItemGroupSubtype, ItemRegistry, ItemVariableValueDefinition, PocketTypeDefinition,
-    StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
+    ItemGroupSubtype, ItemRegistry, ItemTemperatureRuntimeClass, ItemVariableValueDefinition,
+    PocketTypeDefinition, StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode,
+    StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
     CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
@@ -60,6 +61,39 @@ pub(super) fn runtime_bash_item_group_source(
         .into());
     }
     Ok(Some(source))
+}
+
+/// Returns the strict constructor capability for the current temperature
+/// family. Material thermodynamics, spoilage/rot, and custom freezing points
+/// remain separate fail-closed engines; admitting them here would create
+/// active items whose ten-minute processing could not be reproduced.
+pub(super) fn runtime_item_tracks_temperature(
+    item: &ItemDefinition,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match item.temperature_runtime_class() {
+        ItemTemperatureRuntimeClass::NotTracked => Ok(false),
+        ItemTemperatureRuntimeClass::MateriallessNonperishable => Ok(true),
+        ItemTemperatureRuntimeClass::RequiresRot => Err(format!(
+            "temperature-tracked item {} requires unimplemented rot state",
+            item.id
+        )
+        .into()),
+        ItemTemperatureRuntimeClass::RequiresCustomFreezing => Err(format!(
+            "temperature-tracked item {} requires a custom freezing point",
+            item.id
+        )
+        .into()),
+        ItemTemperatureRuntimeClass::RequiresMaterialThermodynamics => Err(format!(
+            "temperature-tracked item {} requires unimplemented material thermodynamics",
+            item.id
+        )
+        .into()),
+        ItemTemperatureRuntimeClass::UnsupportedPhase => Err(format!(
+            "temperature-tracked item {} has unsupported phase {}",
+            item.id, item.phase
+        )
+        .into()),
+    }
 }
 
 fn strict_bash_item_group_graph(
@@ -988,13 +1022,6 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    if item.subtypes.contains("COMESTIBLE") && !item.flags.contains("NO_TEMP") {
-        return Err(format!(
-            "item group comestible {} requires unimplemented temperature state",
-            item.id
-        )
-        .into());
-    }
     const CONSTRUCTOR_RNG_FIELDS: &[&str] = &[
         "nanofab_template_group",
         "trait_group",
@@ -1158,6 +1185,42 @@ mod tests {
     use super::*;
     use cdda_content::{ItemVariantDefinition, PocketDefinition};
 
+    fn materialless_temperature_item() -> ItemDefinition {
+        ItemDefinition {
+            id: String::from("chaw"),
+            phase: String::from("solid"),
+            subtypes: BTreeSet::from([String::from("COMESTIBLE")]),
+            flags: BTreeSet::from([String::from("CAN_HAVE_CHARGES")]),
+            ..ItemDefinition::default()
+        }
+    }
+
+    #[test]
+    fn temperature_admission_is_generalized_and_fail_closed() {
+        let supported = materialless_temperature_item();
+        assert_eq!(runtime_item_tracks_temperature(&supported).ok(), Some(true));
+
+        let mut no_temp = supported.clone();
+        no_temp.flags.insert(String::from("NO_TEMP"));
+        assert_eq!(runtime_item_tracks_temperature(&no_temp).ok(), Some(false));
+
+        let mut material_backed = supported.clone();
+        material_backed.materials.insert(String::from("water"), 1);
+        assert!(runtime_item_tracks_temperature(&material_backed).is_err());
+
+        let mut perishable = supported.clone();
+        perishable
+            .unsupported_fields
+            .insert(String::from("spoils_in"));
+        assert!(runtime_item_tracks_temperature(&perishable).is_err());
+
+        let mut custom_freezing = supported;
+        custom_freezing
+            .unsupported_fields
+            .insert(String::from("freezing_point"));
+        assert!(runtime_item_tracks_temperature(&custom_freezing).is_err());
+    }
+
     #[test]
     fn finalized_variants_fall_back_to_base_text_and_art_before_append() {
         let item = ItemDefinition {
@@ -1266,6 +1329,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -1301,6 +1365,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,

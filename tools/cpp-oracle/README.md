@@ -41,7 +41,12 @@ default-container traces distinguish direct construction, modifier fallback,
 explicit-null suppression, explicit containers whose own creator applies a
 default wrapper, and the production one/twenty `bottle_otc_painkiller_1_20`
 boundaries. The Rust half executes the production planner for all seven exact
-traces and compares ordered child types directly. Exact
+traces and compares ordered child types directly. Four exact temperature
+constructor traces additionally distinguish materialless `chaw`,
+material-backed `water_clean`, NO_TEMP `caffeine`, and ordinary `rock`,
+including birth tick, active state, cadence, phase, sentinel energy, flags, and
+serialized `last_temp_check`; the reusable Rust projection compares the same
+trace directly. Exact
 phone-case witnesses retain the case variant, locked/unlocked phone, battery
 charges, ordered E-files, sealing/capacity state, and downstream RNG draw for
 empty and many-E-file boundaries. The static mapgen

@@ -31,8 +31,9 @@ pub use field::{
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
 pub use item::{
     ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemSnippetDefinition,
-    ItemVariableValueDefinition, ItemVariantDefinition, PocketDefinition, PocketTypeDefinition,
-    SpawnPocketKindDefinition, StrictMagazineDefinition, StrictSpawnPocketDefinition,
+    ItemTemperatureRuntimeClass, ItemVariableValueDefinition, ItemVariantDefinition,
+    PocketDefinition, PocketTypeDefinition, SpawnPocketKindDefinition, StrictMagazineDefinition,
+    StrictSpawnPocketDefinition,
 };
 pub use item_group::{
     ItemGroupChargesRange, ItemGroupContentsSource, ItemGroupDefinition, ItemGroupEntryWrapper,

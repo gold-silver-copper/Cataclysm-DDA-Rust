@@ -10,24 +10,28 @@ mod astronomy_table;
 mod item_groups;
 
 pub use item_groups::{
+    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
+    ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G, ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
     ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
     ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
     ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
     ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1,
-    MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemTemperatureStateV1, ItemVariableValueV1,
+    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
     MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_GROUP_DEFINITIONS,
     MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
-    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, item_description_expansion_is_valid,
-    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
-    item_snippet_is_valid, item_variant_is_valid, valid_item_variables,
+    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, initial_item_temperature_state,
+    item_description_expansion_is_valid, item_group_catalog_is_valid,
+    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
+    item_variant_is_valid, valid_item_variables,
 };
 use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
+    valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 91;
+pub const PROTOCOL_VERSION: u16 = 92;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1315,6 +1319,11 @@ pub struct CraftItemPrototypeV1 {
     pub calories: i32,
     pub quench: i32,
     pub comestible_type: String,
+    /// Whether the strict materialless/nonperishable constructor owns active
+    /// temperature state. Material-backed thermodynamics and rot are separate
+    /// fail-closed families.
+    #[serde(default)]
+    pub tracks_temperature: bool,
     pub ammunition_type: String,
     pub ranged_weapon: Option<RangedWeaponSnapshot>,
     #[serde(default)]
@@ -2314,6 +2323,8 @@ pub struct ItemSnapshot {
     pub calories: i32,
     pub quench: i32,
     pub comestible_type: String,
+    #[serde(default)]
+    pub temperature: Option<ItemTemperatureStateV1>,
     pub ammunition_type: String,
     pub ranged_weapon: Option<RangedWeaponSnapshot>,
     /// `None` means an ordinary item whose disassembly uses recipe defaults.
@@ -2417,6 +2428,8 @@ pub struct ItemComponentSnapshotV1 {
     pub calories: i32,
     pub quench: i32,
     pub comestible_type: String,
+    #[serde(default)]
+    pub temperature: Option<ItemTemperatureStateV1>,
     pub ammunition_type: String,
     pub ranged_weapon: Option<RangedWeaponSnapshot>,
     pub count_by_charges: bool,
@@ -3955,6 +3968,9 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
         calories: item.calories,
         quench: item.quench,
         comestible_type: item.comestible_type.clone(),
+        temperature: item
+            .tracks_temperature
+            .then(|| initial_item_temperature_state(SimTick(0), item.containment.phase)),
         ammunition_type: item.ammunition_type.clone(),
         ranged_weapon: item.ranged_weapon.clone(),
         component_provenance: None,
@@ -4634,6 +4650,11 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
             .chars()
             .all(|character| !character.is_control())
         && (item.comestible_type.is_empty() || item.charges > 0)
+        && item
+            .temperature
+            .as_ref()
+            .is_none_or(valid_item_temperature_state)
+        && (item.temperature.is_none() || !item.comestible_type.is_empty())
         && item.ammunition_type.len() <= 64
         && item
             .ammunition_type
@@ -4726,6 +4747,7 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
                 && item.calories == 0
                 && item.quench == 0
                 && item.comestible_type.is_empty()
+                && item.temperature.is_none()
                 && item.ammunition_type.is_empty()
                 && item.ranged_weapon.is_none()
                 && item.component_provenance.is_none()
@@ -5303,6 +5325,7 @@ fn component_state_matches_prototype(
         && state.calories == prototype.calories
         && state.quench == prototype.quench
         && state.comestible_type == prototype.comestible_type
+        && state.temperature.is_some() == prototype.tracks_temperature
         && state.ammunition_type == prototype.ammunition_type
         && state.ranged_weapon == prototype.ranged_weapon
         && state.magazine_capacity == prototype.magazine_capacity
@@ -5368,6 +5391,11 @@ fn valid_item_component(
             .chars()
             .all(|character| !character.is_control())
         && (component.comestible_type.is_empty() || component.charges > 0)
+        && component
+            .temperature
+            .as_ref()
+            .is_none_or(valid_item_temperature_state)
+        && (component.temperature.is_none() || !component.comestible_type.is_empty())
         && component.ammunition_type.len() <= 64
         && component
             .ammunition_type
@@ -5882,6 +5910,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -5988,6 +6017,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    tracks_temperature: false,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
@@ -6011,6 +6041,7 @@ mod tests {
                     calories: 0,
                     quench: 0,
                     comestible_type: String::new(),
+                    temperature: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     count_by_charges: false,
@@ -7787,6 +7818,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -8150,6 +8182,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -8172,6 +8205,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            tracks_temperature: false,
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -8208,6 +8242,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                temperature: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 component_provenance: None,
@@ -8244,6 +8279,7 @@ mod tests {
                 calories: 0,
                 quench: 0,
                 comestible_type: String::new(),
+                tracks_temperature: false,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -8499,6 +8535,7 @@ mod tests {
                 calories: i32::MAX,
                 quench: i32::MAX,
                 comestible_type: "x".repeat(32),
+                temperature: None,
                 ammunition_type: "x".repeat(64),
                 ranged_weapon: Some(RangedWeaponSnapshot {
                     ammunition_type: "x".repeat(64),
@@ -8676,6 +8713,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             component_provenance: None,
@@ -8706,6 +8744,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             component_provenance: None,
@@ -8870,6 +8909,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             component_provenance: None,
@@ -8910,6 +8950,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             component_provenance: None,
@@ -9000,6 +9041,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: ammunition_type.to_owned(),
             ranged_weapon: None,
             component_provenance: None,
@@ -9040,6 +9082,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             component_provenance: None,
@@ -9515,6 +9558,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: ammunition_type.to_owned(),
             ranged_weapon: None,
             component_provenance: None,
@@ -9621,6 +9665,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             component_provenance: None,
@@ -9700,6 +9745,7 @@ mod tests {
             calories: 0,
             quench: 0,
             comestible_type: String::new(),
+            temperature: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             count_by_charges: false,

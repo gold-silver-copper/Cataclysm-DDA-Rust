@@ -3286,3 +3286,52 @@ closed at `chaw` because general comestible temperature state is not yet
 represented. That semantic family, followed by the remaining field closure and
 ordinary client exploration/loot demonstration, is the next dependency
 boundary.
+
+## Materialless item temperature is the Protocol 92 boundary
+
+Protocol 92 advances to schema 70 and CanonicalStateV68 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Temperature is
+owned by each item instance, including provenance components, integral
+ammunition, installed magazines, and physical container contents. The state is
+integer-only: millikelvin, optional millijoules per gram, last-check tick,
+phase, and HOT/COLD/FROZEN flags. A future last-check tick is invalid during
+world recovery.
+
+The pinned constructor creates every temperature-tracked comestible active at
+its birth tick with 0 K, -10 J/g sentinel energy, its finalized phase, and no
+temperature flags. A four-case exact C++ trace fixes materialless `chaw`,
+material-backed `water_clean`, NO_TEMP `caffeine`, and ordinary `rock`,
+including processing cadence and serialized `last_temp_check`. The reusable
+Rust comparator executes the same constructor projection directly. At the
+first ten-minute boundary, the currently admitted materialless/nonperishable
+class initializes to deterministic normal ambient 293.150 K. Upstream's
+materialless coefficient calculation is indeterminate after initialization;
+Rust represents that result as absent specific energy instead of persisting a
+platform-dependent NaN payload.
+
+Exactly 36 selected core definitions satisfy this bounded constructor class.
+Material-backed thermodynamics, `spoils_in` rot, custom freezing points,
+weather-driven ambient changes, and gas phases remain explicit fail-closed
+classes. The shared finalized-content classifier is used by server catalog
+normalization and client disassembly eligibility. This closes a pre-existing
+unsound admission: 420 crafting recipes and 66 disassembly recipes that need
+those later engines are now retained in content but excluded from runtime.
+The crafting audit is 208 material, 182 rot, and 28 custom-freezing results,
+plus one rot and one custom-freezing byproduct.
+
+The authoritative item-group scenario retains a temperature-tracked item
+inside its default container through direct, per-tick snapshot, SQLite, and
+portable replay execution. The Bevy item menu distinguishes constructor-pending
+state from initialized 20.0 °C state and will not merge stacks whose temperature
+state differs. Because the real `field` group is still blocked, no runtime
+progress points are awarded. Its exact next boundary is now the flexible
+`chaw_wrapper_1_20` wrapper, which requires a general non-rigid physical
+container engine before the ordinary field exploration/loot loop can ship.
+
+Protocol 92 changes representative Postcard bytes even when temperature is
+absent. Hashing those new bytes under the old V67 domain yields
+`d0b9e7a84fbdb6ef8a751d3536bfb57a8cd092f17d379ea7a960c14ede43f187`;
+the V68 domain yields
+`ecf2ff2770054b46562dd7cad15c3aa9326586594374b2710af84754beef6a6a`.
+The prior V67 fixture remains documented as historical evidence rather than
+being mechanically overwritten.
