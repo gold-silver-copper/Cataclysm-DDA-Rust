@@ -13,18 +13,19 @@ pub use item_groups::{
     ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
     ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G, ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
-    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
-    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemTemperatureStateV1, ItemThermalPropertiesV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_DESCRIPTION_SNIPPET_CATEGORIES,
-    MAX_DESCRIPTION_SNIPPET_CHOICES, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES,
-    MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES,
-    MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS,
-    initial_item_temperature_state, item_description_expansion_is_valid,
-    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
-    item_snippet_is_valid, item_temperature_state_matches_phase, item_variant_is_valid,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
+    ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemSnippetV1, ItemTemperatureStateV1,
+    ItemThermalPropertiesV1, ItemVariableValueV1, ItemVariantV1,
+    MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
+    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_GROUP_DEFINITIONS,
+    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
+    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, initial_item_temperature_state,
+    item_description_expansion_is_valid, item_group_catalog_is_valid,
+    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
+    item_temperature_state_matches_phase, item_variant_is_valid,
     spawn_pocket_external_volume_milliliters, valid_item_variables,
 };
 use item_groups::{
@@ -32,7 +33,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 94;
+pub const PROTOCOL_VERSION: u16 = 95;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -6134,7 +6135,7 @@ mod tests {
             minimum_one_charge: false,
             tool_charge_storage: None,
             charges_supported: true,
-            modifier_container_capacity_applies: true,
+            charge_capacity: ItemGroupChargeCapacityV1::ModifierContainer,
             contents_insertion_supported: true,
         }))
     }
@@ -6690,7 +6691,7 @@ mod tests {
         let ItemGroupTargetV1::Item(item) = &mut charged_leaf else {
             unreachable!("fixture is a direct item")
         };
-        item.charges = Some(InclusiveI32RangeV1 {
+        item.charges = Some(ItemGroupChargeRangeV1 {
             minimum: 0,
             maximum: 12,
         });
@@ -6873,8 +6874,8 @@ mod tests {
         let ItemGroupTargetV1::Item(item) = &mut invalid_charges else {
             unreachable!("fixture is a direct item")
         };
-        item.charges = Some(InclusiveI32RangeV1 {
-            minimum: 4,
+        item.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: -2,
             maximum: 3,
         });
         let invalid_charges = ItemGroupDefinitionV1 {
@@ -7032,7 +7033,7 @@ mod tests {
         let ItemGroupTargetV1::Item(item) = &mut missing_charge_marker else {
             unreachable!("fixture is a direct item")
         };
-        item.charges = Some(InclusiveI32RangeV1 {
+        item.charges = Some(ItemGroupChargeRangeV1 {
             minimum: 4,
             maximum: 16,
         });
@@ -7142,7 +7143,7 @@ mod tests {
                 unreachable!("fixture is a direct item")
             };
             item.prototype.comestible_type = String::from("FOOD");
-            item.charges = Some(InclusiveI32RangeV1 {
+            item.charges = Some(ItemGroupChargeRangeV1 {
                 minimum: 0,
                 maximum: 0,
             });
@@ -7174,7 +7175,7 @@ mod tests {
         };
         item.prototype.ammunition_type = String::from("9mm");
         item.prototype.magazine_capacity = 10;
-        item.charges = Some(InclusiveI32RangeV1 {
+        item.charges = Some(ItemGroupChargeRangeV1 {
             minimum: 0,
             maximum: 11,
         });
@@ -7230,7 +7231,7 @@ mod tests {
             unreachable!("fixture is a direct item")
         };
         tool.prototype.charges = 0;
-        tool.modifier_container_capacity_applies = false;
+        tool.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
         tool.prototype.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
             pocket_index: 0,
             pocket_id: String::from("BATTERY"),
@@ -7254,7 +7255,7 @@ mod tests {
             1,
             ItemGroupTargetV1::Group(String::from("a_charged_child")),
         );
-        charge_modifier.modifier_charges = Some(InclusiveI32RangeV1 {
+        charge_modifier.modifier_charges = Some(ItemGroupChargeRangeV1 {
             minimum: 2,
             maximum: 2,
         });
@@ -7350,7 +7351,7 @@ mod tests {
             1,
             ItemGroupTargetV1::Group(String::from("a_graph_wrapped_child")),
         );
-        graph_charge_modifier.modifier_charges = Some(InclusiveI32RangeV1 {
+        graph_charge_modifier.modifier_charges = Some(ItemGroupChargeRangeV1 {
             minimum: 1,
             maximum: 1,
         });
@@ -7362,7 +7363,7 @@ mod tests {
 
         let mut ignored_direct_charge =
             item_group_modifier_entry(100, 1, 1, item_group_item("direct_charge_target"));
-        ignored_direct_charge.modifier_charges = Some(InclusiveI32RangeV1 {
+        ignored_direct_charge.modifier_charges = Some(ItemGroupChargeRangeV1 {
             minimum: 1,
             maximum: 1,
         });

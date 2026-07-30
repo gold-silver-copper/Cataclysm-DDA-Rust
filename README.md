@@ -883,6 +883,20 @@ scan advances to `civilian_eink_tablet_pcs`, whose item-group charge capacity
 sentinel is the next generalized dependency. No runtime denominator credit is
 claimed until the complete field is generated and playable.
 
+Protocol 95/schema 73/CanonicalStateV71 add raw item-group charge endpoints and
+explicit capacity ownership. Upper `-1` sentinels resolve only after the
+concrete output and modifier container are known; integral `MAGAZINE` pockets,
+detachable wells, magazines, and physical containers use their pinned capacity,
+while an ordinary item without a capacity retains the exact no-op. Eleven exact
+C++ traces include both 0- and 85-charge e-ink tablet boundaries and derive the
+effective range from pinned item APIs before direct Rust comparison. The shared
+item-group scenario preserves an integral-tool battery child through direct,
+per-tick snapshot, SQLite, and portable replay execution. Selected content now
+admits `civilian_eink_tablet_pcs`; the complete `field` scan next fails closed
+at `costume_accessories`, where `leg_sheath6` requires generalized multi-pocket
+wrapper insertion. No runtime denominator credit is claimed before the field is
+generated, explored, looted, persisted, and client-accessible.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

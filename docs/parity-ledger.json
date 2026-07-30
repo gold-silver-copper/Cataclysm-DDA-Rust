@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 94,
-  "persistence_schema_version": 72,
+  "protocol_version": 95,
+  "persistence_schema_version": 73,
   "replay_format_version": 3,
   "active_milestone": "regional-terrain-base",
   "completion_gate": [
@@ -99,7 +99,7 @@
       "depends_on": ["item-containment", "cpp-differential-oracle"],
       "upstream_sources": ["../Cataclysm-DDA/src/item_group.cpp", "../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/item.cpp", "../Cataclysm-DDA/src/text_snippets.cpp"],
       "rust_paths": ["crates/content/src/item_group.rs", "crates/content/src/bash.rs", "crates/content/src/snippet.rs", "crates/protocol/src/item_groups.rs", "crates/protocol/src/lib.rs", "crates/sim/src/items.rs", "crates/sim/src/lib.rs", "crates/server/src/item_groups.rs", "crates/server/src/main.rs", "crates/conformance/src/lib.rs", "tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-group-generation-v1.json"],
-      "scenario_families": ["weighted-collection-and-distribution", "raw-damage-and-selected-variants", "fixed-zero-modifier-rng-phase", "disabled-holiday-event-selection", "named-wall-bash-snapshot-recovery-replay", "gun-magazine-ammunition-dressing", "detachable-tool-charge-storage", "integral-magazine-charge-loading-and-production-light-batteries", "rigid-wrapper-contents-sealing-snippets-and-variables", "recursive-base-and-variant-description-snippet-expansion", "variable-size-fit-construction-crafting-disassembly-and-client-rendering", "default-container-direct-fill-modifier-fallback-explicit-null-explicit-creator-and-production-boundaries", "materialless-temperature-constructor-processing-nested-recovery-and-client-rendering", "flexible-reserved-volume-wrapper-constructor-default-and-automatic-collapse", "nonperishable-material-inheritance-weighting-fixed-point-energy-and-recovery"],
+      "scenario_families": ["weighted-collection-and-distribution", "raw-damage-and-selected-variants", "fixed-zero-modifier-rng-phase", "disabled-holiday-event-selection", "named-wall-bash-snapshot-recovery-replay", "gun-magazine-ammunition-dressing", "detachable-tool-charge-storage", "integral-magazine-charge-loading-and-production-light-batteries", "capacity-sentinel-integral-detachable-magazine-container-and-unresolved-boundaries", "rigid-wrapper-contents-sealing-snippets-and-variables", "recursive-base-and-variant-description-snippet-expansion", "variable-size-fit-construction-crafting-disassembly-and-client-rendering", "default-container-direct-fill-modifier-fallback-explicit-null-explicit-creator-and-production-boundaries", "materialless-temperature-constructor-processing-nested-recovery-and-client-rendering", "flexible-reserved-volume-wrapper-constructor-default-and-automatic-collapse", "nonperishable-material-inheritance-weighting-fixed-point-energy-and-recovery"],
       "differential_oracle": "active",
       "multiplayer_adaptation": "The authoritative server consumes named deterministic RNG streams, fixes real-world event spawns to the pinned default disabled policy for portable replay, and allocates every generated object a stable ID.",
       "unlocks": ["strict closure admission from 7621 pinned definitions", "pinned wall_bash_results generation", "mapgen and monster item spawning", "ordinary loot generation"]

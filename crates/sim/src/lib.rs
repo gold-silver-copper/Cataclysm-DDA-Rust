@@ -59,6 +59,7 @@ pub use items::{
     ItemGroupFlexibleWrapperProjection, ItemGroupIntegralChargeProjection, expand_item_description,
     item_group_default_container_projection, item_group_fitted_after_phase,
     item_group_flexible_wrapper_projection, item_group_integral_charge_projection,
+    resolve_item_group_charge_range,
 };
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
@@ -13710,7 +13711,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV70");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV71");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13920,7 +13921,7 @@ mod tests {
 
     fn test_item_group_leaf(
         type_id: &str,
-        charges: Option<cdda_protocol::InclusiveI32RangeV1>,
+        charges: Option<cdda_protocol::ItemGroupChargeRangeV1>,
         minimum_one_charge: bool,
     ) -> ItemGroupTargetV1 {
         ItemGroupTargetV1::Item(Box::new(ItemGroupItemPrototypeV1 {
@@ -13936,7 +13937,7 @@ mod tests {
             minimum_one_charge,
             tool_charge_storage: None,
             charges_supported: true,
-            modifier_container_capacity_applies: true,
+            charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
             contents_insertion_supported: true,
         }))
     }
@@ -27117,7 +27118,7 @@ mod tests {
                         event: None,
                         target: test_item_group_leaf(
                             "charged",
-                            Some(cdda_protocol::InclusiveI32RangeV1 {
+                            Some(cdda_protocol::ItemGroupChargeRangeV1 {
                                 minimum: 0,
                                 maximum: 2,
                             }),
@@ -27275,7 +27276,7 @@ mod tests {
                     event: None,
                     target: test_item_group_leaf(
                         "fixed_charges",
-                        Some(cdda_protocol::InclusiveI32RangeV1 {
+                        Some(cdda_protocol::ItemGroupChargeRangeV1 {
                             minimum: 5,
                             maximum: 5,
                         }),
@@ -27391,7 +27392,8 @@ mod tests {
                                 minimum_one_charge: false,
                                 tool_charge_storage: None,
                                 charges_supported: true,
-                                modifier_container_capacity_applies: true,
+                                charge_capacity:
+                                    cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
                                 contents_insertion_supported: true,
                             },
                         )),

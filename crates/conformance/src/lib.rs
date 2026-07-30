@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xc0, 0x73, 0xbe, 0xbf, 0xd0, 0xe2, 0x7f, 0xdd, 0xc7, 0x76, 0xdf, 0x55, 0x8c,
-                    0xdc, 0x9f, 0xe8, 0xa7, 0xc1, 0x1a, 0x86, 0xf8, 0x58, 0xfe, 0x8f, 0xa0, 0xaf,
-                    0x0a, 0x4f, 0x04, 0xee, 0x6d, 0x08,
+                    0x27, 0x39, 0xa4, 0x53, 0xfb, 0x70, 0x0b, 0x8f, 0x31, 0x18, 0xf6, 0x96, 0x31,
+                    0x92, 0x6f, 0x5e, 0xf0, 0xba, 0xad, 0x7a, 0xb5, 0xeb, 0x7c, 0x04, 0x34, 0xa8,
+                    0x2b, 0x37, 0x2e, 0x8a, 0xf5, 0xab,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1054,16 +1054,16 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV69");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV70");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0x5f, 0x66, 0x2f, 0xf5, 0x9b, 0xc4, 0xc6, 0x6b, 0x4c, 0x7e, 0x07, 0x00, 0xfd, 0xb0,
-                0x83, 0x8b, 0xf4, 0x1b, 0xac, 0x38, 0x5a, 0x51, 0x34, 0x58, 0x53, 0x1d, 0x5a, 0xf2,
-                0x55, 0xbc, 0x54, 0x56,
+                0xc0, 0x73, 0xbe, 0xbf, 0xd0, 0xe2, 0x7f, 0xdd, 0xc7, 0x76, 0xdf, 0x55, 0x8c, 0xdc,
+                0x9f, 0xe8, 0xa7, 0xc1, 0x1a, 0x86, 0xf8, 0x58, 0xfe, 0x8f, 0xa0, 0xaf, 0x0a, 0x4f,
+                0x04, 0xee, 0x6d, 0x08,
             ],
-            "the old V69 domain must pin the Protocol 94 item-flow Postcard bytes independently of the V70 domain bump"
+            "the old V70 domain must pin the Protocol 95 item-flow Postcard bytes independently of the V71 domain bump"
         );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
@@ -1241,7 +1241,7 @@ mod tests {
     fn named_item_group_bash_is_identical_across_snapshot_sqlite_and_replay() {
         let position = WorldPosition { x: 1, y: 1, z: 0 };
         let wall_position = WorldPosition { x: 2, y: 1, z: 0 };
-        let item_leaf = |type_id: &str, charges: Option<cdda_protocol::InclusiveI32RangeV1>| {
+        let item_leaf = |type_id: &str, charges: Option<cdda_protocol::ItemGroupChargeRangeV1>| {
             cdda_protocol::ItemGroupTargetV1::Item(Box::new(
                 cdda_protocol::ItemGroupItemPrototypeV1 {
                     prototype: cdda_protocol::CraftItemPrototypeV1 {
@@ -1281,7 +1281,7 @@ mod tests {
                     charges,
                     tool_charge_storage: None,
                     charges_supported: true,
-                    modifier_container_capacity_applies: true,
+                    charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
                     contents_insertion_supported: true,
                 },
             ))
@@ -1302,10 +1302,10 @@ mod tests {
                 unloadable: true,
                 spawn_rules: Some(cdda_protocol::SpawnPocketRulesV1 {
                     kind: cdda_protocol::SpawnPocketKindV1::Container,
-                    // Two 250 ml splinters, one 500 ml nail stack, and the
-                    // 251 ml painkiller bottle exactly fill the wrapper,
-                    // preserving pinned seal-on-full behavior.
-                    max_contains_volume_milliliters: 1_251,
+                    // Two 250 ml splinters, one 500 ml nail stack, the 251 ml
+                    // painkiller bottle, and the 137 ml tablet exactly fill
+                    // the wrapper, preserving pinned seal-on-full behavior.
+                    max_contains_volume_milliliters: 1_388,
                     magazine_well_volume_milliliters: 45,
                     contents_collapsed_by_default: false,
                     max_contains_weight_milligrams: 10_000,
@@ -1324,7 +1324,7 @@ mod tests {
             }];
         let mut wearable_light = item_leaf(
             "wearable_light",
-            Some(cdda_protocol::InclusiveI32RangeV1 {
+            Some(cdda_protocol::ItemGroupChargeRangeV1 {
                 minimum: 100,
                 maximum: 100,
             }),
@@ -1334,7 +1334,8 @@ mod tests {
             unreachable!("headlamp fixture is a direct item")
         };
         wearable_light_item.minimum_one_charge = false;
-        wearable_light_item.modifier_container_capacity_applies = false;
+        wearable_light_item.charge_capacity =
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage;
         wearable_light_item.prototype.charges = 0;
         wearable_light_item.prototype.magazine_wells =
             vec![cdda_protocol::MagazineWellPrototypeV1 {
@@ -1375,7 +1376,7 @@ mod tests {
             });
         let mut light_battery = item_leaf(
             "light_battery_cell",
-            Some(cdda_protocol::InclusiveI32RangeV1 {
+            Some(cdda_protocol::ItemGroupChargeRangeV1 {
                 minimum: 100,
                 maximum: 100,
             }),
@@ -1384,7 +1385,8 @@ mod tests {
             unreachable!("light-battery fixture is a direct item")
         };
         light_battery_item.minimum_one_charge = false;
-        light_battery_item.modifier_container_capacity_applies = false;
+        light_battery_item.charge_capacity =
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage;
         light_battery_item.prototype.charges = 0;
         light_battery_item.prototype.integral_magazines =
             vec![cdda_protocol::IntegralMagazinePocketPrototypeV1 {
@@ -1397,6 +1399,35 @@ mod tests {
                 unloadable: false,
             }];
         light_battery_item.tool_charge_storage =
+            Some(cdda_protocol::ItemGroupToolChargeStorageV1::Integral {
+                ammunition: ammunition.prototype.clone(),
+            });
+        let mut eink_tablet = item_leaf(
+            "eink_tablet_pc",
+            Some(cdda_protocol::ItemGroupChargeRangeV1 {
+                minimum: 0,
+                maximum: -1,
+            }),
+        );
+        let cdda_protocol::ItemGroupTargetV1::Item(eink_tablet_item) = &mut eink_tablet else {
+            unreachable!("e-ink tablet fixture is a direct item")
+        };
+        eink_tablet_item.minimum_one_charge = false;
+        eink_tablet_item.charge_capacity =
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage;
+        eink_tablet_item.prototype.charges = 0;
+        eink_tablet_item.prototype.containment.volume_milliliters = 137;
+        eink_tablet_item.prototype.integral_magazines =
+            vec![cdda_protocol::IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("MAGAZINE"),
+                ammunition_type: String::from("battery"),
+                capacity: 85,
+                rigid: true,
+                reloadable: true,
+                unloadable: true,
+            }];
+        eink_tablet_item.tool_charge_storage =
             Some(cdda_protocol::ItemGroupToolChargeStorageV1::Integral {
                 ammunition: ammunition.prototype.clone(),
             });
@@ -1514,7 +1545,7 @@ mod tests {
                             event: None,
                             target: item_leaf(
                                 "nail",
-                                Some(cdda_protocol::InclusiveI32RangeV1 {
+                                Some(cdda_protocol::ItemGroupChargeRangeV1 {
                                     minimum: 4,
                                     maximum: 6,
                                 }),
@@ -1555,6 +1586,24 @@ mod tests {
                             variant_id: None,
                             event: None,
                             target: light_battery,
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            modifier_default_container_sealed: None,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                        },
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                                minimum: 0,
+                                maximum: 0,
+                            }),
+                            variant_id: None,
+                            event: None,
+                            target: eink_tablet,
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
@@ -1794,7 +1843,7 @@ mod tests {
             wrapper_state.sealed,
             "the group-level seal must survive every recovery mode"
         );
-        assert_eq!(pocket.contents.len(), 7);
+        assert_eq!(pocket.contents.len(), 8);
         assert!(
             pocket
                 .contents
@@ -1813,6 +1862,7 @@ mod tests {
             [
                 ("bottle_plastic_pill_painkiller", 1),
                 ("caff_gum", 1),
+                ("eink_tablet_pc", 0),
                 ("light_battery_cell", 0),
                 ("nail", 4),
                 ("splinter", 1),
@@ -1850,6 +1900,18 @@ mod tests {
         assert_eq!(light_ammunition.type_id, "battery");
         assert_eq!(light_ammunition.charges, 16);
         assert!(light_battery.id < light_ammunition.id);
+        let eink_tablet = pocket
+            .contents
+            .iter()
+            .find(|item| item.type_id == "eink_tablet_pc")
+            .expect("the integral-tool sentinel path should generate an e-ink tablet");
+        let tablet_ammunition = eink_tablet.integral_magazines[0]
+            .loaded_ammunition
+            .as_deref()
+            .expect("the capacity-resolved sentinel should construct integral ammunition");
+        assert_eq!(tablet_ammunition.type_id, "battery");
+        assert!((1..=85).contains(&tablet_ammunition.charges));
+        assert!(eink_tablet.id < tablet_ammunition.id);
         let painkiller_bottle = pocket
             .contents
             .iter()

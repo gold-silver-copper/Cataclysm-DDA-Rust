@@ -127,6 +127,8 @@ struct ItemGroupOracleObservationV1 {
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
+    #[serde(default)]
+    charge_capacity_sentinels: Vec<ItemGroupChargeCapacitySentinelTraceV1>,
     default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
     flexible_wrappers: Vec<ItemGroupFlexibleWrapperTraceV1>,
     temperature_constructors: Vec<ItemGroupTemperatureConstructorTraceV1>,
@@ -391,6 +393,47 @@ struct ItemGroupModifierContainerCapacityObservationV1 {
     explicit_downstream_draw: i32,
     fixed_downstream_draw: i32,
     downstream_draw_matches: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupChargeCapacitySentinelTraceV1 {
+    case_id: String,
+    seed: u32,
+    minimum: i32,
+    maximum: i32,
+    effective_minimum: i32,
+    effective_maximum: i32,
+    item_type: String,
+    item_charges: i32,
+    ammunition_type: String,
+    ammunition_remaining: i32,
+    remaining_capacity: i32,
+    magazine_present: bool,
+    magazine_type: String,
+    wrapper_type: String,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupChargeCapacitySentinelDirectV1 {
+    case_id: String,
+    minimum: i32,
+    maximum: i32,
+    effective_minimum: i32,
+    effective_maximum: i32,
+}
+
+impl ItemGroupChargeCapacitySentinelTraceV1 {
+    fn direct_projection(&self) -> ItemGroupChargeCapacitySentinelDirectV1 {
+        ItemGroupChargeCapacitySentinelDirectV1 {
+            case_id: self.case_id.clone(),
+            minimum: self.minimum,
+            maximum: self.maximum,
+            effective_minimum: self.effective_minimum,
+            effective_maximum: self.effective_maximum,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -834,6 +877,15 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 "item constructor temperature state",
                 &observation.temperature_constructors,
                 &rust_item_group_temperature_constructor_observation(workspace)?,
+            )?;
+            compare_direct_observation(
+                "item-group charge-capacity sentinels",
+                &observation
+                    .charge_capacity_sentinels
+                    .iter()
+                    .map(ItemGroupChargeCapacitySentinelTraceV1::direct_projection)
+                    .collect::<Vec<_>>(),
+                &rust_item_group_charge_capacity_sentinel_observation()?,
             )?;
             println!(
                 "{}",
@@ -1395,6 +1447,241 @@ fn validate_item_group_observation(
             .downstream_draw_matches
     {
         return Err("modifier-container capacity characterization is incomplete".into());
+    }
+    let expected_charge_sentinels = [
+        (
+            "integral_tool_minimum",
+            78,
+            0,
+            -1,
+            0,
+            85,
+            "eink_tablet_pc",
+            0,
+            "null",
+            0,
+            85,
+            false,
+            "",
+            "",
+            9_885,
+        ),
+        (
+            "integral_tool_maximum",
+            31_415,
+            0,
+            -1,
+            0,
+            85,
+            "eink_tablet_pc",
+            0,
+            "battery",
+            85,
+            0,
+            false,
+            "",
+            "",
+            6_092,
+        ),
+        (
+            "ordinary_unresolved",
+            31_415,
+            4,
+            -1,
+            -1,
+            -1,
+            "rock",
+            1,
+            "rock",
+            1,
+            0,
+            false,
+            "",
+            "",
+            4_053,
+        ),
+        (
+            "detachable_tool_minimum",
+            24,
+            0,
+            -1,
+            0,
+            56,
+            "wearable_light",
+            0,
+            "null",
+            0,
+            0,
+            true,
+            "medium_battery_cell",
+            "",
+            7_471,
+        ),
+        (
+            "detachable_tool_maximum",
+            7,
+            0,
+            -1,
+            0,
+            56,
+            "wearable_light",
+            0,
+            "battery",
+            56,
+            0,
+            true,
+            "medium_battery_cell",
+            "",
+            331,
+        ),
+        (
+            "magazine_minimum",
+            24,
+            0,
+            -1,
+            0,
+            16,
+            "light_battery_cell",
+            0,
+            "null",
+            0,
+            16,
+            false,
+            "",
+            "",
+            3_656,
+        ),
+        (
+            "magazine_maximum",
+            6,
+            0,
+            -1,
+            0,
+            16,
+            "light_battery_cell",
+            0,
+            "battery",
+            16,
+            0,
+            false,
+            "",
+            "",
+            2_988,
+        ),
+        (
+            "container_minimum",
+            3,
+            1,
+            -1,
+            1,
+            2,
+            "water_clean",
+            1,
+            "water_clean",
+            1,
+            0,
+            false,
+            "",
+            "bottle_plastic",
+            5_029,
+        ),
+        (
+            "container_maximum",
+            1,
+            1,
+            -1,
+            1,
+            2,
+            "water_clean",
+            2,
+            "water_clean",
+            2,
+            0,
+            false,
+            "",
+            "bottle_plastic",
+            4_747,
+        ),
+        (
+            "lower_sentinel_minimum",
+            4,
+            -1,
+            4,
+            0,
+            4,
+            "40x46mm_m1006",
+            1,
+            "40x46mm_m1006",
+            1,
+            0,
+            false,
+            "",
+            "",
+            4_406,
+        ),
+        (
+            "lower_sentinel_maximum",
+            2,
+            -1,
+            4,
+            0,
+            4,
+            "40x46mm_m1006",
+            4,
+            "40x46mm_m1006",
+            4,
+            0,
+            false,
+            "",
+            "",
+            7_814,
+        ),
+    ];
+    if observation.charge_capacity_sentinels.len() != expected_charge_sentinels.len()
+        || observation
+            .charge_capacity_sentinels
+            .iter()
+            .zip(expected_charge_sentinels)
+            .any(|(actual, expected)| {
+                let (
+                    case_id,
+                    seed,
+                    minimum,
+                    maximum,
+                    effective_minimum,
+                    effective_maximum,
+                    item_type,
+                    item_charges,
+                    ammunition_type,
+                    ammunition_remaining,
+                    remaining_capacity,
+                    magazine_present,
+                    magazine_type,
+                    wrapper_type,
+                    downstream_draw,
+                ) = expected;
+                actual.case_id != case_id
+                    || actual.seed != seed
+                    || actual.minimum != minimum
+                    || actual.maximum != maximum
+                    || actual.effective_minimum != effective_minimum
+                    || actual.effective_maximum != effective_maximum
+                    || actual.item_type != item_type
+                    || actual.item_charges != item_charges
+                    || actual.ammunition_type != ammunition_type
+                    || actual.ammunition_remaining != ammunition_remaining
+                    || actual.remaining_capacity != remaining_capacity
+                    || actual.magazine_present != magazine_present
+                    || actual.magazine_type != magazine_type
+                    || actual.wrapper_type != wrapper_type
+                    || actual.downstream_draw != downstream_draw
+            })
+    {
+        return Err(format!(
+            "charge-capacity sentinel characterization is incomplete: {:?}",
+            observation.charge_capacity_sentinels
+        )
+        .into());
     }
     let expected_default_containers = [
         (
@@ -2083,6 +2370,41 @@ fn rust_item_group_magazine_charge_observation()
     .collect()
 }
 
+fn rust_item_group_charge_capacity_sentinel_observation()
+-> Result<Vec<ItemGroupChargeCapacitySentinelDirectV1>, Box<dyn std::error::Error>> {
+    [
+        ("integral_tool_minimum", 0, -1, Some(85)),
+        ("integral_tool_maximum", 0, -1, Some(85)),
+        ("ordinary_unresolved", 4, -1, None),
+        ("detachable_tool_minimum", 0, -1, Some(56)),
+        ("detachable_tool_maximum", 0, -1, Some(56)),
+        ("magazine_minimum", 0, -1, Some(16)),
+        ("magazine_maximum", 0, -1, Some(16)),
+        ("container_minimum", 1, -1, Some(2)),
+        ("container_maximum", 1, -1, Some(2)),
+        ("lower_sentinel_minimum", -1, 4, None),
+        ("lower_sentinel_maximum", -1, 4, None),
+    ]
+    .into_iter()
+    .map(|(case_id, minimum, maximum, capacity)| {
+        let effective = cdda_sim::resolve_item_group_charge_range(
+            cdda_protocol::ItemGroupChargeRangeV1 { minimum, maximum },
+            capacity,
+        )?;
+        let (effective_minimum, effective_maximum) = effective
+            .map(|range| (range.minimum, range.maximum))
+            .unwrap_or((-1, -1));
+        Ok(ItemGroupChargeCapacitySentinelDirectV1 {
+            case_id: case_id.to_owned(),
+            minimum,
+            maximum,
+            effective_minimum,
+            effective_maximum,
+        })
+    })
+    .collect()
+}
+
 fn rust_item_group_magazine_charge_case(
     case_id: &str,
     item_type: &str,
@@ -2136,14 +2458,14 @@ fn rust_item_group_magazine_charge_case(
         initial_variables: BTreeMap::new(),
         default_container: None,
         modifier_side_effects_supported: true,
-        charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+        charges: Some(cdda_protocol::ItemGroupChargeRangeV1 {
             minimum: requested_charges,
             maximum: requested_charges,
         }),
         minimum_one_charge: false,
         tool_charge_storage: Some(ItemGroupToolChargeStorageV1::Integral { ammunition }),
         charges_supported: true,
-        modifier_container_capacity_applies: false,
+        charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
         contents_insertion_supported: true,
     };
     let projection = cdda_sim::item_group_integral_charge_projection(&item, requested_charges)
@@ -2259,7 +2581,7 @@ fn rust_item_group_default_container_observation()
         minimum_one_charge: false,
         tool_charge_storage: None,
         charges_supported: true,
-        modifier_container_capacity_applies: true,
+        charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
         contents_insertion_supported: true,
     };
     let container = |type_id: &str,
@@ -2434,7 +2756,7 @@ fn rust_item_group_flexible_wrapper_observation()
         minimum_one_charge: false,
         tool_charge_storage: None,
         charges_supported: true,
-        modifier_container_capacity_applies: true,
+        charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::ModifierContainer,
         contents_insertion_supported: true,
     };
     let variant = |id: &str| ItemGroupVariantOptionV1 {
@@ -2762,7 +3084,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         initial_variables: BTreeMap::new(),
         default_container: None,
         modifier_side_effects_supported: true,
-        charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+        charges: Some(cdda_protocol::ItemGroupChargeRangeV1 {
             minimum: leaf_minimum,
             maximum: leaf_maximum,
         }),
@@ -2773,7 +3095,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
             ammunition: Box::new(ammunition),
         }),
         charges_supported: true,
-        modifier_container_capacity_applies: false,
+        charge_capacity: cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
         contents_insertion_supported: true,
     };
     let definition = ItemGroupDefinitionV1 {
@@ -2825,7 +3147,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
                             variant_id: None,
                             event: None,
                             target: ItemGroupTargetV1::Group(definition.group_id.clone()),
-                            modifier_charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+                            modifier_charges: Some(cdda_protocol::ItemGroupChargeRangeV1 {
                                 minimum: replacement_requested,
                                 maximum: replacement_requested,
                             }),

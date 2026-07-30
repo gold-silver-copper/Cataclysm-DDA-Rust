@@ -8,13 +8,13 @@ use cdda_content::{
     StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
-    CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
-    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
-    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
-    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    CraftItemPrototypeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
+    ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
+    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
     item_group_source_max_outputs,
 };
@@ -585,11 +585,7 @@ fn runtime_item_group_item_inner(
         minimum_one_charge,
         tool_charge_storage,
         charges_supported,
-        modifier_container_capacity_applies: matches!(item.phase.as_str(), "LIQUID" | "liquid")
-            || !item
-                .subtypes
-                .iter()
-                .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE")),
+        charge_capacity: runtime_item_group_charge_capacity(item),
         contents_insertion_supported,
     })
 }
@@ -834,7 +830,11 @@ fn require_single_physical_item(
         .filter(|rules| rules.kind == cdda_protocol::SpawnPocketKindV1::Container)
         .collect::<Vec<_>>();
     if physical_pockets.len() != 1 {
-        return Err("item-group wrappers require exactly one physical container pocket".into());
+        return Err(format!(
+            "item-group wrapper {} requires exactly one physical container pocket",
+            item.prototype.type_id
+        )
+        .into());
     }
     Ok(())
 }
@@ -1149,23 +1149,9 @@ fn validate_item_group_item_spawn(
 pub(super) fn runtime_item_group_charges(
     item: &ItemDefinition,
     charges: Option<cdda_content::ItemGroupChargesRange>,
-) -> Result<(Option<InclusiveI32RangeV1>, bool), Box<dyn std::error::Error>> {
+) -> Result<(Option<ItemGroupChargeRangeV1>, bool), Box<dyn std::error::Error>> {
     let Some(charges) = charges else {
         return Ok((None, false));
-    };
-    if charges.minimum == -1 && charges.maximum == -1 {
-        return Ok((None, false));
-    }
-    if charges.minimum < 0 || charges.maximum < 0 {
-        return Err(format!(
-            "item-group charges for {} require unimplemented capacity sentinels",
-            item.id
-        )
-        .into());
-    }
-    let charges = cdda_content::ItemGroupChargesRange {
-        minimum: charges.minimum.min(charges.maximum),
-        maximum: charges.maximum,
     };
     let liquid = matches!(item.phase.as_str(), "LIQUID" | "liquid");
     if item
@@ -1174,7 +1160,7 @@ pub(super) fn runtime_item_group_charges(
         .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE"))
     {
         return Ok((
-            Some(InclusiveI32RangeV1 {
+            Some(ItemGroupChargeRangeV1 {
                 minimum: charges.minimum,
                 maximum: charges.maximum,
             }),
@@ -1182,7 +1168,14 @@ pub(super) fn runtime_item_group_charges(
         ));
     }
     if !item_group_charges_supported(item) {
-        if charges.minimum == charges.maximum {
+        let resolved = cdda_sim::resolve_item_group_charge_range(
+            ItemGroupChargeRangeV1 {
+                minimum: charges.minimum,
+                maximum: charges.maximum,
+            },
+            None,
+        )?;
+        if resolved.is_none_or(|charges| charges.minimum == charges.maximum) {
             // Pinned Item_modifier computes the fixed value without consuming
             // RNG, then ignores it for an ordinary item.
             return Ok((None, false));
@@ -1194,7 +1187,7 @@ pub(super) fn runtime_item_group_charges(
         .into());
     }
     Ok((
-        Some(InclusiveI32RangeV1 {
+        Some(ItemGroupChargeRangeV1 {
             minimum: charges.minimum,
             maximum: charges.maximum,
         }),
@@ -1204,20 +1197,35 @@ pub(super) fn runtime_item_group_charges(
 
 fn normalize_item_group_charges(
     charges: Option<cdda_content::ItemGroupChargesRange>,
-) -> Result<Option<InclusiveI32RangeV1>, Box<dyn std::error::Error>> {
+) -> Result<Option<ItemGroupChargeRangeV1>, Box<dyn std::error::Error>> {
     let Some(charges) = charges else {
         return Ok(None);
     };
-    if charges.minimum == -1 && charges.maximum == -1 {
-        return Ok(None);
-    }
-    if charges.minimum < 0 || charges.maximum < 0 {
-        return Err("nested item-group charges require unimplemented capacity sentinels".into());
-    }
-    Ok(Some(InclusiveI32RangeV1 {
-        minimum: charges.minimum.min(charges.maximum),
+    Ok(Some(ItemGroupChargeRangeV1 {
+        minimum: charges.minimum,
         maximum: charges.maximum,
     }))
+}
+
+fn runtime_item_group_charge_capacity(item: &ItemDefinition) -> ItemGroupChargeCapacityV1 {
+    if !item.integral_magazines.is_empty()
+        || item.subtypes.contains("MAGAZINE")
+        || item
+            .pockets
+            .iter()
+            .any(|pocket| pocket.pocket_type == PocketTypeDefinition::MagazineWell)
+    {
+        ItemGroupChargeCapacityV1::AmmunitionStorage
+    } else if matches!(item.phase.as_str(), "LIQUID" | "liquid")
+        || !item
+            .subtypes
+            .iter()
+            .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE"))
+    {
+        ItemGroupChargeCapacityV1::ModifierContainer
+    } else {
+        ItemGroupChargeCapacityV1::None
+    }
 }
 
 fn item_group_charges_supported(item: &ItemDefinition) -> bool {

@@ -415,6 +415,24 @@ struct modifier_container_capacity_trace {
     int downstream_draw = 0;
 };
 
+struct charge_capacity_sentinel_trace {
+    std::string case_id;
+    unsigned int seed = 0;
+    int minimum = 0;
+    int maximum = 0;
+    int effective_minimum = 0;
+    int effective_maximum = 0;
+    std::string item_type;
+    int item_charges = 0;
+    std::string ammunition_type;
+    int ammunition_remaining = 0;
+    int remaining_capacity = 0;
+    bool magazine_present = false;
+    std::string magazine_type;
+    std::string wrapper_type;
+    int downstream_draw = 0;
+};
+
 struct default_container_trace {
     std::string case_id;
     unsigned int seed = 0;
@@ -780,6 +798,128 @@ modifier_container_capacity_trace observe_modifier_container_capacity( unsigned 
         payload.charges,
         rng( 0, 9999 )
     };
+}
+
+std::pair<int, int> effective_charge_capacity_bounds( const std::string &item_id,
+        int minimum, int maximum, const std::string &container_id )
+{
+    item observed( itype_id( item_id ), calendar::turn_zero );
+    std::optional<item> container;
+    if( !container_id.empty() ) {
+        container.emplace( itype_id( container_id ), calendar::turn_zero );
+    }
+    int max_capacity = -1;
+    if( minimum != -1 && maximum == -1 && ( observed.is_magazine() ||
+            observed.uses_magazine() ) ) {
+        int max_ammo = 0;
+        if( observed.is_magazine() ) {
+            if( const std::optional<ammotype> at = item::ammotype_of( observed.ammo_default() ) ) {
+                max_ammo = observed.ammo_capacity( *at );
+            }
+        } else if( !observed.magazine_default().is_null() ) {
+            const itype *magazine = item::find_type( observed.magazine_default() );
+            if( magazine != nullptr && magazine->magazine ) {
+                max_ammo = magazine->magazine->capacity;
+            }
+        }
+        if( max_ammo > 0 ) {
+            max_capacity = max_ammo;
+        }
+    }
+    if( max_capacity == -1 && container.has_value() &&
+        ( observed.made_of( phase_id::LIQUID ) ||
+          ( !observed.is_tool() && !observed.is_gun() && !observed.is_magazine() ) ) ) {
+        if( observed.type->weight == 0_gram ) {
+            max_capacity = observed.charges_per_volume( container->get_volume_capacity() );
+        } else {
+            max_capacity = std::min(
+                               observed.charges_per_volume( container->get_volume_capacity() ),
+                               observed.charges_per_weight( container->get_total_weight_capacity() ) );
+        }
+    }
+    if( minimum == -1 && maximum == -1 ) {
+        return { -1, -1 };
+    }
+    int effective_minimum = minimum == -1 ? 0 : minimum;
+    int effective_maximum = maximum == -1 ? max_capacity : maximum;
+    if( effective_minimum == -1 && effective_maximum != -1 ) {
+        effective_minimum = 0;
+    }
+    if( max_capacity != -1 && ( effective_maximum > max_capacity ||
+                                ( effective_minimum != 1 && effective_maximum == -1 ) ) ) {
+        effective_maximum = max_capacity;
+    }
+    if( effective_minimum > effective_maximum ) {
+        effective_minimum = effective_maximum;
+    }
+    return { effective_minimum, effective_maximum };
+}
+
+charge_capacity_sentinel_trace observe_charge_capacity_sentinel(
+    const std::string &case_id, const std::string &item_id, unsigned int seed,
+    int minimum, int maximum, const std::string &container_id = "" )
+{
+    const auto [effective_minimum, effective_maximum] =
+        effective_charge_capacity_bounds( item_id, minimum, maximum, container_id );
+    Single_item_creator creator( item_id, Single_item_creator::S_ITEM, 100,
+                                 "Rust charge-capacity sentinel oracle" );
+    creator.modifier.emplace();
+    creator.modifier->charges = { minimum, maximum };
+    if( !container_id.empty() ) {
+        creator.modifier->container = std::make_unique<Single_item_creator>(
+                                          container_id, Single_item_creator::S_ITEM, 100,
+                                          "Rust charge-capacity sentinel wrapper oracle" );
+        creator.modifier->sealed = false;
+    }
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    const item &outer = items.front();
+    const item *observed = &outer;
+    if( !container_id.empty() ) {
+        const std::list<const item *> contents = outer.all_items_top();
+        REQUIRE( contents.size() == 1 );
+        observed = *contents.begin();
+    }
+    const item *magazine = observed->magazine_current();
+    return {
+        case_id,
+        seed,
+        minimum,
+        maximum,
+        effective_minimum,
+        effective_maximum,
+        observed->typeId().str(),
+        observed->charges,
+        observed->ammo_current().str(),
+        observed->ammo_remaining(),
+        observed->remaining_ammo_capacity(),
+        magazine != nullptr,
+        magazine == nullptr ? "" : magazine->typeId().str(),
+        container_id.empty() ? "" : outer.typeId().str(),
+        rng( 0, 9999 )
+    };
+}
+
+charge_capacity_sentinel_trace find_charge_capacity_sentinel(
+    const std::string &case_id, const std::string &item_id,
+    int minimum, int maximum, int target_ammunition_remaining,
+    const std::string &container_id = "",
+    int target_item_charges = std::numeric_limits<int>::min() )
+{
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        charge_capacity_sentinel_trace trace = observe_charge_capacity_sentinel(
+                case_id, item_id, seed, minimum, maximum, container_id );
+        if( trace.ammunition_remaining == target_ammunition_remaining &&
+            ( target_item_charges == std::numeric_limits<int>::min() ||
+              trace.item_charges == target_item_charges ) ) {
+            return trace;
+        }
+    }
+    FAIL( "could not find bounded charge-capacity sentinel witness for " + case_id );
+    return {};
 }
 
 int downstream_after_fixed_count( unsigned int seed )
@@ -1470,6 +1610,48 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     REQUIRE( explicit_container_capacity.downstream_draw ==
              fixed_container_capacity.downstream_draw );
 
+    const std::vector<charge_capacity_sentinel_trace> charge_capacity_sentinels = {
+        observe_charge_capacity_sentinel( "integral_tool_minimum", "eink_tablet_pc", 78,
+                                          0, -1 ),
+        observe_charge_capacity_sentinel( "integral_tool_maximum", "eink_tablet_pc", 31415,
+                                          0, -1 ),
+        observe_charge_capacity_sentinel( "ordinary_unresolved", "rock", 31415,
+                                          4, -1 ),
+        find_charge_capacity_sentinel( "detachable_tool_minimum", "wearable_light",
+                                       0, -1, 0 ),
+        find_charge_capacity_sentinel( "detachable_tool_maximum", "wearable_light",
+                                       0, -1, 56 ),
+        find_charge_capacity_sentinel( "magazine_minimum", "light_battery_cell",
+                                       0, -1, 0 ),
+        find_charge_capacity_sentinel( "magazine_maximum", "light_battery_cell",
+                                       0, -1, 16 ),
+        find_charge_capacity_sentinel( "container_minimum", "water_clean",
+                                       1, -1, 1, "bottle_plastic", 1 ),
+        find_charge_capacity_sentinel( "container_maximum", "water_clean",
+                                       1, -1, 2, "bottle_plastic", 2 ),
+        find_charge_capacity_sentinel( "lower_sentinel_minimum", "40x46mm_m1006",
+                                       -1, 4, 1, "", 1 ),
+        find_charge_capacity_sentinel( "lower_sentinel_maximum", "40x46mm_m1006",
+                                       -1, 4, 4, "", 4 )
+    };
+    REQUIRE( charge_capacity_sentinels[0].ammunition_remaining == 0 );
+    REQUIRE( charge_capacity_sentinels[0].remaining_capacity == 85 );
+    REQUIRE( charge_capacity_sentinels[1].item_charges == 0 );
+    REQUIRE( charge_capacity_sentinels[1].ammunition_type == "battery" );
+    REQUIRE( charge_capacity_sentinels[1].ammunition_remaining == 85 );
+    REQUIRE_FALSE( charge_capacity_sentinels[1].magazine_present );
+    REQUIRE( charge_capacity_sentinels[1].remaining_capacity == 0 );
+    REQUIRE( charge_capacity_sentinels[2].item_charges == 1 );
+    REQUIRE( charge_capacity_sentinels[2].ammunition_remaining == 1 );
+    REQUIRE_FALSE( charge_capacity_sentinels[2].magazine_present );
+    REQUIRE( charge_capacity_sentinels[3].magazine_present );
+    REQUIRE( charge_capacity_sentinels[4].magazine_present );
+    REQUIRE( charge_capacity_sentinels[4].magazine_type == "medium_battery_cell" );
+    REQUIRE( charge_capacity_sentinels[5].ammunition_type == "null" );
+    REQUIRE( charge_capacity_sentinels[6].ammunition_type == "battery" );
+    REQUIRE( charge_capacity_sentinels[7].wrapper_type == "bottle_plastic" );
+    REQUIRE( charge_capacity_sentinels[8].wrapper_type == "bottle_plastic" );
+
     const std::vector<default_container_trace> default_containers = {
         observe_default_container( "direct_water", "water_clean", 31415,
                                    default_container_mode::unmodified ),
@@ -1830,6 +2012,29 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
                      explicit_container_capacity.downstream_draw ==
                      fixed_container_capacity.downstream_draw );
         json.end_object();
+
+        json.member( "charge_capacity_sentinels" );
+        json.start_array();
+        for( const charge_capacity_sentinel_trace &trace : charge_capacity_sentinels ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "seed", trace.seed );
+            json.member( "minimum", trace.minimum );
+            json.member( "maximum", trace.maximum );
+            json.member( "effective_minimum", trace.effective_minimum );
+            json.member( "effective_maximum", trace.effective_maximum );
+            json.member( "item_type", trace.item_type );
+            json.member( "item_charges", trace.item_charges );
+            json.member( "ammunition_type", trace.ammunition_type );
+            json.member( "ammunition_remaining", trace.ammunition_remaining );
+            json.member( "remaining_capacity", trace.remaining_capacity );
+            json.member( "magazine_present", trace.magazine_present );
+            json.member( "magazine_type", trace.magazine_type );
+            json.member( "wrapper_type", trace.wrapper_type );
+            json.member( "downstream_draw", trace.downstream_draw );
+            json.end_object();
+        }
+        json.end_array();
 
         json.member( "default_containers" );
         json.start_array();

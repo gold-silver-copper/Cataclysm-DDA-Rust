@@ -36,7 +36,12 @@ discard/spill overflow, the selected-content `everyday_corpse` wrappers, and
 both collection and distribution event filtering outside their holiday. Exact
 modifier-container traces prove ranged charges clamp to physical capacity,
 default liquids fill that capacity, and a fixed post-clamp range consumes no
-extra charge draw. Exact
+extra charge draw. Eleven exact capacity-sentinel traces derive their effective
+bounds from pinned C++ `is_magazine()`, `uses_magazine()`, ammunition, and
+container APIs, then retain minimum/maximum integral-tool, detachable-tool,
+magazine, container, lower-sentinel, and unresolved ordinary outcomes with
+downstream RNG state. The Rust direct comparator executes the production range
+resolver against those derived bounds. Exact
 default-container traces distinguish direct construction, modifier fallback,
 explicit-null suppression, explicit containers whose own creator applies a
 default wrapper, and the production one/twenty `bottle_otc_painkiller_1_20`

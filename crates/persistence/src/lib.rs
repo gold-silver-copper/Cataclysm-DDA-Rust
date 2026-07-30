@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 72;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 94
-/// added fixed-point material thermodynamics to canonical item temperature.
+pub const SCHEMA_VERSION: i64 = 73;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 95
+/// added raw charge sentinels and explicit capacity ownership to item groups.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 72;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 73;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;

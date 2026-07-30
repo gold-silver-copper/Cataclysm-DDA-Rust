@@ -4,12 +4,13 @@ use cdda_protocol::{
     AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
     ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
     IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
-    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1,
-    ItemTemperatureStateV1, ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES,
-    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
+    ItemDescriptionSnippetCategoryV1, ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1,
+    ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
+    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
+    ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1, ItemTemperatureStateV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH,
+    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
     MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
     RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, initial_item_temperature_state,
     item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
@@ -524,10 +525,10 @@ pub(super) struct PlannedItemSpawn {
     default_container: Option<ItemGroupContainerV1>,
     modifier_side_effects_supported: bool,
     charges_supported: bool,
-    modifier_container_capacity_applies: bool,
+    charge_capacity: ItemGroupChargeCapacityV1,
     tool_charge_storage: Option<ItemGroupToolChargeStorageV1>,
     minimum_one_charge: bool,
-    default_charge_range: Option<cdda_protocol::InclusiveI32RangeV1>,
+    default_charge_range: Option<ItemGroupChargeRangeV1>,
     pub(super) pocket_contents: BTreeMap<u16, Vec<PlannedItemSpawn>>,
     pub(super) collapsed_pockets: BTreeSet<u16>,
     pub(super) sealed_pockets: BTreeSet<u16>,
@@ -1088,7 +1089,7 @@ fn construct_item_group_item_with_fit_phase(
         default_container: item.default_container.clone(),
         modifier_side_effects_supported: item.modifier_side_effects_supported,
         charges_supported: item.charges_supported,
-        modifier_container_capacity_applies: item.modifier_container_capacity_applies,
+        charge_capacity: item.charge_capacity,
         tool_charge_storage: item.tool_charge_storage.clone(),
         minimum_one_charge: item.minimum_one_charge,
         default_charge_range: item.charges,
@@ -1402,7 +1403,7 @@ pub fn item_group_integral_charge_projection(
     let mut planned = construct_item_group_item(item, &mut rng)?;
     apply_item_group_charges(
         &mut planned,
-        Some(cdda_protocol::InclusiveI32RangeV1 {
+        Some(ItemGroupChargeRangeV1 {
             minimum: requested_charges,
             maximum: requested_charges,
         }),
@@ -1479,7 +1480,7 @@ fn construct_charge_ammunition(
         default_container: None,
         modifier_side_effects_supported: true,
         charges_supported: true,
-        modifier_container_capacity_applies: false,
+        charge_capacity: ItemGroupChargeCapacityV1::None,
         tool_charge_storage: None,
         minimum_one_charge: true,
         default_charge_range: None,
@@ -1590,7 +1591,7 @@ fn expand_description_text<R: Rng + ?Sized>(
 fn apply_item_group_modifier(
     planned: &mut PlannedItemSpawn,
     entry: &ItemGroupEntryV1,
-    charges: Option<cdda_protocol::InclusiveI32RangeV1>,
+    charges: Option<ItemGroupChargeRangeV1>,
     item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
     rng: &mut ChaCha8Rng,
 ) -> Result<(), SimError> {
@@ -1633,11 +1634,11 @@ fn apply_item_group_modifier(
 
 fn apply_item_group_charges(
     planned: &mut PlannedItemSpawn,
-    charges: Option<cdda_protocol::InclusiveI32RangeV1>,
+    charges: Option<ItemGroupChargeRangeV1>,
     modifier_container_capacity: Option<i32>,
     rng: &mut ChaCha8Rng,
 ) -> Result<(), SimError> {
-    let Some(mut charges) = charges else {
+    let Some(charges) = charges else {
         if planned.prototype.containment.phase == cdda_protocol::ItemPhaseV1::Liquid
             && let Some(capacity) = modifier_container_capacity
         {
@@ -1645,12 +1646,16 @@ fn apply_item_group_charges(
         }
         return Ok(());
     };
-    if !planned.charges_supported || charges.minimum < 0 || charges.maximum < charges.minimum {
+    let capacity = match planned.charge_capacity {
+        ItemGroupChargeCapacityV1::None => None,
+        ItemGroupChargeCapacityV1::AmmunitionStorage => item_group_ammunition_capacity(planned)?,
+        ItemGroupChargeCapacityV1::ModifierContainer => modifier_container_capacity,
+    };
+    let Some(charges) = resolve_item_group_charge_range(charges, capacity)? else {
+        return Ok(());
+    };
+    if !planned.charges_supported {
         return Err(SimError::InvalidItem);
-    }
-    if let Some(capacity) = modifier_container_capacity {
-        charges.maximum = charges.maximum.min(capacity);
-        charges.minimum = charges.minimum.min(charges.maximum);
     }
     let rolled = if charges.minimum == charges.maximum {
         charges.minimum
@@ -1735,11 +1740,79 @@ fn apply_item_group_charges(
     Ok(())
 }
 
+/// Resolve pinned `-1` charge endpoints after the concrete output type and
+/// modifier container are known. `None` is an exact no-op, distinct from a
+/// resolved zero which can empty ammunition storage.
+pub fn resolve_item_group_charge_range(
+    charges: ItemGroupChargeRangeV1,
+    maximum_capacity: Option<i32>,
+) -> Result<Option<cdda_protocol::InclusiveI32RangeV1>, SimError> {
+    if charges.minimum < -1 || charges.maximum < -1 {
+        return Err(SimError::InvalidItem);
+    }
+    if charges.minimum == -1 && charges.maximum == -1 {
+        return Ok(None);
+    }
+    let mut minimum = if charges.minimum == -1 {
+        0
+    } else {
+        charges.minimum
+    };
+    let mut maximum = if charges.maximum == -1 {
+        maximum_capacity.unwrap_or(-1)
+    } else {
+        charges.maximum
+    };
+    if let Some(capacity) = maximum_capacity {
+        if capacity < 0 {
+            return Err(SimError::InvalidItem);
+        }
+        if maximum > capacity || (minimum != 1 && maximum == -1) {
+            maximum = capacity;
+        }
+    }
+    if minimum > maximum {
+        minimum = maximum;
+    }
+    if minimum == -1 && maximum == -1 {
+        return Ok(None);
+    }
+    if minimum < 0 || maximum < minimum {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(Some(cdda_protocol::InclusiveI32RangeV1 {
+        minimum,
+        maximum,
+    }))
+}
+
+fn item_group_ammunition_capacity(planned: &PlannedItemSpawn) -> Result<Option<i32>, SimError> {
+    match &planned.tool_charge_storage {
+        Some(ItemGroupToolChargeStorageV1::Integral { .. }) => {
+            let [pocket] = planned.prototype.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            Ok(Some(
+                i32::try_from(pocket.capacity).map_err(|_| SimError::NumericOverflow)?,
+            ))
+        }
+        Some(ItemGroupToolChargeStorageV1::Detachable { magazine, .. }) => {
+            let [pocket] = magazine.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            Ok(Some(
+                i32::try_from(pocket.capacity).map_err(|_| SimError::NumericOverflow)?,
+            ))
+        }
+        None => Ok(None),
+    }
+}
+
 fn modifier_container_charge_capacity(
     planned: &PlannedItemSpawn,
     container: &PlannedItemSpawn,
 ) -> Result<Option<i32>, SimError> {
-    if !planned.modifier_container_capacity_applies || planned.tool_charge_storage.is_some() {
+    if planned.charge_capacity != ItemGroupChargeCapacityV1::ModifierContainer {
         // Ammunition capacity is owned by the integral pocket or detachable
         // magazine rather than by the modifier container in pinned
         // Item_modifier.
@@ -1847,7 +1920,7 @@ fn physical_container_charge_capacity(
     container: &PlannedItemSpawn,
 ) -> Result<Option<i32>, SimError> {
     let mut unrestricted = planned.clone();
-    unrestricted.modifier_container_capacity_applies = true;
+    unrestricted.charge_capacity = ItemGroupChargeCapacityV1::ModifierContainer;
     unrestricted.tool_charge_storage = None;
     modifier_container_charge_capacity(&unrestricted, container)
 }
@@ -1912,18 +1985,12 @@ fn set_planned_variant(
 }
 
 fn consume_item_group_modifier_dressing(planned: &PlannedItemSpawn, rng: &mut ChaCha8Rng) {
-    if prototype_uses_magazine_dressing(&planned.prototype) {
+    if planned.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage {
         // Pinned Item_modifier evaluates both zero-chance ammunition and
         // magazine dressing rolls for magazines and wells.
         let _ = rng.next_u64();
         let _ = rng.next_u64();
     }
-}
-
-fn prototype_uses_magazine_dressing(prototype: &CraftItemPrototypeV1) -> bool {
-    prototype.magazine_capacity > 0
-        || !prototype.integral_magazines.is_empty()
-        || !prototype.magazine_wells.is_empty()
 }
 
 fn construct_item_group_container(
@@ -2605,7 +2672,7 @@ mod tests {
             minimum_one_charge: false,
             tool_charge_storage: None,
             charges_supported: true,
-            modifier_container_capacity_applies: true,
+            charge_capacity: ItemGroupChargeCapacityV1::ModifierContainer,
             contents_insertion_supported: true,
         }
     }
@@ -3211,8 +3278,9 @@ mod tests {
         };
         item.prototype.ammunition_type = String::from("9mm");
         item.prototype.magazine_capacity = 10;
+        item.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
         item.maximum_raw_damage = cdda_protocol::MAX_ITEM_RAW_DAMAGE;
-        item.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+        item.charges = Some(ItemGroupChargeRangeV1 {
             minimum: 1,
             maximum: 4,
         });
@@ -3281,7 +3349,7 @@ mod tests {
             unloadable: false,
         }];
         target.maximum_raw_damage = cdda_protocol::MAX_ITEM_RAW_DAMAGE;
-        target.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+        target.charges = Some(ItemGroupChargeRangeV1 {
             minimum: 1,
             maximum: 4,
         });
@@ -3293,6 +3361,7 @@ mod tests {
             ..ItemContainmentProfileV1::default()
         };
         target.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Integral { ammunition });
+        target.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
         let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
             root_node: 0,
             nodes: vec![ItemGroupNodeV1 {
@@ -3355,7 +3424,7 @@ mod tests {
                 rigid: true,
                 unloadable: true,
             }];
-            target.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+            target.charges = Some(ItemGroupChargeRangeV1 {
                 minimum: charges,
                 maximum: charges,
             });
@@ -3383,6 +3452,7 @@ mod tests {
                 magazine,
                 ammunition: Box::new(ammunition),
             });
+            target.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
             ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
                 root_node: 0,
                 nodes: vec![ItemGroupNodeV1 {
@@ -3470,7 +3540,7 @@ mod tests {
                     variant_id: None,
                     event: None,
                     target: ItemGroupTargetV1::Group(String::from("inner_tool_charge")),
-                    modifier_charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+                    modifier_charges: Some(ItemGroupChargeRangeV1 {
                         minimum: 1,
                         maximum: 1,
                     }),
@@ -3516,7 +3586,8 @@ mod tests {
         let mut target = leaf_item("charged_magazine");
         target.prototype.ammunition_type = String::from("9mm");
         target.prototype.magazine_capacity = 10;
-        target.charges = Some(cdda_protocol::InclusiveI32RangeV1 {
+        target.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
+        target.charges = Some(ItemGroupChargeRangeV1 {
             minimum: 1,
             maximum: 4,
         });
@@ -3666,7 +3737,7 @@ mod tests {
         };
 
         for charges in [
-            Some(cdda_protocol::InclusiveI32RangeV1 {
+            Some(ItemGroupChargeRangeV1 {
                 minimum: 50,
                 maximum: 80,
             }),
@@ -3682,7 +3753,7 @@ mod tests {
 
         let mut actual_rng = ChaCha8Rng::seed_from_u64(73);
         let _ = plan_item_group_source(
-            &source(Some(cdda_protocol::InclusiveI32RangeV1 {
+            &source(Some(ItemGroupChargeRangeV1 {
                 minimum: 50,
                 maximum: 80,
             })),
@@ -3699,6 +3770,104 @@ mod tests {
             expected_rng.next_u64(),
             "clamping the explicit range to one value consumes no charge RNG draw"
         );
+    }
+
+    #[test]
+    fn charge_capacity_sentinels_resolve_all_pinned_endpoint_families() {
+        let resolved = |minimum, maximum, capacity| {
+            resolve_item_group_charge_range(ItemGroupChargeRangeV1 { minimum, maximum }, capacity)
+                .expect("characterized sentinel range should resolve")
+                .map(|range| (range.minimum, range.maximum))
+        };
+        assert_eq!(resolved(-1, -1, None), None);
+        assert_eq!(resolved(0, -1, None), None);
+        assert_eq!(resolved(4, -1, None), None);
+        assert_eq!(resolved(0, -1, Some(85)), Some((0, 85)));
+        assert_eq!(resolved(0, -1, Some(56)), Some((0, 56)));
+        assert_eq!(resolved(1, -1, Some(2)), Some((1, 2)));
+        assert_eq!(resolved(-1, 4, None), Some((0, 4)));
+        assert_eq!(resolved(7, 2, None), Some((2, 2)));
+        assert!(
+            resolve_item_group_charge_range(
+                ItemGroupChargeRangeV1 {
+                    minimum: -2,
+                    maximum: 4,
+                },
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn integral_tool_sentinel_resolves_against_its_magazine_capacity() {
+        let mut tablet = leaf_item("eink_tablet_pc");
+        tablet.prototype.charges = 0;
+        tablet.prototype.integral_magazines =
+            vec![cdda_protocol::IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("MAGAZINE"),
+                ammunition_type: String::from("battery"),
+                capacity: 85,
+                rigid: true,
+                reloadable: true,
+                unloadable: true,
+            }];
+        let mut battery = tablet.prototype.clone();
+        battery.type_id = String::from("battery");
+        battery.charges = 1;
+        battery.integral_magazines.clear();
+        battery.containment.count_by_charges = true;
+        battery.containment.stack_size = 1;
+        battery.ammunition_type = String::from("battery");
+        tablet.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Integral {
+            ammunition: battery,
+        });
+        tablet.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
+        tablet.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: 0,
+            maximum: -1,
+        });
+        tablet.minimum_one_charge = false;
+
+        let source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+            root_node: 0,
+            nodes: vec![ItemGroupNodeV1 {
+                node_id: 0,
+                kind: ItemGroupKindV1::Distribution,
+                entries: vec![ItemGroupEntryV1 {
+                    probability: 100,
+                    count_min: 1,
+                    count_max: 1,
+                    raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                        minimum: 0,
+                        maximum: 0,
+                    }),
+                    variant_id: None,
+                    event: None,
+                    modifier_charges: None,
+                    contents: Vec::new(),
+                    seal_contents: false,
+                    modifier_default_container_sealed: Some(true),
+                    direct_wrapper: None,
+                    modifier_container: None,
+                    target: ItemGroupTargetV1::Item(Box::new(tablet)),
+                }],
+            }],
+            wrapper: None,
+        });
+        let mut rng = ChaCha8Rng::seed_from_u64(31_415);
+        let planned = plan_item_group_source(&source, &BTreeMap::new(), &mut rng)
+            .expect("integral tool sentinel should plan");
+        let [tablet] = planned.as_slice() else {
+            panic!("one tablet should be generated")
+        };
+        assert_eq!(tablet.prototype.charges, 0);
+        let charges = tablet
+            .integral_ammunition
+            .get(&0)
+            .map_or(0, |ammunition| ammunition.prototype.charges);
+        assert!((0..=85).contains(&charges));
     }
 
     #[test]
@@ -4016,7 +4185,7 @@ mod tests {
                     variant_id: None,
                     event: None,
                     target: ItemGroupTargetV1::Group(String::from("counted_child")),
-                    modifier_charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+                    modifier_charges: Some(ItemGroupChargeRangeV1 {
                         minimum: 0,
                         maximum: 0,
                     }),

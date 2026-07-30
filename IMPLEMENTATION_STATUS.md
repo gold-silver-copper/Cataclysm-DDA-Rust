@@ -14,6 +14,9 @@ tree `210f31db2e8b2f0caed1809f1a66781859f9d129`.
 - Checkpoint representation: protocol 94, persistence schema/minimum recoverable
   schema 72, CanonicalStateV70, CanonicalEventsV18, replay format 3, worldgen
   algorithm 2, scenario format 7, observation format 6.
+- Candidate representation under verification: protocol 95, persistence
+  schema/minimum recoverable schema 73, CanonicalStateV71, with event/replay/
+  worldgen/scenario/observation formats unchanged.
 - Active milestone: `regional-terrain-base`.
 - Hosts remain macOS, Linux, and Windows. Bevy 0.19 is client-only; server and
   simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
@@ -27,28 +30,22 @@ Mapgen/overmap milestone states:
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
-## Active family: nonperishable material thermodynamics
+## Candidate family: item-group charge-capacity sentinels
 
-- A generalized selected-content material registry resolves inheritance,
-  defaults, positive item portions, upstream `float` accumulation, and fixed
-  microjoule profiles. The weighted `saline` trace pins the otherwise hidden
-  `330092987` microjoule quantization boundary; materialless constructors remain
-  distinct, while rot, custom freezing, and unsupported phases fail closed.
-- Protocol 94/schema 72/CanonicalStateV70 carry self-contained thermal
-  properties and accept only the characterized sentinel-to-20 C lifecycle.
-  Material-backed ambient energy is numeric; materialless indeterminate energy
-  remains `None` without serializing NaN.
-- Six exact constructor traces, including `caff_gum`, `water_clean`, and the
-  weighted saline boundary, bring the item-group oracle to 144 C++ assertions
-  and pass the reusable direct Rust comparison. A material-backed generated
-  item is identical through direct, per-tick snapshot, SQLite, and portable
-  replay modes, and the normal Bevy item menu renders its initialized numeric
-  energy as 20 C rather than pending.
-- Selected content admits all 278 nonperishable/default-freezing
-  material-backed constructors, exactly four attributable furniture bashes,
-  and 197 attributable recipes. Those aggregate changes are checked against
-  the previous materialless boundary and exact owners rather than accepted
-  mechanically.
+- Raw lower and upper charge endpoints remain serialized until the concrete
+  item and modifier container are known. Explicit capacity ownership selects
+  integral/detachable ammunition storage, a physical modifier container, or the
+  exact no-capacity no-op; unsupported randomized ordinary-item modifiers still
+  fail closed.
+- Eleven exact C++ traces cover both ends of integral-tool, detachable-tool,
+  magazine, container, lower-sentinel, and unresolved ordinary behavior. The
+  oracle derives effective bounds from pinned item APIs and then compares them
+  directly with the generalized Rust resolver. Exact e-ink witnesses retain 0
+  and 85 loaded battery charges plus downstream RNG state.
+- A real `eink_tablet_pc` with its integral battery is identical through direct,
+  per-tick snapshot, SQLite, and portable replay modes. The production-content
+  audit admits `civilian_eink_tablet_pcs` and verifies raw `[0, -1]` ownership
+  instead of accepting a changed aggregate count.
 
 ## Runnable behavior and next boundary
 
@@ -58,12 +55,12 @@ and vulnerable, traverses generated terrain, fights admitted creatures,
 manipulates nested items, and runs implemented crafting, reading, disassembly,
 construction, recovery, and replay paths.
 
-The complete `field` scan now passes `chewing_gum_full_caff` and stops exactly
-at `civilian_eink_tablet_pcs`: `eink_tablet_pc` uses the upstream item-group
-charge capacity sentinel. The next playable unlock remains the generalized
-capacity-sentinel family, complete real-field admission, and ordinary client
-exploration/loot. Do not start cities, roads, rivers, specials, anatomy, or EOCs
-first.
+The complete `field` scan now passes `civilian_eink_tablet_pcs` and stops exactly
+at `costume_accessories`: wrapper `leg_sheath6` has six physical sheath pockets,
+while the current generalized insertion engine owns exactly one. The next
+playable unlock is multi-pocket wrapper selection, complete real-field
+admission, and ordinary client exploration/loot. Do not start cities, roads,
+rivers, specials, anatomy, or EOCs first.
 
 ## Measured runtime progress
 
@@ -81,23 +78,19 @@ proven as an ordinary gameplay surface.
 
 ## Module-growth budget
 
-Verified sizes are 29,592 lines in `sim/lib.rs`, 5,047 in `sim/items.rs`,
-9,973 in `protocol/lib.rs`, 2,101 in `protocol/item_groups.rs`, 13,077 in
-persistence, 8,807 in the server library, 1,527 in `server/item_groups.rs`,
-7,070 in the server executable, and 596 in the new `content/material.rs`.
-Relative to verified implementation `d863ea5`, the central simulation grows
-199 net lines to mirror Protocol 94's snapshot, component, prototype,
-phase-ownership, and provenance invariants and to retain the independently
-requested negative recovery regression, mechanical fixtures, and canonical
-domain. Temperature processing behavior grows
-`sim/items.rs` by 50 net lines. The central protocol grows 37 net wire,
-validation, and fixture lines while `protocol/item_groups.rs` grows 88 net
-engine/validation lines. The server executable grows 107 net lines solely for
-registry threading, catalog integration, and the fixed production-content
-audit; capability logic grows `server/item_groups.rs` by 63 net lines. The
-server library grows three fixture lines and no runtime behavior. This larger
-central simulation exception is confined to fail-closed recovery validation;
-future temperature behavior remains owned by `sim/items.rs`.
+Candidate sizes are 29,594 lines in `sim/lib.rs`, 5,216 in `sim/items.rs`,
+9,974 in `protocol/lib.rs`, 2,191 in `protocol/item_groups.rs`, 13,077 in
+persistence, 8,807 in the server library, 1,535 in `server/item_groups.rs`, and
+7,110 in the server executable. Relative to verified implementation `40037fb`,
+the central simulation grows two net lines for the resolver export and
+canonical-domain bump; charge behavior grows `sim/items.rs` by 169 net lines.
+The central protocol grows one net export/version line while validation and
+metrics grow `protocol/item_groups.rs` by 90 net lines. Capability projection
+grows `server/item_groups.rs` by eight net lines; the server executable grows 40
+net test/audit lines and no generalized behavior. Persistence and the server
+library do not grow. New behavior therefore stays in the requested ownership
+modules, and every central-file increase is mechanical or an exact production
+boundary.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
@@ -105,34 +98,31 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Latest verification
 
-Passing checks on the verified implementation:
+Passing checks on the candidate implementation:
 
 - formatting and diff checks;
-- content material inheritance and exact weighted profiles;
-- protocol and simulation constructor/processing boundaries;
-- negative snapshot/component/prototype recovery and immutable phase ownership;
-- normal Bevy pending/initialized material-energy rendering;
+- raw sentinel validation, capacity ownership, and exact simulation boundaries;
 - named item-group direct/snapshot/SQLite/portable-replay conformance;
-- representative item-flow four-mode conformance and explicit V69/V70 domain
+- representative item-flow four-mode conformance and explicit V70/V71 domain
   audit;
-- schema-72 persistence tests;
-- deterministic selected-content scan with 278 material constructors, 534
-  exact furniture bashes, 2,826 recipes, and the exact next field failure;
-- pinned item-group C++ oracle: 144 assertions plus direct Rust comparison;
-- pinned static-mapgen C++ oracle plus reusable direct Rust comparison;
-- all 395 workspace target/feature tests, strict workspace Clippy, and rustdoc
+- schema-73 persistence tests;
+- deterministic selected-content scan through `civilian_eink_tablet_pcs` to
+  the exact six-pocket `leg_sheath6` boundary;
+- pinned item-group C++ oracle: 239 assertions plus direct Rust comparison;
+- pinned pocket and static-mapgen C++ oracles, including the reusable direct
+  mapgen comparator;
+- dependency boundaries, parity ledger, runtime denominator, astronomy table,
+  content validation, and content inventory gates;
+- all 398 workspace target/feature tests, strict workspace Clippy, and rustdoc
   with warnings denied.
 
-The V70 item-flow fixture hash is
-`c073bebfd0e27fddc776df558cdc9fe8a7c11a86f858fe8fa0af0a4f04ee6d08`.
-Hashing the same Postcard bytes under V69 still yields
-`5f662ff59bc4c66b4c7e0700fdb0838bf41bac385a513458531d5af255bc5456`;
+The V71 item-flow fixture hash is
+`2739a453fb700b8f3118f69631926f5ef0baad7ab5eb7c0434a82b372e8af5ab`.
+Hashing the same Postcard bytes under V70 yields
+`c073bebfd0e27fddc776df558cdc9fe8a7c11a86f858fe8fa0af0a4f04ee6d08`;
 the changed hash is therefore the deliberate domain bump for the newly
-serialized item family. CanonicalEventsV18 is unchanged.
+serialized item-group representation. CanonicalEventsV18 is unchanged.
 
-The first fixed committed-tree review found one P1 recovery-integrity issue,
-two P2 generalized-validation issues, and two P3 boundary/documentation issues.
-The first corrected tree then exposed one P2 immutable-phase relation and stale
-growth accounting. All confirmed findings were fixed. A final independent pass
-reviewed the complete replacement commit from a clean detached worktree and
-found no remaining P0-P3 issue. No known failure remains.
+The broad workspace gates pass. A fixed committed-tree independent review
+remains before this candidate becomes the live verified checkpoint. No failure
+is known.

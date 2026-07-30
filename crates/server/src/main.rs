@@ -48,7 +48,7 @@ use cdda_protocol::{
 };
 #[cfg(test)]
 use cdda_protocol::{
-    InclusiveI32RangeV1, ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemGroupChargeRangeV1, ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1,
     item_group_source_max_outputs,
 };
 use cdda_server::{
@@ -4375,7 +4375,7 @@ mod tests {
             runtime_item_group_charges(&ordinary, Some(range)).is_err(),
             "a ranged ignored modifier would still consume pinned RNG"
         );
-        assert!(
+        assert_eq!(
             runtime_item_group_charges(
                 &ordinary,
                 Some(cdda_content::ItemGroupChargesRange {
@@ -4383,8 +4383,8 @@ mod tests {
                     maximum: -1,
                 }),
             )
-            .is_err(),
-            "capacity-dependent signed sentinels must stay runtime-closed"
+            .expect("an unresolved upper sentinel is an exact no-op"),
+            (None, false)
         );
         assert_eq!(
             runtime_item_group_charges(
@@ -4425,7 +4425,7 @@ mod tests {
             runtime_item_group_charges(&ordinary, Some(range))
                 .expect("count-by-charges item should admit"),
             (
-                Some(InclusiveI32RangeV1 {
+                Some(ItemGroupChargeRangeV1 {
                     minimum: 0,
                     maximum: 7,
                 }),
@@ -4439,7 +4439,7 @@ mod tests {
             runtime_item_group_charges(&ordinary, Some(range))
                 .expect("every liquid charge modifier should clamp"),
             (
-                Some(InclusiveI32RangeV1 {
+                Some(ItemGroupChargeRangeV1 {
                     minimum: 0,
                     maximum: 7,
                 }),
@@ -4453,7 +4453,7 @@ mod tests {
             runtime_item_group_charges(&ordinary, Some(range))
                 .expect("explicit charge-bearing item should admit"),
             (
-                Some(InclusiveI32RangeV1 {
+                Some(ItemGroupChargeRangeV1 {
                     minimum: 0,
                     maximum: 7,
                 }),
@@ -4466,7 +4466,7 @@ mod tests {
             runtime_item_group_charges(&ordinary, Some(range))
                 .expect("ammunition owners retain the range for later storage normalization"),
             (
-                Some(InclusiveI32RangeV1 {
+                Some(ItemGroupChargeRangeV1 {
                     minimum: 0,
                     maximum: 7,
                 }),
@@ -4610,7 +4610,7 @@ mod tests {
             .expect("child accessories should retain the charged headlamp");
         assert_eq!(
             wearable_light.charges,
-            Some(InclusiveI32RangeV1 {
+            Some(ItemGroupChargeRangeV1 {
                 minimum: 0,
                 maximum: 100,
             })
@@ -4859,12 +4859,52 @@ mod tests {
                 .as_ref()
                 .is_some_and(|rules| rules.contents_collapsed_by_default)
         );
+        let eink_tablets = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("civilian_eink_tablet_pcs")
+                .expect("field closure should retain civilian e-ink tablets"),
+            item_group_content,
+        )
+        .expect("integral-tool capacity sentinels should normalize");
+        let eink_tablet = eink_tablets
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .find_map(|entry| match &entry.target {
+                ItemGroupTargetV1::Item(item) if item.prototype.type_id == "eink_tablet_pc" => {
+                    Some(item.as_ref())
+                }
+                ItemGroupTargetV1::Item(_)
+                | ItemGroupTargetV1::Group(_)
+                | ItemGroupTargetV1::Node(_) => None,
+            })
+            .expect("civilian tablet group should retain its direct tablet leaf");
+        assert_eq!(
+            eink_tablet.charges,
+            Some(cdda_protocol::ItemGroupChargeRangeV1 {
+                minimum: 0,
+                maximum: -1,
+            })
+        );
+        assert_eq!(eink_tablet.prototype.charges, 0);
+        assert_eq!(
+            eink_tablet.charge_capacity,
+            cdda_protocol::ItemGroupChargeCapacityV1::AmmunitionStorage,
+            "upstream is_magazine includes integral MAGAZINE pockets"
+        );
+        assert!(matches!(
+            &eink_tablet.tool_charge_storage,
+            Some(cdda_protocol::ItemGroupToolChargeStorageV1::Integral { ammunition })
+                if ammunition.type_id == "battery"
+                    && eink_tablet.prototype.integral_magazines[0].capacity == 85
+        ));
         assert_eq!(
             field_runtime_errors.first(),
             Some(&(
-                "civilian_eink_tablet_pcs",
+                "costume_accessories",
                 String::from(
-                    "item-group charges for eink_tablet_pc require unimplemented capacity sentinels",
+                    "item-group wrapper leg_sheath6 requires exactly one physical container pocket",
                 ),
             )),
             "the field closure must retain its exact next unsupported semantic boundary"
@@ -5277,7 +5317,7 @@ mod tests {
         assert_eq!(nails.prototype.type_id, "nail");
         assert_eq!(
             nails.charges,
-            Some(InclusiveI32RangeV1 {
+            Some(ItemGroupChargeRangeV1 {
                 minimum: 4,
                 maximum: 16,
             })

@@ -291,6 +291,27 @@ pub enum ItemGroupToolChargeStorageV1 {
     },
 }
 
+/// Raw endpoints from pinned `Item_modifier::charges`. Each endpoint may use
+/// `-1` independently: a lower sentinel becomes zero, while an upper sentinel
+/// asks the finalized item/container for its applicable capacity. Keeping the
+/// sentinel in canonical state is necessary for named-group modifiers, whose
+/// concrete child type is selected only during simulation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupChargeRangeV1 {
+    pub minimum: i32,
+    pub maximum: i32,
+}
+
+/// The pinned capacity source consulted by an item-group charge upper
+/// sentinel. Upstream `is_magazine()` includes any item with an integral
+/// `MAGAZINE` pocket, while `uses_magazine()` covers detachable wells.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ItemGroupChargeCapacityV1 {
+    None,
+    AmmunitionStorage,
+    ModifierContainer,
+}
+
 /// A direct item leaf in a normalized item-group graph. The server resolves
 /// immutable content into the same prototype used by crafting before the
 /// graph enters canonical simulation state.
@@ -318,7 +339,7 @@ pub struct ItemGroupItemPrototypeV1 {
     /// authoritative side effects beyond the raw damage, selected variant,
     /// and magazine-dressing RNG phases represented by the protocol.
     pub modifier_side_effects_supported: bool,
-    pub charges: Option<InclusiveI32RangeV1>,
+    pub charges: Option<ItemGroupChargeRangeV1>,
     /// Count-by-charge items clamp an explicit zero charge roll to one in the
     /// pinned implementation. Non-charge items leave this false.
     pub minimum_one_charge: bool,
@@ -326,10 +347,10 @@ pub struct ItemGroupItemPrototypeV1 {
     /// `None` means charges remain on the owning instance.
     pub tool_charge_storage: Option<ItemGroupToolChargeStorageV1>,
     pub charges_supported: bool,
-    /// Whether pinned `Item_modifier` derives a charge ceiling from a
-    /// modifier-owned container for this finalized item type. This is true for
-    /// liquids and non-tool/non-gun/non-magazine items.
-    pub modifier_container_capacity_applies: bool,
+    /// Capacity source for an upper `-1` charge sentinel. This also identifies
+    /// magazine/well owners whose modifier phase consumes pinned ammunition
+    /// and magazine dressing rolls.
+    pub charge_capacity: ItemGroupChargeCapacityV1,
     /// Whether every retained pocket shape needed by generalized item-group
     /// contents insertion is represented by the normalized prototype. This
     /// distinguishes a true no-pocket item from an item whose unsupported raw
@@ -384,7 +405,7 @@ pub struct ItemGroupEntryV1 {
     /// Modifier charges applied to every completed child of a named group.
     /// Direct item leaves retain their range on `ItemGroupItemPrototypeV1` for
     /// compatibility with earlier fixtures.
-    pub modifier_charges: Option<InclusiveI32RangeV1>,
+    pub modifier_charges: Option<ItemGroupChargeRangeV1>,
     pub contents: Vec<ItemGroupContentsSourceV1>,
     /// Upstream seals the modified item after adding `contents-*` when it is a
     /// comestible. Entry wrappers are a separate always-sealed spawn layer.
@@ -735,7 +756,7 @@ impl<'a> ItemGroupEvaluator<'a> {
                 entry_outputs.checked_add(entry_outputs.checked_mul(contents_outputs)?)?;
             let positive_modifier_charges = entry
                 .modifier_charges
-                .is_some_and(|charges| charges.maximum > 0);
+                .is_some_and(|charges| charges.maximum > 0 || charges.maximum == -1);
             if entry.modifier_charges.is_some() {
                 entry_outputs = entry_outputs
                     .checked_add(target.charge_magazine_candidates.checked_mul(count)?)?;
@@ -956,7 +977,7 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                 || (modifier_present && matches!(&entry.target, ItemGroupTargetV1::Node(_)))
                 || entry
                     .modifier_charges
-                    .is_some_and(|charges| charges.minimum < 0 || charges.maximum < charges.minimum)
+                    .is_some_and(|charges| !valid_item_group_charge_range(charges))
                 || (entry.modifier_charges.is_some()
                     && !matches!(&entry.target, ItemGroupTargetV1::Group(_)))
                 || (entry.modifier_container.is_some()
@@ -1067,14 +1088,19 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
                 && container.overflow == ItemGroupOverflowV1::None
                 && valid_item_group_container_at_depth(container, depth + 1)
         })
-        && (!item.modifier_container_capacity_applies
-            || (item.tool_charge_storage.is_none()
-                && item.prototype.ranged_weapon.is_none()
-                && item.prototype.magazine_capacity == 0))
+        && match item.charge_capacity {
+            ItemGroupChargeCapacityV1::None => true,
+            ItemGroupChargeCapacityV1::AmmunitionStorage => item.tool_charge_storage.is_some(),
+            ItemGroupChargeCapacityV1::ModifierContainer => {
+                item.tool_charge_storage.is_none()
+                    && item.prototype.ranged_weapon.is_none()
+                    && item.prototype.magazine_capacity == 0
+            }
+        }
         && (item.prototype.containment.phase != super::ItemPhaseV1::Liquid
-            || item.modifier_container_capacity_applies)
+            || item.charge_capacity == ItemGroupChargeCapacityV1::ModifierContainer)
         && item.charges.is_none_or(|charges| {
-            if charges.minimum < 0 || charges.maximum < charges.minimum {
+            if !valid_item_group_charge_range(charges) {
                 return false;
             }
             if let Some(storage) = &item.tool_charge_storage {
@@ -1084,12 +1110,18 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
                     return false;
                 };
                 return [charges.minimum, charges.maximum].into_iter().all(|value| {
+                    if value == -1 {
+                        return true;
+                    }
                     let mut effective = ammunition.clone();
                     effective.charges = value.min(i32::try_from(capacity).unwrap_or(i32::MAX));
                     value == 0 || valid_craft_item_prototype(&effective)
                 });
             }
             [charges.minimum, charges.maximum].into_iter().all(|value| {
+                if value == -1 {
+                    return true;
+                }
                 let mut effective = item.prototype.clone();
                 effective.charges = if item.minimum_one_charge {
                     value.max(1)
@@ -1101,6 +1133,12 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
         })
         && (!item.minimum_one_charge || item.charges.is_some())
         && (item.charges.is_none() || item.charges_supported)
+}
+
+fn valid_item_group_charge_range(charges: ItemGroupChargeRangeV1) -> bool {
+    [charges.minimum, charges.maximum]
+        .into_iter()
+        .all(|bound| (-1..=1_000_000).contains(&bound))
 }
 
 fn valid_tool_charge_storage(
@@ -1186,13 +1224,24 @@ fn item_group_item_containment_depth(item: &ItemGroupItemPrototypeV1) -> usize {
     let Some(storage) = &item.tool_charge_storage else {
         return 0;
     };
+    let modifier_applies = item.charges.is_some_and(|charges| {
+        charges
+            != (ItemGroupChargeRangeV1 {
+                minimum: -1,
+                maximum: -1,
+            })
+            && (charges.maximum != -1
+                || item.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage)
+    });
+    let ammunition_possible = item.charges.is_some_and(|charges| {
+        charges.maximum > 0
+            || (charges.maximum == -1
+                && item.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage)
+    });
     match storage {
-        ItemGroupToolChargeStorageV1::Integral { .. } => {
-            usize::from(item.charges.is_some_and(|charges| charges.maximum > 0))
-        }
+        ItemGroupToolChargeStorageV1::Integral { .. } => usize::from(ammunition_possible),
         ItemGroupToolChargeStorageV1::Detachable { .. } => {
-            usize::from(item.charges.is_some())
-                + usize::from(item.charges.is_some_and(|charges| charges.maximum > 0))
+            usize::from(modifier_applies) + usize::from(ammunition_possible)
         }
     }
 }
@@ -1781,9 +1830,50 @@ mod tests {
             minimum_one_charge: false,
             tool_charge_storage: None,
             charges_supported: true,
-            modifier_container_capacity_applies: true,
+            charge_capacity: ItemGroupChargeCapacityV1::ModifierContainer,
             contents_insertion_supported: true,
         }
+    }
+
+    #[test]
+    fn charge_sentinel_validation_and_ammunition_metrics_are_bounded() {
+        let mut tablet = valid_test_item();
+        tablet.prototype.type_id = String::from("eink_tablet_pc");
+        tablet.prototype.charges = 0;
+        tablet.prototype.integral_magazines = vec![crate::IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("MAGAZINE"),
+            ammunition_type: String::from("battery"),
+            capacity: 85,
+            rigid: true,
+            reloadable: true,
+            unloadable: true,
+        }];
+        let mut battery = valid_test_item().prototype;
+        battery.type_id = String::from("battery");
+        battery.charges = 1;
+        battery.ammunition_type = String::from("battery");
+        battery.containment.count_by_charges = true;
+        battery.containment.stack_size = 1;
+        tablet.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Integral {
+            ammunition: battery,
+        });
+        tablet.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
+        tablet.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: 0,
+            maximum: -1,
+        });
+
+        assert!(valid_item_group_item(&tablet));
+        assert_eq!(item_group_item_containment_depth(&tablet), 1);
+        assert_eq!(item_group_item_max_outputs(&tablet), 2);
+
+        let mut invalid_endpoint = tablet;
+        invalid_endpoint.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: -2,
+            maximum: 4,
+        });
+        assert!(!valid_item_group_item(&invalid_endpoint));
     }
 
     fn valid_test_container(type_id: &str) -> ItemGroupContainerV1 {
