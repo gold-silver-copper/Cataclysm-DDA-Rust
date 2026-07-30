@@ -5,11 +5,12 @@ tree `210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
 ## Live checkpoint
 
-- Verified green commit: `a80f6c2a8c23c29146f67a843f8cbc34d0cbb6ec`.
-  Protocol-92 work above documentation parent
-  `e4f74aff4a84019c35818aa0a6746ce33bf309e8` is intentionally unbound until
-  the full gates and fixed committed-tree review complete.
-- Current worktree representation: protocol 92, persistence schema/minimum
+- Verified green commit: `84509b8ebb7ceb6b68456e9473ea0816d2b24a80`,
+  tree `367af56a854a6a47ccc0ef0eb99d111cf2f4664a`.
+- Completed family checkpoint: generalized materialless/nonperishable item
+  temperature. The complete local gates and independent fixed committed-tree
+  review are green with no confirmed P0-P3 finding.
+- Current representation: protocol 92, persistence schema/minimum
   recoverable schema 70, CanonicalStateV68, CanonicalEventsV18, replay format
   3, worldgen algorithm 2, scenario format 7, observation format 6.
 - Active milestone: `regional-terrain-base`.
@@ -94,21 +95,35 @@ Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
 mechanical extraction milestones before anatomy or EOC expansion.
 
-## Verification state
+## Latest verified checkpoint
 
-Latest focused results in the unbound worktree:
+Exact implementation commit `84509b8` passes formatting and diff checks,
+strict workspace all-target/all-feature Clippy, warning-free rustdoc, and all
+392 workspace tests: 13 client, 9 conformance, 79 content, 1 network, 40
+persistence, 42 protocol, 39 server, 159 simulation, and 10 tools. Conformance
+is 9/9 across direct, per-tick snapshot, SQLite, and portable replay execution.
 
-- `cargo check --workspace --all-targets --all-features`: pass.
-- protocol, simulation, client, content, persistence, and conformance targeted
-  suites: pass; conformance is 9/9 across all four execution modes.
-- deterministic selected-content field/catalog test: pass in 97.50 seconds.
-- item-group C++ oracle/direct comparator: pass, 119 assertions.
+Dependency boundaries, parity ledger, runtime progress, astronomy table,
+content validation, and content inventory pass. The fixed corpus contains 7,992
+vendored content files; inventory covers 6,571 JSON files, 93,779 top-level
+objects, and 180 definition types. Pinned C++ pocket, item-group, and mapgen
+oracles pass 8, 119, and 1,179 assertions; item-group and mapgen also run their
+reusable direct Rust comparisons.
+
+- The deterministic selected-content field/catalog test passes in 97.60
+  seconds and pins the 36-item class, the 2,629/1,161 catalog counts, and the
+  exact `chaw_wrapper_1_20` next boundary.
 - Protocol-92 hash audit: new bytes under old V67 domain are
   `d0b9e7a84fbdb6ef8a751d3536bfb57a8cd092f17d379ea7a960c14ede43f187`;
   current V68 is
   `ecf2ff2770054b46562dd7cad15c3aa9326586594374b2710af84754beef6a6a`.
   CanonicalEventsV18 is unchanged.
 
-The broad formatting, Clippy, workspace-test, documentation, project-gate, all
-three C++ oracle, and fixed committed-tree independent-review gates remain to
-be run before binding a new verified commit.
+An independent reviewer inspected the complete 23-file implementation diff at
+exact commit `84509b8`, tree `367af56a`, from a clean detached worktree. The
+review covered fail-closed content admission, crafting/disassembly, recursive
+ownership and cadence, recovery, persistence/version/hash changes, client
+stacking/display, four-mode conformance, oracle equivalence, documentation, and
+module growth. It found no confirmed P0, P1, P2, or P3 issue. Exact scope,
+commands, investigated concerns, and residual risks are recorded in
+[docs/reviews/protocol-92-materialless-item-temperature.md](docs/reviews/protocol-92-materialless-item-temperature.md).
