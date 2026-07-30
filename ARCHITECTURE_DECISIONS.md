@@ -3104,3 +3104,47 @@ is the intentional V64 domain. The next retained regional-field edge is
 `saint_necklace` variant description snippet expansion; real field generation
 and runtime progress credit remain closed until that full closure and a normal
 client exploration/loot path are green.
+
+## Recursive item-description expansion
+
+Protocol 89 advances to schema 67 and CanonicalStateV65 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. Base ITEM and
+variant `expand_snippets` definitions normalize into a self-contained template
+plus the exact reachable weighted category closure. This representation is
+stored with the authoritative item-group catalog rather than consulting live
+content during simulation or recovery.
+
+The selected English registry loads `data/names/en.json` in the pinned
+pre-snippet phase, maps gendered and unisex entries into the eight upstream
+name categories, and then loads ordinary snippet JSON in selected source
+order. Identified choices precede anonymous choices, overrides clear only their
+category, zero-weight choices remain represented, and duplicate global IDs,
+weight overflow, cycles, excessive depth, excessive closure size, oversized
+output, and unavailable item-variable capacity fail closed. Maximum-length
+validation memoizes category/depth results so a bounded repeated DAG cannot
+create exponential validation work. Non-English catalogs and runtime language
+switching remain out of scope.
+
+Construction preserves the pinned phase order even when intermediate text is
+overwritten. Selecting an expanding variant immediately expands it; the later
+constructor phase expands the base and then the selected variant again.
+Explicit item-group variant modifiers expand once more. Recognized categories
+consume one canonical draw even when they have one choice or zero total
+weight; genuinely unknown tags stay literal without consuming the stream. The
+generated `description` variable replaces an existing value or consumes one
+of the bounded variable slots before materialization.
+
+The pinned item-group oracle records the exact recursive/literal boundary and
+the production seed-59 `accessory_necklace`/`saint_necklace` result plus its
+downstream draw. Complementary Rust phase tests use a multi-choice variant so
+omitting the initial overwritten expansion changes both the final choice and
+the shared stream. Production normalization also proves the seven-category
+`dog_tag_id` name closure. Direct, per-tick snapshot, SQLite, and portable
+replay execution preserve the resulting canonical description, and the
+ordinary Bevy item menu renders only the replicated value.
+
+This closes the description-expansion edge without earning runtime progress:
+the real field is still neither generated nor traversable as ordinary
+gameplay. Its next exact fail-closed boundary is variable-size `FIT` state on
+`leg_sheath6`; that generalized constructor family must complete before the
+field/client exploration-and-loot unlock.

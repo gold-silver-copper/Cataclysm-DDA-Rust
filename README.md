@@ -764,10 +764,24 @@ wells include it recursively in wrapper fit checks. Exact C++ traces cover
 requests 0, 1, 56, and 100. A production named-group trace also proves that a
 later charge modifier reuses the installed magazine, replaces only its
 ammunition, and preserves the downstream RNG phase; direct Rust comparison and
-direct/snapshot/SQLite/replay conformance preserve the resulting nested stable IDs. The real field
-loot closure now passes `wearable_light` and fails closed at the next retained
-semantic edge, `saint_necklace` description snippet expansion. Databases below
+direct/snapshot/SQLite/replay conformance preserve the resulting nested stable
+IDs. The real field loot closure now passes `wearable_light`. Databases below
 schema 66 that contain serialized state are rejected before mutation.
+
+Protocol 89/schema 67/CanonicalStateV65 add self-contained recursive item
+description expansion. The selected English snippet registry preserves
+identified-before-anonymous weighting, category overrides, and the pinned
+`data/names/en.json` gender/usage categories. Server normalization retains only
+the exact reachable closure; cycles, oversized output, excessive work, and an
+unavailable generated variable slot fail closed. Construction reproduces the
+pinned selected-variant expansion before base processing and the later final
+variant expansion, while explicit variant modifiers expand once more. The
+item-group oracle pins recursive/literal expansion and a real
+`saint_necklace`; production gates also retain the complete `dog_tag_id` name
+closure. Replicated descriptions render in the ordinary client item menu and
+survive direct, snapshot, SQLite, and replay execution. The real field closure
+now stops at `leg_sheath6` variable-size `FIT` state; Protocol 89 does not yet
+earn runtime points because the field is not generated or playable.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned

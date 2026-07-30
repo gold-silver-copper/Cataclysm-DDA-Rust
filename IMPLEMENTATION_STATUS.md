@@ -5,14 +5,14 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
 
 ## Live checkpoint
 
-- Last fully green repository commit:
-  `bcd868170d4fdf50b6e1a2aadff7ebc980dac40d` (`Record Protocol 88
-  tool-charge checkpoint`). Its verified implementation tree is
-  `bdeb8570615fae97288b0d5d5d8b1e18e407e04c`.
+- Verified green commit: `032883aed6d3677597248c8e0ec8d0dc7de9324e`
+  (`Implement recursive item description snippets`), tree
+  `6da10d6bcb9fef98f7212a2a536ccc620cb3cae1`.
 - Active milestone: `regional-terrain-base`.
-- Active candidate: generalized base/variant item-description snippet
-  expansion and strict admission of `accessory_necklace`.
-- Candidate representation: protocol 89, worldgen algorithm 2, persistence
+- Completed family checkpoint: generalized base/variant item-description
+  snippet expansion, selected English name categories, and strict admission of
+  `accessory_necklace` plus `dog_tag_id`.
+- Current representation: protocol 89, worldgen algorithm 2, persistence
   schema/minimum recoverable schema 67, replay format 3, CanonicalStateV65,
   and CanonicalEventsV18. Scenario format 7 and observation format 6 do not
   change.
@@ -50,19 +50,21 @@ generation, rotation, server-selected starts, durable chunks, and blocked
 layout edges are runnable. The real default `field` layer remains outside the
 production surface until its entire loot closure is exact.
 
-## Active description-expansion family
+## Completed description-expansion family
 
-- `DescriptionSnippetRegistry` loads selected content in source order while
-  retaining upstream's identified-before-anonymous weighted choice order,
+- `DescriptionSnippetRegistry` loads the pinned English name library before
+  selected snippet content, maps gendered/unisex name usages into the eight
+  upstream categories, and retains identified-before-anonymous weighting,
   overrides, translations, duplicate-ID rejection, and checked weights.
 - Server normalization emits only the recursively reachable category closure,
   sorted canonically. Unknown tags remain literal; cycles, excessive depth,
-  excessive choices, overflows, and oversized output fail closed.
-- The simulation expands base descriptions and then selected variant
-  descriptions in constructor order. Variant text overwrites base text exactly
-  as upstream does; explicit variant modifiers expand again. Each recognized
-  tag consumes one canonical RNG draw, including one-choice and zero-total
-  categories.
+  excessive choices, overflows, oversized output, exponential repeated-DAG
+  work, and unavailable variable capacity fail closed.
+- The simulation expands a selected variant immediately, then expands the base
+  and selected variant again in the later constructor phase. The overwritten
+  first result still advances RNG exactly as upstream; explicit variant
+  modifiers expand once more. Each recognized tag consumes one canonical RNG
+  draw, including one-choice and zero-total categories.
 - The pinned C++ oracle records the exact recursive/literal boundary
   `Foo <lt>lt<gt> <unknown>` -> `Foo <lt> <unknown>`, including downstream RNG,
   plus production seed 59 for
@@ -72,6 +74,9 @@ production surface until its entire loot closure is exact.
 - Direct, per-tick snapshot, SQLite, and portable-replay conformance preserve
   an authoritative expanded item variable. The ordinary Bevy item menu renders
   that replicated description without consulting live content.
+- Production normalization retains all seven reachable `dog_tag_id`
+  categories, including 3,045 family names, 4,275 female given names, and 1,219
+  male given names. The real field boundary remains `leg_sheath6`/`VARSIZE`.
 - Protocol 89 batches the description template and its reachable weighted
   categories into this containment-family checkpoint. Schema 67 and
   CanonicalStateV65 follow because Postcard state changed; replay format and
@@ -91,17 +96,19 @@ through all four recovery modes.
 - Parser-only inventory remains separate: 7,621 item groups, 9,520 mapgen
   objects, 2,712 OMTs, and 150 starts.
 
-Current ownership sizes are 29,303 lines in `sim/lib.rs`, 3,790 in
-`sim/items.rs`, 9,758 in `protocol/lib.rs`, 1,511 in
+Current ownership sizes are 29,303 lines in `sim/lib.rs`, 3,828 in
+`sim/items.rs`, 9,758 in `protocol/lib.rs`, 1,624 in
 `protocol/item_groups.rs`, 13,065 in persistence, 8,793 in the server library,
 and 1,293 in `server/item_groups.rs`.
 
-Against `bcd8681`, this candidate adds 221 net lines to `sim/items.rs`, 208 to
+Against `bcd8681`, this family adds 259 net lines to `sim/items.rs`, 321 to
 `protocol/item_groups.rs`, and 95 to `server/item_groups.rs`. Central-file
 growth is limited to three net lines in `sim/lib.rs` for an initializer, the
 V65 domain, and the reusable comparator export, and five net lines in
-`protocol/lib.rs` for exports, initializers, and the Protocol 89 constant. No
-new item behavior is implemented in a central `lib.rs`.
+`protocol/lib.rs` for exports, initializers, and the Protocol 89 constant. The
+server executable's growth is registry wiring and production admission tests;
+the server implementation remains in `server/item_groups.rs`. No new item
+behavior is implemented in a central `lib.rs`.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
@@ -124,7 +131,7 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Latest verification
 
-The active candidate currently passes:
+The fixed implementation passes:
 
 - targeted content, protocol, simulation, server production-closure, client,
   and four-mode conformance tests;
@@ -142,17 +149,22 @@ root, so this fixture change is solely the intentional V65 domain. The named
 item-group scenario separately proves the new description representation
 through all four recovery modes. CanonicalEventsV18 is unchanged.
 
-The full formatting, all-target check, strict Clippy, 378-test workspace,
+The full formatting, all-target check, strict Clippy, 380-test workspace,
 warning-free rustdoc, content, inventory, parity, progress, astronomy, and
 dependency-boundary gates pass. All three pinned C++ oracles pass; the
-item-group oracle includes 76 assertions and the new direct comparison. The
-fixed-commit independent review is still pending, so runtime progress remains
-deliberately unbound above green parent `bcd8681`.
+item-group oracle includes 76 assertions and the direct comparison. The initial
+`13bae07` review found two P1 and two P2 defects; all four are fixed in
+`032883a`. Its replacement-tree review confirmed those runtime fixes and found
+one P3: this live status still described the pre-fix line counts, test count,
+and constructor order. The review checkpoint corrects that documentation; no
+runtime/protocol P0-P2 remains, and no other P0-P3 was confirmed. Runtime
+progress is bound to exact implementation commit `032883a` above green parent
+`bcd8681`.
 
 ## Next dependency boundary
 
-Complete and independently review this description family, then implement the
-generalized variable-size `FIT` constructor state needed by the field closure.
+Implement the generalized variable-size `FIT` constructor state needed by the
+field closure.
 Do not start cities, roads, rivers, specials, anatomy, or EOCs first. The next
 playable unlock remains the real field plus ordinary client exploration and
 loot.
