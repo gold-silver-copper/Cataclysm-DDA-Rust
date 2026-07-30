@@ -115,6 +115,7 @@ struct ItemGroupOracleObservationV1 {
     counts: Vec<ItemGroupRangeObservationV1>,
     charges: Vec<ItemGroupRangeObservationV1>,
     tool_charges: Vec<ItemGroupToolChargeObservationV1>,
+    magazine_charges: ItemGroupMagazineChargeObservationV1,
     repeated_tool_charges: ItemGroupRepeatedToolChargeObservationV1,
     modifier_rng_phase: ItemGroupModifierRngPhaseObservationV1,
     constructor_variants: Vec<ItemGroupConstructorVariantTraceV1>,
@@ -177,6 +178,53 @@ struct ItemGroupToolChargeObservationV1 {
     ammunition_type: String,
     ammunition_remaining: i32,
     remaining_capacity: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupMagazineChargeTraceV1 {
+    case_id: String,
+    seed: u32,
+    requested_charges: i32,
+    item_type: String,
+    ammunition_type: String,
+    ammunition_remaining: i32,
+    remaining_capacity: i32,
+    downstream_draw: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupMagazineChargeObservationV1 {
+    production_group: String,
+    direct: Vec<ItemGroupMagazineChargeTraceV1>,
+    production: Vec<ItemGroupMagazineChargeTraceV1>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupMagazineChargeDirectV1 {
+    case_id: String,
+    requested_charges: i32,
+    item_type: String,
+    ammunition_type: String,
+    ammunition_remaining: i32,
+    remaining_capacity: i32,
+}
+
+impl ItemGroupMagazineChargeObservationV1 {
+    fn direct_projection(&self) -> Vec<ItemGroupMagazineChargeDirectV1> {
+        self.direct
+            .iter()
+            .map(|trace| ItemGroupMagazineChargeDirectV1 {
+                case_id: trace.case_id.clone(),
+                requested_charges: trace.requested_charges,
+                item_type: trace.item_type.clone(),
+                ammunition_type: trace.ammunition_type.clone(),
+                ammunition_remaining: trace.ammunition_remaining,
+                remaining_capacity: trace.remaining_capacity,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -614,6 +662,11 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 &rust_tool_charges,
             )?;
             compare_direct_observation(
+                "item-group integral magazine charges",
+                &observation.magazine_charges.direct_projection(),
+                &rust_item_group_magazine_charge_observation()?,
+            )?;
+            compare_direct_observation(
                 "item-group repeated detachable tool charges",
                 &observation.repeated_tool_charges.direct_projection(),
                 &rust_repeated_item_group_tool_charge_observation()?,
@@ -880,6 +933,120 @@ fn validate_item_group_observation(
             serde_json::to_string(&observation.tool_charges)?
         )
         .into());
+    }
+    let expected_magazine_charges = [
+        (
+            "light_0",
+            8_675_309,
+            0,
+            "light_battery_cell",
+            "null",
+            0,
+            16,
+            8_054,
+        ),
+        (
+            "light_1",
+            8_675_309,
+            1,
+            "light_battery_cell",
+            "battery",
+            1,
+            15,
+            8_012,
+        ),
+        (
+            "light_16",
+            8_675_309,
+            16,
+            "light_battery_cell",
+            "battery",
+            16,
+            0,
+            8_012,
+        ),
+        (
+            "light_100",
+            8_675_309,
+            100,
+            "light_battery_cell",
+            "battery",
+            16,
+            0,
+            8_012,
+        ),
+        (
+            "ultralight_overflow",
+            8_675_309,
+            100,
+            "light_minus_battery_cell",
+            "battery",
+            2,
+            0,
+            8_012,
+        ),
+        (
+            "production_empty_light",
+            378,
+            -1,
+            "light_battery_cell",
+            "null",
+            0,
+            16,
+            4_351,
+        ),
+        (
+            "production_partial_light",
+            19,
+            -1,
+            "light_battery_cell",
+            "battery",
+            4,
+            12,
+            6_734,
+        ),
+        (
+            "production_full_light",
+            1,
+            -1,
+            "light_battery_cell",
+            "battery",
+            16,
+            0,
+            272,
+        ),
+        (
+            "production_full_ultralight",
+            4,
+            -1,
+            "light_minus_battery_cell",
+            "battery",
+            2,
+            0,
+            7_453,
+        ),
+    ];
+    if observation.magazine_charges.production_group != "ammo_light_batteries"
+        || observation.magazine_charges.direct.len() != 5
+        || observation.magazine_charges.production.len() != 4
+        || observation
+            .magazine_charges
+            .direct
+            .iter()
+            .chain(&observation.magazine_charges.production)
+            .zip(expected_magazine_charges)
+            .any(|(trace, expected)| {
+                trace.case_id != expected.0
+                    || trace.seed != expected.1
+                    || trace.requested_charges != expected.2
+                    || trace.item_type != expected.3
+                    || trace.ammunition_type != expected.4
+                    || trace.ammunition_remaining != expected.5
+                    || trace.remaining_capacity != expected.6
+                    || trace.downstream_draw != expected.7
+            })
+    {
+        return Err("item-group integral-magazine charge traces are incomplete".into());
     }
     if observation.repeated_tool_charges.source_group != "accesories_personal_unisex_child"
         || observation.repeated_tool_charges.seed == 0
@@ -1436,6 +1603,96 @@ fn rust_item_group_tool_charge_case(
     requested_charges: i32,
 ) -> Result<ItemGroupToolChargeObservationV1, Box<dyn std::error::Error>> {
     rust_item_group_tool_charge_case_with_replacement(requested_charges, requested_charges, None)
+}
+
+fn rust_item_group_magazine_charge_observation()
+-> Result<Vec<ItemGroupMagazineChargeDirectV1>, Box<dyn std::error::Error>> {
+    [
+        ("light_0", "light_battery_cell", 16, 0),
+        ("light_1", "light_battery_cell", 16, 1),
+        ("light_16", "light_battery_cell", 16, 16),
+        ("light_100", "light_battery_cell", 16, 100),
+        ("ultralight_overflow", "light_minus_battery_cell", 2, 100),
+    ]
+    .into_iter()
+    .map(|(case_id, item_type, capacity, requested_charges)| {
+        rust_item_group_magazine_charge_case(case_id, item_type, capacity, requested_charges)
+    })
+    .collect()
+}
+
+fn rust_item_group_magazine_charge_case(
+    case_id: &str,
+    item_type: &str,
+    capacity: u32,
+    requested_charges: i32,
+) -> Result<ItemGroupMagazineChargeDirectV1, Box<dyn std::error::Error>> {
+    let mut owner = CraftItemPrototypeV1 {
+        type_id: item_type.to_owned(),
+        charges: 0,
+        melee_damage_milli: BTreeMap::new(),
+        calories: 0,
+        quench: 0,
+        comestible_type: String::new(),
+        ammunition_type: String::new(),
+        ranged_weapon: None,
+        magazine_capacity: 0,
+        integral_magazines: Vec::new(),
+        magazine_wells: Vec::new(),
+        ammunition_containers: Vec::new(),
+        residual_energy_millijoules: 0,
+        powered_tool: None,
+        containment: ItemContainmentProfileV1::default(),
+    };
+    owner.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+        pocket_index: 0,
+        pocket_id: String::from("MAGAZINE"),
+        ammunition_type: String::from("battery"),
+        capacity,
+        rigid: true,
+        reloadable: false,
+        unloadable: false,
+    }];
+    let mut ammunition = owner.clone();
+    ammunition.type_id = String::from("battery");
+    ammunition.charges = 1;
+    ammunition.ammunition_type = String::from("battery");
+    ammunition.integral_magazines.clear();
+    ammunition.containment = ItemContainmentProfileV1 {
+        count_by_charges: true,
+        stack_size: 100,
+        ..ItemContainmentProfileV1::default()
+    };
+    let item = ItemGroupItemPrototypeV1 {
+        prototype: owner,
+        maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
+        variants: Vec::new(),
+        description_expansion: None,
+        snippets: Vec::new(),
+        initial_variables: BTreeMap::new(),
+        modifier_side_effects_supported: true,
+        charges: Some(cdda_protocol::InclusiveI32RangeV1 {
+            minimum: requested_charges,
+            maximum: requested_charges,
+        }),
+        minimum_one_charge: false,
+        tool_charge_storage: Some(ItemGroupToolChargeStorageV1::Integral { ammunition }),
+        charges_supported: true,
+        modifier_container_capacity_applies: false,
+        contents_insertion_supported: true,
+    };
+    let projection = cdda_sim::item_group_integral_charge_projection(&item, requested_charges)
+        .map_err(|error| format!("Rust integral-magazine charge projection failed: {error}"))?;
+    Ok(ItemGroupMagazineChargeDirectV1 {
+        case_id: case_id.to_owned(),
+        requested_charges,
+        item_type: projection.item_type,
+        ammunition_type: projection
+            .ammunition_type
+            .unwrap_or_else(|| String::from("null")),
+        ammunition_remaining: projection.ammunition_remaining,
+        remaining_capacity: i32::try_from(projection.remaining_capacity)?,
+    })
 }
 
 fn rust_repeated_item_group_tool_charge_observation()

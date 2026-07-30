@@ -141,9 +141,11 @@ pub struct InclusiveU16RangeV1 {
     pub maximum: u16,
 }
 
-/// Canonical storage selected by pinned `Item_modifier::charges` for a tool.
-/// The server resolves content defaults before this reaches simulation so the
-/// interpreter never guesses either a magazine or an ammunition item.
+/// Canonical storage selected by pinned `Item_modifier::charges` for any
+/// supported tool or magazine. The historical type name is retained so
+/// this generalized admission does not alter the Postcard representation. The
+/// server resolves content defaults before simulation, which never guesses a
+/// magazine or ammunition item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ItemGroupToolChargeStorageV1 {
     Integral {
@@ -182,7 +184,7 @@ pub struct ItemGroupItemPrototypeV1 {
     /// Count-by-charge items clamp an explicit zero charge roll to one in the
     /// pinned implementation. Non-charge items leave this false.
     pub minimum_one_charge: bool,
-    /// Fully resolved nested storage used when `charges` targets tool ammo.
+    /// Fully resolved nested storage used when `charges` targets ammunition.
     /// `None` means charges remain on the owning instance.
     pub tool_charge_storage: Option<ItemGroupToolChargeStorageV1>,
     pub charges_supported: bool,

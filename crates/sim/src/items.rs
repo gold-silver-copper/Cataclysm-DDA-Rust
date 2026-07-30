@@ -14,7 +14,7 @@ use cdda_protocol::{
     item_containment_volume_milliliters, item_containment_weight_milligrams,
 };
 use rand_chacha::ChaCha8Rng;
-use rand_core::Rng;
+use rand_core::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -918,6 +918,56 @@ pub fn item_group_fitted_after_phase(
     already_fitted || (variable_size && one_in_three_succeeded)
 }
 
+/// Direct, renderer-free projection of the generalized integral-ammunition
+/// transition used by the pinned C++ differential comparator. This executes
+/// the production constructor and charge planner; it does not duplicate their
+/// clamp or empty-ammunition rules in tooling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupIntegralChargeProjection {
+    pub item_type: String,
+    pub ammunition_type: Option<String>,
+    pub ammunition_remaining: i32,
+    pub remaining_capacity: u32,
+}
+
+pub fn item_group_integral_charge_projection(
+    item: &ItemGroupItemPrototypeV1,
+    requested_charges: i32,
+) -> Result<ItemGroupIntegralChargeProjection, SimError> {
+    if requested_charges < 0
+        || !matches!(
+            item.tool_charge_storage,
+            Some(ItemGroupToolChargeStorageV1::Integral { .. })
+        )
+    {
+        return Err(SimError::InvalidItem);
+    }
+    let mut rng = ChaCha8Rng::from_seed([0; 32]);
+    let mut planned = construct_item_group_item(item, &mut rng)?;
+    apply_item_group_charges(
+        &mut planned,
+        Some(cdda_protocol::InclusiveI32RangeV1 {
+            minimum: requested_charges,
+            maximum: requested_charges,
+        }),
+        None,
+        &mut rng,
+    )?;
+    let [pocket] = planned.prototype.integral_magazines.as_slice() else {
+        return Err(SimError::InvalidItem);
+    };
+    let loaded = planned.integral_ammunition.get(&pocket.pocket_index);
+    let ammunition_remaining = loaded.map_or(0, |ammunition| ammunition.prototype.charges);
+    let ammunition_type = loaded.map(|ammunition| ammunition.prototype.ammunition_type.clone());
+    let loaded = u32::try_from(ammunition_remaining).map_err(|_| SimError::InvalidItem)?;
+    Ok(ItemGroupIntegralChargeProjection {
+        item_type: planned.prototype.type_id,
+        ammunition_type,
+        ammunition_remaining,
+        remaining_capacity: pocket.capacity.saturating_sub(loaded),
+    })
+}
+
 pub(super) fn item_profile_has_flag(
     profile: &cdda_protocol::ItemContainmentProfileV1,
     expected: &str,
@@ -1210,8 +1260,9 @@ fn modifier_container_charge_capacity(
     container: &PlannedItemSpawn,
 ) -> Result<Option<i32>, SimError> {
     if !planned.modifier_container_capacity_applies || planned.tool_charge_storage.is_some() {
-        // Tool ammunition capacity is owned by the tool/magazine rather than
-        // by the modifier container in pinned Item_modifier.
+        // Ammunition capacity is owned by the integral pocket or detachable
+        // magazine rather than by the modifier container in pinned
+        // Item_modifier.
         return Ok(None);
     }
     let mut physical = container

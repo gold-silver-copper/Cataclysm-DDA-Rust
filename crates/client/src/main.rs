@@ -5492,6 +5492,7 @@ mod tests {
             residual_energy_millijoules: 123_456,
         }];
         battery_snapshot.controlled_actor.inventory = vec![integral_owner.clone()];
+        assert!(item_menu_label(&integral_owner, None).contains("p2 0/1 battery + 123456 mJ"));
         assert!(matches!(
             first_pocket_item_removal(&battery_snapshot),
             Some(ClientAction::RemovePocketItem {
@@ -5500,6 +5501,26 @@ mod tests {
                 contained_item,
             }) if owner_item == integral_owner.id && contained_item == ItemId::new(1, 10)
         ));
+
+        let mut light_battery = item(15, "", "", None);
+        light_battery.type_id = String::from("light_battery_cell");
+        let mut loaded_battery = item(16, "battery", "", None);
+        loaded_battery.charges = 16;
+        light_battery.integral_magazines = vec![cdda_protocol::IntegralMagazinePocketSnapshotV1 {
+            pocket_index: 0,
+            pocket_id: String::from("MAGAZINE"),
+            ammunition_type: String::from("battery"),
+            capacity: 16,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+            loaded_ammunition: Some(Box::new(loaded_battery)),
+            residual_energy_millijoules: 0,
+        }];
+        assert!(
+            item_menu_label(&light_battery, None).contains("p0 16/16 battery"),
+            "the normal Bevy item menu must expose generated integral ammunition"
+        );
 
         let mut quiver = item(11, "", "", None);
         quiver.type_id = String::from("quiver");

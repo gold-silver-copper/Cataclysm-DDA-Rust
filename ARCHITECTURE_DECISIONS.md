@@ -3189,3 +3189,44 @@ containers, food temperature, corpse construction, and generalized wrapper
 shapes. Those must be completed as coherent engines; FIT does not earn runtime
 progress until the real field is generated, explored, looted, persisted, and
 client-accessible.
+
+## Generalized item-group ammunition loading without representation churn
+
+The ammunition-loading increment retains Protocol 90, schema 68,
+CanonicalStateV66, worldgen algorithm 2, replay format 3, and CanonicalEventsV18.
+The existing integral/detachable `ItemGroupToolChargeStorageV1` Postcard shape
+already describes storage independently of the owner subtype; its historical
+name is source terminology, not a tool-only invariant. Reusing it changes
+neither wire nor persisted representation, so a version bump would be ceremony
+rather than a schema change.
+
+Server normalization now resolves that descriptor for strict magazines and
+tools. A strict single integral magazine loads
+its registry-default ammunition, preserves an exact zero request as empty, and
+clamps a positive request to pocket capacity. Integral tools use the same
+engine. A detachable tool retains the earlier exact default-magazine path.
+Every gun remains fail closed: pinned integral guns retain owner-local charges,
+while detachable guns route through `item::ammo_set`; both have state ownership
+and constructor RNG semantics distinct from the magazine/tool planner.
+Multi-well, missing-default, incompatible-ammunition, constructor-state, and
+signed capacity-sentinel cases also remain fail closed.
+
+The pinned C++ oracle retains five direct boundary traces: zero, one, exact
+capacity, overflow for `light_battery_cell`, and overflow for the two-charge
+`light_minus_battery_cell`. It also retains production
+`ammo_light_batteries` witnesses at seeds 378, 19, 1, and 4 for empty, partial,
+clamped-full, and alternate-magazine results. Every trace includes item type,
+ammunition type/count, remaining capacity, and the exact downstream RNG draw.
+The reusable Rust projection calls the production constructor and charge
+planner rather than reimplementing the clamp. The shared named-item-group
+scenario preserves the generated magazine and nested ammunition through direct,
+per-tick snapshot, SQLite, and portable replay execution; the ordinary Bevy
+item menu displays the replicated integral charge count.
+
+Production normalization now admits `ammo_light_batteries`. This earns no
+weighted runtime points because the real `field` is not yet generated or
+playable. Its next audited fail-closed boundary is default-container ownership:
+`bottle_otc_painkiller_1_20` reaches `aspirin`, whose finalized default
+containment is retained but not yet materialized. That containment family must
+be completed before food temperature, corpse construction, or later field
+dependencies are expanded.

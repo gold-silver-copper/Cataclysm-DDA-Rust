@@ -54,11 +54,14 @@ use cdda_protocol::{
     ItemGroupTargetV1,
 };
 
+pub use items::{
+    ItemGroupIntegralChargeProjection, expand_item_description, item_group_fitted_after_phase,
+    item_group_integral_charge_projection,
+};
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
     item_from_craft_prototype, item_from_planned_spawn, plan_item_group_source,
 };
-pub use items::{expand_item_description, item_group_fitted_after_phase};
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
 pub const DEFAULT_ACTOR_HP: i32 = 100;

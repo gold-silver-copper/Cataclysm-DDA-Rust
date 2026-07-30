@@ -222,6 +222,101 @@ struct tool_charge_trace {
     int remaining_capacity = 0;
 };
 
+struct magazine_charge_trace {
+    std::string case_id;
+    unsigned int seed = 0;
+    int requested_charges = 0;
+    std::string item_type;
+    std::string ammunition_type;
+    int ammunition_remaining = 0;
+    int remaining_capacity = 0;
+    int downstream_draw = 0;
+};
+
+struct magazine_charge_observation {
+    std::string production_group;
+    std::vector<magazine_charge_trace> direct;
+    std::vector<magazine_charge_trace> production;
+};
+
+magazine_charge_trace observe_direct_magazine_charges( const std::string &case_id,
+        const itype_id &item_type, int requested_charges )
+{
+    constexpr unsigned int seed = 8675309;
+    Single_item_creator creator( item_type.str(), Single_item_creator::S_ITEM, 100,
+                                 "Rust item-group integral magazine charge oracle" );
+    creator.modifier.emplace();
+    creator.modifier->charges = { requested_charges, requested_charges };
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    const item &magazine = items.front();
+    return {
+        case_id,
+        seed,
+        requested_charges,
+        magazine.typeId().str(),
+        magazine.ammo_current().str(),
+        magazine.ammo_remaining(),
+        magazine.remaining_ammo_capacity(),
+        rng( 0, 9999 )
+    };
+}
+
+magazine_charge_trace observe_production_magazine_charges( const std::string &case_id,
+        const itype_id &item_type, int minimum_remaining, int maximum_remaining )
+{
+    const item_group_id group_id( "ammo_light_batteries" );
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item_group::ItemList items = item_group::items_from( group_id );
+        if( items.size() != 1 || items.front().typeId() != item_type ) {
+            continue;
+        }
+        const item &magazine = items.front();
+        const int remaining = magazine.ammo_remaining();
+        if( remaining < minimum_remaining || remaining > maximum_remaining ) {
+            continue;
+        }
+        return {
+            case_id,
+            seed,
+            -1,
+            magazine.typeId().str(),
+            magazine.ammo_current().str(),
+            remaining,
+            magazine.remaining_ammo_capacity(),
+            rng( 0, 9999 )
+        };
+    }
+    FAIL( "could not find bounded production integral-magazine charge witness" );
+    return {};
+}
+
+magazine_charge_observation observe_magazine_charges()
+{
+    magazine_charge_observation observation;
+    observation.production_group = "ammo_light_batteries";
+    for( const int requested : { 0, 1, 16, 100 } ) {
+        observation.direct.push_back( observe_direct_magazine_charges(
+                                          string_format( "light_%d", requested ),
+                                          itype_id( "light_battery_cell" ), requested ) );
+    }
+    observation.direct.push_back( observe_direct_magazine_charges(
+                                      "ultralight_overflow", itype_id( "light_minus_battery_cell" ), 100 ) );
+    observation.production.push_back( observe_production_magazine_charges(
+                                          "production_empty_light", itype_id( "light_battery_cell" ), 0, 0 ) );
+    observation.production.push_back( observe_production_magazine_charges(
+                                          "production_partial_light", itype_id( "light_battery_cell" ), 1, 15 ) );
+    observation.production.push_back( observe_production_magazine_charges(
+                                          "production_full_light", itype_id( "light_battery_cell" ), 16, 16 ) );
+    observation.production.push_back( observe_production_magazine_charges(
+                                          "production_full_ultralight", itype_id( "light_minus_battery_cell" ), 2, 2 ) );
+    return observation;
+}
+
 tool_charge_trace observe_tool_charges( int requested_charges )
 {
     Single_item_creator creator( "wearable_light", Single_item_creator::S_ITEM, 100,
@@ -948,6 +1043,7 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     for( const int requested : { 0, 1, 56, 100 } ) {
         tool_charges.push_back( observe_tool_charges( requested ) );
     }
+    const magazine_charge_observation magazine_charges = observe_magazine_charges();
     const repeated_tool_charge_trace repeated_tool_charges = observe_repeated_tool_charges();
     REQUIRE( repeated_tool_charges.seed > 0 );
 
@@ -1162,6 +1258,31 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.end_object();
         }
         json.end_array();
+
+        const auto write_magazine_charge_traces = [&]( const std::vector<magazine_charge_trace> &traces ) {
+            json.start_array();
+            for( const magazine_charge_trace &trace : traces ) {
+                json.start_object();
+                json.member( "case_id", trace.case_id );
+                json.member( "seed", trace.seed );
+                json.member( "requested_charges", trace.requested_charges );
+                json.member( "item_type", trace.item_type );
+                json.member( "ammunition_type", trace.ammunition_type );
+                json.member( "ammunition_remaining", trace.ammunition_remaining );
+                json.member( "remaining_capacity", trace.remaining_capacity );
+                json.member( "downstream_draw", trace.downstream_draw );
+                json.end_object();
+            }
+            json.end_array();
+        };
+        json.member( "magazine_charges" );
+        json.start_object();
+        json.member( "production_group", magazine_charges.production_group );
+        json.member( "direct" );
+        write_magazine_charge_traces( magazine_charges.direct );
+        json.member( "production" );
+        write_magazine_charge_traces( magazine_charges.production );
+        json.end_object();
 
         json.member( "repeated_tool_charges" );
         json.start_object();

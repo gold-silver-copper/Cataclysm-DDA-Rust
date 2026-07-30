@@ -427,8 +427,12 @@ pub(super) fn runtime_item_group_item(
     validate_item_group_item_spawn(item, &prototype, false)?;
     let modifier_side_effects_supported =
         validate_item_group_item_spawn(item, &prototype, true).is_ok();
-    let tool_charge_storage = runtime_tool_charge_storage(item, &prototype, content)?;
-    let charges_supported = if item.subtypes.contains("TOOL") {
+    let tool_charge_storage = runtime_item_charge_storage(item, &prototype, content)?;
+    let uses_ammunition_loading = item
+        .subtypes
+        .iter()
+        .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE"));
+    let charges_supported = if uses_ammunition_loading {
         tool_charge_storage.is_some()
     } else {
         item_group_charges_supported(item)
@@ -486,12 +490,22 @@ pub(super) fn runtime_item_group_item(
     })
 }
 
-fn runtime_tool_charge_storage(
+fn runtime_item_charge_storage(
     item: &ItemDefinition,
     prototype: &CraftItemPrototypeV1,
     content: RuntimeItemGroupContent<'_>,
 ) -> Result<Option<ItemGroupToolChargeStorageV1>, Box<dyn std::error::Error>> {
-    if !item.subtypes.contains("TOOL") {
+    let uses_ammunition_loading = item
+        .subtypes
+        .iter()
+        .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE"));
+    if !uses_ammunition_loading {
+        return Ok(None);
+    }
+    if !item_group_charge_storage_owner_supported(item) {
+        // Pinned guns retain a separate owner-local/ammo_set transition and
+        // RNG schedule. Neither integral nor detachable gun charges can reuse
+        // the magazine/tool planner, so the complete gun family stays closed.
         return Ok(None);
     }
     if let [pocket] = prototype.integral_magazines.as_slice()
@@ -518,13 +532,13 @@ fn runtime_tool_charge_storage(
         .get(&raw_well.default_magazine)
         .ok_or_else(|| {
             format!(
-                "item-group tool {} references missing default magazine {}",
+                "item-group charge owner {} references missing default magazine {}",
                 item.id, raw_well.default_magazine
             )
         })?;
     let magazine_shape = magazine_definition.strict_magazine().ok_or_else(|| {
         format!(
-            "item-group tool {} default magazine {} is not a strict single-pocket magazine",
+            "item-group charge owner {} default magazine {} is not a strict single-pocket magazine",
             item.id, magazine_definition.id
         )
     })?;
@@ -534,7 +548,7 @@ fn runtime_tool_charge_storage(
         .is_err()
     {
         return Err(format!(
-            "item-group tool {} default magazine {} is incompatible with well {}",
+            "item-group charge owner {} default magazine {} is incompatible with well {}",
             item.id, magazine_definition.id, well.pocket_index
         )
         .into());
@@ -551,8 +565,12 @@ fn runtime_tool_charge_storage(
     }))
 }
 
+fn item_group_charge_storage_owner_supported(item: &ItemDefinition) -> bool {
+    !item.subtypes.contains("GUN")
+}
+
 fn runtime_default_ammunition_prototype(
-    tool: &ItemDefinition,
+    owner: &ItemDefinition,
     ammunition_type: &str,
     content: RuntimeItemGroupContent<'_>,
 ) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
@@ -561,15 +579,15 @@ fn runtime_default_ammunition_prototype(
         .get(ammunition_type)
         .ok_or_else(|| {
             format!(
-                "item-group tool {} references missing ammunition type {ammunition_type}",
-                tool.id
+                "item-group charge owner {} references missing ammunition type {ammunition_type}",
+                owner.id
             )
         })?
         .default_item;
     let definition = content.items.get(default_id).ok_or_else(|| {
         format!(
-            "item-group tool {} has no concrete default ammunition {} for {ammunition_type}",
-            tool.id, default_id
+            "item-group charge owner {} has no concrete default ammunition {} for {ammunition_type}",
+            owner.id, default_id
         )
     })?;
     validate_charge_item_constructor_state(definition)?;
@@ -577,8 +595,8 @@ fn runtime_default_ammunition_prototype(
     validate_item_group_item_spawn(definition, &ammunition, false)?;
     if ammunition.ammunition_type != ammunition_type {
         return Err(format!(
-            "item-group tool {} default ammunition {} does not match {ammunition_type}",
-            tool.id, definition.id
+            "item-group charge owner {} default ammunition {} does not match {ammunition_type}",
+            owner.id, definition.id
         )
         .into());
     }
@@ -626,7 +644,7 @@ fn validate_charge_item_constructor_state(
         || !item.variables.is_empty()
     {
         return Err(format!(
-            "tool-charge item {} has constructor variant, snippet, or variable state that is not represented by ItemGroupToolChargeStorageV1",
+            "ammunition-loading item {} has constructor variant, snippet, or variable state that is not represented by ItemGroupToolChargeStorageV1",
             item.id
         )
         .into());
@@ -984,16 +1002,20 @@ pub(super) fn runtime_item_group_charges(
         minimum: charges.minimum.min(charges.maximum),
         maximum: charges.maximum,
     };
-    if (item.subtypes.contains("GUN") || item.subtypes.contains("MAGAZINE"))
-        || (item.subtypes.contains("TOOL") && !item_group_charges_supported(item))
-    {
-        return Err(format!(
-            "item-group charges for {} require unimplemented ammunition loading",
-            item.id
-        )
-        .into());
-    }
     let liquid = matches!(item.phase.as_str(), "LIQUID" | "liquid");
+    if item
+        .subtypes
+        .iter()
+        .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE"))
+    {
+        return Ok((
+            Some(InclusiveI32RangeV1 {
+                minimum: charges.minimum,
+                maximum: charges.maximum,
+            }),
+            false,
+        ));
+    }
     if !item_group_charges_supported(item) {
         if charges.minimum == charges.maximum {
             // Pinned Item_modifier computes the fixed value without consuming
@@ -1036,19 +1058,6 @@ fn normalize_item_group_charges(
 fn item_group_charges_supported(item: &ItemDefinition) -> bool {
     if item.count_by_charges() || matches!(item.phase.as_str(), "LIQUID" | "liquid") {
         return true;
-    }
-    if item.subtypes.contains("TOOL") {
-        let integral = item
-            .pockets
-            .iter()
-            .filter(|pocket| pocket.strict_integral_magazine().is_some())
-            .count();
-        let detachable = item
-            .magazine_wells
-            .iter()
-            .filter(|well| !well.default_magazine.is_empty())
-            .count();
-        return (integral == 1 && detachable == 0) || (integral == 0 && detachable == 1);
     }
     item.flags.contains("CAN_HAVE_CHARGES")
 }
@@ -1135,6 +1144,26 @@ mod tests {
             cdda_content::ItemVariableValueDefinition::Integer(7),
         );
         assert!(validate_charge_item_constructor_state(&variable).is_err());
+    }
+
+    #[test]
+    fn gun_charge_storage_stays_fail_closed_for_every_pocket_shape() {
+        let gun = ItemDefinition {
+            id: String::from("test_detachable_gun"),
+            subtypes: BTreeSet::from([String::from("GUN")]),
+            ..ItemDefinition::default()
+        };
+        assert!(
+            !item_group_charge_storage_owner_supported(&gun),
+            "integral and detachable guns use distinct owner-local/ammo_set state and RNG semantics"
+        );
+
+        let tool = ItemDefinition {
+            id: String::from("test_detachable_tool"),
+            subtypes: BTreeSet::from([String::from("TOOL")]),
+            ..ItemDefinition::default()
+        };
+        assert!(item_group_charge_storage_owner_supported(&tool));
     }
 
     #[test]

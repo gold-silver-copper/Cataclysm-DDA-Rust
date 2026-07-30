@@ -40,6 +40,22 @@
       { "requested_charges": 56, "tool_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 56, "remaining_capacity": 0 },
       { "requested_charges": 100, "tool_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 56, "remaining_capacity": 0 }
     ],
+    "magazine_charges": {
+      "production_group": "ammo_light_batteries",
+      "direct": [
+        { "case_id": "light_0", "seed": 8675309, "requested_charges": 0, "item_type": "light_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 16, "downstream_draw": 8054 },
+        { "case_id": "light_1", "seed": 8675309, "requested_charges": 1, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 1, "remaining_capacity": 15, "downstream_draw": 8012 },
+        { "case_id": "light_16", "seed": 8675309, "requested_charges": 16, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 16, "remaining_capacity": 0, "downstream_draw": 8012 },
+        { "case_id": "light_100", "seed": 8675309, "requested_charges": 100, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 16, "remaining_capacity": 0, "downstream_draw": 8012 },
+        { "case_id": "ultralight_overflow", "seed": 8675309, "requested_charges": 100, "item_type": "light_minus_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 2, "remaining_capacity": 0, "downstream_draw": 8012 }
+      ],
+      "production": [
+        { "case_id": "production_empty_light", "seed": 378, "requested_charges": -1, "item_type": "light_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 16, "downstream_draw": 4351 },
+        { "case_id": "production_partial_light", "seed": 19, "requested_charges": -1, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 4, "remaining_capacity": 12, "downstream_draw": 6734 },
+        { "case_id": "production_full_light", "seed": 1, "requested_charges": -1, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 16, "remaining_capacity": 0, "downstream_draw": 272 },
+        { "case_id": "production_full_ultralight", "seed": 4, "requested_charges": -1, "item_type": "light_minus_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 2, "remaining_capacity": 0, "downstream_draw": 7453 }
+      ]
+    },
     "repeated_tool_charges": {
       "source_group": "accesories_personal_unisex_child",
       "seed": 235,

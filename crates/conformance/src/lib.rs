@@ -1365,6 +1365,33 @@ mod tests {
                 magazine: magazine.prototype.clone(),
                 ammunition: Box::new(ammunition.prototype.clone()),
             });
+        let mut light_battery = item_leaf(
+            "light_battery_cell",
+            Some(cdda_protocol::InclusiveI32RangeV1 {
+                minimum: 100,
+                maximum: 100,
+            }),
+        );
+        let cdda_protocol::ItemGroupTargetV1::Item(light_battery_item) = &mut light_battery else {
+            unreachable!("light-battery fixture is a direct item")
+        };
+        light_battery_item.minimum_one_charge = false;
+        light_battery_item.modifier_container_capacity_applies = false;
+        light_battery_item.prototype.charges = 0;
+        light_battery_item.prototype.integral_magazines =
+            vec![cdda_protocol::IntegralMagazinePocketPrototypeV1 {
+                pocket_index: 0,
+                pocket_id: String::from("MAGAZINE"),
+                ammunition_type: String::from("battery"),
+                capacity: 16,
+                rigid: true,
+                reloadable: false,
+                unloadable: false,
+            }];
+        light_battery_item.tool_charge_storage =
+            Some(cdda_protocol::ItemGroupToolChargeStorageV1::Integral {
+                ammunition: ammunition.prototype.clone(),
+            });
         let mut item_groups = vec![ItemGroupDefinitionV1 {
             group_id: String::from("wall_bash_results"),
             graph: cdda_protocol::ItemGroupGraphV1 {
@@ -1438,6 +1465,23 @@ mod tests {
                             variant_id: None,
                             event: None,
                             target: wearable_light,
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                        },
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                                minimum: 0,
+                                maximum: 0,
+                            }),
+                            variant_id: None,
+                            event: None,
+                            target: light_battery,
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
@@ -1642,7 +1686,7 @@ mod tests {
                 .is_some_and(|state| state.sealed),
             "the group-level seal must survive every recovery mode"
         );
-        assert_eq!(pocket.contents.len(), 4);
+        assert_eq!(pocket.contents.len(), 5);
         assert!(
             pocket
                 .contents
@@ -1659,6 +1703,7 @@ mod tests {
         assert_eq!(
             contained,
             [
+                ("light_battery_cell", 0),
                 ("nail", 4),
                 ("splinter", 1),
                 ("splinter", 1),
@@ -1683,6 +1728,18 @@ mod tests {
         assert_eq!(battery.type_id, "battery");
         assert_eq!(battery.charges, 56);
         assert!(headlamp.id < installed.id && installed.id < battery.id);
+        let light_battery = pocket
+            .contents
+            .iter()
+            .find(|item| item.type_id == "light_battery_cell")
+            .expect("the generalized integral-ammunition path should generate a light battery");
+        let light_ammunition = light_battery.integral_magazines[0]
+            .loaded_ammunition
+            .as_deref()
+            .expect("the light battery should retain clamped ammunition");
+        assert_eq!(light_ammunition.type_id, "battery");
+        assert_eq!(light_ammunition.charges, 16);
+        assert!(light_battery.id < light_ammunition.id);
         let splinters = pocket
             .contents
             .iter()

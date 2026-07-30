@@ -4413,9 +4413,17 @@ mod tests {
         );
 
         ordinary.subtypes.insert(String::from("TOOL"));
-        assert!(
-            runtime_item_group_charges(&ordinary, Some(range)).is_err(),
-            "tool charge modifiers require ammo-loading semantics"
+        assert_eq!(
+            runtime_item_group_charges(&ordinary, Some(range))
+                .expect("ammunition owners retain the range for later storage normalization"),
+            (
+                Some(InclusiveI32RangeV1 {
+                    minimum: 0,
+                    maximum: 7,
+                }),
+                false,
+            ),
+            "range parsing must stay separate from fail-closed storage resolution"
         );
     }
 
@@ -4492,6 +4500,51 @@ mod tests {
         assert_eq!(magazine.type_id, "medium_battery_cell");
         assert_eq!(magazine.integral_magazines[0].capacity, 56);
         assert_eq!(charge_ammunition.type_id, "battery");
+        let light_batteries = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("ammo_light_batteries")
+                .expect("field closure should retain light batteries"),
+            item_group_content,
+        )
+        .expect("the generalized ammunition-loading engine should admit light batteries");
+        let light_battery = light_batteries
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .find_map(|entry| match &entry.target {
+                ItemGroupTargetV1::Item(item) if item.prototype.type_id == "light_battery_cell" => {
+                    Some(item)
+                }
+                ItemGroupTargetV1::Item(_)
+                | ItemGroupTargetV1::Group(_)
+                | ItemGroupTargetV1::Node(_) => None,
+            })
+            .expect("light batteries should retain their integral ammunition storage");
+        let Some(cdda_protocol::ItemGroupToolChargeStorageV1::Integral {
+            ammunition: light_charge_ammunition,
+        }) = &light_battery.tool_charge_storage
+        else {
+            panic!("light battery charges should resolve integral storage")
+        };
+        assert_eq!(light_battery.prototype.integral_magazines[0].capacity, 16);
+        assert_eq!(light_charge_ammunition.type_id, "battery");
+        let bbgun = items
+            .get("bbgun")
+            .expect("the pinned registry should retain the integral BB gun");
+        assert_eq!(
+            runtime_item_group_item(
+                bbgun,
+                Some(cdda_content::ItemGroupChargesRange {
+                    minimum: 0,
+                    maximum: 150,
+                }),
+                item_group_content,
+            )
+            .expect_err("gun charge modifiers require their distinct owner-local engine")
+            .to_string(),
+            "item group item bbgun cannot retain charge modifiers"
+        );
         let necklaces = runtime_item_group_graph(
             field_graph
                 .groups
@@ -4605,15 +4658,15 @@ mod tests {
         assert_eq!(
             field_runtime_errors.first(),
             Some(&(
-                "ammo_light_batteries",
-                String::from(
-                    "item-group charges for light_battery_cell require unimplemented ammunition loading"
-                ),
+                "bottle_otc_painkiller_1_20",
+                String::from("item group item aspirin requires unimplemented default containment"),
             )),
             "the field closure must retain its exact next unsupported semantic boundary"
         );
         assert!(field_runtime_errors.iter().all(|(group, error)| {
-            *group != "accessory_weaponcarry" && !error.contains("variable-size FIT")
+            !matches!(*group, "accessory_weaponcarry" | "ammo_light_batteries")
+                && !error.contains("variable-size FIT")
+                && !error.contains("unimplemented ammunition loading")
         }));
 
         let phone_case_graph = item_groups

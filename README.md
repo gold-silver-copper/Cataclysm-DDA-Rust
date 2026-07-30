@@ -789,14 +789,25 @@ leaf consumes the pinned one-in-three phase; only `VARSIZE` items gain `FIT`,
 and raw wrapper construction does not consume a second FIT phase. Crafting
 always fits variable-size outputs and byproducts, while default disassembly
 components inherit fit from a fitted target and exact retained components keep
-their own state. The pinned 80-assertion C++ oracle records exact direct and
+their own state. The pinned oracle's FIT traces record exact direct and
 production fitted/unfitted witnesses for `leg_sheath6`, including names and
 downstream RNG, and compares the transition directly with Rust. The normal
 client item menu renders `(poor fit)` from replicated state. Direct, per-tick
 snapshot, SQLite, and portable replay execution preserve FIT. The field closure
-now passes `accessory_weaponcarry`; its next exact boundary is battery loading
-for `ammo_light_batteries`. Runtime points remain unchanged until the real
-field is generated, explored, looted, persisted, and client-accessible.
+now passes `accessory_weaponcarry`.
+
+Without changing Protocol 90 or schema 68, the generalized ammunition-loading
+engine reuses the existing integral/detachable canonical descriptor for strict
+magazines and supported tools. Every gun remains fail closed because its
+owner-local or `ammo_set` state and constructor/RNG semantics differ. The 85-assertion pinned C++
+item-group oracle fixes direct zero/one/capacity/overflow traces plus production
+`ammo_light_batteries` empty, partial, full, and ultra-light witnesses, including
+downstream RNG; the Rust comparator executes the production charge transition.
+Direct, per-tick snapshot, SQLite, and replay modes preserve nested ammunition,
+and the Bevy item menu shows its authoritative charge count. The field closure
+now passes `ammo_light_batteries` and stops at default-container ownership for
+`aspirin` in `bottle_otc_painkiller_1_20`. Runtime points remain unchanged until
+the real field is generated, explored, looted, persisted, and client-accessible.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned
