@@ -646,6 +646,71 @@
         "frozen": false
       }
     ],
+    "named_snippet_categories": [
+      {
+        "case_id": "months_old_news",
+        "item_type": "months_old_newspaper",
+        "category": "months_old_news",
+        "choice_ids": [
+          "months_old_news_1", "months_old_news_2", "months_old_news_3",
+          "months_old_news_4", "months_old_news_5", "months_old_news_6",
+          "months_old_news_8", "months_old_news_9", "months_old_news_10",
+          "months_old_news_11", "months_old_news_12", "months_old_news_13",
+          "months_old_news_14", "months_old_news_15", "months_old_news_16",
+          "months_old_news_17", "months_old_news_18", "months_old_news_19",
+          "months_old_news_20", "months_old_news_21", "months_old_news_22",
+          "months_old_news_23", "months_old_news_24", "months_old_news_25"
+        ],
+        "first_text": "SUPPORT THE COUNTRIES THAT SUPPORT YOURS - PRESIDENT: Earlier today, in an unexpected and unpopular decision, the president suggested the possible institution of a peacetime draft in response to increasing Chinese aggression towards Taiwan and the Philippines.  \"We must pray for the best while preparing for the worst.  We cannot abandon key allies in the face of Chinese bullying.\"",
+        "last_text": "GIANT INSECTS: NOTHING TO WORRY ABOUT?.  Amidst rising concerns about massive insects, the USDA has issued an official statement.  In it, they stated that farmers should not worry about the increasing insect sizes.  \"We are working tightly with experts in the pesticide industry, to ensure that even IF insects keep getting bigger, so does our arsenal to combat them,\" a USDA official declared.  On top of that, they assured that \"the USA has stockpiled enough food for years to come.\"",
+        "first_selection": {
+          "seed": 16,
+          "snippet_id": "months_old_news_1",
+          "text": "SUPPORT THE COUNTRIES THAT SUPPORT YOURS - PRESIDENT: Earlier today, in an unexpected and unpopular decision, the president suggested the possible institution of a peacetime draft in response to increasing Chinese aggression towards Taiwan and the Philippines.  \"We must pray for the best while preparing for the worst.  We cannot abandon key allies in the face of Chinese bullying.\"",
+          "downstream_draw": 8169
+        },
+        "last_selection": {
+          "seed": 20,
+          "snippet_id": "months_old_news_25",
+          "text": "GIANT INSECTS: NOTHING TO WORRY ABOUT?.  Amidst rising concerns about massive insects, the USDA has issued an official statement.  In it, they stated that farmers should not worry about the increasing insect sizes.  \"We are working tightly with experts in the pesticide industry, to ensure that even IF insects keep getting bigger, so does our arsenal to combat them,\" a USDA official declared.  On top of that, they assured that \"the USA has stockpiled enough food for years to come.\"",
+          "downstream_draw": 2020
+        }
+      },
+      {
+        "case_id": "wallet_photos",
+        "item_type": "wallet_photo",
+        "category": "wallet_photos",
+        "choice_ids": [
+          "wallet_picture_1", "wallet_picture_2", "wallet_picture_3",
+          "wallet_picture_4", "wallet_picture_5", "wallet_picture_6",
+          "wallet_picture_7", "wallet_picture_8", "wallet_picture_9",
+          "wallet_picture_10", "wallet_picture_11", "wallet_picture_12",
+          "wallet_picture_13", "wallet_picture_14", "wallet_picture_15",
+          "wallet_picture_16", "wallet_picture_17", "wallet_picture_18",
+          "wallet_picture_19", "wallet_picture_20", "wallet_picture_21",
+          "wallet_picture_22", "wallet_picture_23", "wallet_picture_24",
+          "wallet_picture_25", "wallet_picture_26", "wallet_picture_27",
+          "wallet_picture_28", "wallet_picture_29", "wallet_picture_30",
+          "wallet_picture_31", "wallet_picture_32", "wallet_picture_33",
+          "wallet_picture_34", "wallet_picture_35", "wallet_picture_36",
+          "wallet_picture_37", "wallet_picture_38"
+        ],
+        "first_text": "This is a small and creased photo of a smirking young woman standing with booted feet planted upon the asphalt of a driveway, a thick cowl of blond hair flowing over her leather jacket-clad shoulders.  With the setting sun's light reflecting off the surface of a helmet she holds under one arm, she's casually leaning against a propped-up motorcycle, her head slightly inclined as she shoots a black-glossed grin towards the camera.  In looping handwriting, the back end of the picture is inscribed with the text, \"Dallas, 1993.\"\n\n\"Though cancer has parted us, I'll always carry you with me.\"",
+        "last_text": "A strange gray fruit is placed on a pedestal, like a relic would be placed on a stand for others to admire.  Clearly, it isn't anything originating from this world, and the vein-like tendrils along its skin only convince you of that even more.  A piece of plastic crudely paperclipped to the back has been used to carve out the message \"I'm sorry I'm sorry Im sorr'm soryI'm sorrm sorrsorr\" in increasingly illegible handwriting.  It gives off the faint smell of mold.",
+        "first_selection": {
+          "seed": 16,
+          "snippet_id": "wallet_picture_1",
+          "text": "This is a small and creased photo of a smirking young woman standing with booted feet planted upon the asphalt of a driveway, a thick cowl of blond hair flowing over her leather jacket-clad shoulders.  With the setting sun's light reflecting off the surface of a helmet she holds under one arm, she's casually leaning against a propped-up motorcycle, her head slightly inclined as she shoots a black-glossed grin towards the camera.  In looping handwriting, the back end of the picture is inscribed with the text, \"Dallas, 1993.\"\n\n\"Though cancer has parted us, I'll always carry you with me.\"",
+          "downstream_draw": 8169
+        },
+        "last_selection": {
+          "seed": 12,
+          "snippet_id": "wallet_picture_38",
+          "text": "A strange gray fruit is placed on a pedestal, like a relic would be placed on a stand for others to admire.  Clearly, it isn't anything originating from this world, and the vein-like tendrils along its skin only convince you of that even more.  A piece of plastic crudely paperclipped to the back has been used to carve out the message \"I'm sorry I'm sorry Im sorr'm soryI'm sorrm sorrsorr\" in increasingly illegible handwriting.  It gives off the faint smell of mold.",
+          "downstream_draw": 5121
+        }
+      }
+    ],
     "multi_pocket_wrappers": [
       {
         "case_id": "leg_sheath_minimum",

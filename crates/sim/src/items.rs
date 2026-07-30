@@ -994,6 +994,22 @@ fn select_constructor_variant(
         .ok_or(SimError::InvalidItem)
 }
 
+fn select_item_snippet(
+    snippets: &[ItemSnippetV1],
+    ticket: u64,
+) -> Result<Option<ItemSnippetV1>, SimError> {
+    if snippets.is_empty() {
+        return Ok(None);
+    }
+    let index =
+        usize::try_from(ticket % snippets.len() as u64).map_err(|_| SimError::NumericOverflow)?;
+    snippets
+        .get(index)
+        .cloned()
+        .map(Some)
+        .ok_or(SimError::InvalidItem)
+}
+
 fn construct_item_group_item(
     item: &ItemGroupItemPrototypeV1,
     rng: &mut ChaCha8Rng,
@@ -1042,14 +1058,7 @@ fn construct_item_group_item_with_fit_phase(
     let snippet = if item.snippets.is_empty() {
         None
     } else {
-        let index = usize::try_from(rng.next_u64() % item.snippets.len() as u64)
-            .map_err(|_| SimError::NumericOverflow)?;
-        Some(
-            item.snippets
-                .get(index)
-                .ok_or(SimError::InvalidItem)?
-                .clone(),
-        )
+        select_item_snippet(&item.snippets, rng.next_u64())?
     };
     if let Some(expansion) = &item.description_expansion {
         set_description_variable(
@@ -1190,6 +1199,16 @@ pub struct ItemGroupFlexibleWrapperProjection {
 pub struct ItemGroupMultiPocketProjection {
     pub outer_type: String,
     pub pocket_contents: Vec<(u16, Vec<String>)>,
+}
+
+/// Exact uniform snippet selection used by production item construction and
+/// the direct C++ differential comparator. The caller owns the RNG draw so an
+/// empty category consumes no entropy, matching the production constructor.
+pub fn item_group_snippet_projection(
+    snippets: &[ItemSnippetV1],
+    ticket: u64,
+) -> Result<Option<ItemSnippetV1>, SimError> {
+    select_item_snippet(snippets, ticket)
 }
 
 /// Renderer-free direct projection used by the pinned C++ differential
@@ -2742,6 +2761,49 @@ mod tests {
 
     fn leaf(type_id: &str) -> ItemGroupTargetV1 {
         ItemGroupTargetV1::Item(Box::new(leaf_item(type_id)))
+    }
+
+    #[test]
+    fn uniform_named_snippet_projection_selects_exact_boundaries() {
+        let snippets = [
+            ItemSnippetV1 {
+                id: String::from("first"),
+                text: String::from("first text"),
+            },
+            ItemSnippetV1 {
+                id: String::from("middle"),
+                text: String::from("middle text"),
+            },
+            ItemSnippetV1 {
+                id: String::from("last"),
+                text: String::from("last text"),
+            },
+        ];
+        assert_eq!(
+            item_group_snippet_projection(&snippets, 0)
+                .expect("first ticket should select")
+                .expect("nonempty snippets should select")
+                .id,
+            "first"
+        );
+        assert_eq!(
+            item_group_snippet_projection(&snippets, 2)
+                .expect("last ticket should select")
+                .expect("nonempty snippets should select")
+                .id,
+            "last"
+        );
+        assert_eq!(
+            item_group_snippet_projection(&snippets, 3)
+                .expect("wrapped ticket should select")
+                .expect("nonempty snippets should select")
+                .id,
+            "first"
+        );
+        assert_eq!(
+            item_group_snippet_projection(&[], 0).expect("empty snippets are valid"),
+            None
+        );
     }
 
     fn spawn_pocket(

@@ -188,9 +188,11 @@ pub struct ItemDefinition {
     /// per-variant behavior is retained explicitly for strict admission.
     pub variants: Vec<ItemVariantDefinition>,
     pub variant_type: String,
-    /// Strict inline snippet choices retained in source order. Named snippet
-    /// categories and expansion remain explicitly unsupported.
+    /// Strict inline snippet choices retained in source order.
     pub snippets: Vec<ItemSnippetDefinition>,
+    /// Named item-constructor snippet category resolved from the selected
+    /// snippet registry by the authoritative runtime.
+    pub snippet_category: String,
     /// Typed default item variables copied into every new instance. The raw
     /// field remains unsupported outside constructors that explicitly opt in.
     pub variables: BTreeMap<String, ItemVariableValueDefinition>,
@@ -1162,11 +1164,24 @@ fn apply_inline_snippets(
     item: &mut ItemDefinition,
     source: &str,
 ) -> Result<(), ItemRegistryError> {
-    let Some(Value::Array(values)) = object.get("snippet_category") else {
-        if object.contains_key("snippet_category") {
-            item.snippets.clear();
-        }
+    let Some(value) = object.get("snippet_category") else {
         return Ok(());
+    };
+    let values = match value {
+        Value::String(category) if !category.is_empty() => {
+            item.snippets.clear();
+            item.snippet_category.clone_from(category);
+            return Ok(());
+        }
+        Value::Array(values) => {
+            item.snippet_category.clear();
+            values
+        }
+        _ => {
+            item.snippets.clear();
+            item.snippet_category.clear();
+            return Ok(());
+        }
     };
     let mut ids = BTreeSet::new();
     item.snippets = values
@@ -3920,11 +3935,31 @@ mod tests {
         assert!(load_one(&named, &mut items, &mut abstracts).expect("named marker should load"));
         assert!(items["named_snippet_item"].snippets.is_empty());
         assert_eq!(
+            items["named_snippet_item"].snippet_category,
+            "external_category"
+        );
+        assert_eq!(
             items["named_snippet_item"].variables,
             BTreeMap::from([(
                 String::from("browsed"),
                 ItemVariableValueDefinition::String(String::from("true"))
             )])
+        );
+
+        let inherited_named = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "inherited_named_snippet_item",
+            "copy-from": "named_snippet_item",
+            "name": "inherited named snippet item"
+        }));
+        assert!(
+            load_one(&inherited_named, &mut items, &mut abstracts)
+                .expect("derived named snippet item should load")
+        );
+        assert!(items["inherited_named_snippet_item"].snippets.is_empty());
+        assert_eq!(
+            items["inherited_named_snippet_item"].snippet_category,
+            "external_category"
         );
 
         let duplicate = raw(serde_json::json!({

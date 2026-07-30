@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cdda_content::{
-    ContentManifest, ItemRegistry, MaterialRegistry, ModCatalog, OvermapTerrainMatchType,
-    OvermapTerrainRegistry, StartLocationRegistry,
+    ContentManifest, DescriptionSnippetRegistry, ItemRegistry, MaterialRegistry, ModCatalog,
+    OvermapTerrainMatchType, OvermapTerrainRegistry, StartLocationRegistry,
 };
 use cdda_protocol::{
     AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1,
@@ -15,12 +15,12 @@ use cdda_protocol::{
     ItemGroupContainerV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
     ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
     ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemPhaseV1,
-    ItemVariantV1, MagazineWellPrototypeV1, SimTick, SpawnPocketKindV1, SpawnPocketRulesV1,
-    TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT,
-    WORLDGEN_OVERMAP_WIDTH, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1,
-    WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1,
-    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
-    WorldgenOvermapRunV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    ItemSnippetV1, ItemVariantV1, MagazineWellPrototypeV1, SimTick, SpawnPocketKindV1,
+    SpawnPocketRulesV1, TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE,
+    WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldPosition, WorldSnapshotV1,
+    WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1,
+    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
+    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
     WorldgenWeightedFurnitureTargetV1, WorldgenWeightedTerrainTargetV1,
     initial_item_temperature_state, worldgen_omt_matches,
 };
@@ -132,6 +132,7 @@ struct ItemGroupOracleObservationV1 {
     default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
     flexible_wrappers: Vec<ItemGroupFlexibleWrapperTraceV1>,
     temperature_constructors: Vec<ItemGroupTemperatureConstructorTraceV1>,
+    named_snippet_categories: Vec<ItemGroupNamedSnippetCategoryTraceV1>,
     multi_pocket_wrappers: Vec<ItemGroupMultiPocketTraceV1>,
     containers: Vec<ItemGroupContainerObservationV1>,
     everyday_corpse: ItemGroupCorpseObservationV1,
@@ -579,6 +580,59 @@ struct ItemGroupContainerObservationV1 {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ItemGroupNamedSnippetSelectionTraceV1 {
+    seed: u32,
+    snippet_id: String,
+    text: String,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupNamedSnippetCategoryTraceV1 {
+    case_id: String,
+    item_type: String,
+    category: String,
+    choice_ids: Vec<String>,
+    first_text: String,
+    last_text: String,
+    first_selection: ItemGroupNamedSnippetSelectionTraceV1,
+    last_selection: ItemGroupNamedSnippetSelectionTraceV1,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupNamedSnippetDirectV1 {
+    case_id: String,
+    item_type: String,
+    category: String,
+    choice_ids: Vec<String>,
+    first_text: String,
+    last_text: String,
+    first_selected_id: String,
+    first_selected_text: String,
+    last_selected_id: String,
+    last_selected_text: String,
+}
+
+impl ItemGroupNamedSnippetCategoryTraceV1 {
+    fn direct_projection(&self) -> ItemGroupNamedSnippetDirectV1 {
+        ItemGroupNamedSnippetDirectV1 {
+            case_id: self.case_id.clone(),
+            item_type: self.item_type.clone(),
+            category: self.category.clone(),
+            choice_ids: self.choice_ids.clone(),
+            first_text: self.first_text.clone(),
+            last_text: self.last_text.clone(),
+            first_selected_id: self.first_selection.snippet_id.clone(),
+            first_selected_text: self.first_selection.text.clone(),
+            last_selected_id: self.last_selection.snippet_id.clone(),
+            last_selected_text: self.last_selection.text.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ItemGroupMultiPocketTraceV1 {
     case_id: String,
     seed: u32,
@@ -917,6 +971,15 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                     .map(ItemGroupChargeCapacitySentinelTraceV1::direct_projection)
                     .collect::<Vec<_>>(),
                 &rust_item_group_charge_capacity_sentinel_observation()?,
+            )?;
+            compare_direct_observation(
+                "item-group named snippet category selection",
+                &observation
+                    .named_snippet_categories
+                    .iter()
+                    .map(ItemGroupNamedSnippetCategoryTraceV1::direct_projection)
+                    .collect::<Vec<_>>(),
+                &rust_item_group_named_snippet_observation(workspace)?,
             )?;
             compare_direct_observation(
                 "item-group multi-pocket first-compatible selection",
@@ -2048,6 +2111,52 @@ fn validate_item_group_observation(
         )
         .into());
     }
+    let expected_named_snippets = [
+        (
+            "months_old_news",
+            "months_old_newspaper",
+            "months_old_news",
+            24,
+            "months_old_news_1",
+            "months_old_news_25",
+        ),
+        (
+            "wallet_photos",
+            "wallet_photo",
+            "wallet_photos",
+            38,
+            "wallet_picture_1",
+            "wallet_picture_38",
+        ),
+    ];
+    if observation.named_snippet_categories.len() != expected_named_snippets.len()
+        || observation
+            .named_snippet_categories
+            .iter()
+            .zip(expected_named_snippets)
+            .any(
+                |(actual, (case_id, item_type, category, count, first_id, last_id))| {
+                    actual.case_id != case_id
+                        || actual.item_type != item_type
+                        || actual.category != category
+                        || actual.choice_ids.len() != count
+                        || actual.choice_ids.first().map(String::as_str) != Some(first_id)
+                        || actual.choice_ids.last().map(String::as_str) != Some(last_id)
+                        || actual.first_text.is_empty()
+                        || actual.last_text.is_empty()
+                        || actual.first_selection.seed == 0
+                        || actual.first_selection.snippet_id != first_id
+                        || actual.first_selection.text != actual.first_text
+                        || !(0..10_000).contains(&actual.first_selection.downstream_draw)
+                        || actual.last_selection.seed == 0
+                        || actual.last_selection.snippet_id != last_id
+                        || actual.last_selection.text != actual.last_text
+                        || !(0..10_000).contains(&actual.last_selection.downstream_draw)
+                },
+            )
+    {
+        return Err("item-group named snippet characterization is incomplete".into());
+    }
     let expected_multi_pocket = [
         (
             "leg_sheath_minimum",
@@ -3074,6 +3183,99 @@ fn rust_item_group_flexible_wrapper_observation()
             pocket_remaining_volume_ml: projection.pocket_remaining_volume_milliliters,
             pocket_remaining_weight_g: projection.pocket_remaining_weight_grams,
             sealed: projection.sealed,
+        })
+    })
+    .collect()
+}
+
+fn rust_item_group_named_snippet_observation(
+    workspace: &Path,
+) -> Result<Vec<ItemGroupNamedSnippetDirectV1>, Box<dyn std::error::Error>> {
+    let manifest_path = workspace.join("vendor/cdda-content-manifest.json");
+    let manifest = ContentManifest::load(&manifest_path)?;
+    let content_root = manifest_path
+        .parent()
+        .ok_or("pinned content manifest has no parent directory")?;
+    let mods = ModCatalog::load(&manifest, content_root)?;
+    let enabled = mods.recommended_new_world()?;
+    let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    let snippets =
+        DescriptionSnippetRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+
+    [
+        ("months_old_news", "months_old_newspaper", "months_old_news"),
+        ("wallet_photos", "wallet_photo", "wallet_photos"),
+    ]
+    .into_iter()
+    .map(|(case_id, item_type, category_id)| {
+        let item = items
+            .get(item_type)
+            .ok_or_else(|| format!("pinned item {item_type} disappeared"))?;
+        if item.snippet_category != category_id || !item.snippets.is_empty() {
+            return Err(format!(
+                "pinned item {item_type} no longer uses named snippet category {category_id}"
+            )
+            .into());
+        }
+        let category = snippets
+            .get(category_id)
+            .ok_or_else(|| format!("pinned snippet category {category_id} disappeared"))?;
+        let first_weight = category
+            .identified
+            .first()
+            .ok_or_else(|| format!("pinned snippet category {category_id} became empty"))?
+            .weight;
+        if first_weight == 0
+            || category
+                .identified
+                .iter()
+                .any(|choice| choice.weight != first_weight)
+            || category.identified.len() > cdda_protocol::MAX_ITEM_SNIPPETS
+        {
+            return Err(format!(
+                "pinned snippet category {category_id} no longer has bounded uniform weights"
+            )
+            .into());
+        }
+        let choices = category
+            .identified
+            .iter()
+            .map(|choice| {
+                Ok(ItemSnippetV1 {
+                    id: choice.id.clone().ok_or_else(|| {
+                        format!("pinned snippet category {category_id} lost an identified ID")
+                    })?,
+                    text: choice.text.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let first = cdda_sim::item_group_snippet_projection(&choices, 0)
+            .map_err(|error| format!("Rust named-snippet projection failed: {error}"))?
+            .ok_or("nonempty snippet category produced no first choice")?;
+        let last_ticket =
+            u64::try_from(choices.len() - 1).map_err(|_| "snippet category length exceeded u64")?;
+        let last = cdda_sim::item_group_snippet_projection(&choices, last_ticket)
+            .map_err(|error| format!("Rust named-snippet projection failed: {error}"))?
+            .ok_or("nonempty snippet category produced no last choice")?;
+        Ok(ItemGroupNamedSnippetDirectV1 {
+            case_id: case_id.to_owned(),
+            item_type: item_type.to_owned(),
+            category: category_id.to_owned(),
+            choice_ids: choices.iter().map(|choice| choice.id.clone()).collect(),
+            first_text: choices
+                .first()
+                .ok_or("snippet first choice disappeared")?
+                .text
+                .clone(),
+            last_text: choices
+                .last()
+                .ok_or("snippet last choice disappeared")?
+                .text
+                .clone(),
+            first_selected_id: first.id,
+            first_selected_text: first.text,
+            last_selected_id: last.id,
+            last_selected_text: last.text,
         })
     })
     .collect()

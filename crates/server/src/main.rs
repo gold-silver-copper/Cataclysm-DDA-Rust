@@ -4708,7 +4708,7 @@ mod tests {
                 .binary_search_by(|flag| flag.as_str().cmp("VARSIZE"))
                 .is_ok()
         );
-        assert_regional_field_multi_pocket_closure(&field_graph, item_group_content);
+        assert_regional_field_item_group_closure(&field_graph, item_group_content);
         let painkillers = runtime_item_group_graph(
             field_graph
                 .groups

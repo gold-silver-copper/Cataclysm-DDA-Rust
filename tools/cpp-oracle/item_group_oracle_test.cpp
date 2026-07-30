@@ -1218,6 +1218,80 @@ struct multi_pocket_trace {
     int downstream_draw = 0;
 };
 
+struct named_snippet_selection_trace {
+    unsigned int seed = 0;
+    std::string snippet_id;
+    std::string text;
+    int downstream_draw = 0;
+};
+
+struct named_snippet_category_trace {
+    std::string case_id;
+    std::string item_type;
+    std::string category;
+    std::vector<std::string> choice_ids;
+    std::string first_text;
+    std::string last_text;
+    named_snippet_selection_trace first_selection;
+    named_snippet_selection_trace last_selection;
+};
+
+std::string serialized_snippet_id( const item &observed )
+{
+    std::ostringstream serialized;
+    {
+        JsonOut json( serialized );
+        observed.serialize( json );
+    }
+    JsonObject object = json_loader::from_string( serialized.str() ).get_object();
+    object.allow_omitted_members();
+    return object.has_string( "snip_id" ) ? object.get_string( "snip_id" ) : "";
+}
+
+named_snippet_category_trace observe_named_snippet_category( const std::string &case_id,
+        const itype_id &item_type, const std::string &category )
+{
+    const std::vector<std::pair<snippet_id, std::string>> choices =
+        SNIPPET.get_snippets_by_category( category );
+    if( choices.empty() ) {
+        FAIL( "production named snippet category has no identified choices" );
+        return {};
+    }
+    const auto observe_selection = [&]( const snippet_id & target ) {
+        for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+            rng_set_engine_seed( seed );
+            const item observed( item_type, calendar::turn_zero );
+            const std::string selected = serialized_snippet_id( observed );
+            if( selected == target.str() ) {
+                return named_snippet_selection_trace {
+                    seed,
+                    selected,
+                    SNIPPET.get_snippet_ref_by_id( target ).translated(),
+                    rng( 0, 9999 )
+                };
+            }
+        }
+        FAIL( "could not find exact production named-snippet boundary witness" );
+        return named_snippet_selection_trace {};
+    };
+    std::vector<std::string> choice_ids;
+    choice_ids.reserve( choices.size() );
+    for( const auto &[id, text] : choices ) {
+        static_cast<void>( text );
+        choice_ids.push_back( id.str() );
+    }
+    return {
+        case_id,
+        item_type.str(),
+        category,
+        std::move( choice_ids ),
+        choices.front().second,
+        choices.back().second,
+        observe_selection( choices.front().first ),
+        observe_selection( choices.back().first )
+    };
+}
+
 multi_pocket_trace observe_multi_pocket_wrapper( const std::string &case_id,
         const item_group_id &group_id, const itype_id &wrapper_type,
         const itype_id &payload_type, std::size_t target_contents )
@@ -1650,6 +1724,18 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     REQUIRE( multi_pocket_wrappers[2].pocket_contents.size() == 6 );
     REQUIRE( multi_pocket_wrappers[2].pocket_contents[3] ==
              std::vector<std::string>{ "plastic_mandible_guard" } );
+    const std::vector<named_snippet_category_trace> named_snippet_categories = {
+        observe_named_snippet_category( "months_old_news", itype_id( "months_old_newspaper" ),
+                                        "months_old_news" ),
+        observe_named_snippet_category( "wallet_photos", itype_id( "wallet_photo" ),
+                                        "wallet_photos" )
+    };
+    REQUIRE( named_snippet_categories[0].choice_ids.size() == 24 );
+    REQUIRE( named_snippet_categories[0].choice_ids.front() == "months_old_news_1" );
+    REQUIRE( named_snippet_categories[0].choice_ids.back() == "months_old_news_25" );
+    REQUIRE( named_snippet_categories[1].choice_ids.size() == 38 );
+    REQUIRE( named_snippet_categories[1].choice_ids.front() == "wallet_picture_1" );
+    REQUIRE( named_snippet_categories[1].choice_ids.back() == "wallet_picture_38" );
     const corpse_observation corpses = observe_everyday_corpses();
     const phone_case_observation phone_cases = observe_civilian_phone_cases();
     REQUIRE( phone_cases.valid_shapes );
@@ -2183,6 +2269,37 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.member( "hot", trace.hot );
             json.member( "cold", trace.cold );
             json.member( "frozen", trace.frozen );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "named_snippet_categories" );
+        json.start_array();
+        for( const named_snippet_category_trace &trace : named_snippet_categories ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "item_type", trace.item_type );
+            json.member( "category", trace.category );
+            json.member( "choice_ids" );
+            json.start_array();
+            for( const std::string &id : trace.choice_ids ) {
+                json.write( id );
+            }
+            json.end_array();
+            json.member( "first_text", trace.first_text );
+            json.member( "last_text", trace.last_text );
+            const auto write_selection = [&]( const char *member,
+            const named_snippet_selection_trace & selection ) {
+                json.member( member );
+                json.start_object();
+                json.member( "seed", selection.seed );
+                json.member( "snippet_id", selection.snippet_id );
+                json.member( "text", selection.text );
+                json.member( "downstream_draw", selection.downstream_draw );
+                json.end_object();
+            };
+            write_selection( "first_selection", trace.first_selection );
+            write_selection( "last_selection", trace.last_selection );
             json.end_object();
         }
         json.end_array();

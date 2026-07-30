@@ -32,7 +32,7 @@ pub(super) struct RuntimeItemGroupContent<'a> {
 }
 
 #[cfg(test)]
-pub(super) fn assert_regional_field_multi_pocket_closure(
+pub(super) fn assert_regional_field_item_group_closure(
     field_graph: &StrictItemGroupGraph,
     content: RuntimeItemGroupContent<'_>,
 ) {
@@ -112,6 +112,35 @@ pub(super) fn assert_regional_field_multi_pocket_closure(
         [(0, 0), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0)]
     );
 
+    for (item_id, expected_count, first_id, last_id) in [
+        (
+            "months_old_newspaper",
+            24,
+            "months_old_news_1",
+            "months_old_news_25",
+        ),
+        ("wallet_photo", 38, "wallet_picture_1", "wallet_picture_38"),
+    ] {
+        let item = runtime_item_group_item(
+            content
+                .items
+                .get(item_id)
+                .unwrap_or_else(|| panic!("field closure should retain {item_id}")),
+            None,
+            content,
+        )
+        .unwrap_or_else(|error| panic!("named snippets for {item_id} should normalize: {error}"));
+        assert_eq!(item.snippets.len(), expected_count);
+        assert_eq!(
+            item.snippets.first().map(|snippet| snippet.id.as_str()),
+            Some(first_id)
+        );
+        assert_eq!(
+            item.snippets.last().map(|snippet| snippet.id.as_str()),
+            Some(last_id)
+        );
+    }
+
     let field_runtime_errors = field_graph
         .groups
         .values()
@@ -160,10 +189,6 @@ pub(super) fn assert_regional_field_multi_pocket_closure(
                 "temperature-tracked item banana requires unimplemented rot state",
             ),
             (
-                "newspaper_recent",
-                "item group item months_old_newspaper requires an unsupported named or empty snippet category",
-            ),
-            (
                 "sandwich_deluxe_wrapper_2",
                 "temperature-tracked item sandwich_deluxe requires unimplemented rot state",
             ),
@@ -178,34 +203,6 @@ pub(super) fn assert_regional_field_multi_pocket_closure(
             (
                 "sandwiches",
                 "temperature-tracked item sandwich_cucumber requires unimplemented rot state",
-            ),
-            (
-                "wallet_duct_tape_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
-            ),
-            (
-                "wallet_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
-            ),
-            (
-                "wallet_industrial_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
-            ),
-            (
-                "wallet_industrial_leather_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
-            ),
-            (
-                "wallet_large_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
-            ),
-            (
-                "wallet_leather_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
-            ),
-            (
-                "wallet_stylish_full",
-                "item group item wallet_photo requires an unsupported named or empty snippet category",
             ),
         ],
         "every production-field blocker must remain classified until its generalized family is implemented"
@@ -838,14 +835,7 @@ fn runtime_item_group_item_inner(
             .expand_description_snippets
             .then(|| runtime_description_expansion(&item.description, content.snippets))
             .transpose()?,
-        snippets: item
-            .snippets
-            .iter()
-            .map(|snippet| ItemSnippetV1 {
-                id: snippet.id.clone(),
-                text: snippet.text.clone(),
-            })
-            .collect(),
+        snippets: runtime_item_snippets(item, content.snippets)?,
         initial_variables: item
             .variables
             .iter()
@@ -870,6 +860,79 @@ fn runtime_item_group_item_inner(
         charge_capacity: runtime_item_group_charge_capacity(item),
         contents_insertion_supported,
     })
+}
+
+fn runtime_item_snippets(
+    item: &ItemDefinition,
+    snippets: &DescriptionSnippetRegistry,
+) -> Result<Vec<ItemSnippetV1>, Box<dyn std::error::Error>> {
+    if !item.snippets.is_empty() {
+        if !item.snippet_category.is_empty() {
+            return Err(format!(
+                "item {} has both inline and named snippet constructors",
+                item.id
+            )
+            .into());
+        }
+        return Ok(item
+            .snippets
+            .iter()
+            .map(|snippet| ItemSnippetV1 {
+                id: snippet.id.clone(),
+                text: snippet.text.clone(),
+            })
+            .collect());
+    }
+    if item.snippet_category.is_empty() {
+        return Ok(Vec::new());
+    }
+    let category = snippets.get(&item.snippet_category).ok_or_else(|| {
+        format!(
+            "item {} references missing snippet category {}",
+            item.id, item.snippet_category
+        )
+    })?;
+    let Some(first) = category.identified.first() else {
+        return Err(format!(
+            "item {} snippet category {} has no identified choices",
+            item.id, item.snippet_category
+        )
+        .into());
+    };
+    if first.weight == 0
+        || category
+            .identified
+            .iter()
+            .any(|choice| choice.weight != first.weight)
+    {
+        return Err(format!(
+            "item {} snippet category {} requires weighted named selection",
+            item.id, item.snippet_category
+        )
+        .into());
+    }
+    if category.identified.len() > cdda_protocol::MAX_ITEM_SNIPPETS {
+        return Err(format!(
+            "item {} snippet category {} exceeds the runtime choice bound",
+            item.id, item.snippet_category
+        )
+        .into());
+    }
+    category
+        .identified
+        .iter()
+        .map(|choice| {
+            Ok(ItemSnippetV1 {
+                id: choice.id.clone().ok_or_else(|| {
+                    format!(
+                        "item {} snippet category {} contains an unidentified choice",
+                        item.id, item.snippet_category
+                    )
+                })?,
+                text: choice.text.clone(),
+            })
+        })
+        .collect()
 }
 
 fn runtime_item_charge_storage(
@@ -1023,6 +1086,7 @@ fn validate_charge_item_constructor_state(
     if !item.variants.is_empty()
         || item.expand_description_snippets
         || !item.snippets.is_empty()
+        || !item.snippet_category.is_empty()
         || !item.variables.is_empty()
     {
         return Err(format!(
@@ -1385,7 +1449,10 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    if item.unsupported_fields.contains("snippet_category") && item.snippets.is_empty() {
+    if item.unsupported_fields.contains("snippet_category")
+        && item.snippets.is_empty()
+        && item.snippet_category.is_empty()
+    {
         return Err(format!(
             "item group item {} requires an unsupported named or empty snippet category",
             item.id
@@ -1568,6 +1635,37 @@ mod tests {
     }
 
     #[test]
+    fn named_snippet_projection_rejects_missing_and_conflicting_categories() {
+        let missing = ItemDefinition {
+            id: String::from("missing_named_snippets"),
+            snippet_category: String::from("not_loaded"),
+            ..ItemDefinition::default()
+        };
+        assert_eq!(
+            runtime_item_snippets(&missing, &DescriptionSnippetRegistry::default())
+                .expect_err("missing named categories must fail closed")
+                .to_string(),
+            "item missing_named_snippets references missing snippet category not_loaded"
+        );
+
+        let conflicting = ItemDefinition {
+            id: String::from("conflicting_snippets"),
+            snippet_category: String::from("named"),
+            snippets: vec![cdda_content::ItemSnippetDefinition {
+                id: String::from("inline"),
+                text: String::from("inline text"),
+            }],
+            ..ItemDefinition::default()
+        };
+        assert_eq!(
+            runtime_item_snippets(&conflicting, &DescriptionSnippetRegistry::default())
+                .expect_err("mixed snippet constructors must fail closed")
+                .to_string(),
+            "item conflicting_snippets has both inline and named snippet constructors"
+        );
+    }
+
+    #[test]
     fn temperature_admission_is_generalized_and_fail_closed() {
         let materials = MaterialRegistry::default();
         let supported = materialless_temperature_item();
@@ -1670,6 +1768,10 @@ mod tests {
             text: String::from("Marked lot"),
         }];
         assert!(validate_charge_item_constructor_state(&snippet).is_err());
+
+        let mut named_snippet = plain.clone();
+        named_snippet.snippet_category = String::from("marked_lots");
+        assert!(validate_charge_item_constructor_state(&named_snippet).is_err());
 
         let mut variable = plain;
         variable.variables.insert(
