@@ -5,17 +5,15 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
 
 ## Live checkpoint
 
-- Verified green commit: `032883aed6d3677597248c8e0ec8d0dc7de9324e`
-  (`Implement recursive item description snippets`), tree
-  `6da10d6bcb9fef98f7212a2a536ccc620cb3cae1`.
+- Verified green commit: `d115312105b6c340884e73ffdf6b9d12c541a4c4`,
+  tree `14405a785f10ecc7ee0ec2bbf9006c68b0de91d6`.
 - Active milestone: `regional-terrain-base`.
-- Completed family checkpoint: generalized base/variant item-description
-  snippet expansion, selected English name categories, and strict admission of
-  `accessory_necklace` plus `dog_tag_id`.
-- Current representation: protocol 89, worldgen algorithm 2, persistence
-  schema/minimum recoverable schema 67, replay format 3, CanonicalStateV65,
-  and CanonicalEventsV18. Scenario format 7 and observation format 6 do not
-  change.
+- Completed family checkpoint: generalized variable-size FIT construction,
+  crafting/disassembly propagation, persistence, and client presentation.
+- Current representation: protocol 90, worldgen algorithm 2, persistence
+  schema/minimum recoverable schema 68, replay format 3, CanonicalStateV66,
+  and CanonicalEventsV18. Scenario format 7 and observation format 6 are
+  unchanged.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only; the server and
   simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
 
@@ -24,70 +22,62 @@ Mapgen/overmap completion is intentionally split:
 - `atomic-static-mapgen`: `complete`.
 - `omt-identities-routing`: `complete`.
 - `start-location-selection`: `complete`.
-- `regional-terrain-base`: `in_progress`; description expansion is admitted,
-  and exact field closure now stops at `accessory_weaponcarry` because
-  `leg_sheath6` requires unimplemented variable-size `FIT` state.
+- `regional-terrain-base`: `in_progress`; `accessory_weaponcarry` and
+  `leg_sheath6` now admit, and the exact field closure next stops at
+  `ammo_light_batteries` because charge modifiers require generalized
+  ammunition loading.
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
-The mapgen completion evidence is in
+Mapgen completion evidence is in
 [docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
-Earlier protocol narration is retained in `docs/history` and scoped review
-records instead of this live status.
+Historical protocol narration remains in `docs/history` and scoped reviews.
 
 ## Runnable behavior
 
-The persistent server-authoritative multiplayer foundation can authenticate
-through iroh, create/select durable characters, keep the world running with no
-players, traverse generated terrain, fight admitted creatures, manipulate
-visible items, smash admitted structures, and use the implemented crafting,
+The persistent server-authoritative multiplayer foundation authenticates with
+iroh, creates and selects durable characters, keeps the world running without
+players, traverses generated terrain, fights admitted creatures, manipulates
+visible items, smashes admitted structures, and runs implemented crafting,
 reading, disassembly, construction, survival, recovery, and replay paths.
 Disconnected characters remain physically present and vulnerable.
 
-Worlds currently retain a bounded 180x180 z=0 overmap filled by the admitted
+Worlds retain a bounded 180x180 z=0 overmap currently filled by the admitted
 `lmoe_north` generator. Coordinate-owned OMT identities, atomic 24x24
 generation, rotation, server-selected starts, durable chunks, and blocked
 layout edges are runnable. The real default `field` layer remains outside the
-production surface until its entire loot closure is exact.
+production surface until its complete loot closure and client exploration loop
+are exact.
 
-## Completed description-expansion family
+## Completed variable-size FIT family
 
-- `DescriptionSnippetRegistry` loads the pinned English name library before
-  selected snippet content, maps gendered/unisex name usages into the eight
-  upstream categories, and retains identified-before-anonymous weighting,
-  overrides, translations, duplicate-ID rejection, and checked weights.
-- Server normalization emits only the recursively reachable category closure,
-  sorted canonically. Unknown tags remain literal; cycles, excessive depth,
-  excessive choices, overflows, oversized output, exponential repeated-DAG
-  work, and unavailable variable capacity fail closed.
-- The simulation expands a selected variant immediately, then expands the base
-  and selected variant again in the later constructor phase. The overwritten
-  first result still advances RNG exactly as upstream; explicit variant
-  modifiers expand once more. Each recognized tag consumes one canonical RNG
-  draw, including one-choice and zero-total categories.
-- The pinned C++ oracle records the exact recursive/literal boundary
-  `Foo <lt>lt<gt> <unknown>` -> `Foo <lt> <unknown>`, including downstream RNG,
-  plus production seed 59 for
-  `accessory_necklace` -> `holy_symbol/saint_necklace`. The production text is
-  expanded to St. Mary and leaves downstream draw 1652. The direct comparator
-  executes the same bounded expansion through Rust.
-- Direct, per-tick snapshot, SQLite, and portable-replay conformance preserve
-  an authoritative expanded item variable. The ordinary Bevy item menu renders
-  that replicated description without consulting live content.
-- Production normalization retains all seven reachable `dog_tag_id`
-  categories, including 3,045 family names, 4,275 female given names, and 1,219
-  male given names. The real field boundary remains `leg_sheath6`/`VARSIZE`.
-- Protocol 89 batches the description template and its reachable weighted
-  categories into this containment-family checkpoint. Schema 67 and
-  CanonicalStateV65 follow because Postcard state changed; replay format and
-  CanonicalEvents remain unchanged.
+- `VARSIZE` remains an immutable finalized item capability; per-instance `FIT`
+  is canonical, validated, nested with ownership, and preserved in component
+  provenance.
+- Every direct item-group leaf consumes the pinned one-in-three FIT phase.
+  Only variable-size items change state, already-fitted items remain fitted,
+  named groups do not add a second phase, and raw wrappers do not own the leaf
+  phase.
+- Crafted variable-size primary outputs and byproducts are always fitted.
+  Exact disassembly components preserve their state; default variable-size
+  components inherit FIT only from a fitted target.
+- The 80-assertion pinned C++ oracle retains exact direct witnesses at seeds 1
+  and 2, a same-draw non-variable control, and production
+  `accessory_weaponcarry` witnesses at seeds 219 and 97. Item type, capability,
+  FIT state, rendered name, and downstream draw are fixed. The Rust comparator
+  executes the reusable transition directly.
+- Direct, per-tick snapshot, SQLite, and portable replay conformance preserve
+  the state. The ordinary Bevy item menu renders `(poor fit)` solely from the
+  replicated snapshot.
+- Production normalization admits `leg_sheath6`; the deterministic field scan
+  retains `ammo_light_batteries` ammunition loading as the next boundary.
 
 ## Measured progress
 
-Runtime credit remains four core definitions and 44 weighted points. This
-family enables strict normalization but does not earn production runtime credit
-until the real field is generated, explored, looted, persisted, and exercised
-through all four recovery modes.
+Runtime credit remains four core definitions and 44 weighted points. FIT
+unlocks more strict normalization but earns no production credit until the real
+field is generated, explored, looted, persisted, exercised in all four recovery
+modes, and accessible through the client.
 
 - Core DDA ordinary-gameplay target: 13,865 definitions and 263,435 possible
   weighted points; 44 earned (0.0167%).
@@ -96,19 +86,17 @@ through all four recovery modes.
 - Parser-only inventory remains separate: 7,621 item groups, 9,520 mapgen
   objects, 2,712 OMTs, and 150 starts.
 
-Current ownership sizes are 29,303 lines in `sim/lib.rs`, 3,828 in
-`sim/items.rs`, 9,758 in `protocol/lib.rs`, 1,624 in
-`protocol/item_groups.rs`, 13,065 in persistence, 8,793 in the server library,
-and 1,293 in `server/item_groups.rs`.
-
-Against `bcd8681`, this family adds 259 net lines to `sim/items.rs`, 321 to
-`protocol/item_groups.rs`, and 95 to `server/item_groups.rs`. Central-file
-growth is limited to three net lines in `sim/lib.rs` for an initializer, the
-V65 domain, and the reusable comparator export, and five net lines in
-`protocol/lib.rs` for exports, initializers, and the Protocol 89 constant. The
-server executable's growth is registry wiring and production admission tests;
-the server implementation remains in `server/item_groups.rs`. No new item
-behavior is implemented in a central `lib.rs`.
+Current ownership sizes are 29,232 lines in `sim/lib.rs`, 4,132 in
+`sim/items.rs`, 9,797 in `protocol/lib.rs`, 1,641 in
+`protocol/item_groups.rs`, 13,065 in persistence, 8,797 in the server library,
+and 1,286 in `server/item_groups.rs`. Relative to the verified parent,
+`sim/items.rs` owns the generalized transition, item materialization, and its
+phase tests; `protocol/item_groups.rs` owns FIT capability validation; and
+`server/item_groups.rs` removes the obsolete admission guard. Central-file
+changes are restricted to the canonical field and version, mechanical fixture
+initializers, crafting/disassembly coordination, and focused integration tests.
+Moving both item materializers into `sim/items.rs` makes the central simulation
+file smaller than its parent despite the new family.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
@@ -116,55 +104,55 @@ mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Explicit boundaries
 
-- The real field is not yet runtime-admitted. Its next exact retained blocker
-  is variable-size `FIT` state on `leg_sheath6`.
+- The real field is not runtime-admitted. Its next exact retained blocker is
+  ammunition loading for `light_battery_cell` in `ammo_light_batteries`.
+- The complete scan also retains separate default-container, food-temperature,
+  corpse-construction, capacity-sentinel, wrapper-shape, dressing, and snippet
+  families. They remain fail closed and must be implemented as generalized
+  engines rather than individual definitions.
 - Flexible physical spawn pockets, arbitrary player-driven containment,
   material-derived softness, and other unprojected constructor/pocket semantics
-  remain explicit and fail closed.
+  remain unavailable.
 - Cities, roads, rivers, specials, extras, spawn groups/populations, zones,
   vehicles, adjacent overmaps, and additional generated z-levels remain
   unavailable.
 - Rich start scoring, nested/update mapgen, parameters, multi-layer glyphs,
   weighted one-time fill, and recursive regional targets remain unavailable.
-- Remote start generation remains unavailable until its worldgen mutations can
-  journal atomically with character creation.
 
 ## Latest verification
 
-The fixed implementation passes:
+The implementation checkpoint passes formatting and diff checks, workspace
+all-target/all-feature checking, strict Clippy, 382 workspace tests,
+warning-free rustdoc, dependency boundaries, parity ledger, runtime progress,
+the 364-day astronomy table, all 7,992 vendored content files, the 6,571-file
+schema inventory, and all three pinned C++ oracles (8 pocket, 80 item-group,
+and 1,179 mapgen assertions). The complete 382-test suite was rerun after the
+containment-identity fix. After the final immutable-FIT validation repair, the
+affected 38 protocol tests, all 156 simulation tests, the pinned production
+content server test, and strict full-workspace Clippy were rerun.
 
-- targeted content, protocol, simulation, server production-closure, client,
-  and four-mode conformance tests;
-- the pinned item-group C++ oracle with 76 exact assertions and the direct Rust
-  comparison;
-- production normalization of `accessory_necklace`, including all 14
-  `<catholic_saints>` choices, followed by the exact `leg_sheath6` fail-closed
-  boundary.
-
-The representative canonical fixture changes from
-`c476a1ccd153ece571ebf4a98be13242ab3a7163124abff4173d9c9050c1f9b7` to
+The representative fixture changes from the Protocol-89 V65 root
 `0878f47b5e8e159fdee5a57a6c7f90bab5e13e6bb944820a10585b835fb857be`.
-Hashing the same Postcard bytes under CanonicalStateV64 reproduces the old
-root, so this fixture change is solely the intentional V65 domain. The named
-item-group scenario separately proves the new description representation
-through all four recovery modes. CanonicalEventsV18 is unchanged.
+Hashing the Protocol-90 bytes under the old V65 domain yields
+`24e4298046769183c36ee47334b1acc628956a92fa2176dfff4deac32fbef2db`,
+proving the Postcard representation changed. CanonicalStateV66 then yields
+`7fffb3bccad59a52e64540aeb421cde5f1fd8912e3a11946368170b2eeec91cb`.
+The event trace and CanonicalEventsV18 are unchanged.
 
-The full formatting, all-target check, strict Clippy, 380-test workspace,
-warning-free rustdoc, content, inventory, parity, progress, astronomy, and
-dependency-boundary gates pass. All three pinned C++ oracles pass; the
-item-group oracle includes 76 assertions and the direct comparison. The initial
-`13bae07` review found two P1 and two P2 defects; all four are fixed in
-`032883a`. Its replacement-tree review confirmed those runtime fixes and found
-one P3: this live status still described the pre-fix line counts, test count,
-and constructor order. The review checkpoint corrects that documentation; no
-runtime/protocol P0-P2 remains, and no other P0-P3 was confirmed. Runtime
-progress is bound to exact implementation commit `032883a` above green parent
-`bcd8681`.
+The first independent detached review of exact commit `8a444f6` found no
+P0/P1 and two P2 defects: planned count-by-charge containment merging omitted
+FIT identity, and validation admitted `fitted=false` for immutable `FIT`.
+Both generic custom/restored-domain defects are fixed and regressed in the
+replacement commit above; the pinned recommended registry contains zero
+definitions that trigger either shape. The replacement fixed-tree review is
+recorded in
+[docs/reviews/protocol-90-variable-size-fit.md](docs/reviews/protocol-90-variable-size-fit.md):
+the fresh detached review of exact replacement `d115312` confirmed both fixes
+and found no remaining P0-P3 issue.
 
 ## Next dependency boundary
 
-Implement the generalized variable-size `FIT` constructor state needed by the
-field closure.
-Do not start cities, roads, rivers, specials, anatomy, or EOCs first. The next
-playable unlock remains the real field plus ordinary client exploration and
-loot.
+Implement generalized ammunition loading for battery magazines, then rerun the
+complete field closure. Do not start cities, roads, rivers, specials, anatomy,
+or EOCs first. The next playable unlock remains the real field plus ordinary
+client exploration and loot.
