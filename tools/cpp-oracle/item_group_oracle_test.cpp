@@ -344,6 +344,113 @@ tool_charge_trace observe_tool_charges( int requested_charges )
     };
 }
 
+struct dressing_trace {
+    std::string case_id;
+    std::string source_group;
+    unsigned int seed = 0;
+    int ammunition_chance = 0;
+    int magazine_chance = 0;
+    int charges_minimum = -1;
+    int charges_maximum = -1;
+    std::string item_type;
+    bool magazine_present = false;
+    std::string magazine_type;
+    std::string ammunition_type;
+    int ammunition_remaining = 0;
+    int remaining_capacity = 0;
+    int downstream_draw = 0;
+};
+
+dressing_trace dressing_result( const std::string &case_id, const std::string &source_group,
+                                unsigned int seed, int ammunition_chance,
+                                int magazine_chance, int charges_minimum,
+                                int charges_maximum, const item &observed )
+{
+    const item *magazine = observed.magazine_current();
+    return {
+        case_id,
+        source_group,
+        seed,
+        ammunition_chance,
+        magazine_chance,
+        charges_minimum,
+        charges_maximum,
+        observed.typeId().str(),
+        magazine != nullptr,
+        magazine == nullptr ? "" : magazine->typeId().str(),
+        observed.ammo_current().str(),
+        observed.ammo_remaining(),
+        observed.remaining_ammo_capacity(),
+        rng( 0, 9999 )
+    };
+}
+
+dressing_trace observe_direct_dressing( const std::string &case_id,
+        const std::string &item_type, unsigned int seed, int ammunition_chance,
+        int magazine_chance, int charges_minimum = -1, int charges_maximum = -1 )
+{
+    Single_item_creator creator( item_type, Single_item_creator::S_ITEM, 100,
+                                 "Rust item-group dressing oracle" );
+    creator.modifier.emplace();
+    creator.modifier->with_ammo = ammunition_chance;
+    creator.modifier->with_magazine = magazine_chance;
+    creator.modifier->charges = { charges_minimum, charges_maximum };
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    return dressing_result( case_id, "", seed, ammunition_chance, magazine_chance,
+                            charges_minimum, charges_maximum, items.front() );
+}
+
+dressing_trace find_direct_dressing( const std::string &case_id,
+                                     const std::string &item_type,
+                                     int ammunition_chance, int magazine_chance,
+                                     int expected_ammunition_remaining )
+{
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        const dressing_trace trace = observe_direct_dressing(
+                                         case_id, item_type, seed,
+                                         ammunition_chance, magazine_chance );
+        if( trace.ammunition_remaining == expected_ammunition_remaining ) {
+            return trace;
+        }
+    }
+    FAIL( "could not find bounded direct dressing chance witness" );
+    return {};
+}
+
+dressing_trace find_production_dressing( const std::string &case_id,
+        const std::string &source_group, const std::string &item_type,
+        int expected_ammunition_remaining )
+{
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item_group::ItemList items = item_group::items_from( item_group_id( source_group ) );
+        const auto found = std::find_if( items.begin(), items.end(), [&]( const item &candidate ) {
+            return candidate.typeId() == itype_id( item_type ) &&
+                   candidate.ammo_remaining() == expected_ammunition_remaining;
+        } );
+        if( found != items.end() ) {
+            const bool everyday_gear = source_group == "everyday_gear";
+            const int ammunition_chance = everyday_gear ? 75 : 0;
+            const int magazine_chance = everyday_gear ? 100 : 0;
+            const int charges_minimum = item_type == "inhaler" ? 10 :
+                                        item_type == "teargas_sprayer" ? 1 : 0;
+            const int charges_maximum = item_type == "matches" ? 20 :
+                                        item_type == "ref_matches" ? 32 :
+                                        item_type == "inhaler" ? 100 :
+                                        item_type == "flashlight" ? 300 :
+                                        item_type == "teargas_sprayer" ? 10 : -1;
+            return dressing_result( case_id, source_group, seed, ammunition_chance,
+                                    magazine_chance, charges_minimum, charges_maximum, *found );
+        }
+    }
+    FAIL( "could not find bounded production dressing witness" );
+    return {};
+}
+
 struct repeated_tool_charge_trace {
     std::string source_group;
     unsigned int seed = 0;
@@ -1702,6 +1809,27 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     item dressed_integral_tool( itype_id( "matches" ) );
     rng_set_engine_seed( 1 );
     dressed.modify( dressed_integral_tool, "Rust item-group integral dressing oracle" );
+    const std::vector<dressing_trace> direct_dressing = {
+        observe_direct_dressing( "integral_full", "matches", 1, 100, 100 ),
+        find_direct_dressing( "integral_chance_failure", "matches", 50, 100, 0 ),
+        find_direct_dressing( "integral_chance_success", "matches", 50, 100, 20 ),
+        observe_direct_dressing( "detachable_ammunition", "wearable_light", 1, 100, 0 ),
+        observe_direct_dressing( "detachable_magazine", "wearable_light", 1, 0, 100 ),
+        observe_direct_dressing( "explicit_charge_suppression", "permanent_marker", 1,
+                                 100, 100, 0, 0 )
+    };
+    const std::vector<dressing_trace> production_dressing = {
+        find_production_dressing( "lighter_matches_empty", "everyday_lighter", "matches", 0 ),
+        find_production_dressing( "lighter_matches_full", "everyday_lighter", "matches", 20 ),
+        find_production_dressing( "lighter_ref_matches_empty", "everyday_lighter", "ref_matches", 0 ),
+        find_production_dressing( "lighter_ref_matches_full", "everyday_lighter", "ref_matches", 32 ),
+        find_production_dressing( "gear_marker_empty", "everyday_gear", "permanent_marker", 0 ),
+        find_production_dressing( "gear_marker_full", "everyday_gear", "permanent_marker", 500 ),
+        find_production_dressing( "gear_inhaler_minimum", "everyday_gear", "inhaler", 10 ),
+        find_production_dressing( "gear_inhaler_maximum", "everyday_gear", "inhaler", 100 ),
+        find_production_dressing( "gear_flashlight_empty", "everyday_gear", "flashlight", 0 ),
+        find_production_dressing( "gear_flashlight_full", "everyday_gear", "flashlight", 56 )
+    };
 
     const container_observation discarded = observe_container_group(
                 "discard", item_group_id( "test_truncating_to_container" ) );
@@ -2148,6 +2276,36 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         json.member( "integral_ammo_remaining", dressed_integral_tool.ammo_remaining() );
         json.member( "integral_ammunition_type", dressed_integral_tool.ammo_current().str() );
         json.member( "integral_remaining_capacity", dressed_integral_tool.remaining_ammo_capacity() );
+        json.end_object();
+
+        const auto write_dressing_traces = [&]( const std::vector<dressing_trace> &traces ) {
+            json.start_array();
+            for( const dressing_trace &trace : traces ) {
+                json.start_object();
+                json.member( "case_id", trace.case_id );
+                json.member( "source_group", trace.source_group );
+                json.member( "seed", trace.seed );
+                json.member( "ammunition_chance", trace.ammunition_chance );
+                json.member( "magazine_chance", trace.magazine_chance );
+                json.member( "charges_minimum", trace.charges_minimum );
+                json.member( "charges_maximum", trace.charges_maximum );
+                json.member( "item_type", trace.item_type );
+                json.member( "magazine_present", trace.magazine_present );
+                json.member( "magazine_type", trace.magazine_type );
+                json.member( "ammunition_type", trace.ammunition_type );
+                json.member( "ammunition_remaining", trace.ammunition_remaining );
+                json.member( "remaining_capacity", trace.remaining_capacity );
+                json.member( "downstream_draw", trace.downstream_draw );
+                json.end_object();
+            }
+            json.end_array();
+        };
+        json.member( "dressing" );
+        json.start_object();
+        json.member( "direct" );
+        write_dressing_traces( direct_dressing );
+        json.member( "production" );
+        write_dressing_traces( production_dressing );
         json.end_object();
 
         json.member( "modifier_container_capacity" );

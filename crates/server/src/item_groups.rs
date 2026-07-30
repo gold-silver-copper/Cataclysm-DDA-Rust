@@ -17,6 +17,7 @@ use cdda_protocol::{
     ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
     ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
     SPAWN_POCKET_SINGLE_ITEM_MARKER, SpawnPocketKindV1, SpawnPocketRulesV1,
+    encode_item_group_dressing_marker, is_reserved_item_group_dressing_marker,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
     item_group_source_max_outputs,
 };
@@ -141,6 +142,85 @@ pub(super) fn assert_regional_field_item_group_closure(
         );
     }
 
+    let lighter = runtime_item_group_graph(
+        field_graph
+            .groups
+            .get("everyday_lighter")
+            .expect("field closure should retain everyday lighters"),
+        content,
+    )
+    .expect("integral match storage should normalize");
+    for (item_id, maximum) in [("matches", 20), ("ref_matches", 32)] {
+        let item = lighter
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .find_map(|entry| match &entry.target {
+                ItemGroupTargetV1::Item(item) if item.prototype.type_id == item_id => Some(item),
+                ItemGroupTargetV1::Item(_)
+                | ItemGroupTargetV1::Group(_)
+                | ItemGroupTargetV1::Node(_) => None,
+            })
+            .unwrap_or_else(|| panic!("everyday lighter should retain {item_id}"));
+        assert_eq!(
+            item.charges,
+            Some(ItemGroupChargeRangeV1 {
+                minimum: 0,
+                maximum,
+            })
+        );
+        assert!(matches!(
+            item.tool_charge_storage,
+            Some(ItemGroupToolChargeStorageV1::Integral { .. })
+        ));
+    }
+
+    let everyday_gear = runtime_item_group_graph(
+        field_graph
+            .groups
+            .get("everyday_gear")
+            .expect("field closure should retain everyday gear"),
+        content,
+    )
+    .expect("group ammunition and magazine dressing should normalize");
+    let dressing_marker = encode_item_group_dressing_marker(75, 100)
+        .expect("production dressing policy should encode");
+    assert!(
+        everyday_gear
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .filter(|entry| matches!(entry.target, ItemGroupTargetV1::Item(_) | ItemGroupTargetV1::Group(_)))
+            .all(|entry| entry.contents.iter().filter(|contents| {
+                matches!(contents, ItemGroupContentsSourceV1::Group(group_id) if group_id == &dressing_marker)
+            }).count() == 1),
+        "every concrete/named leaf should inherit exactly one dressing policy"
+    );
+    let marker = everyday_gear
+        .nodes
+        .iter()
+        .flat_map(|node| &node.entries)
+        .find_map(|entry| match &entry.target {
+            ItemGroupTargetV1::Item(item) if item.prototype.type_id == "permanent_marker" => {
+                Some(item)
+            }
+            ItemGroupTargetV1::Item(_)
+            | ItemGroupTargetV1::Group(_)
+            | ItemGroupTargetV1::Node(_) => None,
+        })
+        .expect("everyday gear should retain its permanent marker");
+    assert_eq!(
+        marker.charges,
+        Some(ItemGroupChargeRangeV1 {
+            minimum: 0,
+            maximum: -1,
+        })
+    );
+    assert!(matches!(
+        marker.tool_charge_storage,
+        Some(ItemGroupToolChargeStorageV1::Integral { .. })
+    ));
+
     let field_runtime_errors = field_graph
         .groups
         .values()
@@ -167,14 +247,6 @@ pub(super) fn assert_regional_field_item_group_closure(
             (
                 "everyday_corpse_male",
                 "item group item corpse_generic_male requires unimplemented corpse construction",
-            ),
-            (
-                "everyday_gear",
-                "item group everyday_gear requires unimplemented ammunition or magazine dressing",
-            ),
-            (
-                "everyday_lighter",
-                "item group item matches cannot retain charge modifiers",
             ),
             (
                 "flask_liquor",
@@ -513,9 +585,9 @@ pub(super) fn runtime_item_group_graph(
     definition: &StrictItemGroupDefinition,
     content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupGraphV1, Box<dyn std::error::Error>> {
-    if definition.ammo_chance != 0 || definition.magazine_chance != 0 {
+    if is_reserved_item_group_dressing_marker(&definition.id) {
         return Err(format!(
-            "item group {} requires unimplemented ammunition or magazine dressing",
+            "item group {} collides with the reserved dressing namespace",
             definition.id
         )
         .into());
@@ -651,6 +723,7 @@ fn runtime_item_group_entry(
     content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupEntryV1, Box<dyn std::error::Error>> {
     let node = strict_item_group_node(definition, node_id)?;
+    let dressing_marker = runtime_item_group_dressing_marker(definition, node);
     let raw_damage = node
         .damage
         .map(
@@ -663,7 +736,7 @@ fn runtime_item_group_entry(
         )
         .transpose()?
         .or_else(|| {
-            node.variant.as_ref().map(|_| InclusiveU16RangeV1 {
+            (node.variant.is_some() || dressing_marker.is_some()).then_some(InclusiveU16RangeV1 {
                 minimum: 0,
                 maximum: 0,
             })
@@ -673,7 +746,8 @@ fn runtime_item_group_entry(
         || node.charges.is_some()
         || node.modifier_container.is_some()
         || node.modifier_sealed.is_some()
-        || !node.contents.is_empty();
+        || !node.contents.is_empty()
+        || dressing_marker.is_some();
     let target = match &node.kind {
         StrictItemGroupNodeKind::Item(item_id) => {
             let item = content.items.get(item_id).ok_or_else(|| {
@@ -705,6 +779,36 @@ fn runtime_item_group_entry(
             })?)
         }
     };
+    let mut contents = node
+        .contents
+        .iter()
+        .map(|contents| match contents {
+            ItemGroupContentsSource::Item(item_id) => {
+                let item = content.items.get(item_id).ok_or_else(|| {
+                    format!(
+                        "item group {} references missing contents item {item_id}",
+                        definition.id
+                    )
+                })?;
+                Ok(ItemGroupContentsSourceV1::Item(Box::new(
+                    runtime_item_group_item(item, None, content)?,
+                )))
+            }
+            ItemGroupContentsSource::Group(group_id) => {
+                if is_reserved_item_group_dressing_marker(group_id) {
+                    return Err(format!(
+                        "item group {} contents reference {} collides with the reserved dressing namespace",
+                        definition.id, group_id
+                    )
+                    .into());
+                }
+                Ok(ItemGroupContentsSourceV1::Group(group_id.clone()))
+            }
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    if let Some(marker) = dressing_marker {
+        contents.push(ItemGroupContentsSourceV1::Group(marker));
+    }
     Ok(ItemGroupEntryV1 {
         probability: node.probability,
         count_min: u16::try_from(node.count.minimum)?,
@@ -718,26 +822,7 @@ fn runtime_item_group_entry(
             | StrictItemGroupNodeKind::Collection(_)
             | StrictItemGroupNodeKind::Distribution(_) => None,
         },
-        contents: node
-            .contents
-            .iter()
-            .map(|contents| match contents {
-                ItemGroupContentsSource::Item(item_id) => {
-                    let item = content.items.get(item_id).ok_or_else(|| {
-                        format!(
-                            "item group {} references missing contents item {item_id}",
-                            definition.id
-                        )
-                    })?;
-                    Ok(ItemGroupContentsSourceV1::Item(Box::new(
-                        runtime_item_group_item(item, None, content)?,
-                    )))
-                }
-                ItemGroupContentsSource::Group(group_id) => {
-                    Ok(ItemGroupContentsSourceV1::Group(group_id.clone()))
-                }
-            })
-            .collect::<Result<_, Box<dyn std::error::Error>>>()?,
+        contents,
         seal_contents: !node.contents.is_empty() && node.modifier_sealed.unwrap_or(true),
         modifier_default_container_sealed: (modifier_present && node.modifier_container.is_none())
             .then(|| node.modifier_sealed.unwrap_or(true)),
@@ -783,6 +868,18 @@ fn runtime_item_group_entry(
             .transpose()?,
         target,
     })
+}
+
+fn runtime_item_group_dressing_marker(
+    definition: &StrictItemGroupDefinition,
+    node: &StrictItemGroupNode,
+) -> Option<String> {
+    matches!(
+        node.kind,
+        StrictItemGroupNodeKind::Item(_) | StrictItemGroupNodeKind::Group(_)
+    )
+    .then(|| encode_item_group_dressing_marker(definition.ammo_chance, definition.magazine_chance))
+    .flatten()
 }
 
 pub(super) fn runtime_item_group_item(
@@ -1588,7 +1685,49 @@ fn item_group_charges_supported(item: &ItemDefinition) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cdda_content::{ItemVariantDefinition, PocketDefinition, SpawnPocketKindDefinition};
+    use cdda_content::{
+        ItemGroupRange, ItemVariantDefinition, PocketDefinition, SpawnPocketKindDefinition,
+    };
+
+    fn strict_group_node(kind: StrictItemGroupNodeKind) -> StrictItemGroupNode {
+        StrictItemGroupNode {
+            kind,
+            probability: 100,
+            count: ItemGroupRange::ONE,
+            charges: None,
+            damage: None,
+            variant: None,
+            direct_wrapper: None,
+            modifier_container: None,
+            modifier_sealed: None,
+            contents: Vec::new(),
+            event: None,
+        }
+    }
+
+    #[test]
+    fn inherited_dressing_marks_only_concrete_and_named_leaves() {
+        let definition = StrictItemGroupDefinition {
+            id: String::from("dressed_group"),
+            subtype: ItemGroupSubtype::Collection,
+            ammo_chance: 75,
+            magazine_chance: 100,
+            wrapper: None,
+            roots: vec![0],
+            nodes: vec![
+                strict_group_node(StrictItemGroupNodeKind::Collection(vec![1])),
+                strict_group_node(StrictItemGroupNodeKind::Group(String::from("inner"))),
+            ],
+        };
+        assert_eq!(
+            runtime_item_group_dressing_marker(&definition, &definition.nodes[0]),
+            None
+        );
+        assert_eq!(
+            runtime_item_group_dressing_marker(&definition, &definition.nodes[1]),
+            Some(String::from("__CDDA_ITEM_GROUP_DRESSING_V1:75:100"))
+        );
+    }
 
     fn materialless_temperature_item() -> ItemDefinition {
         ItemDefinition {

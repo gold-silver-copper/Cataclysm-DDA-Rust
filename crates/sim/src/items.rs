@@ -12,7 +12,8 @@ use cdda_protocol::{
     ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH,
     MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
     MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
-    RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, initial_item_temperature_state,
+    RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, decode_item_group_dressing_marker,
+    initial_item_temperature_state, is_reserved_item_group_dressing_marker,
     item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
     item_containment_weight_milligrams,
 };
@@ -1146,6 +1147,16 @@ pub struct ItemGroupIntegralChargeProjection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupDressingProjection {
+    pub item_type: String,
+    pub magazine_present: bool,
+    pub magazine_type: Option<String>,
+    pub ammunition_type: Option<String>,
+    pub ammunition_remaining: i32,
+    pub remaining_capacity: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ItemGroupDefaultContainerMode {
     Unmodified,
     ModifierFallback {
@@ -1486,6 +1497,110 @@ pub fn item_group_integral_charge_projection(
     })
 }
 
+/// Renderer-free direct projection for inherited group ammunition/magazine
+/// dressing. This executes the same constructor, modifier, and storage planner
+/// used by production item groups; the seed is explicit so differential cases
+/// can retain successful and failed chance boundaries independently.
+pub fn item_group_dressing_projection(
+    item: &ItemGroupItemPrototypeV1,
+    ammunition_chance: u8,
+    magazine_chance: u8,
+    charges: Option<ItemGroupChargeRangeV1>,
+    seed: u64,
+) -> Result<ItemGroupDressingProjection, SimError> {
+    let marker =
+        cdda_protocol::encode_item_group_dressing_marker(ammunition_chance, magazine_chance);
+    if marker.is_none() && (ammunition_chance != 0 || magazine_chance != 0) {
+        return Err(SimError::InvalidItem);
+    }
+    let mut item = item.clone();
+    item.charges = charges;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut output = Vec::new();
+    let graph = ItemGroupGraphV1 {
+        root_node: 0,
+        nodes: vec![ItemGroupNodeV1 {
+            node_id: 0,
+            kind: ItemGroupKindV1::Collection,
+            entries: vec![ItemGroupEntryV1 {
+                probability: 100,
+                count_min: 1,
+                count_max: 1,
+                raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                    minimum: 0,
+                    maximum: 0,
+                }),
+                variant_id: None,
+                event: None,
+                modifier_charges: None,
+                contents: marker
+                    .map(ItemGroupContentsSourceV1::Group)
+                    .into_iter()
+                    .collect(),
+                seal_contents: false,
+                modifier_default_container_sealed: Some(true),
+                direct_wrapper: None,
+                modifier_container: None,
+                target: ItemGroupTargetV1::Item(Box::new(item)),
+            }],
+        }],
+        wrapper: None,
+    };
+    plan_item_group_source_into(
+        &ItemGroupSourceV1::Inline(graph),
+        &BTreeMap::new(),
+        &mut rng,
+        &mut output,
+        0,
+    )?;
+    let [planned] = output.try_into().map_err(|_| SimError::InvalidItem)?;
+    match &planned.tool_charge_storage {
+        Some(ItemGroupToolChargeStorageV1::Integral { .. }) => {
+            let [pocket] = planned.prototype.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            let ammunition = planned.integral_ammunition.get(&pocket.pocket_index);
+            let ammunition_remaining =
+                ammunition.map_or(0, |ammunition| ammunition.prototype.charges);
+            Ok(ItemGroupDressingProjection {
+                item_type: planned.prototype.type_id,
+                magazine_present: false,
+                magazine_type: None,
+                ammunition_type: ammunition
+                    .map(|ammunition| ammunition.prototype.ammunition_type.clone()),
+                ammunition_remaining,
+                remaining_capacity: pocket.capacity.saturating_sub(
+                    u32::try_from(ammunition_remaining).map_err(|_| SimError::InvalidItem)?,
+                ),
+            })
+        }
+        Some(ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index, ..
+        }) => {
+            let magazine = planned.detachable_magazines.get(well_pocket_index);
+            let ammunition = magazine.and_then(|magazine| {
+                let [pocket] = magazine.prototype.integral_magazines.as_slice() else {
+                    return None;
+                };
+                magazine.integral_ammunition.get(&pocket.pocket_index)
+            });
+            Ok(ItemGroupDressingProjection {
+                item_type: planned.prototype.type_id,
+                magazine_present: magazine.is_some(),
+                magazine_type: magazine.map(|magazine| magazine.prototype.type_id.clone()),
+                ammunition_type: ammunition
+                    .map(|ammunition| ammunition.prototype.ammunition_type.clone()),
+                ammunition_remaining: ammunition
+                    .map_or(0, |ammunition| ammunition.prototype.charges),
+                // Pinned `item::remaining_ammo_capacity()` reports zero on a
+                // detachable owner; the installed magazine owns capacity.
+                remaining_capacity: 0,
+            })
+        }
+        None => Err(SimError::InvalidItem),
+    }
+}
+
 pub(super) fn item_profile_has_flag(
     profile: &cdda_protocol::ItemContainmentProfileV1,
     expected: &str,
@@ -1682,7 +1797,7 @@ fn apply_item_group_modifier(
         .transpose()?
         .flatten();
     apply_item_group_charges(planned, charges, modifier_container_capacity, rng)?;
-    consume_item_group_modifier_dressing(planned, rng);
+    apply_item_group_modifier_dressing(planned, charges, &entry.contents, rng)?;
     if let (Some(container), Some((wrapper, _))) = (modifier_container, active_wrapper.as_ref()) {
         wrap_single_item(planned, container, wrapper)?;
     }
@@ -2062,13 +2177,118 @@ fn set_planned_variant(
     Ok(())
 }
 
-fn consume_item_group_modifier_dressing(planned: &PlannedItemSpawn, rng: &mut ChaCha8Rng) {
-    if planned.charge_capacity == ItemGroupChargeCapacityV1::AmmunitionStorage {
-        // Pinned Item_modifier evaluates both zero-chance ammunition and
-        // magazine dressing rolls for magazines and wells.
-        let _ = rng.next_u64();
-        let _ = rng.next_u64();
+fn item_group_dressing_policy(sources: &[ItemGroupContentsSourceV1]) -> Result<(u8, u8), SimError> {
+    let mut policy = None;
+    for source in sources {
+        let ItemGroupContentsSourceV1::Group(group_id) = source else {
+            continue;
+        };
+        if !is_reserved_item_group_dressing_marker(group_id) {
+            continue;
+        }
+        let decoded = decode_item_group_dressing_marker(group_id).ok_or(SimError::InvalidItem)?;
+        if policy.replace(decoded).is_some() {
+            return Err(SimError::InvalidItem);
+        }
     }
+    Ok(policy.unwrap_or((0, 0)))
+}
+
+fn apply_item_group_modifier_dressing(
+    planned: &mut PlannedItemSpawn,
+    charges: Option<ItemGroupChargeRangeV1>,
+    sources: &[ItemGroupContentsSourceV1],
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    let (ammunition_chance, magazine_chance) = item_group_dressing_policy(sources)?;
+    if planned.charge_capacity != ItemGroupChargeCapacityV1::AmmunitionStorage {
+        return Ok(());
+    }
+
+    // Pinned Item_modifier evaluates both rolls for every integral magazine
+    // and magazine well, including zero-chance policies. Explicit charges
+    // suppress only ammunition dressing and do not remove either draw.
+    let ammunition_roll = rng.next_u64() % 100;
+    let magazine_roll = rng.next_u64() % 100;
+    let charges_not_set =
+        charges.is_none_or(|charges| charges.minimum == -1 && charges.maximum == -1);
+    let spawn_ammunition = ammunition_roll < u64::from(ammunition_chance) && charges_not_set;
+
+    match planned.tool_charge_storage.clone() {
+        Some(ItemGroupToolChargeStorageV1::Integral { ammunition }) => {
+            let [pocket] = planned.prototype.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            let has_ammunition = planned
+                .integral_ammunition
+                .get(&pocket.pocket_index)
+                .is_some_and(|ammunition| ammunition.prototype.charges > 0);
+            if spawn_ammunition && !has_ammunition {
+                let charges =
+                    i32::try_from(pocket.capacity).map_err(|_| SimError::NumericOverflow)?;
+                let loaded = construct_charge_ammunition(&ammunition, charges, rng)?;
+                planned
+                    .integral_ammunition
+                    .insert(pocket.pocket_index, Box::new(loaded));
+            }
+        }
+        Some(ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index,
+            magazine,
+            ammunition,
+        }) => {
+            let [well] = planned.prototype.magazine_wells.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            if well.pocket_index != well_pocket_index
+                || well
+                    .compatible_magazine_type_ids
+                    .binary_search(&magazine.type_id)
+                    .is_err()
+            {
+                return Err(SimError::InvalidItem);
+            }
+            let [magazine_pocket] = magazine.integral_magazines.as_slice() else {
+                return Err(SimError::InvalidItem);
+            };
+            let current_magazine = planned.detachable_magazines.get(&well_pocket_index);
+            if current_magazine.is_some_and(|installed| installed.prototype != magazine) {
+                return Err(SimError::InvalidItem);
+            }
+            let has_ammunition = current_magazine
+                .and_then(|installed| {
+                    installed
+                        .integral_ammunition
+                        .get(&magazine_pocket.pocket_index)
+                })
+                .is_some_and(|ammunition| ammunition.prototype.charges > 0);
+            let has_current_magazine = current_magazine.is_some();
+            let spawn_ammunition = spawn_ammunition && !has_ammunition;
+            let spawn_magazine =
+                magazine_roll < u64::from(magazine_chance) && !has_current_magazine;
+            if spawn_magazine {
+                let loaded_magazine = construct_charge_ammunition(&magazine, 0, rng)?;
+                planned
+                    .detachable_magazines
+                    .insert(well_pocket_index, Box::new(loaded_magazine));
+            }
+            if spawn_ammunition && (spawn_magazine || has_current_magazine) {
+                let installed = planned
+                    .detachable_magazines
+                    .get_mut(&well_pocket_index)
+                    .ok_or(SimError::InvalidItem)?;
+                let charges = i32::try_from(magazine_pocket.capacity)
+                    .map_err(|_| SimError::NumericOverflow)?;
+                let loaded = construct_charge_ammunition(&ammunition, charges, rng)?;
+                installed
+                    .integral_ammunition
+                    .insert(magazine_pocket.pocket_index, Box::new(loaded));
+            }
+        }
+        None if ammunition_chance == 0 && magazine_chance == 0 => {}
+        None => return Err(SimError::InvalidItem),
+    }
+    Ok(())
 }
 
 fn construct_item_group_container(
@@ -2157,8 +2377,26 @@ fn insert_item_group_contents(
     item_groups: &BTreeMap<String, ItemGroupDefinitionV1>,
     rng: &mut ChaCha8Rng,
 ) -> Result<(), SimError> {
+    let _ = item_group_dressing_policy(sources)?;
+    let actual_source_count = sources
+        .iter()
+        .filter(|source| {
+            !matches!(
+                source,
+                ItemGroupContentsSourceV1::Group(group_id)
+                    if is_reserved_item_group_dressing_marker(group_id)
+            )
+        })
+        .count();
     for source in sources {
-        if sources.len() > 1 {
+        if matches!(
+            source,
+            ItemGroupContentsSourceV1::Group(group_id)
+                if is_reserved_item_group_dressing_marker(group_id)
+        ) {
+            continue;
+        }
+        if actual_source_count > 1 {
             // Pinned `load_sub_ref` wraps multiple contents sources in a
             // probability-100 collection, whose range-100 check still
             // consumes one RNG draw per source. A single source remains a
@@ -2719,6 +2957,7 @@ mod tests {
         AmmunitionContainerPocketPrototypeV1, IntegralMagazinePocketPrototypeV1,
         ItemContainmentProfileV1, ItemGroupEventV1, ItemGroupItemPrototypeV1, ItemGroupNodeV1,
         ItemPhaseV1, MagazineWellPrototypeV1, SpawnPocketRulesV1,
+        encode_item_group_dressing_marker,
     };
     use rand_core::SeedableRng;
 
@@ -3742,6 +3981,235 @@ mod tests {
             observed_draws, 17,
             "the second modifier constructs ammunition but not another magazine"
         );
+    }
+
+    #[test]
+    fn group_dressing_fills_integral_and_detachable_defaults_with_exact_phases() {
+        let marker = |ammunition, magazine| {
+            ItemGroupContentsSourceV1::Group(
+                encode_item_group_dressing_marker(ammunition, magazine)
+                    .expect("bounded nonzero dressing should encode"),
+            )
+        };
+        let source = |target: ItemGroupItemPrototypeV1, contents| {
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        variant_id: None,
+                        event: None,
+                        target: ItemGroupTargetV1::Item(Box::new(target)),
+                        modifier_charges: None,
+                        contents,
+                        seal_contents: false,
+                        modifier_default_container_sealed: Some(true),
+                        direct_wrapper: None,
+                        modifier_container: None,
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+        let ammunition = || {
+            let mut ammunition = leaf_item("battery").prototype;
+            ammunition.ammunition_type = String::from("battery");
+            ammunition.containment = ItemContainmentProfileV1 {
+                count_by_charges: true,
+                stack_size: 100,
+                ..ItemContainmentProfileV1::default()
+            };
+            ammunition
+        };
+
+        let mut integral = leaf_item("integral_light");
+        integral.prototype.charges = 0;
+        integral.prototype.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 2,
+            pocket_id: String::from("BATTERY"),
+            ammunition_type: String::from("battery"),
+            capacity: 20,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+        }];
+        integral.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Integral {
+            ammunition: ammunition(),
+        });
+        integral.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
+        let seed = 31;
+        let mut integral_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(
+            &source(integral.clone(), vec![marker(100, 100)]),
+            &BTreeMap::new(),
+            &mut integral_rng,
+        )
+        .expect("integral dressing should plan");
+        assert_eq!(planned[0].integral_ammunition[&2].prototype.charges, 20);
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        for _ in 0..9 {
+            let _ = expected_rng.next_u64();
+        }
+        assert_eq!(integral_rng.next_u64(), expected_rng.next_u64());
+
+        let failure_seed = (1_u64..100)
+            .find(|seed| {
+                let mut rng = ChaCha8Rng::seed_from_u64(*seed);
+                for _ in 0..5 {
+                    let _ = rng.next_u64();
+                }
+                rng.next_u64() % 100 >= 50
+            })
+            .expect("a deterministic failing ammunition ticket should exist");
+        let mut failure_rng = ChaCha8Rng::seed_from_u64(failure_seed);
+        let failed = plan_item_group_source(
+            &source(integral.clone(), vec![marker(50, 100)]),
+            &BTreeMap::new(),
+            &mut failure_rng,
+        )
+        .expect("a failed dressing chance should still plan");
+        assert!(failed[0].integral_ammunition.is_empty());
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(failure_seed);
+        for _ in 0..7 {
+            let _ = expected_rng.next_u64();
+        }
+        assert_eq!(failure_rng.next_u64(), expected_rng.next_u64());
+
+        integral.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        let mut explicit_rng = ChaCha8Rng::seed_from_u64(seed);
+        let explicit = plan_item_group_source(
+            &source(integral, vec![marker(100, 100)]),
+            &BTreeMap::new(),
+            &mut explicit_rng,
+        )
+        .expect("explicit zero charges should suppress ammunition dressing");
+        assert!(explicit[0].integral_ammunition.is_empty());
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        for _ in 0..7 {
+            let _ = expected_rng.next_u64();
+        }
+        assert_eq!(explicit_rng.next_u64(), expected_rng.next_u64());
+
+        let mut detachable = leaf_item("wearable_light");
+        detachable.prototype.charges = 0;
+        detachable.prototype.magazine_wells = vec![MagazineWellPrototypeV1 {
+            pocket_index: 4,
+            pocket_id: String::from("BATTERY_WELL"),
+            compatible_magazine_type_ids: vec![String::from("medium_battery_cell")],
+            rigid: true,
+            unloadable: true,
+        }];
+        let mut magazine = leaf_item("medium_battery_cell").prototype;
+        magazine.charges = 0;
+        magazine.integral_magazines = vec![IntegralMagazinePocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("MAGAZINE"),
+            ammunition_type: String::from("battery"),
+            capacity: 56,
+            rigid: true,
+            reloadable: false,
+            unloadable: false,
+        }];
+        detachable.tool_charge_storage = Some(ItemGroupToolChargeStorageV1::Detachable {
+            well_pocket_index: 4,
+            magazine,
+            ammunition: Box::new(ammunition()),
+        });
+        detachable.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
+        let mut ammunition_only_rng = ChaCha8Rng::seed_from_u64(seed);
+        let ammunition_only = plan_item_group_source(
+            &source(detachable.clone(), vec![marker(100, 0)]),
+            &BTreeMap::new(),
+            &mut ammunition_only_rng,
+        )
+        .expect("ammunition-only detachable dressing should plan");
+        assert!(
+            ammunition_only[0].detachable_magazines.is_empty(),
+            "without an installed magazine, upstream ammunition chance alone has no target"
+        );
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        for _ in 0..7 {
+            let _ = expected_rng.next_u64();
+        }
+        assert_eq!(ammunition_only_rng.next_u64(), expected_rng.next_u64());
+
+        let mut detachable_rng = ChaCha8Rng::seed_from_u64(seed);
+        let planned = plan_item_group_source(
+            &source(detachable, vec![marker(100, 100)]),
+            &BTreeMap::new(),
+            &mut detachable_rng,
+        )
+        .expect("detachable dressing should plan");
+        let magazine = &planned[0].detachable_magazines[&4];
+        assert_eq!(magazine.prototype.type_id, "medium_battery_cell");
+        assert_eq!(magazine.integral_ammunition[&0].prototype.charges, 56);
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        for _ in 0..11 {
+            let _ = expected_rng.next_u64();
+        }
+        assert_eq!(detachable_rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn group_dressing_rejects_malformed_and_duplicate_reserved_policies() {
+        let source = |contents| {
+            ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![ItemGroupEntryV1 {
+                        probability: 100,
+                        count_min: 1,
+                        count_max: 1,
+                        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+                            minimum: 0,
+                            maximum: 0,
+                        }),
+                        variant_id: None,
+                        event: None,
+                        target: leaf("hostile_dressing"),
+                        modifier_charges: None,
+                        contents,
+                        seal_contents: false,
+                        modifier_default_container_sealed: None,
+                        direct_wrapper: None,
+                        modifier_container: None,
+                    }],
+                }],
+                wrapper: None,
+            })
+        };
+        let marker = encode_item_group_dressing_marker(1, 1).expect("policy should encode");
+        for contents in [
+            vec![ItemGroupContentsSourceV1::Group(String::from(
+                "__CDDA_ITEM_GROUP_DRESSING_V1:1:101",
+            ))],
+            vec![
+                ItemGroupContentsSourceV1::Group(marker.clone()),
+                ItemGroupContentsSourceV1::Group(marker.clone()),
+            ],
+        ] {
+            assert!(
+                plan_item_group_source(
+                    &source(contents),
+                    &BTreeMap::new(),
+                    &mut ChaCha8Rng::seed_from_u64(1),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -5106,7 +5574,13 @@ mod tests {
                         event: None,
                         target: ItemGroupTargetV1::Item(Box::new(food.clone())),
                         modifier_charges: None,
-                        contents: vec![ItemGroupContentsSourceV1::Item(Box::new(contents.clone()))],
+                        contents: vec![
+                            ItemGroupContentsSourceV1::Item(Box::new(contents.clone())),
+                            ItemGroupContentsSourceV1::Group(
+                                encode_item_group_dressing_marker(100, 100)
+                                    .expect("policy should encode"),
+                            ),
+                        ],
                         seal_contents,
                         modifier_default_container_sealed: None,
                         direct_wrapper: None,
@@ -5129,7 +5603,7 @@ mod tests {
         assert_eq!(
             sealed_rng.next_u64(),
             expected_single_source_rng.next_u64(),
-            "one contents source stays a direct creator without a collection roll"
+            "a reserved dressing marker must not turn one content source into a collection"
         );
 
         let mut unsealed_rng = ChaCha8Rng::seed_from_u64(27);

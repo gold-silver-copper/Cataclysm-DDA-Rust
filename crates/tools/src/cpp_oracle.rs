@@ -28,6 +28,10 @@ use cdda_sim::{ReservedIdBlock, WorldState};
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
+mod item_group_dressing;
+
+use item_group_dressing::ItemGroupDressingObservationV1;
+
 const ORACLE_FORMAT_VERSION: u16 = 1;
 const CACHE_FORMAT_VERSION: u16 = 1;
 const UPSTREAM_TREE: &str = "210f31db2e8b2f0caed1809f1a66781859f9d129";
@@ -126,6 +130,7 @@ struct ItemGroupOracleObservationV1 {
     variable_size_fit: ItemGroupVariableSizeFitObservationV1,
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
+    dressing: ItemGroupDressingObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
     #[serde(default)]
     charge_capacity_sentinels: Vec<ItemGroupChargeCapacitySentinelTraceV1>,
@@ -931,6 +936,11 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 &rust_repeated_item_group_tool_charge_observation()?,
             )?;
             compare_direct_observation(
+                "item-group ammunition and magazine dressing",
+                &observation.dressing.direct_projection(),
+                &item_group_dressing::rust_observation()?,
+            )?;
+            compare_direct_observation(
                 "item description snippet expansion",
                 &observation.description_expansion.direct_projection(),
                 &rust_item_group_description_expansion_observation()?,
@@ -1527,6 +1537,7 @@ fn validate_item_group_observation(
     {
         return Err("item-group modifier characterization is incomplete".into());
     }
+    item_group_dressing::validate(&observation.dressing)?;
     if observation.modifier_container_capacity.seed != 31_415
         || observation.modifier_container_capacity.container_type != "bottle_plastic"
         || observation.modifier_container_capacity.payload_type != "water_clean"

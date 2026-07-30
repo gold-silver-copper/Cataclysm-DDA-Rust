@@ -349,18 +349,40 @@ pub struct StrictSpawnPocketDefinition {
 }
 
 impl PocketDefinition {
-    /// A strict integral magazine has no behavior beyond ammunition category
-    /// and capacity. Other preserved fields keep the pocket fail-closed.
+    /// A strict integral magazine has no behavior beyond ammunition category,
+    /// capacity, and the one-stack ownership already enforced by canonical
+    /// integral storage. Upstream's `holster` marker does not add another
+    /// representable child because integral ammunition is one combinable
+    /// stack, while `airtight` and `watertight` add no state beyond the
+    /// compatible ammunition restriction; other preserved fields keep the
+    /// pocket fail-closed.
     #[must_use]
     pub fn strict_integral_magazine(&self) -> Option<&BTreeMap<String, i32>> {
-        const FIELDS: &[&str] = &["ammo_restriction", "id", "pocket_type", "rigid"];
+        const FIELDS: &[&str] = &[
+            "airtight",
+            "ammo_restriction",
+            "holster",
+            "id",
+            "pocket_type",
+            "rigid",
+            "watertight",
+        ];
         (self.pocket_type == PocketTypeDefinition::Magazine
             && !self.ammo_restrictions.is_empty()
             && self
                 .raw_fields
                 .keys()
                 .all(|field| FIELDS.contains(&field.as_str()))
-            && self.raw_fields.get("rigid").is_none_or(Value::is_boolean))
+            && self
+                .raw_fields
+                .get("airtight")
+                .is_none_or(Value::is_boolean)
+            && self.raw_fields.get("holster").is_none_or(Value::is_boolean)
+            && self.raw_fields.get("rigid").is_none_or(Value::is_boolean)
+            && self
+                .raw_fields
+                .get("watertight")
+                .is_none_or(Value::is_boolean))
         .then_some(&self.ammo_restrictions)
     }
 
@@ -3216,6 +3238,49 @@ mod tests {
                 .unsupported_fields
                 .contains("pocket_data")
         );
+    }
+
+    #[test]
+    fn holster_integral_magazine_retains_strict_one_stack_storage() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let matches = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_matches",
+            "subtypes": ["TOOL"],
+            "name": "test matches",
+            "pocket_data": [{
+                "pocket_type": "MAGAZINE",
+                "ammo_restriction": {"match": 20},
+                "airtight": true,
+                "holster": true,
+                "watertight": true
+            }]
+        }));
+        assert!(load_one(&matches, &mut items, &mut abstracts).expect("matches should load"));
+        let pocket = &items["test_matches"].pockets[0];
+        assert_eq!(
+            pocket.strict_integral_magazine(),
+            Some(&BTreeMap::from([(String::from("match"), 20)]))
+        );
+
+        let mut invalid = pocket.clone();
+        invalid
+            .raw_fields
+            .insert(String::from("holster"), serde_json::json!("yes"));
+        assert_eq!(invalid.strict_integral_magazine(), None);
+
+        let mut invalid = pocket.clone();
+        invalid
+            .raw_fields
+            .insert(String::from("watertight"), serde_json::json!(1));
+        assert_eq!(invalid.strict_integral_magazine(), None);
+
+        let mut invalid = pocket.clone();
+        invalid
+            .raw_fields
+            .insert(String::from("airtight"), serde_json::json!([]));
+        assert_eq!(invalid.strict_integral_magazine(), None);
     }
 
     #[test]

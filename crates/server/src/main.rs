@@ -48,7 +48,8 @@ use cdda_protocol::{
 #[cfg(test)]
 use cdda_protocol::{
     AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, ItemGroupChargeRangeV1,
-    ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1, item_group_source_max_outputs,
+    ItemGroupContentsSourceV1, ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    encode_item_group_dressing_marker, item_group_source_max_outputs,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -76,8 +77,8 @@ use item_groups::{
 };
 #[cfg(test)]
 use item_groups::{
-    assert_regional_field_multi_pocket_closure, runtime_item_group_charges,
-    runtime_item_group_graph, runtime_item_group_item,
+    assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
+    runtime_item_group_item,
 };
 use worldgen::{RuntimeMapgenContent, bootstrap_lmoe_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
@@ -5246,9 +5247,24 @@ mod tests {
             .expect("wall group should strictly normalize")
             .root;
         dressed_wall.ammo_chance = 1;
+        let dressed_wall = runtime_item_group_graph(&dressed_wall, item_group_content)
+            .expect("generalized ammunition dressing should normalize");
+        let dressing_marker = encode_item_group_dressing_marker(1, 0)
+            .expect("nonzero synthetic dressing should encode");
         assert!(
-            runtime_item_group_graph(&dressed_wall, item_group_content).is_err(),
-            "unimplemented ammunition dressing must fail closed"
+            dressed_wall
+                .nodes
+                .iter()
+                .flat_map(|node| &node.entries)
+                .filter(|entry| matches!(
+                    entry.target,
+                    ItemGroupTargetV1::Item(_) | ItemGroupTargetV1::Group(_)
+                ))
+                .all(|entry| entry.contents.iter().any(|contents| matches!(
+                    contents,
+                    ItemGroupContentsSourceV1::Group(group_id) if group_id == &dressing_marker
+                ))),
+            "every concrete/named leaf should carry inherited dressing"
         );
         for (terrain_id, dynamic_floor_result, multiplier) in [
             ("t_door_b", None, 950_000),
@@ -5877,10 +5893,20 @@ mod tests {
                 ("wearable_light", false),
             ]
         );
-        assert_eq!(empty_charge_targets.len(), 54);
+        assert_eq!(empty_charge_targets.len(), 52);
+        for item_id in ["matches", "ref_matches"] {
+            assert!(
+                !disassembly
+                    .get(item_id)
+                    .unwrap_or_else(|| panic!("{item_id} disassembly should remain admitted"))
+                    .requires_empty_charges,
+                "strict holster-integral storage should make {item_id} charge state recoverable"
+            );
+        }
         assert_eq!(
             generalized_detachable_targets,
             [
+                "acetylene_cooker",
                 "circsaw_off",
                 "cordless_drill",
                 "creepy_doll",
@@ -5892,6 +5918,7 @@ mod tests {
                 "heavy_flashlight",
                 "mask_filter",
                 "mask_gas",
+                "oxy_torch",
                 "ph_meter",
                 "radio_car",
                 "radiocontrol",

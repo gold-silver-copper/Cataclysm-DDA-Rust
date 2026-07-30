@@ -265,6 +265,46 @@ pub const MAX_ITEM_GROUP_DEPTH: usize = 32;
 /// One item-group invocation cannot require more than one reserved ID block.
 pub const MAX_ITEM_GROUP_OUTPUTS: u64 = 4_096;
 
+/// Reserved value carried by `ItemGroupContentsSourceV1::Group` so inherited
+/// group-level ammunition and magazine dressing can use the frozen Protocol
+/// 95 representation. Simulation consumes the marker before ordinary contents
+/// insertion; a real content group in this namespace is always rejected.
+pub const ITEM_GROUP_DRESSING_MARKER_PREFIX: &str = "__CDDA_ITEM_GROUP_DRESSING_V1:";
+
+#[must_use]
+pub fn encode_item_group_dressing_marker(
+    ammunition_chance: u8,
+    magazine_chance: u8,
+) -> Option<String> {
+    if (ammunition_chance == 0 && magazine_chance == 0)
+        || ammunition_chance > 100
+        || magazine_chance > 100
+    {
+        return None;
+    }
+    Some(format!(
+        "{ITEM_GROUP_DRESSING_MARKER_PREFIX}{ammunition_chance}:{magazine_chance}"
+    ))
+}
+
+#[must_use]
+pub fn decode_item_group_dressing_marker(value: &str) -> Option<(u8, u8)> {
+    let suffix = value.strip_prefix(ITEM_GROUP_DRESSING_MARKER_PREFIX)?;
+    let (ammunition, magazine) = suffix.split_once(':')?;
+    if magazine.contains(':') {
+        return None;
+    }
+    let ammunition = ammunition.parse::<u8>().ok()?;
+    let magazine = magazine.parse::<u8>().ok()?;
+    let canonical = encode_item_group_dressing_marker(ammunition, magazine)?;
+    (canonical == value).then_some((ammunition, magazine))
+}
+
+#[must_use]
+pub fn is_reserved_item_group_dressing_marker(value: &str) -> bool {
+    value.starts_with(ITEM_GROUP_DRESSING_MARKER_PREFIX)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ItemGroupKindV1 {
     Collection,
@@ -496,6 +536,35 @@ struct ItemGroupMetrics {
     top_level_default_container_possible: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ItemGroupDressingPolicy {
+    ammunition_chance: u8,
+    magazine_chance: u8,
+}
+
+fn item_group_dressing_policy(
+    contents: &[ItemGroupContentsSourceV1],
+) -> Option<ItemGroupDressingPolicy> {
+    let mut policy = None;
+    for source in contents {
+        let ItemGroupContentsSourceV1::Group(group_id) = source else {
+            continue;
+        };
+        if !is_reserved_item_group_dressing_marker(group_id) {
+            continue;
+        }
+        let (ammunition_chance, magazine_chance) = decode_item_group_dressing_marker(group_id)?;
+        if policy.is_some() {
+            return None;
+        }
+        policy = Some(ItemGroupDressingPolicy {
+            ammunition_chance,
+            magazine_chance,
+        });
+    }
+    Some(policy.unwrap_or_default())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ItemGroupEvaluationState {
     Visiting,
@@ -697,6 +766,14 @@ impl<'a> ItemGroupEvaluator<'a> {
         let mut top_level_default_container_possible = false;
         for entry in entries {
             let mut target = target_metrics(self, &entry.target)?;
+            let dressing = item_group_dressing_policy(&entry.contents)?;
+            let has_actual_contents = entry.contents.iter().any(|contents| {
+                !matches!(
+                    contents,
+                    ItemGroupContentsSourceV1::Group(group_id)
+                        if is_reserved_item_group_dressing_marker(group_id)
+                )
+            });
             let modifier_present = entry.raw_damage.is_some()
                 || entry.variant_id.is_some()
                 || entry.modifier_charges.is_some()
@@ -755,6 +832,13 @@ impl<'a> ItemGroupEvaluator<'a> {
                 entry.contents.iter().try_fold(
                     (0_u64, 0_usize, true),
                     |(total, depth, all_estorable), contents| {
+                        if matches!(
+                            contents,
+                            ItemGroupContentsSourceV1::Group(group_id)
+                                if is_reserved_item_group_dressing_marker(group_id)
+                        ) {
+                            return Some((total, depth, all_estorable));
+                        }
                         let metrics = match contents {
                             ItemGroupContentsSourceV1::Item(item) => item_group_item_metrics(item),
                             ItemGroupContentsSourceV1::Group(group_id) => {
@@ -769,7 +853,7 @@ impl<'a> ItemGroupEvaluator<'a> {
                         ))
                     },
                 )?;
-            if !entry.contents.is_empty()
+            if has_actual_contents
                 && !(if all_contents_estorable {
                     modified_contents_support.0
                 } else {
@@ -788,6 +872,14 @@ impl<'a> ItemGroupEvaluator<'a> {
                     .checked_add(target.charge_magazine_candidates.checked_mul(count)?)?;
             }
             if positive_modifier_charges {
+                entry_outputs = entry_outputs
+                    .checked_add(target.charge_ammunition_candidates.checked_mul(count)?)?;
+            }
+            if dressing.magazine_chance > 0 {
+                entry_outputs = entry_outputs
+                    .checked_add(target.charge_magazine_candidates.checked_mul(count)?)?;
+            }
+            if dressing.ammunition_chance > 0 {
                 entry_outputs = entry_outputs
                     .checked_add(target.charge_ammunition_candidates.checked_mul(count)?)?;
             }
@@ -840,7 +932,7 @@ impl<'a> ItemGroupEvaluator<'a> {
                         entry_containment_depth.max(container.containment_depth);
                 }
             }
-            if !entry.contents.is_empty() {
+            if has_actual_contents {
                 entry_containment_depth =
                     entry_containment_depth.max(contents_depth.checked_add(1)?);
             }
@@ -1023,7 +1115,15 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                     .contents
                     .iter()
                     .any(|contents| !valid_item_group_contents(contents))
-                || (entry.seal_contents && entry.contents.is_empty())
+                || item_group_dressing_policy(&entry.contents).is_none()
+                || (entry.seal_contents
+                    && !entry.contents.iter().any(|contents| {
+                        !matches!(
+                            contents,
+                            ItemGroupContentsSourceV1::Group(group_id)
+                                if is_reserved_item_group_dressing_marker(group_id)
+                        )
+                    }))
                 || entry
                     .direct_wrapper
                     .as_ref()
@@ -1365,7 +1465,13 @@ fn valid_item_snippets(snippets: &[ItemSnippetV1]) -> bool {
 fn valid_item_group_contents(contents: &ItemGroupContentsSourceV1) -> bool {
     match contents {
         ItemGroupContentsSourceV1::Item(item) => valid_item_group_item(item),
-        ItemGroupContentsSourceV1::Group(group_id) => valid_recipe_id(group_id),
+        ItemGroupContentsSourceV1::Group(group_id) => {
+            if is_reserved_item_group_dressing_marker(group_id) {
+                decode_item_group_dressing_marker(group_id).is_some()
+            } else {
+                valid_recipe_id(group_id)
+            }
+        }
     }
 }
 
@@ -1772,7 +1878,12 @@ fn item_group_graph_references(graph: &ItemGroupGraphV1) -> impl Iterator<Item =
             target
                 .into_iter()
                 .chain(entry.contents.iter().filter_map(|contents| match contents {
-                    ItemGroupContentsSourceV1::Group(group_id) => Some(group_id.as_str()),
+                    ItemGroupContentsSourceV1::Group(group_id)
+                        if !is_reserved_item_group_dressing_marker(group_id) =>
+                    {
+                        Some(group_id.as_str())
+                    }
+                    ItemGroupContentsSourceV1::Group(_) => None,
                     ItemGroupContentsSourceV1::Item(_) => None,
                 }))
         })
@@ -2038,6 +2149,48 @@ mod tests {
             modifier_container: None,
             target,
         }
+    }
+
+    #[test]
+    fn dressing_marker_is_canonical_unique_and_not_a_named_dependency() {
+        let marker = encode_item_group_dressing_marker(75, 100)
+            .expect("nonzero bounded policy should encode");
+        assert_eq!(marker, "__CDDA_ITEM_GROUP_DRESSING_V1:75:100");
+        assert_eq!(decode_item_group_dressing_marker(&marker), Some((75, 100)));
+        for malformed in [
+            "__CDDA_ITEM_GROUP_DRESSING_V1:075:100",
+            "__CDDA_ITEM_GROUP_DRESSING_V1:75:101",
+            "__CDDA_ITEM_GROUP_DRESSING_V1:0:0",
+            "__CDDA_ITEM_GROUP_DRESSING_V1:75:100:0",
+        ] {
+            assert!(is_reserved_item_group_dressing_marker(malformed));
+            assert_eq!(decode_item_group_dressing_marker(malformed), None);
+        }
+
+        let mut entry = test_entry(ItemGroupTargetV1::Group(String::from("inner")));
+        entry.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        entry.contents = vec![ItemGroupContentsSourceV1::Group(marker.clone())];
+        let graph = test_group("outer", entry).graph;
+        assert!(valid_item_group_graph_shape(&graph));
+        assert_eq!(
+            item_group_graph_references(&graph).collect::<Vec<_>>(),
+            ["inner"]
+        );
+
+        let mut duplicate = graph.clone();
+        duplicate.nodes[0].entries[0]
+            .contents
+            .push(ItemGroupContentsSourceV1::Group(marker));
+        assert!(!valid_item_group_graph_shape(&duplicate));
+
+        let mut malformed = graph;
+        malformed.nodes[0].entries[0].contents = vec![ItemGroupContentsSourceV1::Group(
+            String::from("__CDDA_ITEM_GROUP_DRESSING_V1:75:101"),
+        )];
+        assert!(!valid_item_group_graph_shape(&malformed));
     }
 
     #[test]

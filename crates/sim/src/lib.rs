@@ -56,12 +56,12 @@ use cdda_protocol::{
 
 pub use items::{
     ItemGroupDefaultContainerMode, ItemGroupDefaultContainerProjection,
-    ItemGroupFlexibleWrapperProjection, ItemGroupIntegralChargeProjection,
-    ItemGroupMultiPocketProjection, expand_item_description,
-    item_group_default_container_projection, item_group_fitted_after_phase,
-    item_group_flexible_wrapper_projection, item_group_integral_charge_projection,
-    item_group_multi_pocket_projection, item_group_snippet_projection,
-    resolve_item_group_charge_range,
+    ItemGroupDressingProjection, ItemGroupFlexibleWrapperProjection,
+    ItemGroupIntegralChargeProjection, ItemGroupMultiPocketProjection, expand_item_description,
+    item_group_default_container_projection, item_group_dressing_projection,
+    item_group_fitted_after_phase, item_group_flexible_wrapper_projection,
+    item_group_integral_charge_projection, item_group_multi_pocket_projection,
+    item_group_snippet_projection, resolve_item_group_charge_range,
 };
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
