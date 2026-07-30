@@ -4,16 +4,15 @@ Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
 
 ## Live checkpoint
 
-- Verified green commit: `37bb6f473153d3dc320f055c5ae35330b48b38a1`
-  (`Address mapgen checkpoint review findings`).
+- Verified green commit: `bdeb8570615fae97288b0d5d5d8b1e18e407e04c`
+  (`Implement detachable item-group tool charging`).
 - Active milestone: `regional-terrain-base`. The three runnable mapgen/overmap
   families now have their reusable direct Rust-to-C++ comparator and complete
-  six-part evidence. The active worktree admits detachable tool-charge storage;
-  field admission now resumes at variant description snippet expansion.
-- Active representation pending checkpoint: protocol 88, worldgen algorithm 2,
-  persistence schema/minimum recoverable schema 66, replay format 3,
-  CanonicalStateV64, and CanonicalEventsV18. The last bound green commit uses
-  protocol 87/schema 65/CanonicalStateV63.
+  six-part evidence. Detachable tool-charge storage is verified; field
+  admission now resumes at variant description snippet expansion.
+- Current representation: protocol 88, worldgen algorithm 2, persistence
+  schema/minimum recoverable schema 66, replay format 3, CanonicalStateV64,
+  and CanonicalEventsV18.
 - Conformance: scenario 7 and observation 6.
 - Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only. The server and
   simulation are plain Rust; iroh 1.0.3 owns networking and authentication.
@@ -120,9 +119,10 @@ from parser and weighted coverage.
 Current ownership sizes are 29,300 lines in `sim/lib.rs`, 3,569 in
 `sim/items.rs`, 9,753 in `protocol/lib.rs`, 1,303 in
 `protocol/item_groups.rs`, 13,065 in persistence, 8,793 in the server library,
-and 1,198 in server item-group normalization. Against the green implementation,
-the containment family primarily grows the three bounded owners:
-`sim/items.rs` +2,181 net lines, `protocol/item_groups.rs` +552, and
+and 1,198 in server item-group normalization. Protocol 87's containment family,
+measured against its pre-family green base `2a3ab9d`, primarily grows the three
+bounded owners:
+`sim/items.rs` +2,115 net lines, `protocol/item_groups.rs` +552, and
 `server/item_groups.rs` +446. Central growth is limited to canonical/wire
 integration: `sim/lib.rs` +643, `protocol/lib.rs` +1,542, server `lib.rs` +15,
 and persistence +6. The protocol exception is large because item snapshots and
@@ -166,14 +166,16 @@ mechanical extraction milestones before anatomy or EOC expansion.
 ## Latest verification
 
 The exact verified implementation commit
-`37bb6f473153d3dc320f055c5ae35330b48b38a1`, parent
-`6da2b7a21fa5f595c596fefa7535cf2a1f5a116e`, passes formatting, all-target
-workspace checking, strict Clippy, 373 workspace tests plus doc-tests, and
+`bdeb8570615fae97288b0d5d5d8b1e18e407e04c`, parent
+`57d542235f7d1fa0049591d234f3ae25907072cb`, tree
+`36edcec2a01c5a747e943867324b1479a84843ce`, and stable patch ID
+`5ca50adee4f93d81d4cfdd46a4a8d7d3e7330ea1` passes formatting, all-target
+workspace checking, strict Clippy, 374 workspace tests plus doc-tests, and
 warning-free rustdoc. All six dependency/parity/progress/astronomy/content
-gates pass; runtime progress remains four definitions and 44 points. The three
-pinned C++ oracles pass 8 pocket, 65 item-group, and 1,179 mapgen assertions. The
-production content test confirms exactly 524 admitted furniture bashes and the
-7,992-file manifest hash
+gates pass; runtime progress remains four definitions and 44 points. The
+implementation gate's three pinned C++ oracles pass 8 pocket, 70 item-group,
+and 1,179 mapgen assertions. The production content test confirms exactly 524
+admitted furniture bashes and the 7,992-file manifest hash
 `45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
 
 The comparator loads the pinned production OMT and start-location registries,
@@ -204,7 +206,7 @@ oracle gates, and found no remaining P0-P3 issue. Scope, findings, resolutions,
 verification, rejected concerns, and residual limitations are recorded in
 [docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
 
-The active worktree's only checked canonical fixture hash changes from
+The implementation's only checked canonical fixture hash changes from
 `80e072e755e68be0aad782132f7118f4269b5f664ead99bc50a1b1cd8b27d335` to
 `c476a1ccd153ece571ebf4a98be13242ab3a7163124abff4173d9c9050c1f9b7`.
 A durable audit assertion hashes the same representative Postcard bytes under
@@ -217,6 +219,17 @@ portable-replay modes all reproduce the new representation.
 The fixed upstream checkout remains
 `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
 `210f31db2e8b2f0caed1809f1a66781859f9d129`.
+
+The pre-freeze independent review found one P1: an outer named-group charge
+modifier reconstructed an already installed detachable magazine and consumed
+two extra constructor RNG draws. The implementation now reuses the matching
+magazine and replaces only its ammunition. The final exact-commit review used
+clean detached worktree `/tmp/cdda-bdeb-review.J4hsfF`, inspected the complete
+20-file, +1,657/-326 diff, reproduced the 17-draw Rust boundary and the C++
+seed-235/downstream-2632 witness, reran the broad gates, and found no remaining
+confirmed P0-P3 issue. The scoped evidence, rejected concerns, and residual
+test boundary are recorded in
+[docs/reviews/protocol-88-detachable-tool-charges.md](docs/reviews/protocol-88-detachable-tool-charges.md).
 
 ## Next dependency boundary
 
