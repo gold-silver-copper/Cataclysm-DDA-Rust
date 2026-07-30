@@ -7,6 +7,7 @@ mod furniture;
 mod item;
 mod item_group;
 mod mapgen;
+mod material;
 mod monster;
 mod overmap_terrain;
 mod proficiency;
@@ -51,6 +52,9 @@ pub use mapgen::{
     MAX_MAPGEN_VARIANTS, MAX_MAPGEN_WEIGHT, MAX_NAMED_PALETTES, MapgenIdChoice, MapgenRegistry,
     MapgenRegistryError, MapgenRootReport, StrictMapgenDefinition, StrictMapgenItemPlacement,
     WeightedMapgenId,
+};
+pub use material::{
+    ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,
 };
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
 pub use overmap_terrain::{

@@ -867,6 +867,22 @@ thermodynamics. The real field is still not generated, so runtime progress
 remains 44 of 263,435 core-DDA weighted points (0.0167%). Replay format 3 and
 CanonicalEventsV18 are unchanged.
 
+Protocol 94/schema 72/CanonicalStateV70 add the generalized nonperishable
+material-thermodynamics family. Selected material inheritance, defaults, and
+positive item portions reproduce upstream `float` accumulation before fixed
+microjoule quantization; exact `water_clean`, `caff_gum`, and weighted `saline`
+traces are compared directly with pinned C++. Snapshots retain the complete
+specific-heat/latent-heat profile, the simulation accepts only the constructor
+sentinel and exact 20 C initialized state, and materialless indeterminate
+energy remains distinct from numeric material energy. Direct, per-tick
+snapshot, SQLite, and portable replay preserve a generated material-backed
+item, while the normal Bevy menu exposes its authoritative temperature. All
+278 selected nonperishable/default-freezing material constructors now admit;
+rot, custom freezing, and unsupported phases remain closed. The real `field`
+scan advances to `civilian_eink_tablet_pcs`, whose item-group charge capacity
+sentinel is the next generalized dependency. No runtime denominator credit is
+claimed until the complete field is generated and playable.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

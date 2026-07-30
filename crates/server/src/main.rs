@@ -12,9 +12,10 @@ use cdda_content::{
     AmmunitionRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition, ConstructionRegistry,
     ContentManifest, DEFAULT_MANIFEST_PATH, DefaultRegionTerrainFurnitureRegistry,
     DescriptionSnippetRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
-    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry, ModCatalog,
-    MonsterDefinition, MonsterRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
-    RecipeRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry,
+    MaterialRegistry, ModCatalog, MonsterDefinition, MonsterRegistry, OvermapTerrainRegistry,
+    ProficiencyRegistry, RecipeRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
+    TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -71,7 +72,7 @@ mod worldgen;
 
 use item_groups::{
     RuntimeItemGroupContent, runtime_bash_item_group_catalog, runtime_bash_item_group_source,
-    runtime_item_tracks_temperature,
+    runtime_item_temperature_capability, runtime_item_tracks_temperature,
 };
 #[cfg(test)]
 use item_groups::{runtime_item_group_charges, runtime_item_group_graph, runtime_item_group_item};
@@ -98,6 +99,7 @@ struct RuntimeWorldContent<'a> {
     ammunition: &'a AmmunitionRegistry,
     snippets: &'a DescriptionSnippetRegistry,
     items: &'a ItemRegistry,
+    materials: &'a MaterialRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
     fields: &'a FieldTypeRegistry,
@@ -243,6 +245,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let items =
         ItemRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
+    let materials = MaterialRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let item_groups = ItemGroupRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -332,9 +340,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
-    let crafting = build_crafting_catalog(&recipes, &items, &proficiencies)?;
+    let crafting = build_crafting_catalog(&recipes, &items, &materials, &proficiencies)?;
     let reading = build_reading_catalog(&items, &skills)?;
-    let disassembly = build_disassembly_catalog(&recipes, &items, &ammunition, &crafting)?;
+    let disassembly =
+        build_disassembly_catalog(&recipes, &items, &materials, &ammunition, &crafting)?;
     let construction = build_construction_catalog(
         &constructions,
         &recipes,
@@ -376,6 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ammunition: &ammunition,
             snippets: &snippets,
             items: &items,
+            materials: &materials,
             item_groups: &item_groups,
             monsters: &monsters,
             fields: &fields,
@@ -703,6 +713,7 @@ fn open_world(
 ) -> Result<OpenedWorld, Box<dyn std::error::Error>> {
     let item_group_content = RuntimeItemGroupContent {
         items: content.items,
+        materials: content.materials,
         ammunition: content.ammunition,
         snippets: content.snippets,
     };
@@ -1193,6 +1204,7 @@ fn utc_now_seconds() -> Result<i64, Box<dyn std::error::Error>> {
 fn build_crafting_catalog(
     recipes: &RecipeRegistry,
     items: &ItemRegistry,
+    materials: &MaterialRegistry,
     proficiencies: &ProficiencyRegistry,
 ) -> Result<CraftingCatalog, Box<dyn std::error::Error>> {
     let mut catalog = BTreeMap::new();
@@ -1200,11 +1212,11 @@ fn build_crafting_catalog(
         let result = items
             .get(&recipe.result)
             .ok_or("runnable recipe result disappeared from the item registry")?;
-        if runtime_item_tracks_temperature(result).is_err()
+        if runtime_item_tracks_temperature(result, materials).is_err()
             || recipe.byproducts.keys().any(|type_id| {
                 items
                     .get(type_id)
-                    .is_none_or(|item| runtime_item_tracks_temperature(item).is_err())
+                    .is_none_or(|item| runtime_item_tracks_temperature(item, materials).is_err())
             })
         {
             continue;
@@ -1238,7 +1250,7 @@ fn build_crafting_catalog(
                     };
                     Ok(CraftByproductV1 {
                         output_instances,
-                        output: craft_item_prototype(item, charges, items)?,
+                        output: craft_item_prototype(item, charges, items, materials)?,
                     })
                 },
             )
@@ -1465,6 +1477,7 @@ fn build_crafting_catalog(
                 output_charges,
                 ammunition_type,
                 items,
+                materials,
             )?,
             retain_components: recipe.reversible && !result.count_by_charges(),
             byproducts,
@@ -1726,6 +1739,7 @@ fn normalize_construction_qualities(
 fn build_disassembly_catalog(
     recipes: &RecipeRegistry,
     items: &ItemRegistry,
+    materials: &MaterialRegistry,
     ammunition: &AmmunitionRegistry,
     crafting: &CraftingCatalog,
 ) -> Result<DisassemblyCatalog, Box<dyn std::error::Error>> {
@@ -1748,7 +1762,8 @@ fn build_disassembly_catalog(
         else {
             continue;
         };
-        if result.count_by_charges() || runtime_item_tracks_temperature(result).is_err() {
+        if result.count_by_charges() || runtime_item_tracks_temperature(result, materials).is_err()
+        {
             continue;
         }
         let unload_category = if result.subtypes.contains("GUN") {
@@ -1778,13 +1793,14 @@ fn build_disassembly_catalog(
                 .ok_or_else(|| {
                     format!("item {target_type_id} lost its default charge-carrier item")
                 })?;
-            if runtime_item_tracks_temperature(default_ammunition).is_err() {
+            if runtime_item_tracks_temperature(default_ammunition, materials).is_err() {
                 continue;
             }
             Some(craft_item_prototype(
                 default_ammunition,
                 default_ammunition.default_charges(),
                 items,
+                materials,
             )?)
         } else {
             None
@@ -1818,7 +1834,7 @@ fn build_disassembly_catalog(
             if !component.recoverable || item.flags.contains("UNRECOVERABLE") {
                 continue;
             }
-            if runtime_item_tracks_temperature(item).is_err() {
+            if runtime_item_tracks_temperature(item, materials).is_err() {
                 supported = false;
                 break;
             }
@@ -1847,7 +1863,7 @@ fn build_disassembly_catalog(
             components.push(DisassemblyComponentV1 {
                 output_instances,
                 count_by_charges: item.count_by_charges(),
-                output: craft_item_prototype(item, charges, items)?,
+                output: craft_item_prototype(item, charges, items, materials)?,
                 output_state: None,
             });
         }
@@ -2000,8 +2016,15 @@ fn craft_item_prototype(
     item: &ItemDefinition,
     charges: i32,
     items: &ItemRegistry,
+    materials: &MaterialRegistry,
 ) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
-    craft_item_prototype_with_ammunition(item, charges, single_ammunition_type(item)?, items)
+    craft_item_prototype_with_ammunition(
+        item,
+        charges,
+        single_ammunition_type(item)?,
+        items,
+        materials,
+    )
 }
 
 fn default_instance_charges(item: &ItemDefinition) -> i32 {
@@ -2019,6 +2042,7 @@ fn craft_item_prototype_with_ammunition(
     charges: i32,
     ammunition_type: String,
     items: &ItemRegistry,
+    materials: &MaterialRegistry,
 ) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
     let (magazine_capacity, magazine_wells) = runtime_magazine_storage(item, items)?;
     let integral_magazines = runtime_integral_magazines(item);
@@ -2038,6 +2062,7 @@ fn craft_item_prototype_with_ammunition(
         // longer includes TOOL.
         0
     };
+    let temperature = runtime_item_temperature_capability(item, materials)?;
     Ok(CraftItemPrototypeV1 {
         type_id: item.id.clone(),
         charges,
@@ -2045,7 +2070,8 @@ fn craft_item_prototype_with_ammunition(
         calories: item.calories,
         quench: item.quench,
         comestible_type: item.comestible_type.clone(),
-        tracks_temperature: runtime_item_tracks_temperature(item)?,
+        tracks_temperature: temperature.tracks_temperature,
+        thermal_properties: temperature.thermal_properties,
         ammunition_type,
         ranged_weapon: None,
         magazine_capacity,
@@ -4464,18 +4490,27 @@ mod tests {
             .expect("default mods should resolve");
         let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("items should load");
-        let mut temperature_items = items
-            .iter()
-            .filter_map(|(id, item)| {
-                runtime_item_tracks_temperature(item)
-                    .ok()
-                    .filter(|tracks| *tracks)
-                    .map(|_| id)
-            })
-            .collect::<Vec<_>>();
-        temperature_items.sort_unstable();
+        let materials = MaterialRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+            .expect("materials should load");
+        let mut materialless_temperature_items = Vec::new();
+        let mut material_temperature_items = Vec::new();
+        for (id, item) in items.iter() {
+            let Ok(capability) = runtime_item_temperature_capability(item, &materials) else {
+                continue;
+            };
+            if !capability.tracks_temperature {
+                continue;
+            }
+            if capability.thermal_properties.is_some() {
+                material_temperature_items.push(id);
+            } else {
+                materialless_temperature_items.push(id);
+            }
+        }
+        materialless_temperature_items.sort_unstable();
+        material_temperature_items.sort_unstable();
         assert_eq!(
-            temperature_items,
+            materialless_temperature_items,
             [
                 "brew_rootbeer",
                 "chaw",
@@ -4516,6 +4551,23 @@ mod tests {
             ],
             "the fixed selected-content snapshot should admit the complete materialless/nonperishable temperature class"
         );
+        assert_eq!(
+            material_temperature_items.len(),
+            278,
+            "every selected nonperishable/default-freezing material-backed constructor should admit"
+        );
+        assert!(material_temperature_items.contains(&"caff_gum"));
+        let caff_thermal = runtime_item_temperature_capability(
+            items.get("caff_gum").expect("caffeine gum should load"),
+            &materials,
+        )
+        .expect("caffeine gum thermodynamics should normalize")
+        .thermal_properties
+        .expect("caffeine gum should be material-backed");
+        assert_eq!(
+            caff_thermal.normal_ambient_specific_energy_millijoules_per_gram(),
+            Some(367_780)
+        );
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("ammunition should load");
@@ -4524,6 +4576,7 @@ mod tests {
                 .expect("description snippets should load");
         let item_group_content = RuntimeItemGroupContent {
             items: &items,
+            materials: &materials,
             ammunition: &ammunition,
             snippets: &snippets,
         };
@@ -4809,9 +4862,9 @@ mod tests {
         assert_eq!(
             field_runtime_errors.first(),
             Some(&(
-                "chewing_gum_full_caff",
+                "civilian_eink_tablet_pcs",
                 String::from(
-                    "temperature-tracked item caff_gum requires unimplemented material thermodynamics",
+                    "item-group charges for eink_tablet_pc require unimplemented capacity sentinels",
                 ),
             )),
             "the field closure must retain its exact next unsupported semantic boundary"
@@ -5288,10 +5341,38 @@ mod tests {
             &item_groups,
         )
         .expect("admitted furniture bashes should normalize");
+        let no_materials = MaterialRegistry::default();
+        let pre_material_content = RuntimeItemGroupContent {
+            materials: &no_materials,
+            ..item_group_content
+        };
+        let pre_material_bashes = runtime_furniture_bash_types(
+            &furniture,
+            &bash_profiles,
+            &fields,
+            pre_material_content,
+            &item_groups,
+        )
+        .expect("the prior materialless boundary should remain measurable");
+        let pre_material_ids = pre_material_bashes
+            .iter()
+            .map(|bash| bash.furniture_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let newly_admitted_material_bashes = furniture_bashes
+            .iter()
+            .filter(|bash| !pre_material_ids.contains(bash.furniture_id.as_str()))
+            .map(|bash| bash.furniture_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(pre_material_bashes.len(), 530);
+        assert_eq!(
+            newly_admitted_material_bashes,
+            ["f_archery_target_bale", "f_hay", "f_straw_bed", "f_tatami"],
+            "the changed aggregate must remain explained by exact material-backed drop owners"
+        );
         assert_eq!(
             furniture_bashes.len(),
-            530,
-            "only the six audited flexible/collapsed containment bashes should newly normalize"
+            534,
+            "material thermodynamics should admit exactly four additional furniture bashes"
         );
         for furniture_id in [
             "f_cardboard_door_o",
@@ -5339,16 +5420,12 @@ mod tests {
         }
         for furniture_id in [
             "f_clothing_rail",
-            "f_archery_target_bale",
             "f_beach_seaweed",
             "f_drophammer",
             "f_dumpster",
             "f_exodii_charger_cheap",
             "f_firefly_terrarium",
-            "f_hay",
             "f_power_hammer",
-            "f_straw_bed",
-            "f_tatami",
             "f_treadmill",
         ] {
             assert!(
@@ -5558,10 +5635,11 @@ mod tests {
         assert_eq!(hammered_carpet.qualities[0][0].quality_id, "HAMMER");
         assert!(construction.get("constr_hay").is_some());
         assert_eq!(construction.len(), 55);
-        let crafting = build_crafting_catalog(&recipes, &items, &proficiencies)
+        let crafting = build_crafting_catalog(&recipes, &items, &materials, &proficiencies)
             .expect("runnable recipes should normalize");
-        let disassembly = build_disassembly_catalog(&recipes, &items, &ammunition, &crafting)
-            .expect("strict reversible recipes should normalize");
+        let disassembly =
+            build_disassembly_catalog(&recipes, &items, &materials, &ammunition, &crafting)
+                .expect("strict reversible recipes should normalize");
         let powered_light_items = items
             .iter()
             .filter_map(|(item_id, item)| {
@@ -5613,7 +5691,7 @@ mod tests {
             "container access flags must project into authoritative runtime policy"
         );
         assert_eq!(
-            craft_item_prototype(quiver, default_instance_charges(quiver), &items)
+            craft_item_prototype(quiver, default_instance_charges(quiver), &items, &materials,)
                 .expect("quiver craft prototype should normalize")
                 .ammunition_containers,
             quiver_containers,
@@ -6080,9 +6158,13 @@ mod tests {
         assert!(rock_sock_craft.retain_components);
         assert_eq!(rock_sock_craft.components[1].len(), 2);
         let crossbow = items.get("crossbow").expect("crossbow should load");
-        let crossbow_prototype =
-            craft_item_prototype(crossbow, default_instance_charges(crossbow), &items)
-                .expect("integral crossbow should normalize");
+        let crossbow_prototype = craft_item_prototype(
+            crossbow,
+            default_instance_charges(crossbow),
+            &items,
+            &materials,
+        )
+        .expect("integral crossbow should normalize");
         assert_eq!(crossbow_prototype.charges, 0);
         assert_eq!(crossbow_prototype.integral_magazines.len(), 1);
         for (item_type_id, recipe) in disassembly.iter() {
@@ -6173,10 +6255,35 @@ mod tests {
                 source_time_minutes: 15,
             })
         );
+        let no_materials = MaterialRegistry::default();
+        let pre_material_crafting =
+            build_crafting_catalog(&recipes, &items, &no_materials, &proficiencies)
+                .expect("the prior materialless crafting boundary should remain measurable");
+        assert_eq!(pre_material_crafting.len(), 2_629);
+        let pre_material_recipe_ids = pre_material_crafting
+            .iter()
+            .map(|(recipe_id, _)| recipe_id)
+            .collect::<BTreeSet<_>>();
+        let newly_admitted_material_recipes = crafting
+            .iter()
+            .filter(|(recipe_id, _)| !pre_material_recipe_ids.contains(recipe_id))
+            .map(|(recipe_id, recipe)| {
+                assert!(
+                    recipe.output.thermal_properties.is_some()
+                        || recipe
+                            .byproducts
+                            .iter()
+                            .any(|byproduct| byproduct.output.thermal_properties.is_some()),
+                    "new recipe {recipe_id} must be attributable to represented material thermodynamics"
+                );
+                recipe_id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(newly_admitted_material_recipes.len(), 197);
         assert_eq!(
             crafting.len(),
-            2_629,
-            "420 recipes remain fail-closed: results require 208 material, 182 rot, and 28 custom-freezing engines; two further recipes have unsupported rot/freezing byproducts"
+            2_826,
+            "exactly 197 recipes should cross the material-thermodynamics boundary; rot, custom freezing, and overlapping unsupported semantics remain closed"
         );
         let mut maximum_encoded_recipe = (0_usize, "");
         for (recipe_id, recipe) in crafting.iter() {

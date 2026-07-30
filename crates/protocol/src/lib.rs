@@ -17,21 +17,22 @@ pub use item_groups::{
     ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
     ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
     ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemTemperatureStateV1, ItemVariableValueV1,
-    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
-    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_GROUP_DEFINITIONS,
-    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
-    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, initial_item_temperature_state,
-    item_description_expansion_is_valid, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
-    item_variant_is_valid, spawn_pocket_external_volume_milliliters, valid_item_variables,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemTemperatureStateV1, ItemThermalPropertiesV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_DESCRIPTION_SNIPPET_CATEGORIES,
+    MAX_DESCRIPTION_SNIPPET_CHOICES, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES,
+    MAX_ITEM_GROUP_DEFINITIONS, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES,
+    MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS,
+    initial_item_temperature_state, item_description_expansion_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
+    item_snippet_is_valid, item_variant_is_valid, spawn_pocket_external_volume_milliliters,
+    valid_item_variables,
 };
 use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 93;
+pub const PROTOCOL_VERSION: u16 = 94;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1328,11 +1329,15 @@ pub struct CraftItemPrototypeV1 {
     pub calories: i32,
     pub quench: i32,
     pub comestible_type: String,
-    /// Whether the strict materialless/nonperishable constructor owns active
-    /// temperature state. Material-backed thermodynamics and rot are separate
-    /// fail-closed families.
+    /// Whether this strict nonperishable constructor owns active temperature
+    /// state. Rot remains a separate fail-closed family.
     #[serde(default)]
     pub tracks_temperature: bool,
+    /// Finalized material thermodynamics. `None` on a tracked item represents
+    /// the characterized materialless constructor; it is also required when
+    /// `tracks_temperature` is false.
+    #[serde(default)]
+    pub thermal_properties: Option<ItemThermalPropertiesV1>,
     pub ammunition_type: String,
     pub ranged_weapon: Option<RangedWeaponSnapshot>,
     #[serde(default)]
@@ -3963,6 +3968,9 @@ fn valid_learned_recipes(recipes: &[String]) -> bool {
 }
 
 fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
+    if !item.tracks_temperature && item.thermal_properties.is_some() {
+        return false;
+    }
     let snapshot = ItemSnapshot {
         id: ItemId::new(1, 1),
         type_id: item.type_id.clone(),
@@ -3977,9 +3985,13 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
         calories: item.calories,
         quench: item.quench,
         comestible_type: item.comestible_type.clone(),
-        temperature: item
-            .tracks_temperature
-            .then(|| initial_item_temperature_state(SimTick(0), item.containment.phase)),
+        temperature: item.tracks_temperature.then(|| {
+            initial_item_temperature_state(
+                SimTick(0),
+                item.containment.phase,
+                item.thermal_properties,
+            )
+        }),
         ammunition_type: item.ammunition_type.clone(),
         ranged_weapon: item.ranged_weapon.clone(),
         component_provenance: None,
@@ -5350,6 +5362,11 @@ fn component_state_matches_prototype(
         && state.quench == prototype.quench
         && state.comestible_type == prototype.comestible_type
         && state.temperature.is_some() == prototype.tracks_temperature
+        && state
+            .temperature
+            .as_ref()
+            .and_then(|temperature| temperature.thermal_properties.as_ref())
+            == prototype.thermal_properties.as_ref()
         && state.ammunition_type == prototype.ammunition_type
         && state.ranged_weapon == prototype.ranged_weapon
         && state.magazine_capacity == prototype.magazine_capacity
@@ -5935,6 +5952,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -6042,6 +6060,7 @@ mod tests {
                     quench: 0,
                     comestible_type: String::new(),
                     tracks_temperature: false,
+                    thermal_properties: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
@@ -7851,6 +7870,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -8215,6 +8235,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -8238,6 +8259,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -8312,6 +8334,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,

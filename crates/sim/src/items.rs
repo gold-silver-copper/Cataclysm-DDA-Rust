@@ -392,11 +392,26 @@ fn process_temperature_state(
     if elapsed < ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS {
         return Ok(());
     }
-    if state.specific_energy_millijoules_per_gram.is_some() {
-        state.temperature_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
-        state.specific_energy_millijoules_per_gram = None;
-    } else if state.temperature_millikelvin != ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN {
-        return Err(SimError::InvalidItem);
+    match (
+        state.temperature_millikelvin,
+        state.specific_energy_millijoules_per_gram,
+    ) {
+        (
+            cdda_protocol::ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
+            Some(cdda_protocol::ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G),
+        ) => {
+            state.temperature_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
+            state.specific_energy_millijoules_per_gram =
+                state.thermal_properties.and_then(|properties| {
+                    properties.normal_ambient_specific_energy_millijoules_per_gram()
+                });
+        }
+        (ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, energy)
+            if energy
+                == state.thermal_properties.and_then(|properties| {
+                    properties.normal_ambient_specific_energy_millijoules_per_gram()
+                }) => {}
+        _ => return Err(SimError::InvalidItem),
     }
     state.last_check_tick = current_tick;
     Ok(())
@@ -539,9 +554,13 @@ pub(super) fn item_from_craft_prototype(
         calories: prototype.calories,
         quench: prototype.quench,
         comestible_type: prototype.comestible_type.clone(),
-        temperature: prototype
-            .tracks_temperature
-            .then(|| initial_item_temperature_state(birth_tick, prototype.containment.phase)),
+        temperature: prototype.tracks_temperature.then(|| {
+            initial_item_temperature_state(
+                birth_tick,
+                prototype.containment.phase,
+                prototype.thermal_properties,
+            )
+        }),
         ammunition_type: prototype.ammunition_type.clone(),
         ranged_weapon: prototype.ranged_weapon.clone(),
         component_provenance: None,
@@ -2564,6 +2583,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -2666,7 +2686,8 @@ mod tests {
             item.temperature,
             Some(initial_item_temperature_state(
                 birth_tick,
-                ItemPhaseV1::Solid
+                ItemPhaseV1::Solid,
+                None,
             ))
         );
 
@@ -2696,6 +2717,35 @@ mod tests {
                 .expect("processed temperature state should restore")
                 .snapshot(),
             item.snapshot()
+        );
+
+        let mut material_prototype = temperature_prototype();
+        material_prototype.type_id = String::from("water_clean");
+        material_prototype.containment.phase = ItemPhaseV1::Liquid;
+        material_prototype.thermal_properties = Some(cdda_protocol::ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 4_186_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 2_108_000,
+            latent_heat_microjoules_per_gram: 333_000_000,
+            freezing_point_millikelvin: 273_150,
+        });
+        let mut material =
+            item_from_craft_prototype(ItemId::new(1, 2), &material_prototype, birth_tick);
+        material
+            .process_temperature(processing_tick)
+            .expect("material-backed temperature should initialize at the boundary");
+        let material_state = material
+            .temperature
+            .expect("temperature state should exist");
+        assert_eq!(material_state.current_phase, ItemPhaseV1::Liquid);
+        assert_eq!(
+            material_state.specific_energy_millijoules_per_gram,
+            Some(992_520)
+        );
+        assert_eq!(
+            ItemInstance::from_snapshot(&material.snapshot())
+                .expect("material-backed temperature should restore")
+                .snapshot(),
+            material.snapshot()
         );
     }
 

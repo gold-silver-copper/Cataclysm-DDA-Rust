@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cdda_content::{
-    ContentManifest, ItemRegistry, ModCatalog, OvermapTerrainMatchType, OvermapTerrainRegistry,
-    StartLocationRegistry,
+    ContentManifest, ItemRegistry, MaterialRegistry, ModCatalog, OvermapTerrainMatchType,
+    OvermapTerrainRegistry, StartLocationRegistry,
 };
 use cdda_protocol::{
     AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1,
@@ -404,6 +404,12 @@ struct ItemGroupTemperatureConstructorTraceV1 {
     processing_speed: i32,
     temperature_millikelvin: i32,
     specific_energy_millijoules_per_gram: i32,
+    thermal_properties_present: bool,
+    specific_heat_liquid_microjoules_per_gram_kelvin: i64,
+    specific_heat_solid_microjoules_per_gram_kelvin: i64,
+    latent_heat_microjoules_per_gram: i64,
+    freezing_point_millikelvin: i32,
+    ambient_specific_energy_millijoules_per_gram: i32,
     serialized_last_temp_check_present: bool,
     serialized_last_temp_check: i32,
     solid: bool,
@@ -1585,6 +1591,26 @@ fn validate_item_group_observation(
             true,
         ),
         (
+            "field_blocker_material",
+            "caff_gum",
+            true,
+            true,
+            600,
+            true,
+            true,
+            false,
+        ),
+        (
+            "weighted_material",
+            "saline",
+            true,
+            true,
+            600,
+            true,
+            false,
+            true,
+        ),
+        (
             "no_temp_comestible",
             "caffeine",
             false,
@@ -1645,6 +1671,35 @@ fn validate_item_group_observation(
     {
         return Err(format!(
             "item temperature-constructor characterization is incomplete: {:?}",
+            observation.temperature_constructors
+        )
+        .into());
+    }
+    let expected_thermal_properties = [
+        (false, 0, 0, 0, 0, 0),
+        (true, 4_186_000, 2_108_000, 333_000_000, 273_150, 992_520),
+        (true, 1_500_000, 1_200_000, 10_000_000, 273_150, 367_780),
+        (true, 4_156_246, 2_097_308, 330_092_987, 273_150, 986_098),
+        (false, 0, 0, 0, 0, 0),
+        (false, 0, 0, 0, 0, 0),
+    ];
+    if observation
+        .temperature_constructors
+        .iter()
+        .zip(expected_thermal_properties)
+        .any(
+            |(actual, (present, liquid, solid, latent, freezing_point, ambient_energy))| {
+                actual.thermal_properties_present != present
+                    || actual.specific_heat_liquid_microjoules_per_gram_kelvin != liquid
+                    || actual.specific_heat_solid_microjoules_per_gram_kelvin != solid
+                    || actual.latent_heat_microjoules_per_gram != latent
+                    || actual.freezing_point_millikelvin != freezing_point
+                    || actual.ambient_specific_energy_millijoules_per_gram != ambient_energy
+            },
+        )
+    {
+        return Err(format!(
+            "item thermal-property characterization is incomplete: {:?}",
             observation.temperature_constructors
         )
         .into());
@@ -2042,6 +2097,7 @@ fn rust_item_group_magazine_charge_case(
         quench: 0,
         comestible_type: String::new(),
         tracks_temperature: false,
+        thermal_properties: None,
         ammunition_type: String::new(),
         ranged_weapon: None,
         magazine_capacity: 0,
@@ -2181,6 +2237,7 @@ fn rust_item_group_default_container_observation()
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -2355,6 +2412,7 @@ fn rust_item_group_flexible_wrapper_observation()
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -2532,9 +2590,12 @@ fn rust_item_group_temperature_constructor_observation(
     let mods = ModCatalog::load(&manifest, content_root)?;
     let enabled = mods.recommended_new_world()?;
     let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    let materials = MaterialRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
     [
         ("materialless_comestible", "chaw"),
         ("material_comestible", "water_clean"),
+        ("field_blocker_material", "caff_gum"),
+        ("weighted_material", "saline"),
         ("no_temp_comestible", "caffeine"),
         ("ordinary_control", "rock"),
     ]
@@ -2554,7 +2615,18 @@ fn rust_item_group_temperature_constructor_observation(
                 ));
             }
         };
-        let state = initial_item_temperature_state(SimTick(123), current_phase);
+        let thermal_properties = if has_temperature {
+            materials
+                .comestible_thermal_properties(item)
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        let state = initial_item_temperature_state(SimTick(123), current_phase, None);
+        let ambient_specific_energy_millijoules_per_gram = thermal_properties
+            .map(ambient_specific_energy_millijoules_per_gram)
+            .transpose()?
+            .unwrap_or_default();
         Ok(ItemGroupTemperatureConstructorTraceV1 {
             case_id: case_id.to_owned(),
             item_type: item_type.to_owned(),
@@ -2570,6 +2642,19 @@ fn rust_item_group_temperature_constructor_observation(
             specific_energy_millijoules_per_gram: state
                 .specific_energy_millijoules_per_gram
                 .ok_or("initial temperature energy disappeared")?,
+            thermal_properties_present: thermal_properties.is_some(),
+            specific_heat_liquid_microjoules_per_gram_kelvin: thermal_properties
+                .map_or(0, |properties| {
+                    properties.specific_heat_liquid_microjoules_per_gram_kelvin
+                }),
+            specific_heat_solid_microjoules_per_gram_kelvin: thermal_properties
+                .map_or(0, |properties| {
+                    properties.specific_heat_solid_microjoules_per_gram_kelvin
+                }),
+            latent_heat_microjoules_per_gram: thermal_properties
+                .map_or(0, |properties| properties.latent_heat_microjoules_per_gram),
+            freezing_point_millikelvin: thermal_properties.map_or(0, |_| 273_150),
+            ambient_specific_energy_millijoules_per_gram,
             serialized_last_temp_check_present: has_temperature,
             serialized_last_temp_check: if has_temperature {
                 i32::try_from(state.last_check_tick.0)
@@ -2588,6 +2673,29 @@ fn rust_item_group_temperature_constructor_observation(
     .map_err(Into::into)
 }
 
+fn ambient_specific_energy_millijoules_per_gram(
+    properties: cdda_content::ComestibleThermalProperties,
+) -> Result<i32, String> {
+    let numerator = i128::from(properties.specific_heat_solid_microjoules_per_gram_kelvin)
+        .checked_mul(273_150)
+        .and_then(|value| {
+            value.checked_add(i128::from(properties.latent_heat_microjoules_per_gram) * 1_000)
+        })
+        .and_then(|value| {
+            value.checked_add(
+                i128::from(properties.specific_heat_liquid_microjoules_per_gram_kelvin) * 20_000,
+            )
+        })
+        .ok_or_else(|| String::from("ambient thermal-energy arithmetic overflowed"))?;
+    i32::try_from(
+        numerator
+            .checked_add(500_000)
+            .ok_or_else(|| String::from("ambient thermal-energy rounding overflowed"))?
+            / 1_000_000,
+    )
+    .map_err(|_| String::from("ambient thermal energy exceeded protocol range"))
+}
+
 fn rust_item_group_tool_charge_case_with_replacement(
     leaf_minimum: i32,
     leaf_maximum: i32,
@@ -2601,6 +2709,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         quench: 0,
         comestible_type: String::new(),
         tracks_temperature: false,
+        thermal_properties: None,
         ammunition_type: String::new(),
         ranged_weapon: None,
         magazine_capacity: 0,

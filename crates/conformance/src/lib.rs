@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x5f, 0x66, 0x2f, 0xf5, 0x9b, 0xc4, 0xc6, 0x6b, 0x4c, 0x7e, 0x07, 0x00, 0xfd,
-                    0xb0, 0x83, 0x8b, 0xf4, 0x1b, 0xac, 0x38, 0x5a, 0x51, 0x34, 0x58, 0x53, 0x1d,
-                    0x5a, 0xf2, 0x55, 0xbc, 0x54, 0x56,
+                    0xc0, 0x73, 0xbe, 0xbf, 0xd0, 0xe2, 0x7f, 0xdd, 0xc7, 0x76, 0xdf, 0x55, 0x8c,
+                    0xdc, 0x9f, 0xe8, 0xa7, 0xc1, 0x1a, 0x86, 0xf8, 0x58, 0xfe, 0x8f, 0xa0, 0xaf,
+                    0x0a, 0x4f, 0x04, 0xee, 0x6d, 0x08,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1054,16 +1054,16 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV68");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV69");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0xec, 0xf2, 0xff, 0x27, 0x70, 0x05, 0x4b, 0x46, 0x56, 0x2d, 0xd7, 0xca, 0xd1, 0x5c,
-                0x3a, 0xa9, 0x32, 0x65, 0x86, 0x59, 0x43, 0x74, 0xb2, 0x71, 0x0a, 0xf8, 0x47, 0x54,
-                0xbe, 0xef, 0x6a, 0x6a,
+                0x5f, 0x66, 0x2f, 0xf5, 0x9b, 0xc4, 0xc6, 0x6b, 0x4c, 0x7e, 0x07, 0x00, 0xfd, 0xb0,
+                0x83, 0x8b, 0xf4, 0x1b, 0xac, 0x38, 0x5a, 0x51, 0x34, 0x58, 0x53, 0x1d, 0x5a, 0xf2,
+                0x55, 0xbc, 0x54, 0x56,
             ],
-            "the old V68 domain must pin the unchanged item-flow Postcard bytes independently of the V69 domain bump"
+            "the old V69 domain must pin the Protocol 94 item-flow Postcard bytes independently of the V70 domain bump"
         );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
@@ -1252,6 +1252,7 @@ mod tests {
                         quench: 0,
                         comestible_type: String::new(),
                         tracks_temperature: false,
+                        thermal_properties: None,
                         ammunition_type: String::new(),
                         ranged_weapon: None,
                         magazine_capacity: 0,
@@ -1448,6 +1449,18 @@ mod tests {
             sealed: true,
             overflow: cdda_protocol::ItemGroupOverflowV1::None,
         });
+        let mut caff_gum = item_leaf("caff_gum", None);
+        let cdda_protocol::ItemGroupTargetV1::Item(caff_gum_item) = &mut caff_gum else {
+            unreachable!("caffeine-gum fixture is a direct item")
+        };
+        caff_gum_item.prototype.comestible_type = String::from("MED");
+        caff_gum_item.prototype.tracks_temperature = true;
+        caff_gum_item.prototype.thermal_properties = Some(cdda_protocol::ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 1_500_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 1_200_000,
+            latent_heat_microjoules_per_gram: 10_000_000,
+            freezing_point_millikelvin: 273_150,
+        });
         let mut item_groups = vec![ItemGroupDefinitionV1 {
             group_id: String::from("wall_bash_results"),
             graph: cdda_protocol::ItemGroupGraphV1 {
@@ -1557,6 +1570,21 @@ mod tests {
                             variant_id: None,
                             event: None,
                             target: aspirin,
+                            modifier_charges: None,
+                            contents: Vec::new(),
+                            seal_contents: false,
+                            modifier_default_container_sealed: None,
+                            direct_wrapper: None,
+                            modifier_container: None,
+                        },
+                        cdda_protocol::ItemGroupEntryV1 {
+                            probability: 100,
+                            count_min: 1,
+                            count_max: 1,
+                            raw_damage: None,
+                            variant_id: None,
+                            event: None,
+                            target: caff_gum,
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
@@ -1766,7 +1794,7 @@ mod tests {
             wrapper_state.sealed,
             "the group-level seal must survive every recovery mode"
         );
-        assert_eq!(pocket.contents.len(), 6);
+        assert_eq!(pocket.contents.len(), 7);
         assert!(
             pocket
                 .contents
@@ -1784,6 +1812,7 @@ mod tests {
             contained,
             [
                 ("bottle_plastic_pill_painkiller", 1),
+                ("caff_gum", 1),
                 ("light_battery_cell", 0),
                 ("nail", 4),
                 ("splinter", 1),
@@ -1845,10 +1874,33 @@ mod tests {
             Some(cdda_protocol::initial_item_temperature_state(
                 SimTick(53),
                 cdda_protocol::ItemPhaseV1::Solid,
+                None,
             )),
             "all four modes should retain the exact nested constructor state and birth tick"
         );
         assert!(painkiller_bottle.id < aspirin.id);
+        let caff_gum = pocket
+            .contents
+            .iter()
+            .find(|item| item.type_id == "caff_gum")
+            .expect("the material-backed constructor should generate caffeine gum");
+        let caff_state = caff_gum
+            .temperature
+            .expect("caffeine gum should retain temperature state");
+        assert_eq!(
+            caff_state,
+            cdda_protocol::initial_item_temperature_state(
+                SimTick(53),
+                cdda_protocol::ItemPhaseV1::Solid,
+                Some(cdda_protocol::ItemThermalPropertiesV1 {
+                    specific_heat_liquid_microjoules_per_gram_kelvin: 1_500_000,
+                    specific_heat_solid_microjoules_per_gram_kelvin: 1_200_000,
+                    latent_heat_microjoules_per_gram: 10_000_000,
+                    freezing_point_millikelvin: 273_150,
+                }),
+            ),
+            "direct, snapshot, SQLite, and portable replay must retain the exact material profile"
+        );
         let splinters = pocket
             .contents
             .iter()

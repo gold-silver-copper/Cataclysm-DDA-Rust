@@ -3096,7 +3096,10 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
 
 fn item_temperature_suffix(item: &ItemSnapshot) -> &'static str {
     match item.temperature {
-        Some(state) if state.specific_energy_millijoules_per_gram.is_some() => {
+        Some(state)
+            if state.temperature_millikelvin
+                == cdda_protocol::ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN =>
+        {
             " [temperature pending]"
         }
         Some(_) => " [20.0 °C]",
@@ -5275,6 +5278,7 @@ mod tests {
         temperature_item.temperature = Some(cdda_protocol::initial_item_temperature_state(
             cdda_protocol::SimTick(123),
             cdda_protocol::ItemPhaseV1::Solid,
+            None,
         ));
         assert!(
             item_menu_label(&temperature_item, None).contains("[temperature pending]"),
@@ -5292,6 +5296,23 @@ mod tests {
             &unprocessed_temperature_item,
             &temperature_item
         ));
+        let water = cdda_protocol::ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 4_186_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 2_108_000,
+            latent_heat_microjoules_per_gram: 333_000_000,
+            freezing_point_millikelvin: 273_150,
+        };
+        let material_state = temperature_item
+            .temperature
+            .as_mut()
+            .expect("temperature state should exist");
+        material_state.thermal_properties = Some(water);
+        material_state.specific_energy_millijoules_per_gram =
+            water.normal_ambient_specific_energy_millijoules_per_gram();
+        assert!(
+            item_menu_label(&temperature_item, None).contains("[20.0 °C]"),
+            "normal client item menus must not mistake numeric material energy for pending state"
+        );
         let mut variant_item = item(6, "", "", None);
         variant_item.variant = Some(cdda_protocol::ItemVariantV1 {
             id: String::from("weathered"),

@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 93,
-  "persistence_schema_version": 71,
+  "protocol_version": 94,
+  "persistence_schema_version": 72,
   "replay_format_version": 3,
   "active_milestone": "regional-terrain-base",
   "completion_gate": [
@@ -39,6 +39,15 @@
       "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
       "four_mode_conformance": ["crates/conformance/src/lib.rs"],
       "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/main.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "nonperishable-material-thermodynamics",
+      "pinned_characterization": ["tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-group-generation-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs"],
+      "runtime_content_admission": ["crates/server/src/item_groups.rs", "crates/server/src/main.rs"],
       "authoritative_client_path": ["crates/client/src/main.rs"]
     }
   ],
@@ -90,7 +99,7 @@
       "depends_on": ["item-containment", "cpp-differential-oracle"],
       "upstream_sources": ["../Cataclysm-DDA/src/item_group.cpp", "../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/item.cpp", "../Cataclysm-DDA/src/text_snippets.cpp"],
       "rust_paths": ["crates/content/src/item_group.rs", "crates/content/src/bash.rs", "crates/content/src/snippet.rs", "crates/protocol/src/item_groups.rs", "crates/protocol/src/lib.rs", "crates/sim/src/items.rs", "crates/sim/src/lib.rs", "crates/server/src/item_groups.rs", "crates/server/src/main.rs", "crates/conformance/src/lib.rs", "tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-group-generation-v1.json"],
-      "scenario_families": ["weighted-collection-and-distribution", "raw-damage-and-selected-variants", "fixed-zero-modifier-rng-phase", "disabled-holiday-event-selection", "named-wall-bash-snapshot-recovery-replay", "gun-magazine-ammunition-dressing", "detachable-tool-charge-storage", "integral-magazine-charge-loading-and-production-light-batteries", "rigid-wrapper-contents-sealing-snippets-and-variables", "recursive-base-and-variant-description-snippet-expansion", "variable-size-fit-construction-crafting-disassembly-and-client-rendering", "default-container-direct-fill-modifier-fallback-explicit-null-explicit-creator-and-production-boundaries", "materialless-temperature-constructor-processing-nested-recovery-and-client-rendering", "flexible-reserved-volume-wrapper-constructor-default-and-automatic-collapse"],
+      "scenario_families": ["weighted-collection-and-distribution", "raw-damage-and-selected-variants", "fixed-zero-modifier-rng-phase", "disabled-holiday-event-selection", "named-wall-bash-snapshot-recovery-replay", "gun-magazine-ammunition-dressing", "detachable-tool-charge-storage", "integral-magazine-charge-loading-and-production-light-batteries", "rigid-wrapper-contents-sealing-snippets-and-variables", "recursive-base-and-variant-description-snippet-expansion", "variable-size-fit-construction-crafting-disassembly-and-client-rendering", "default-container-direct-fill-modifier-fallback-explicit-null-explicit-creator-and-production-boundaries", "materialless-temperature-constructor-processing-nested-recovery-and-client-rendering", "flexible-reserved-volume-wrapper-constructor-default-and-automatic-collapse", "nonperishable-material-inheritance-weighting-fixed-point-energy-and-recovery"],
       "differential_oracle": "active",
       "multiplayer_adaptation": "The authoritative server consumes named deterministic RNG streams, fixes real-world event spawns to the pinned default disabled policy for portable replay, and allocates every generated object a stable ID.",
       "unlocks": ["strict closure admission from 7621 pinned definitions", "pinned wall_bash_results generation", "mapgen and monster item spawning", "ordinary loot generation"]
@@ -141,8 +150,8 @@
       "priority": 7,
       "depends_on": ["atomic-static-mapgen", "omt-identities-routing", "item-groups", "cpp-differential-oracle"],
       "upstream_sources": ["../Cataclysm-DDA/src/regional_settings.cpp", "../Cataclysm-DDA/src/overmap.cpp"],
-      "rust_paths": ["crates/content/src/region.rs", "crates/content/src/mapgen.rs", "crates/content/src/item_group.rs", "crates/content/src/item.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/sim/src/mapgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/worldgen.rs", "crates/server/src/main.rs", "crates/client/src/main.rs"],
-      "scenario_families": ["regional-pseudo-substitution", "field-base-loot-closure", "materialless-temperature-constructor-and-nested-recovery", "persistent-default-surface"],
+      "rust_paths": ["crates/content/src/region.rs", "crates/content/src/mapgen.rs", "crates/content/src/item_group.rs", "crates/content/src/item.rs", "crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/sim/src/mapgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/worldgen.rs", "crates/server/src/main.rs", "crates/client/src/main.rs"],
+      "scenario_families": ["regional-pseudo-substitution", "field-base-loot-closure", "materialless-temperature-constructor-and-nested-recovery", "nonperishable-material-thermodynamics-and-four-mode-recovery", "persistent-default-surface"],
       "differential_oracle": "active",
       "multiplayer_adaptation": "The server must generate the same ordinary field base continuously and persist every nested loot object before replacing the current LMOE bootstrap fill.",
       "unlocks": ["ordinary field surface", "runtime-usable default regional content", "forest-city-road-river population substrate"]
@@ -432,6 +441,19 @@
       "differential_oracle": "planned",
       "multiplayer_adaptation": "A persistent authoritative server supports sixteen players, authenticated Iroh sessions, physically vulnerable disconnected characters, and continuous zero-player simulation.",
       "unlocks": ["fully playable Rust multiplayer CDDA", "cross-platform release artifacts", "operational persistent-server deployment"]
+    },
+    {
+      "id": "nonperishable-material-thermodynamics",
+      "title": "Nonperishable default-freezing material thermodynamics",
+      "state": "complete",
+      "priority": 30,
+      "depends_on": [],
+      "upstream_sources": ["../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/item.cpp"],
+      "rust_paths": ["crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/server/src/item_groups.rs", "crates/conformance/src/lib.rs", "crates/client/src/main.rs", "crates/tools/src/cpp_oracle.rs"],
+      "scenario_families": ["material-inheritance-and-defaults", "upstream-float-weighted-mixtures", "fixed-point-ambient-energy", "constructor-processing-and-four-mode-recovery", "normal-client-temperature-rendering"],
+      "differential_oracle": "verified",
+      "multiplayer_adaptation": "The server finalizes immutable thermal profiles once, places them in canonical item state, and advances temperature on persistent world ticks without trusting clients.",
+      "unlocks": ["278 material-backed nonperishable constructors", "197 recipes", "four furniture-drop paths", "field progression through caffeine gum"]
     }
   ]
 }

@@ -2016,6 +2016,7 @@ fn validate_craft_item_prototype(item: &CraftItemPrototypeV1) -> Result<(), SimE
         || item.comestible_type.len() > 32
         || item.comestible_type.chars().any(char::is_control)
         || (!item.comestible_type.is_empty() && item.charges <= 0)
+        || (!item.tracks_temperature && item.thermal_properties.is_some())
         || item.ammunition_type.len() > 64
         || item.ammunition_type.chars().any(char::is_control)
         || (!item.ammunition_type.is_empty()
@@ -3164,6 +3165,10 @@ fn craft_prototype_from_component(component: &ItemComponentSnapshotV1) -> CraftI
         quench: component.quench,
         comestible_type: component.comestible_type.clone(),
         tracks_temperature: component.temperature.is_some(),
+        thermal_properties: component
+            .temperature
+            .as_ref()
+            .and_then(|state| state.thermal_properties),
         ammunition_type: component.ammunition_type.clone(),
         ranged_weapon: component.ranged_weapon.clone(),
         magazine_capacity: component.magazine_capacity,
@@ -13668,7 +13673,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV69");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV70");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13863,6 +13868,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -14168,6 +14174,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -14248,6 +14255,7 @@ mod tests {
                     quench: 0,
                     comestible_type: String::new(),
                     tracks_temperature: false,
+                    thermal_properties: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
@@ -14960,6 +14968,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::from("test_ammo"),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -15241,6 +15250,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::from("battery"),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -16108,6 +16118,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -18064,6 +18075,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -18399,6 +18411,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -18533,6 +18546,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -27171,6 +27185,7 @@ mod tests {
                                     quench: 0,
                                     comestible_type: String::new(),
                                     tracks_temperature: false,
+                                    thermal_properties: None,
                                     ammunition_type: String::new(),
                                     ranged_weapon: None,
                                     magazine_capacity: 0,

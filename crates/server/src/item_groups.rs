@@ -4,8 +4,8 @@ use cdda_content::{
     AmmunitionRegistry, BashDefinition, BashItemGroupSource, DescriptionSnippetRegistry,
     ItemDefinition, ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
     ItemGroupSubtype, ItemRegistry, ItemTemperatureRuntimeClass, ItemVariableValueDefinition,
-    PocketTypeDefinition, StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode,
-    StrictItemGroupNodeKind,
+    MaterialRegistry, PocketTypeDefinition, StrictItemGroupDefinition, StrictItemGroupGraph,
+    StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
     CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
@@ -13,9 +13,10 @@ use cdda_protocol::{
     ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
     ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
     ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1,
-    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE, item_description_expansion_is_valid,
-    item_group_catalog_is_valid, item_group_source_max_outputs,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
+    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    item_description_expansion_is_valid, item_group_catalog_is_valid,
+    item_group_source_max_outputs,
 };
 
 use super::{craft_item_prototype, default_instance_charges};
@@ -23,6 +24,7 @@ use super::{craft_item_prototype, default_instance_charges};
 #[derive(Clone, Copy)]
 pub(super) struct RuntimeItemGroupContent<'a> {
     pub(super) items: &'a ItemRegistry,
+    pub(super) materials: &'a MaterialRegistry,
     pub(super) ammunition: &'a AmmunitionRegistry,
     pub(super) snippets: &'a DescriptionSnippetRegistry,
 }
@@ -63,16 +65,30 @@ pub(super) fn runtime_bash_item_group_source(
     Ok(Some(source))
 }
 
-/// Returns the strict constructor capability for the current temperature
-/// family. Material thermodynamics, spoilage/rot, and custom freezing points
-/// remain separate fail-closed engines; admitting them here would create
-/// active items whose ten-minute processing could not be reproduced.
-pub(super) fn runtime_item_tracks_temperature(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RuntimeItemTemperatureCapability {
+    pub(super) tracks_temperature: bool,
+    pub(super) thermal_properties: Option<ItemThermalPropertiesV1>,
+}
+
+/// Resolves the complete strict constructor capability for nonperishable
+/// temperature-tracked items. Rot, custom freezing points, and unsupported
+/// phases remain fail closed.
+pub(super) fn runtime_item_temperature_capability(
     item: &ItemDefinition,
-) -> Result<bool, Box<dyn std::error::Error>> {
+    materials: &MaterialRegistry,
+) -> Result<RuntimeItemTemperatureCapability, Box<dyn std::error::Error>> {
     match item.temperature_runtime_class() {
-        ItemTemperatureRuntimeClass::NotTracked => Ok(false),
-        ItemTemperatureRuntimeClass::MateriallessNonperishable => Ok(true),
+        ItemTemperatureRuntimeClass::NotTracked => Ok(RuntimeItemTemperatureCapability {
+            tracks_temperature: false,
+            thermal_properties: None,
+        }),
+        ItemTemperatureRuntimeClass::MateriallessNonperishable => {
+            Ok(RuntimeItemTemperatureCapability {
+                tracks_temperature: true,
+                thermal_properties: None,
+            })
+        }
         ItemTemperatureRuntimeClass::RequiresRot => Err(format!(
             "temperature-tracked item {} requires unimplemented rot state",
             item.id
@@ -83,17 +99,50 @@ pub(super) fn runtime_item_tracks_temperature(
             item.id
         )
         .into()),
-        ItemTemperatureRuntimeClass::RequiresMaterialThermodynamics => Err(format!(
-            "temperature-tracked item {} requires unimplemented material thermodynamics",
-            item.id
-        )
-        .into()),
+        ItemTemperatureRuntimeClass::RequiresMaterialThermodynamics => {
+            if !matches!(
+                item.phase.to_ascii_lowercase().as_str(),
+                "" | "solid" | "liquid"
+            ) {
+                return Err(format!(
+                    "temperature-tracked item {} has unsupported phase {}",
+                    item.id, item.phase
+                )
+                .into());
+            }
+            let properties = materials
+                .comestible_thermal_properties(item)?
+                .ok_or_else(|| {
+                    format!(
+                        "material-backed temperature item {} lost its material profile",
+                        item.id
+                    )
+                })?;
+            Ok(RuntimeItemTemperatureCapability {
+                tracks_temperature: true,
+                thermal_properties: Some(ItemThermalPropertiesV1 {
+                    specific_heat_liquid_microjoules_per_gram_kelvin: properties
+                        .specific_heat_liquid_microjoules_per_gram_kelvin,
+                    specific_heat_solid_microjoules_per_gram_kelvin: properties
+                        .specific_heat_solid_microjoules_per_gram_kelvin,
+                    latent_heat_microjoules_per_gram: properties.latent_heat_microjoules_per_gram,
+                    freezing_point_millikelvin: 273_150,
+                }),
+            })
+        }
         ItemTemperatureRuntimeClass::UnsupportedPhase => Err(format!(
             "temperature-tracked item {} has unsupported phase {}",
             item.id, item.phase
         )
         .into()),
     }
+}
+
+pub(super) fn runtime_item_tracks_temperature(
+    item: &ItemDefinition,
+    materials: &MaterialRegistry,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(runtime_item_temperature_capability(item, materials)?.tracks_temperature)
 }
 
 fn strict_bash_item_group_graph(
@@ -472,7 +521,12 @@ fn runtime_item_group_item_inner(
     default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
     let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
-    let prototype = craft_item_prototype(item, default_instance_charges(item), content.items)?;
+    let prototype = craft_item_prototype(
+        item,
+        default_instance_charges(item),
+        content.items,
+        content.materials,
+    )?;
     validate_item_group_item_spawn(item, &prototype, false)?;
     let modifier_side_effects_supported =
         validate_item_group_item_spawn(item, &prototype, true).is_ok();
@@ -604,7 +658,7 @@ fn runtime_item_charge_storage(
         .into());
     }
     validate_charge_item_constructor_state(magazine_definition)?;
-    let magazine = craft_item_prototype(magazine_definition, 0, content.items)?;
+    let magazine = craft_item_prototype(magazine_definition, 0, content.items, content.materials)?;
     validate_item_group_item_spawn(magazine_definition, &magazine, false)?;
     let ammunition =
         runtime_default_ammunition_prototype(item, &magazine_shape.ammunition_type, content)?;
@@ -641,7 +695,7 @@ fn runtime_default_ammunition_prototype(
         )
     })?;
     validate_charge_item_constructor_state(definition)?;
-    let mut ammunition = craft_item_prototype(definition, 1, content.items)?;
+    let mut ammunition = craft_item_prototype(definition, 1, content.items, content.materials)?;
     validate_item_group_item_spawn(definition, &ammunition, false)?;
     if ammunition.ammunition_type != ammunition_type {
         return Err(format!(
@@ -1190,28 +1244,35 @@ mod tests {
 
     #[test]
     fn temperature_admission_is_generalized_and_fail_closed() {
+        let materials = MaterialRegistry::default();
         let supported = materialless_temperature_item();
-        assert_eq!(runtime_item_tracks_temperature(&supported).ok(), Some(true));
+        assert_eq!(
+            runtime_item_tracks_temperature(&supported, &materials).ok(),
+            Some(true)
+        );
 
         let mut no_temp = supported.clone();
         no_temp.flags.insert(String::from("NO_TEMP"));
-        assert_eq!(runtime_item_tracks_temperature(&no_temp).ok(), Some(false));
+        assert_eq!(
+            runtime_item_tracks_temperature(&no_temp, &materials).ok(),
+            Some(false)
+        );
 
         let mut material_backed = supported.clone();
         material_backed.materials.insert(String::from("water"), 1);
-        assert!(runtime_item_tracks_temperature(&material_backed).is_err());
+        assert!(runtime_item_tracks_temperature(&material_backed, &materials).is_err());
 
         let mut perishable = supported.clone();
         perishable
             .unsupported_fields
             .insert(String::from("spoils_in"));
-        assert!(runtime_item_tracks_temperature(&perishable).is_err());
+        assert!(runtime_item_tracks_temperature(&perishable, &materials).is_err());
 
         let mut custom_freezing = supported;
         custom_freezing
             .unsupported_fields
             .insert(String::from("freezing_point"));
-        assert!(runtime_item_tracks_temperature(&custom_freezing).is_err());
+        assert!(runtime_item_tracks_temperature(&custom_freezing, &materials).is_err());
     }
 
     #[test]
@@ -1323,6 +1384,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,
@@ -1359,6 +1421,7 @@ mod tests {
             quench: 0,
             comestible_type: String::new(),
             tracks_temperature: false,
+            thermal_properties: None,
             ammunition_type: String::new(),
             ranged_weapon: None,
             magazine_capacity: 0,

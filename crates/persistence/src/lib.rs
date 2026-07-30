@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 71;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 93
-/// added flexible-pocket reserve and collapse state to canonical ownership.
+pub const SCHEMA_VERSION: i64 = 72;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 94
+/// added fixed-point material thermodynamics to canonical item temperature.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 71;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 72;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
@@ -7265,6 +7265,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -7286,6 +7287,7 @@ mod tests {
                     quench: 0,
                     comestible_type: String::new(),
                     tracks_temperature: false,
+                    thermal_properties: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
@@ -10791,6 +10793,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::from("test_ammo"),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -10813,6 +10816,7 @@ mod tests {
                     quench: 0,
                     comestible_type: String::new(),
                     tracks_temperature: false,
+                    thermal_properties: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,
@@ -11020,6 +11024,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::from("battery"),
                 ranged_weapon: None,
                 magazine_capacity: 0,
@@ -11042,6 +11047,7 @@ mod tests {
                     quench: 0,
                     comestible_type: String::new(),
                     tracks_temperature: false,
+                    thermal_properties: None,
                     ammunition_type: String::new(),
                     ranged_weapon: None,
                     magazine_capacity: 0,

@@ -455,6 +455,12 @@ struct temperature_constructor_trace {
     int processing_speed = 0;
     int temperature_millikelvin = 0;
     int specific_energy_millijoules_per_gram = 0;
+    bool thermal_properties_present = false;
+    std::int64_t specific_heat_liquid_microjoules_per_gram_kelvin = 0;
+    std::int64_t specific_heat_solid_microjoules_per_gram_kelvin = 0;
+    std::int64_t latent_heat_microjoules_per_gram = 0;
+    int freezing_point_millikelvin = 0;
+    int ambient_specific_energy_millijoules_per_gram = 0;
     bool serialized_last_temp_check_present = false;
     int serialized_last_temp_check = 0;
     bool solid = false;
@@ -477,6 +483,25 @@ temperature_constructor_trace observe_temperature_constructor( const std::string
     JsonObject object = json_loader::from_string( serialized.str() ).get_object();
     const bool has_last_temp_check = object.has_int( "last_temp_check" );
     object.allow_omitted_members();
+    const double specific_heat_liquid = observed.has_temperature() ?
+                                        observed.get_specific_heat_liquid() : 0.0;
+    const double specific_heat_solid = observed.has_temperature() ?
+                                       observed.get_specific_heat_solid() : 0.0;
+    const double latent_heat = observed.has_temperature() ? observed.get_latent_heat() : 0.0;
+    const double freezing_point = observed.has_temperature() ?
+                                  units::to_kelvin( observed.get_freeze_point() ) : 0.0;
+    const bool thermal_properties_present = observed.has_temperature() &&
+                                            std::isfinite( specific_heat_liquid ) &&
+                                            std::isfinite( specific_heat_solid ) &&
+                                            std::isfinite( latent_heat ) &&
+                                            std::isfinite( freezing_point );
+    int ambient_specific_energy = 0;
+    if( thermal_properties_present ) {
+        item at_ambient = observed;
+        at_ambient.set_item_temperature( units::from_celsius( 20.0 ) );
+        ambient_specific_energy = static_cast<int>( std::lround( units::to_joule_per_gram(
+                                      at_ambient.specific_energy ) * 1000.0 ) );
+    }
     return {
         case_id,
         item_id,
@@ -487,6 +512,15 @@ temperature_constructor_trace observe_temperature_constructor( const std::string
         static_cast<int>( std::lround( units::to_kelvin( observed.temperature ) * 1000.0 ) ),
         static_cast<int>( std::lround( units::to_joule_per_gram( observed.specific_energy ) *
                                       1000.0 ) ),
+        thermal_properties_present,
+        thermal_properties_present ? static_cast<std::int64_t>( std::llround(
+                    specific_heat_liquid * 1000000.0 ) ) : 0,
+        thermal_properties_present ? static_cast<std::int64_t>( std::llround(
+                    specific_heat_solid * 1000000.0 ) ) : 0,
+        thermal_properties_present ? static_cast<std::int64_t>( std::llround(
+                    latent_heat * 1000000.0 ) ) : 0,
+        thermal_properties_present ? static_cast<int>( std::lround( freezing_point * 1000.0 ) ) : 0,
+        ambient_specific_energy,
         has_last_temp_check,
         has_last_temp_check ? object.get_int( "last_temp_check" ) : 0,
         observed.made_of( phase_id::SOLID ),
@@ -1481,6 +1515,8 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     const std::vector<temperature_constructor_trace> temperature_constructors = {
         observe_temperature_constructor( "materialless_comestible", "chaw", 123 ),
         observe_temperature_constructor( "material_comestible", "water_clean", 123 ),
+        observe_temperature_constructor( "field_blocker_material", "caff_gum", 123 ),
+        observe_temperature_constructor( "weighted_material", "saline", 123 ),
         observe_temperature_constructor( "no_temp_comestible", "caffeine", 123 ),
         observe_temperature_constructor( "ordinary_control", "rock", 123 )
     };
@@ -1495,10 +1531,19 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     REQUIRE( temperature_constructors[1].has_temperature );
     REQUIRE( temperature_constructors[1].active );
     REQUIRE( temperature_constructors[1].liquid );
-    REQUIRE_FALSE( temperature_constructors[2].has_temperature );
-    REQUIRE_FALSE( temperature_constructors[2].active );
-    REQUIRE_FALSE( temperature_constructors[3].has_temperature );
-    REQUIRE_FALSE( temperature_constructors[3].active );
+    REQUIRE( temperature_constructors[1].thermal_properties_present );
+    REQUIRE( temperature_constructors[2].specific_heat_liquid_microjoules_per_gram_kelvin ==
+             1500000 );
+    REQUIRE( temperature_constructors[2].specific_heat_solid_microjoules_per_gram_kelvin ==
+             1200000 );
+    REQUIRE( temperature_constructors[2].latent_heat_microjoules_per_gram == 10000000 );
+    REQUIRE( temperature_constructors[2].ambient_specific_energy_millijoules_per_gram == 367780 );
+    REQUIRE( temperature_constructors[3].thermal_properties_present );
+    REQUIRE( temperature_constructors[3].liquid );
+    REQUIRE_FALSE( temperature_constructors[4].has_temperature );
+    REQUIRE_FALSE( temperature_constructors[4].active );
+    REQUIRE_FALSE( temperature_constructors[5].has_temperature );
+    REQUIRE_FALSE( temperature_constructors[5].active );
     REQUIRE( default_containers[0].outer_type == "bottle_plastic" );
     REQUIRE( default_containers[0].content_types == std::vector<std::string>{ "water_clean" } );
     REQUIRE( default_containers[0].payload_charges == 2 );
@@ -1848,6 +1893,16 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.member( "temperature_millikelvin", trace.temperature_millikelvin );
             json.member( "specific_energy_millijoules_per_gram",
                          trace.specific_energy_millijoules_per_gram );
+            json.member( "thermal_properties_present", trace.thermal_properties_present );
+            json.member( "specific_heat_liquid_microjoules_per_gram_kelvin",
+                         trace.specific_heat_liquid_microjoules_per_gram_kelvin );
+            json.member( "specific_heat_solid_microjoules_per_gram_kelvin",
+                         trace.specific_heat_solid_microjoules_per_gram_kelvin );
+            json.member( "latent_heat_microjoules_per_gram",
+                         trace.latent_heat_microjoules_per_gram );
+            json.member( "freezing_point_millikelvin", trace.freezing_point_millikelvin );
+            json.member( "ambient_specific_energy_millijoules_per_gram",
+                         trace.ambient_specific_energy_millijoules_per_gram );
             json.member( "serialized_last_temp_check_present",
                          trace.serialized_last_temp_check_present );
             json.member( "serialized_last_temp_check", trace.serialized_last_temp_check );

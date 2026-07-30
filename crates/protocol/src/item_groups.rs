@@ -23,12 +23,48 @@ pub fn spawn_pocket_external_volume_milliliters(
     }
 }
 
-/// Strict current boundary for nonperishable temperature-tracked items whose
-/// finalized material mix is empty. Pinned C++ constructs these items active
-/// with zero kelvin and -10 J/g sentinel energy; the first ten-minute check
-/// initializes them to the canonical normal ambient. `None` energy retains
-/// the pinned indeterminate materialless result without serializing a float or
-/// platform-dependent NaN payload.
+/// Fixed-point material thermodynamics finalized from an item's complete
+/// positive material mix. The current engine deliberately admits only the
+/// ordinary 0 C freezing point; custom freezing and rot remain fail closed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemThermalPropertiesV1 {
+    pub specific_heat_liquid_microjoules_per_gram_kelvin: i64,
+    pub specific_heat_solid_microjoules_per_gram_kelvin: i64,
+    pub latent_heat_microjoules_per_gram: i64,
+    pub freezing_point_millikelvin: i32,
+}
+
+impl ItemThermalPropertiesV1 {
+    /// Specific energy at the pinned normal ambient, using the same three
+    /// piece material curve as upstream and one deterministic final rounding.
+    #[must_use]
+    pub fn normal_ambient_specific_energy_millijoules_per_gram(self) -> Option<i32> {
+        let solid_to_freezing = i128::from(self.specific_heat_solid_microjoules_per_gram_kelvin)
+            .checked_mul(i128::from(self.freezing_point_millikelvin))?;
+        let latent = i128::from(self.latent_heat_microjoules_per_gram).checked_mul(1_000)?;
+        let liquid_above_freezing = i128::from(
+            self.specific_heat_liquid_microjoules_per_gram_kelvin,
+        )
+        .checked_mul(i128::from(
+            ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
+                .checked_sub(self.freezing_point_millikelvin)?,
+        ))?;
+        i32::try_from(
+            solid_to_freezing
+                .checked_add(latent)?
+                .checked_add(liquid_above_freezing)?
+                .checked_add(500_000)?
+                / 1_000_000,
+        )
+        .ok()
+    }
+}
+
+/// Strict current boundary for nonperishable temperature-tracked items.
+/// Pinned C++ constructs these items active with zero kelvin and -10 J/g
+/// sentinel energy; the first ten-minute check initializes them to canonical
+/// normal ambient. `None` energy retains the pinned indeterminate materialless
+/// result without serializing a float or platform-dependent NaN payload.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItemTemperatureStateV1 {
     pub temperature_millikelvin: i32,
@@ -38,6 +74,7 @@ pub struct ItemTemperatureStateV1 {
     pub hot: bool,
     pub cold: bool,
     pub frozen: bool,
+    pub thermal_properties: Option<ItemThermalPropertiesV1>,
 }
 
 pub const ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN: i32 = 0;
@@ -49,6 +86,7 @@ pub const ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS: u64 = 10 * 60 * SimTick::HZ;
 pub fn initial_item_temperature_state(
     birth_tick: SimTick,
     current_phase: ItemPhaseV1,
+    thermal_properties: Option<ItemThermalPropertiesV1>,
 ) -> ItemTemperatureStateV1 {
     ItemTemperatureStateV1 {
         temperature_millikelvin: ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
@@ -58,7 +96,18 @@ pub fn initial_item_temperature_state(
         hot: false,
         cold: false,
         frozen: false,
+        thermal_properties,
     }
+}
+
+fn valid_item_thermal_properties(properties: ItemThermalPropertiesV1) -> bool {
+    properties.specific_heat_liquid_microjoules_per_gram_kelvin > 0
+        && properties.specific_heat_solid_microjoules_per_gram_kelvin > 0
+        && properties.latent_heat_microjoules_per_gram > 0
+        && properties.freezing_point_millikelvin == 273_150
+        && properties
+            .normal_ambient_specific_energy_millijoules_per_gram()
+            .is_some()
 }
 
 pub(super) fn valid_item_temperature_state(state: &ItemTemperatureStateV1) -> bool {
@@ -68,16 +117,17 @@ pub(super) fn valid_item_temperature_state(state: &ItemTemperatureStateV1) -> bo
     ) && !state.hot
         && !state.cold
         && !state.frozen
-        && matches!(
-            (
-                state.temperature_millikelvin,
-                state.specific_energy_millijoules_per_gram,
-            ),
-            (
-                ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
-                Some(ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G),
-            ) | (ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, None)
-        )
+        && state
+            .thermal_properties
+            .is_none_or(valid_item_thermal_properties)
+        && ((state.temperature_millikelvin == ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN
+            && state.specific_energy_millijoules_per_gram
+                == Some(ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G))
+            || (state.temperature_millikelvin == ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
+                && state.specific_energy_millijoules_per_gram
+                    == state.thermal_properties.and_then(|properties| {
+                        properties.normal_ambient_specific_energy_millijoules_per_gram()
+                    })))
 }
 
 pub(super) fn valid_item_fit_state(fitted: bool, containment: &ItemContainmentProfileV1) -> bool {
@@ -1640,7 +1690,7 @@ mod tests {
     #[test]
     fn temperature_state_accepts_only_the_bounded_constructor_lifecycle() {
         let birth = SimTick(123);
-        let initial = initial_item_temperature_state(birth, ItemPhaseV1::Solid);
+        let initial = initial_item_temperature_state(birth, ItemPhaseV1::Solid, None);
         assert!(valid_item_temperature_state(&initial));
 
         let mut initialized = initial;
@@ -1660,6 +1710,24 @@ mod tests {
         let mut unsupported_phase = initialized;
         unsupported_phase.current_phase = ItemPhaseV1::Gas;
         assert!(!valid_item_temperature_state(&unsupported_phase));
+
+        let water = ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 4_186_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 2_108_000,
+            latent_heat_microjoules_per_gram: 333_000_000,
+            freezing_point_millikelvin: 273_150,
+        };
+        assert_eq!(
+            water.normal_ambient_specific_energy_millijoules_per_gram(),
+            Some(992_520)
+        );
+        let mut material = initial_item_temperature_state(birth, ItemPhaseV1::Liquid, Some(water));
+        assert!(valid_item_temperature_state(&material));
+        material.temperature_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN;
+        material.specific_energy_millijoules_per_gram = Some(992_520);
+        assert!(valid_item_temperature_state(&material));
+        material.specific_energy_millijoules_per_gram = Some(992_519);
+        assert!(!valid_item_temperature_state(&material));
     }
 
     fn valid_test_item() -> ItemGroupItemPrototypeV1 {
@@ -1672,6 +1740,7 @@ mod tests {
                 quench: 0,
                 comestible_type: String::new(),
                 tracks_temperature: false,
+                thermal_properties: None,
                 ammunition_type: String::new(),
                 ranged_weapon: None,
                 magazine_capacity: 0,
