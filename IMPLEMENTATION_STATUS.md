@@ -5,11 +5,12 @@ tree `210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
 ## Live checkpoint
 
-- Last audited green implementation: `84509b8ebb7ceb6b68456e9473ea0816d2b24a80`,
-  tree `367af56a854a6a47ccc0ef0eb99d111cf2f4664a`.
-- Active candidate: generalized flexible containment, not yet a green checkpoint
-  until broad local gates and a fixed committed-tree review finish.
-- Candidate representation: protocol 93, persistence schema/minimum recoverable
+- Verified green commit: `d863ea545ff5ab0ca18d95a14f06391a2ae3c6d7`,
+  tree `6e016ac1f7881a76908ce1147329c0e4262b9c44`.
+- Audited checkpoint: generalized flexible containment. The fixed-tree review
+  and repair cycle is recorded in
+  `docs/reviews/protocol-93-flexible-containment.md`.
+- Checkpoint representation: protocol 93, persistence schema/minimum recoverable
   schema 71, CanonicalStateV69, CanonicalEventsV18, replay format 3, worldgen
   algorithm 2, scenario format 7, observation format 6.
 - Active milestone: `regional-terrain-base`.
@@ -73,7 +74,7 @@ interacted with, persisted, client-accessible, and four-mode proven.
 
 ## Module-growth budget
 
-Candidate sizes are 29,393 lines in `sim/lib.rs`, 4,997 in `sim/items.rs`,
+Verified sizes are 29,393 lines in `sim/lib.rs`, 4,997 in `sim/items.rs`,
 9,936 in `protocol/lib.rs`, 2,013 in `protocol/item_groups.rs`, 13,071 in
 persistence, 8,804 in the server library, 1,464 in `server/item_groups.rs`, and
 6,963 in the server executable. Relative to parent `4ee1df5`, central
@@ -92,9 +93,9 @@ Actors, combat, activities, monsters, canonical state, remaining protocol
 domains, persistence responsibilities, and sessions/replication remain
 mechanical extraction milestones before anatomy or EOC expansion.
 
-## Latest candidate verification
+## Latest verification
 
-Passing checks on the current candidate:
+Passing checks on the verified implementation:
 
 - formatting and diff checks;
 - content flexible-pocket validation;
@@ -116,7 +117,7 @@ Hashing the unchanged Postcard bytes under V68 still yields
 this proves the changed canonical hash is the deliberate domain bump rather
 than an uninvestigated byte change. CanonicalEventsV18 is unchanged.
 
-The broad workspace gates pass. The first fixed committed-tree review found one
-P2 recovery-validation gap; its confirmed fix now passes the focused recovery
-regression and the broad suite. A final independent review of the corrected
-fixed commit is the remaining checkpoint gate. No known failure remains.
+The first fixed committed-tree review found one P2 recovery-validation gap.
+The corrected fixed commit passed the focused recovery regression, broad suite,
+and final independent review with no remaining P0-P3 finding. No known failure
+remains.
