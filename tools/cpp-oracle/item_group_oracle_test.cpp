@@ -1980,6 +1980,9 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         observe_temperature_constructor( "material_comestible", "water_clean", 123 ),
         observe_temperature_constructor( "field_blocker_material", "caff_gum", 123 ),
         observe_temperature_constructor( "weighted_material", "saline", 123 ),
+        observe_temperature_constructor( "custom_freezing_comestible", "whiskey", 123 ),
+        observe_temperature_constructor( "never_freeze_sentinel", "powder_eggs", 123 ),
+        observe_temperature_constructor( "positive_freezing_comestible", "chem_benzene", 123 ),
         observe_temperature_constructor( "no_temp_comestible", "caffeine", 123 ),
         observe_temperature_constructor( "ordinary_control", "rock", 123 )
     };
@@ -2003,10 +2006,18 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     REQUIRE( temperature_constructors[2].ambient_specific_energy_millijoules_per_gram == 367780 );
     REQUIRE( temperature_constructors[3].thermal_properties_present );
     REQUIRE( temperature_constructors[3].liquid );
-    REQUIRE_FALSE( temperature_constructors[4].has_temperature );
-    REQUIRE_FALSE( temperature_constructors[4].active );
-    REQUIRE_FALSE( temperature_constructors[5].has_temperature );
-    REQUIRE_FALSE( temperature_constructors[5].active );
+    REQUIRE( temperature_constructors[4].thermal_properties_present );
+    REQUIRE( temperature_constructors[4].freezing_point_millikelvin == 243150 );
+    REQUIRE( temperature_constructors[4].ambient_specific_energy_millijoules_per_gram == 996300 );
+    REQUIRE( temperature_constructors[4].liquid );
+    REQUIRE( temperature_constructors[5].freezing_point_millikelvin == -850 );
+    REQUIRE( temperature_constructors[5].solid );
+    REQUIRE( temperature_constructors[6].freezing_point_millikelvin == 278150 );
+    REQUIRE( temperature_constructors[6].liquid );
+    REQUIRE_FALSE( temperature_constructors[7].has_temperature );
+    REQUIRE_FALSE( temperature_constructors[7].active );
+    REQUIRE_FALSE( temperature_constructors[8].has_temperature );
+    REQUIRE_FALSE( temperature_constructors[8].active );
     REQUIRE( default_containers[0].outer_type == "bottle_plastic" );
     REQUIRE( default_containers[0].content_types == std::vector<std::string>{ "water_clean" } );
     REQUIRE( default_containers[0].payload_charges == 2 );

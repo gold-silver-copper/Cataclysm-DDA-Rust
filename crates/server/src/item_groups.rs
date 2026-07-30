@@ -33,6 +33,86 @@ pub(super) struct RuntimeItemGroupContent<'a> {
 }
 
 #[cfg(test)]
+pub(super) fn assert_custom_freezing_item_admission(
+    items: &ItemRegistry,
+    material_temperature_items: &[&str],
+) {
+    let custom_freezing_temperature_items = material_temperature_items
+        .iter()
+        .filter(|item_id| {
+            items
+                .get(item_id)
+                .is_some_and(|item| item.freezing_point_millicelsius != 0)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        material_temperature_items.len(),
+        485,
+        "every selected nonperishable material-backed constructor within the modeled thermal lifecycle should admit"
+    );
+    assert_eq!(
+        custom_freezing_temperature_items.len(),
+        207,
+        "the fixed selected snapshot should admit the complete supported custom-freezing constructor family"
+    );
+    assert!(custom_freezing_temperature_items.contains(&"whiskey"));
+}
+
+#[cfg(test)]
+pub(super) fn assert_custom_freezing_recipe_admission(
+    crafting: &cdda_server::CraftingCatalog,
+    pre_material_recipe_ids: &BTreeSet<&str>,
+) {
+    let newly_admitted_custom_freezing_recipes = crafting
+        .iter()
+        .filter(|(recipe_id, _)| !pre_material_recipe_ids.contains(recipe_id))
+        .filter(|(_, recipe)| {
+            recipe
+                .output
+                .thermal_properties
+                .is_some_and(|properties| properties.freezing_point_millikelvin != 273_150)
+                || recipe.byproducts.iter().any(|byproduct| {
+                    byproduct
+                        .output
+                        .thermal_properties
+                        .is_some_and(|properties| properties.freezing_point_millikelvin != 273_150)
+                })
+        })
+        .map(|(recipe_id, _)| recipe_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        newly_admitted_custom_freezing_recipes,
+        [
+            "ammonia_liquid",
+            "birdfood",
+            "brew_soy_sauce",
+            "cattlefodder",
+            "cattlefodder_large",
+            "cattlefodder_medium",
+            "chilly-p",
+            "chilly-p_with_from_food_processor",
+            "disinfectant_makeshift",
+            "drink_beeknees",
+            "drink_martini",
+            "garlic_powder",
+            "garlic_powder_from_quern",
+            "milk_powder",
+            "mixed_alcohol_strong",
+            "mixed_alcohol_weak",
+            "mustard_powder",
+            "mustard_powder_with_from_food_processor",
+            "mutagen_jabberblood",
+            "powder_eggs",
+            "sake_filtered",
+            "sausage_casings_artificial",
+            "vinegar",
+        ],
+        "custom-freezing recipe admission should remain an exact audited family"
+    );
+}
+
+#[cfg(test)]
 pub(super) fn assert_regional_field_item_group_closure(
     field_graph: &StrictItemGroupGraph,
     content: RuntimeItemGroupContent<'_>,
@@ -221,6 +301,35 @@ pub(super) fn assert_regional_field_item_group_closure(
         Some(ItemGroupToolChargeStorageV1::Integral { .. })
     ));
 
+    let flask_liquor = runtime_item_group_graph(
+        field_graph
+            .groups
+            .get("flask_liquor")
+            .expect("field closure should retain flask liquor"),
+        content,
+    )
+    .expect("custom material-backed freezing points should normalize");
+    let whiskey = flask_liquor
+        .nodes
+        .iter()
+        .flat_map(|node| &node.entries)
+        .find_map(|entry| match &entry.target {
+            ItemGroupTargetV1::Item(item) if item.prototype.type_id == "whiskey" => Some(item),
+            ItemGroupTargetV1::Item(_)
+            | ItemGroupTargetV1::Group(_)
+            | ItemGroupTargetV1::Node(_) => None,
+        })
+        .expect("flask liquor should retain whiskey");
+    let whiskey_thermal = whiskey
+        .prototype
+        .thermal_properties
+        .expect("whiskey should retain material thermodynamics");
+    assert_eq!(whiskey_thermal.freezing_point_millikelvin, 243_150);
+    assert_eq!(
+        whiskey_thermal.normal_ambient_specific_energy_millijoules_per_gram(),
+        Some(996_300)
+    );
+
     let field_runtime_errors = field_graph
         .groups
         .values()
@@ -247,10 +356,6 @@ pub(super) fn assert_regional_field_item_group_closure(
             (
                 "everyday_corpse_male",
                 "item group item corpse_generic_male requires unimplemented corpse construction",
-            ),
-            (
-                "flask_liquor",
-                "temperature-tracked item whiskey requires a custom freezing point",
             ),
             (
                 "lunchbox_food",
@@ -423,8 +528,9 @@ pub(super) struct RuntimeItemTemperatureCapability {
 }
 
 /// Resolves the complete strict constructor capability for nonperishable
-/// temperature-tracked items. Rot, custom freezing points, and unsupported
-/// phases remain fail closed.
+/// temperature-tracked items. Material-backed custom freezing points share the
+/// generalized fixed-point thermal curve; rot, materialless custom points,
+/// above-ambient phase boundaries, and unsupported phases remain fail closed.
 pub(super) fn runtime_item_temperature_capability(
     item: &ItemDefinition,
     materials: &MaterialRegistry,
@@ -446,7 +552,7 @@ pub(super) fn runtime_item_temperature_capability(
         )
         .into()),
         ItemTemperatureRuntimeClass::RequiresCustomFreezing => Err(format!(
-            "temperature-tracked item {} requires a custom freezing point",
+            "temperature-tracked item {} has a custom freezing point without material thermodynamics",
             item.id
         )
         .into()),
@@ -469,16 +575,34 @@ pub(super) fn runtime_item_temperature_capability(
                         item.id
                     )
                 })?;
+            let thermal_properties = ItemThermalPropertiesV1 {
+                specific_heat_liquid_microjoules_per_gram_kelvin: properties
+                    .specific_heat_liquid_microjoules_per_gram_kelvin,
+                specific_heat_solid_microjoules_per_gram_kelvin: properties
+                    .specific_heat_solid_microjoules_per_gram_kelvin,
+                latent_heat_microjoules_per_gram: properties.latent_heat_microjoules_per_gram,
+                freezing_point_millikelvin: item.freezing_point_millikelvin().ok_or_else(|| {
+                    format!(
+                        "temperature-tracked item {} has an overflowing freezing point",
+                        item.id
+                    )
+                })?,
+            };
+            if thermal_properties
+                .normal_ambient_specific_energy_millijoules_per_gram()
+                .is_none()
+                || thermal_properties.freezing_point_millikelvin
+                    > cdda_protocol::ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
+            {
+                return Err(format!(
+                    "temperature-tracked item {} has a freezing point outside the modeled ambient lifecycle",
+                    item.id
+                )
+                .into());
+            }
             Ok(RuntimeItemTemperatureCapability {
                 tracks_temperature: true,
-                thermal_properties: Some(ItemThermalPropertiesV1 {
-                    specific_heat_liquid_microjoules_per_gram_kelvin: properties
-                        .specific_heat_liquid_microjoules_per_gram_kelvin,
-                    specific_heat_solid_microjoules_per_gram_kelvin: properties
-                        .specific_heat_solid_microjoules_per_gram_kelvin,
-                    latent_heat_microjoules_per_gram: properties.latent_heat_microjoules_per_gram,
-                    freezing_point_millikelvin: 273_150,
-                }),
+                thermal_properties: Some(thermal_properties),
             })
         }
         ItemTemperatureRuntimeClass::UnsupportedPhase => Err(format!(
@@ -1831,9 +1955,7 @@ mod tests {
         assert!(runtime_item_tracks_temperature(&perishable, &materials).is_err());
 
         let mut custom_freezing = supported;
-        custom_freezing
-            .unsupported_fields
-            .insert(String::from("freezing_point"));
+        custom_freezing.freezing_point_millicelsius = -30_000;
         assert!(runtime_item_tracks_temperature(&custom_freezing, &materials).is_err());
     }
 

@@ -38,6 +38,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "to_hit",
     "charges",
     "phase",
+    "freezing_point",
     "container",
     "container_variant",
     "sealed",
@@ -121,6 +122,10 @@ pub struct ItemDefinition {
     pub melee_to_hit: Option<i32>,
     pub charges: i32,
     pub phase: String,
+    /// Finalized comestible freezing point in integer millicelsius. Upstream
+    /// stores this as Celsius and defaults it to zero; fixed-point retention
+    /// avoids carrying a platform-dependent float into authoritative content.
+    pub freezing_point_millicelsius: i32,
     /// Finalized item-type default container. The literal `null` sentinel is
     /// retained because it explicitly disables inherited containment.
     pub default_container: String,
@@ -764,11 +769,13 @@ impl ItemDefinition {
         if self.unsupported_fields.contains("spoils_in") {
             return ItemTemperatureRuntimeClass::RequiresRot;
         }
-        if self.unsupported_fields.contains("freezing_point") {
-            return ItemTemperatureRuntimeClass::RequiresCustomFreezing;
-        }
         if !self.materials.is_empty() {
             return ItemTemperatureRuntimeClass::RequiresMaterialThermodynamics;
+        }
+        if self.freezing_point_millicelsius != 0 {
+            // Without material heat properties the frozen temperature DTO
+            // cannot retain the custom phase boundary exactly.
+            return ItemTemperatureRuntimeClass::RequiresCustomFreezing;
         }
         if !matches!(
             self.phase.to_ascii_lowercase().as_str(),
@@ -777,6 +784,14 @@ impl ItemDefinition {
             return ItemTemperatureRuntimeClass::UnsupportedPhase;
         }
         ItemTemperatureRuntimeClass::MateriallessNonperishable
+    }
+
+    /// Converts the finalized Celsius value to the absolute millikelvin used
+    /// by the frozen runtime representation. Values below absolute zero remain
+    /// representable because upstream uses them as never-freeze sentinels.
+    #[must_use]
+    pub fn freezing_point_millikelvin(&self) -> Option<i32> {
+        273_150_i32.checked_add(self.freezing_point_millicelsius)
     }
 
     /// Pinned `Item_factory::finalize_pre` default: round the cube root of the
@@ -1065,6 +1080,12 @@ fn apply_common_fields(
     apply_melee_to_hit(object, &mut item.melee_to_hit, source)?;
     apply_integer(object, "charges", &mut item.charges, source)?;
     apply_string(object, "phase", &mut item.phase, source)?;
+    apply_fixed_milli_number(
+        object,
+        "freezing_point",
+        &mut item.freezing_point_millicelsius,
+        source,
+    )?;
     apply_string(object, "container", &mut item.default_container, source)?;
     apply_string(
         object,
@@ -2010,6 +2031,57 @@ fn apply_integer(
     Ok(())
 }
 
+fn apply_fixed_milli_number(
+    object: &Map<String, Value>,
+    field: &str,
+    target: &mut i32,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    for unsupported_modifier in ["extend", "delete"] {
+        if modifier(object, unsupported_modifier, field, source)?.is_some() {
+            return Err(invalid_field(
+                source,
+                &format!("{unsupported_modifier}.{field}"),
+            ));
+        }
+    }
+    if let Some(value) = object.get(field) {
+        *target = fixed_milli_number(value, source, field)?;
+    } else if let Some(value) = modifier(object, "proportional", field, source)? {
+        let multiplier = value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| invalid_field(source, field))?;
+        let adjusted = f64::from(*target) * multiplier;
+        if !adjusted.is_finite() || adjusted < f64::from(i32::MIN) || adjusted > f64::from(i32::MAX)
+        {
+            return Err(invalid_field(source, field));
+        }
+        *target = adjusted.round() as i32;
+    } else if let Some(value) = modifier(object, "relative", field, source)? {
+        *target = target
+            .checked_add(fixed_milli_number(value, source, field)?)
+            .ok_or_else(|| invalid_field(source, field))?;
+    }
+    Ok(())
+}
+
+fn fixed_milli_number(value: &Value, source: &str, field: &str) -> Result<i32, ItemRegistryError> {
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid_field(source, field))?;
+    let scaled = value * 1_000.0;
+    if !scaled.is_finite()
+        || scaled < f64::from(i32::MIN)
+        || scaled > f64::from(i32::MAX)
+        || (scaled - scaled.round()).abs() > 1.0e-6
+    {
+        return Err(invalid_field(source, field));
+    }
+    Ok(scaled.round() as i32)
+}
+
 fn apply_melee_to_hit(
     object: &Map<String, Value>,
     target: &mut Option<i32>,
@@ -2934,6 +3006,94 @@ mod tests {
             items["test_replaced_tool"].tool_ammunition,
             BTreeSet::from([String::from("tape"), String::from("thread")])
         );
+    }
+
+    #[test]
+    fn custom_freezing_point_inherits_and_uses_exact_fixed_point_modifiers() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        for definition in [
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "test_whiskey",
+                "subtypes": ["COMESTIBLE"],
+                "name": "test whiskey",
+                "material": ["alcohol"],
+                "freezing_point": -30
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "test_diluted_whiskey",
+                "copy-from": "test_whiskey",
+                "name": "test diluted whiskey",
+                "relative": {"freezing_point": 5}
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "test_half_point",
+                "copy-from": "test_whiskey",
+                "name": "test half point",
+                "proportional": {"freezing_point": 0.5}
+            }),
+            serde_json::json!({
+                "type": "ITEM",
+                "id": "test_decimal_point",
+                "name": "test decimal point",
+                "freezing_point": -77.73
+            }),
+        ] {
+            assert!(
+                load_one(&raw(definition), &mut items, &mut abstracts)
+                    .expect("fixed-point freezing fixture should load")
+            );
+        }
+        assert_eq!(items["test_whiskey"].freezing_point_millicelsius, -30_000);
+        assert_eq!(
+            items["test_whiskey"].freezing_point_millikelvin(),
+            Some(243_150)
+        );
+        assert_eq!(
+            items["test_whiskey"].temperature_runtime_class(),
+            ItemTemperatureRuntimeClass::RequiresMaterialThermodynamics
+        );
+        assert_eq!(
+            items["test_diluted_whiskey"].freezing_point_millicelsius,
+            -25_000
+        );
+        assert_eq!(
+            items["test_half_point"].freezing_point_millicelsius,
+            -15_000
+        );
+        assert_eq!(
+            items["test_decimal_point"].freezing_point_millicelsius,
+            -77_730
+        );
+        assert!(
+            !items["test_whiskey"]
+                .unsupported_fields
+                .contains("freezing_point")
+        );
+
+        let materialless = ItemDefinition {
+            subtypes: BTreeSet::from([String::from("COMESTIBLE")]),
+            freezing_point_millicelsius: -30_000,
+            ..ItemDefinition::default()
+        };
+        assert_eq!(
+            materialless.temperature_runtime_class(),
+            ItemTemperatureRuntimeClass::RequiresCustomFreezing
+        );
+
+        let invalid = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_sub_millikelvin",
+            "name": "test sub millikelvin",
+            "freezing_point": -0.0001
+        }));
+        assert!(matches!(
+            load_one(&invalid, &mut items, &mut abstracts),
+            Err(ItemRegistryError::InvalidField { field, .. }) if field == "freezing_point"
+        ));
     }
 
     #[test]

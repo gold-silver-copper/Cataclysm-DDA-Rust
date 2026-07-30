@@ -20072,7 +20072,8 @@ mod tests {
             .thermal_properties
             .as_mut()
             .expect("thermal properties exist")
-            .freezing_point_millikelvin = 273_149;
+            .freezing_point_millikelvin =
+            cdda_protocol::ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN + 1;
         assert!(matches!(
             validate_craft_item_prototype(&invalid_temperature_prototype),
             Err(SimError::InvalidCraft)

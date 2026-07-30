@@ -77,6 +77,7 @@ use item_groups::{
 };
 #[cfg(test)]
 use item_groups::{
+    assert_custom_freezing_item_admission, assert_custom_freezing_recipe_admission,
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
@@ -4486,11 +4487,7 @@ mod tests {
             ],
             "the fixed selected-content snapshot should admit the complete materialless/nonperishable temperature class"
         );
-        assert_eq!(
-            material_temperature_items.len(),
-            278,
-            "every selected nonperishable/default-freezing material-backed constructor should admit"
-        );
+        assert_custom_freezing_item_admission(&items, &material_temperature_items);
         assert!(material_temperature_items.contains(&"caff_gum"));
         let caff_thermal = runtime_item_temperature_capability(
             items.get("caff_gum").expect("caffeine gum should load"),
@@ -6259,11 +6256,12 @@ mod tests {
                 recipe_id
             })
             .collect::<Vec<_>>();
-        assert_eq!(newly_admitted_material_recipes.len(), 197);
+        assert_custom_freezing_recipe_admission(&crafting, &pre_material_recipe_ids);
+        assert_eq!(newly_admitted_material_recipes.len(), 220);
         assert_eq!(
             crafting.len(),
-            2_826,
-            "exactly 197 recipes should cross the material-thermodynamics boundary; rot, custom freezing, and overlapping unsupported semantics remain closed"
+            2_849,
+            "exactly 197 default-freezing and 23 custom-freezing recipes should cross the represented material-thermodynamics boundary; rot and overlapping unsupported semantics remain closed"
         );
         let mut maximum_encoded_recipe = (0_usize, "");
         for (recipe_id, recipe) in crafting.iter() {

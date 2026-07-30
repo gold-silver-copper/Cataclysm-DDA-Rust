@@ -3178,6 +3178,34 @@ mod tests {
                 .snapshot(),
             material.snapshot()
         );
+
+        let mut whiskey_prototype = material_prototype;
+        whiskey_prototype.type_id = String::from("whiskey");
+        whiskey_prototype.thermal_properties = Some(cdda_protocol::ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 4_000_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 2_000_000,
+            latent_heat_microjoules_per_gram: 310_000_000,
+            freezing_point_millikelvin: 243_150,
+        });
+        let mut whiskey =
+            item_from_craft_prototype(ItemId::new(1, 3), &whiskey_prototype, birth_tick);
+        whiskey
+            .process_temperature(processing_tick)
+            .expect("custom freezing should use the generalized thermal curve");
+        let whiskey_state = whiskey
+            .temperature
+            .expect("custom temperature state should exist");
+        assert_eq!(whiskey_state.current_phase, ItemPhaseV1::Liquid);
+        assert_eq!(
+            whiskey_state.specific_energy_millijoules_per_gram,
+            Some(996_300)
+        );
+        assert_eq!(
+            ItemInstance::from_snapshot(&whiskey.snapshot())
+                .expect("custom freezing state should restore")
+                .snapshot(),
+            whiskey.snapshot()
+        );
     }
 
     #[test]

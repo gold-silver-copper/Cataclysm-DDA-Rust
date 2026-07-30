@@ -47,8 +47,9 @@ pub fn spawn_pocket_external_volume_milliliters(
 }
 
 /// Fixed-point material thermodynamics finalized from an item's complete
-/// positive material mix. The current engine deliberately admits only the
-/// ordinary 0 C freezing point; custom freezing and rot remain fail closed.
+/// positive material mix and finalized comestible freezing point. The current
+/// lifecycle admits any finite curve whose phase boundary does not exceed the
+/// modeled normal ambient; rot remains independently fail closed.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItemThermalPropertiesV1 {
     pub specific_heat_liquid_microjoules_per_gram_kelvin: i64,
@@ -127,7 +128,7 @@ fn valid_item_thermal_properties(properties: ItemThermalPropertiesV1) -> bool {
     properties.specific_heat_liquid_microjoules_per_gram_kelvin > 0
         && properties.specific_heat_solid_microjoules_per_gram_kelvin > 0
         && properties.latent_heat_microjoules_per_gram > 0
-        && properties.freezing_point_millikelvin == 273_150
+        && properties.freezing_point_millikelvin <= ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
         && properties
             .normal_ambient_specific_energy_millijoules_per_gram()
             .is_some()
@@ -1933,6 +1934,26 @@ mod tests {
         assert!(item_temperature_state_matches_phase(
             &material,
             ItemPhaseV1::Liquid
+        ));
+
+        let whiskey = ItemThermalPropertiesV1 {
+            specific_heat_liquid_microjoules_per_gram_kelvin: 4_000_000,
+            specific_heat_solid_microjoules_per_gram_kelvin: 2_000_000,
+            latent_heat_microjoules_per_gram: 310_000_000,
+            freezing_point_millikelvin: 243_150,
+        };
+        assert_eq!(
+            whiskey.normal_ambient_specific_energy_millijoules_per_gram(),
+            Some(996_300)
+        );
+        let whiskey_state =
+            initial_item_temperature_state(birth, ItemPhaseV1::Liquid, Some(whiskey));
+        assert!(valid_item_temperature_state(&whiskey_state));
+
+        let mut above_ambient = whiskey;
+        above_ambient.freezing_point_millikelvin = ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN + 1;
+        assert!(!valid_item_temperature_state(
+            &initial_item_temperature_state(birth, ItemPhaseV1::Liquid, Some(above_ambient),)
         ));
         assert!(!item_temperature_state_matches_phase(
             &material,

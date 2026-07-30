@@ -2029,6 +2029,36 @@ fn validate_item_group_observation(
             true,
         ),
         (
+            "custom_freezing_comestible",
+            "whiskey",
+            true,
+            true,
+            600,
+            true,
+            false,
+            true,
+        ),
+        (
+            "never_freeze_sentinel",
+            "powder_eggs",
+            true,
+            true,
+            600,
+            true,
+            true,
+            false,
+        ),
+        (
+            "positive_freezing_comestible",
+            "chem_benzene",
+            true,
+            true,
+            600,
+            true,
+            false,
+            true,
+        ),
+        (
             "no_temp_comestible",
             "caffeine",
             false,
@@ -2098,6 +2128,9 @@ fn validate_item_group_observation(
         (true, 4_186_000, 2_108_000, 333_000_000, 273_150, 992_520),
         (true, 1_500_000, 1_200_000, 10_000_000, 273_150, 367_780),
         (true, 4_156_246, 2_097_308, 330_092_987, 273_150, 986_098),
+        (true, 4_000_000, 2_000_000, 310_000_000, 243_150, 996_300),
+        (true, 1_693_636, 1_268_182, 32_000_000, -850, 528_851),
+        (true, 2_000_000, 1_800_000, 200_000_000, 278_150, 730_670),
         (false, 0, 0, 0, 0, 0),
         (false, 0, 0, 0, 0, 0),
     ];
@@ -3453,6 +3486,9 @@ fn rust_item_group_temperature_constructor_observation(
         ("material_comestible", "water_clean"),
         ("field_blocker_material", "caff_gum"),
         ("weighted_material", "saline"),
+        ("custom_freezing_comestible", "whiskey"),
+        ("never_freeze_sentinel", "powder_eggs"),
+        ("positive_freezing_comestible", "chem_benzene"),
         ("no_temp_comestible", "caffeine"),
         ("ordinary_control", "rock"),
     ]
@@ -3473,16 +3509,28 @@ fn rust_item_group_temperature_constructor_observation(
             }
         };
         let thermal_properties = if has_temperature {
-            materials
+            match materials
                 .comestible_thermal_properties(item)
                 .map_err(|error| error.to_string())?
+            {
+                Some(properties) => Some(cdda_protocol::ItemThermalPropertiesV1 {
+                    specific_heat_liquid_microjoules_per_gram_kelvin: properties
+                        .specific_heat_liquid_microjoules_per_gram_kelvin,
+                    specific_heat_solid_microjoules_per_gram_kelvin: properties
+                        .specific_heat_solid_microjoules_per_gram_kelvin,
+                    latent_heat_microjoules_per_gram: properties.latent_heat_microjoules_per_gram,
+                    freezing_point_millikelvin: item.freezing_point_millikelvin().ok_or_else(
+                        || format!("oracle item {item_type} has an overflowing freezing point"),
+                    )?,
+                }),
+                None => None,
+            }
         } else {
             None
         };
-        let state = initial_item_temperature_state(SimTick(123), current_phase, None);
+        let state = initial_item_temperature_state(SimTick(123), current_phase, thermal_properties);
         let ambient_specific_energy_millijoules_per_gram = thermal_properties
-            .map(ambient_specific_energy_millijoules_per_gram)
-            .transpose()?
+            .and_then(|properties| properties.normal_ambient_specific_energy_millijoules_per_gram())
             .unwrap_or_default();
         Ok(ItemGroupTemperatureConstructorTraceV1 {
             case_id: case_id.to_owned(),
@@ -3510,7 +3558,8 @@ fn rust_item_group_temperature_constructor_observation(
                 }),
             latent_heat_microjoules_per_gram: thermal_properties
                 .map_or(0, |properties| properties.latent_heat_microjoules_per_gram),
-            freezing_point_millikelvin: thermal_properties.map_or(0, |_| 273_150),
+            freezing_point_millikelvin: thermal_properties
+                .map_or(0, |properties| properties.freezing_point_millikelvin),
             ambient_specific_energy_millijoules_per_gram,
             serialized_last_temp_check_present: has_temperature,
             serialized_last_temp_check: if has_temperature {
@@ -3528,29 +3577,6 @@ fn rust_item_group_temperature_constructor_observation(
     })
     .collect::<Result<Vec<_>, String>>()
     .map_err(Into::into)
-}
-
-fn ambient_specific_energy_millijoules_per_gram(
-    properties: cdda_content::ComestibleThermalProperties,
-) -> Result<i32, String> {
-    let numerator = i128::from(properties.specific_heat_solid_microjoules_per_gram_kelvin)
-        .checked_mul(273_150)
-        .and_then(|value| {
-            value.checked_add(i128::from(properties.latent_heat_microjoules_per_gram) * 1_000)
-        })
-        .and_then(|value| {
-            value.checked_add(
-                i128::from(properties.specific_heat_liquid_microjoules_per_gram_kelvin) * 20_000,
-            )
-        })
-        .ok_or_else(|| String::from("ambient thermal-energy arithmetic overflowed"))?;
-    i32::try_from(
-        numerator
-            .checked_add(500_000)
-            .ok_or_else(|| String::from("ambient thermal-energy rounding overflowed"))?
-            / 1_000_000,
-    )
-    .map_err(|_| String::from("ambient thermal energy exceeded protocol range"))
 }
 
 fn rust_item_group_tool_charge_case_with_replacement(
