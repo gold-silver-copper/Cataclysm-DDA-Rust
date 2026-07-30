@@ -430,7 +430,7 @@
           "occurrences": 16
         },
         "container": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 643
         },
         "contamination": {
@@ -1062,7 +1062,7 @@
           "occurrences": 9
         },
         "sealed": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 96
         },
         "seeds": {

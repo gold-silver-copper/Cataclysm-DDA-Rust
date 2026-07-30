@@ -9,13 +9,15 @@ use cdda_content::{
     StartLocationRegistry,
 };
 use cdda_protocol::{
-    BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1, FurnitureTileSnapshot,
-    IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, MagazineWellPrototypeV1, TerrainTileSnapshot,
-    WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH,
-    WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1,
+    AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1,
+    FurnitureTileSnapshot, IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1,
+    ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1,
+    ItemGroupContainerV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
+    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
+    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemPhaseV1, MagazineWellPrototypeV1,
+    SpawnPocketKindV1, SpawnPocketRulesV1, TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT,
+    WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldPosition,
+    WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1,
     WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
     WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
     WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurnitureTargetV1,
@@ -124,6 +126,7 @@ struct ItemGroupOracleObservationV1 {
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
+    default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
     containers: Vec<ItemGroupContainerObservationV1>,
     everyday_corpse: ItemGroupCorpseObservationV1,
     civilian_phone_case: ItemGroupPhoneCaseObservationV1,
@@ -385,6 +388,39 @@ struct ItemGroupModifierContainerCapacityObservationV1 {
     explicit_downstream_draw: i32,
     fixed_downstream_draw: i32,
     downstream_draw_matches: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupDefaultContainerTraceV1 {
+    case_id: String,
+    seed: u32,
+    outer_type: String,
+    content_types: Vec<String>,
+    payload_charges: i32,
+    sealed: bool,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupDefaultContainerDirectV1 {
+    case_id: String,
+    outer_type: String,
+    content_types: Vec<String>,
+    payload_charges: Option<i32>,
+    sealed: bool,
+}
+
+impl ItemGroupDefaultContainerTraceV1 {
+    fn direct_projection(&self) -> ItemGroupDefaultContainerDirectV1 {
+        ItemGroupDefaultContainerDirectV1 {
+            case_id: self.case_id.clone(),
+            outer_type: self.outer_type.clone(),
+            content_types: self.content_types.clone(),
+            payload_charges: (self.payload_charges >= 0).then_some(self.payload_charges),
+            sealed: self.sealed,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -680,6 +716,15 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 "item-group variable-size FIT transition",
                 &observation.variable_size_fit.direct_projection(),
                 &rust_item_group_variable_size_fit_observation(),
+            )?;
+            compare_direct_observation(
+                "item-group default-container ownership",
+                &observation
+                    .default_containers
+                    .iter()
+                    .map(ItemGroupDefaultContainerTraceV1::direct_projection)
+                    .collect::<Vec<_>>(),
+                &rust_item_group_default_container_observation()?,
             )?;
             println!(
                 "{}",
@@ -1242,6 +1287,109 @@ fn validate_item_group_observation(
     {
         return Err("modifier-container capacity characterization is incomplete".into());
     }
+    let expected_default_containers = [
+        (
+            "direct_water",
+            31_415,
+            "bottle_plastic",
+            vec!["water_clean"],
+            2,
+            true,
+            8_831,
+        ),
+        (
+            "direct_aspirin",
+            31_415,
+            "bottle_plastic_pill_painkiller",
+            vec!["aspirin"],
+            0,
+            false,
+            8_831,
+        ),
+        (
+            "modifier_aspirin",
+            31_415,
+            "bottle_plastic_pill_painkiller",
+            vec!["aspirin"],
+            0,
+            false,
+            8_831,
+        ),
+        (
+            "suppressed_aspirin",
+            31_415,
+            "aspirin",
+            vec![],
+            -1,
+            false,
+            8_831,
+        ),
+        (
+            "explicit_container_default",
+            31_415,
+            "bottle_plastic_pill_painkiller",
+            vec!["ibuprofen", "aspirin"],
+            0,
+            false,
+            8_323,
+        ),
+        (
+            "production_aspirin_minimum",
+            86,
+            "bottle_plastic_pill_painkiller",
+            vec!["aspirin"],
+            0,
+            false,
+            7_093,
+        ),
+        (
+            "production_aspirin_maximum",
+            5,
+            "bottle_plastic_pill_painkiller",
+            vec!["aspirin"; 20],
+            0,
+            false,
+            6_790,
+        ),
+    ];
+    if observation.default_containers.len() != expected_default_containers.len()
+        || observation
+            .default_containers
+            .iter()
+            .zip(expected_default_containers)
+            .any(
+                |(
+                    actual,
+                    (
+                        case_id,
+                        seed,
+                        outer_type,
+                        content_types,
+                        payload_charges,
+                        sealed,
+                        downstream_draw,
+                    ),
+                )| {
+                    actual.case_id != case_id
+                        || actual.seed != seed
+                        || actual.outer_type != outer_type
+                        || actual
+                            .content_types
+                            .iter()
+                            .map(String::as_str)
+                            .ne(content_types)
+                        || actual.payload_charges != payload_charges
+                        || actual.sealed != sealed
+                        || actual.downstream_draw != downstream_draw
+                },
+            )
+    {
+        return Err(format!(
+            "item-group default-container characterization is incomplete: {:?}",
+            observation.default_containers
+        )
+        .into());
+    }
     let expected_containers = [
         ("discard", 1, 1, Vec::<String>::new()),
         (
@@ -1670,6 +1818,7 @@ fn rust_item_group_magazine_charge_case(
         description_expansion: None,
         snippets: Vec::new(),
         initial_variables: BTreeMap::new(),
+        default_container: None,
         modifier_side_effects_supported: true,
         charges: Some(cdda_protocol::InclusiveI32RangeV1 {
             minimum: requested_charges,
@@ -1761,6 +1910,176 @@ fn rust_item_group_variable_size_fit_observation() -> Vec<ItemGroupVariableSizeF
     .collect()
 }
 
+fn rust_item_group_default_container_observation()
+-> Result<Vec<ItemGroupDefaultContainerDirectV1>, Box<dyn std::error::Error>> {
+    let plain = |type_id: &str| ItemGroupItemPrototypeV1 {
+        prototype: CraftItemPrototypeV1 {
+            type_id: type_id.to_owned(),
+            charges: 1,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            containment: ItemContainmentProfileV1::default(),
+        },
+        maximum_raw_damage: 0,
+        variants: Vec::new(),
+        description_expansion: None,
+        snippets: Vec::new(),
+        initial_variables: BTreeMap::new(),
+        default_container: None,
+        modifier_side_effects_supported: true,
+        charges: None,
+        minimum_one_charge: false,
+        tool_charge_storage: None,
+        charges_supported: true,
+        modifier_container_capacity_applies: true,
+        contents_insertion_supported: true,
+    };
+    let container = |type_id: &str,
+                     maximum_volume: u64,
+                     maximum_item_volume: u64,
+                     maximum_weight: u64,
+                     watertight: bool| {
+        let mut container = plain(type_id);
+        container.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("CONTAINER"),
+            capacities: Vec::new(),
+            access_moves: 400,
+            rigid: true,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind: SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: maximum_volume,
+                max_contains_weight_milligrams: maximum_weight,
+                max_item_volume_milliliters: maximum_item_volume,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: 1_000,
+                item_restrictions: Vec::new(),
+                flag_restrictions: Vec::new(),
+                access_moves: 400,
+                rigid: true,
+                watertight,
+                transparent: true,
+                forbidden: false,
+                sealable: true,
+            }),
+        }];
+        ItemGroupContainerV1 {
+            item: Box::new(container),
+            variant_id: None,
+            sealed: true,
+            overflow: ItemGroupOverflowV1::None,
+        }
+    };
+    let mut water = plain("water_clean");
+    water.prototype.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 250_000,
+        volume_milliliters: 250,
+        count_by_charges: true,
+        stack_size: 1,
+        phase: ItemPhaseV1::Liquid,
+        ..ItemContainmentProfileV1::default()
+    };
+    water.default_container = Some(container("bottle_plastic", 500, 500, 1_000_000, true));
+    let mut aspirin = plain("aspirin");
+    aspirin.prototype.charges = 0;
+    aspirin.prototype.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 1_000,
+        volume_milliliters: 1,
+        stack_size: 1,
+        phase: ItemPhaseV1::Solid,
+        ..ItemContainmentProfileV1::default()
+    };
+    aspirin.default_container = Some(container(
+        "bottle_plastic_pill_painkiller",
+        250,
+        17,
+        1_000_000,
+        true,
+    ));
+    let mut explicit_target = plain("ibuprofen");
+    explicit_target.prototype.charges = 0;
+    explicit_target.prototype.containment.volume_milliliters = 1;
+    explicit_target.prototype.containment.weight_milligrams = 1_000;
+    let explicit_aspirin_container = ItemGroupContainerV1 {
+        item: Box::new(aspirin.clone()),
+        variant_id: None,
+        sealed: true,
+        overflow: ItemGroupOverflowV1::None,
+    };
+    let painkiller_group_wrapper =
+        container("bottle_plastic_pill_painkiller", 250, 17, 1_000_000, true);
+    [
+        (
+            "direct_water",
+            &water,
+            cdda_sim::ItemGroupDefaultContainerMode::Unmodified,
+        ),
+        (
+            "direct_aspirin",
+            &aspirin,
+            cdda_sim::ItemGroupDefaultContainerMode::Unmodified,
+        ),
+        (
+            "modifier_aspirin",
+            &aspirin,
+            cdda_sim::ItemGroupDefaultContainerMode::ModifierFallback { sealed: true },
+        ),
+        (
+            "suppressed_aspirin",
+            &aspirin,
+            cdda_sim::ItemGroupDefaultContainerMode::ModifierSuppressed,
+        ),
+        (
+            "explicit_container_default",
+            &explicit_target,
+            cdda_sim::ItemGroupDefaultContainerMode::ModifierExplicit {
+                container: explicit_aspirin_container,
+            },
+        ),
+        (
+            "production_aspirin_minimum",
+            &aspirin,
+            cdda_sim::ItemGroupDefaultContainerMode::GroupWrapperExplicitNull {
+                container: painkiller_group_wrapper.clone(),
+                count: 1,
+            },
+        ),
+        (
+            "production_aspirin_maximum",
+            &aspirin,
+            cdda_sim::ItemGroupDefaultContainerMode::GroupWrapperExplicitNull {
+                container: painkiller_group_wrapper,
+                count: 20,
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(case_id, item, mode)| {
+        let projection = cdda_sim::item_group_default_container_projection(item, mode)
+            .map_err(|error| format!("Rust default-container projection failed: {error}"))?;
+        Ok(ItemGroupDefaultContainerDirectV1 {
+            case_id: case_id.to_owned(),
+            outer_type: projection.outer_type,
+            content_types: projection.content_types,
+            payload_charges: projection.payload_charges,
+            sealed: projection.sealed,
+        })
+    })
+    .collect()
+}
+
 fn rust_item_group_tool_charge_case_with_replacement(
     leaf_minimum: i32,
     leaf_maximum: i32,
@@ -1823,6 +2142,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         description_expansion: None,
         snippets: Vec::new(),
         initial_variables: BTreeMap::new(),
+        default_container: None,
         modifier_side_effects_supported: true,
         charges: Some(cdda_protocol::InclusiveI32RangeV1 {
             minimum: leaf_minimum,
@@ -1859,6 +2179,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -1892,6 +2213,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
                             }),
                             contents: Vec::new(),
                             seal_contents: false,
+                            modifier_default_container_sealed: None,
                             direct_wrapper: None,
                             modifier_container: None,
                         }],

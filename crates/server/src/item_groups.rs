@@ -306,6 +306,12 @@ fn runtime_item_group_entry(
                 maximum: 0,
             })
         });
+    let modifier_present = raw_damage.is_some()
+        || node.variant.is_some()
+        || node.charges.is_some()
+        || node.modifier_container.is_some()
+        || node.modifier_sealed.is_some()
+        || !node.contents.is_empty();
     let target = match &node.kind {
         StrictItemGroupNodeKind::Item(item_id) => {
             let item = content.items.get(item_id).ok_or_else(|| {
@@ -371,6 +377,8 @@ fn runtime_item_group_entry(
             })
             .collect::<Result<_, Box<dyn std::error::Error>>>()?,
         seal_contents: !node.contents.is_empty() && node.modifier_sealed.unwrap_or(true),
+        modifier_default_container_sealed: (modifier_present && node.modifier_container.is_none())
+            .then(|| node.modifier_sealed.unwrap_or(true)),
         direct_wrapper: node
             .direct_wrapper
             .as_ref()
@@ -404,11 +412,9 @@ fn runtime_item_group_entry(
                         definition.id
                     )
                 })?;
-                runtime_item_group_container(
+                runtime_item_group_creator_container(
                     item,
-                    None,
                     node.modifier_sealed.unwrap_or(true),
-                    ItemGroupOverflow::None,
                     content,
                 )
             })
@@ -421,6 +427,15 @@ pub(super) fn runtime_item_group_item(
     item: &ItemDefinition,
     charges: Option<cdda_content::ItemGroupChargesRange>,
     content: RuntimeItemGroupContent<'_>,
+) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
+    runtime_item_group_item_inner(item, charges, content, &mut Vec::new())
+}
+
+fn runtime_item_group_item_inner(
+    item: &ItemDefinition,
+    charges: Option<cdda_content::ItemGroupChargesRange>,
+    content: RuntimeItemGroupContent<'_>,
+    default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
     let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
     let prototype = craft_item_prototype(item, default_instance_charges(item), content.items)?;
@@ -476,6 +491,7 @@ pub(super) fn runtime_item_group_item(
                 (key.clone(), value)
             })
             .collect(),
+        default_container: runtime_default_item_container(item, content, default_container_stack)?,
         modifier_side_effects_supported,
         charges,
         minimum_one_charge,
@@ -659,19 +675,40 @@ fn runtime_item_group_container(
     overflow: ItemGroupOverflow,
     content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
-    let item = runtime_item_group_item(item, None, content)?;
-    let physical_pockets = item
-        .prototype
-        .ammunition_containers
-        .iter()
-        .filter_map(|pocket| pocket.spawn_rules.as_ref())
-        .filter(|rules| rules.kind == cdda_protocol::SpawnPocketKindV1::Container)
-        .collect::<Vec<_>>();
-    if physical_pockets.len() != 1 || !physical_pockets[0].rigid {
-        return Err(
-            "item-group wrappers require exactly one rigid physical container pocket".into(),
-        );
-    }
+    runtime_item_group_container_inner(item, variant_id, sealed, overflow, content, &mut Vec::new())
+}
+
+fn runtime_item_group_creator_container(
+    item: &ItemDefinition,
+    sealed: bool,
+    content: RuntimeItemGroupContent<'_>,
+) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
+    let item = runtime_item_group_item_inner(item, None, content, &mut Vec::new())?;
+    let container = ItemGroupContainerV1 {
+        item: Box::new(item),
+        variant_id: None,
+        sealed,
+        overflow: ItemGroupOverflowV1::None,
+    };
+    let effective = container
+        .item
+        .default_container
+        .as_ref()
+        .unwrap_or(&container);
+    require_single_rigid_physical_container(effective)?;
+    Ok(container)
+}
+
+fn runtime_item_group_container_inner(
+    item: &ItemDefinition,
+    variant_id: Option<String>,
+    sealed: bool,
+    overflow: ItemGroupOverflow,
+    content: RuntimeItemGroupContent<'_>,
+    default_container_stack: &mut Vec<String>,
+) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
+    let item = runtime_item_group_item_inner(item, None, content, default_container_stack)?;
+    require_single_rigid_physical_item(&item)?;
     if variant_id.as_ref().is_some_and(|variant_id| {
         !item
             .variants
@@ -690,6 +727,67 @@ fn runtime_item_group_container(
             ItemGroupOverflow::Discard => ItemGroupOverflowV1::Discard,
         },
     })
+}
+
+fn require_single_rigid_physical_container(
+    container: &ItemGroupContainerV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    require_single_rigid_physical_item(&container.item)
+}
+
+fn require_single_rigid_physical_item(
+    item: &ItemGroupItemPrototypeV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let physical_pockets = item
+        .prototype
+        .ammunition_containers
+        .iter()
+        .filter_map(|pocket| pocket.spawn_rules.as_ref())
+        .filter(|rules| rules.kind == cdda_protocol::SpawnPocketKindV1::Container)
+        .collect::<Vec<_>>();
+    if physical_pockets.len() != 1 || !physical_pockets[0].rigid {
+        return Err(
+            "item-group wrappers require exactly one rigid physical container pocket".into(),
+        );
+    }
+    Ok(())
+}
+
+fn runtime_default_item_container(
+    item: &ItemDefinition,
+    content: RuntimeItemGroupContent<'_>,
+    default_container_stack: &mut Vec<String>,
+) -> Result<Option<ItemGroupContainerV1>, Box<dyn std::error::Error>> {
+    if item.default_container.is_empty() || item.default_container == "null" {
+        return Ok(None);
+    }
+    if default_container_stack.len() >= cdda_protocol::MAX_ITEM_COMPONENT_DEPTH
+        || default_container_stack.contains(&item.id)
+    {
+        return Err(format!(
+            "item group item {} has cyclic or excessively deep default containment",
+            item.id
+        )
+        .into());
+    }
+    let container = content.items.get(&item.default_container).ok_or_else(|| {
+        format!(
+            "item group item {} references missing default container {}",
+            item.id, item.default_container
+        )
+    })?;
+    default_container_stack.push(item.id.clone());
+    let normalized = runtime_item_group_container_inner(
+        container,
+        (!item.default_container_variant.is_empty())
+            .then(|| item.default_container_variant.clone()),
+        item.default_container_sealed.unwrap_or(true),
+        ItemGroupOverflow::None,
+        content,
+        default_container_stack,
+    );
+    default_container_stack.pop();
+    normalized.map(Some)
 }
 
 fn runtime_item_variants(
@@ -852,13 +950,6 @@ fn validate_item_group_item_spawn(
     if item.id == "corpse" || item.flags.contains("CORPSE") {
         return Err(format!(
             "item group item {} requires unimplemented corpse construction",
-            item.id
-        )
-        .into());
-    }
-    if item.unsupported_fields.contains("container") {
-        return Err(format!(
-            "item group item {} requires unimplemented default containment",
             item.id
         )
         .into());

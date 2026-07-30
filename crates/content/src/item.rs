@@ -38,6 +38,9 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "to_hit",
     "charges",
     "phase",
+    "container",
+    "container_variant",
+    "sealed",
     "stackable",
     "stack_size",
     "calories",
@@ -118,6 +121,13 @@ pub struct ItemDefinition {
     pub melee_to_hit: Option<i32>,
     pub charges: i32,
     pub phase: String,
+    /// Finalized item-type default container. The literal `null` sentinel is
+    /// retained because it explicitly disables inherited containment.
+    pub default_container: String,
+    pub default_container_variant: String,
+    /// An absent value is upstream's default `true`; `Some` preserves an
+    /// explicit or inherited item-type sealing policy.
+    pub default_container_sealed: Option<bool>,
     pub stackable: bool,
     pub stack_size: i32,
     pub calories: i32,
@@ -954,6 +964,20 @@ fn apply_common_fields(
     apply_melee_to_hit(object, &mut item.melee_to_hit, source)?;
     apply_integer(object, "charges", &mut item.charges, source)?;
     apply_string(object, "phase", &mut item.phase, source)?;
+    apply_string(object, "container", &mut item.default_container, source)?;
+    apply_string(
+        object,
+        "container_variant",
+        &mut item.default_container_variant,
+        source,
+    )?;
+    if let Some(value) = object.get("sealed") {
+        item.default_container_sealed = Some(
+            value
+                .as_bool()
+                .ok_or_else(|| invalid_field(source, "sealed"))?,
+        );
+    }
     if let Some(value) = object.get("stackable") {
         item.stackable = value
             .as_bool()
@@ -2796,6 +2820,54 @@ mod tests {
             items["test_replaced_tool"].tool_ammunition,
             BTreeSet::from([String::from("tape"), String::from("thread")])
         );
+    }
+
+    #[test]
+    fn default_container_identity_variant_and_sealing_inherit_exactly() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let base = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_contained",
+            "name": "test contained item",
+            "container": "test_bottle",
+            "container_variant": "blue",
+            "sealed": false
+        }));
+        assert!(load_one(&base, &mut items, &mut abstracts).expect("base item should load"));
+        let inherited = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_inherited_container",
+            "copy-from": "test_contained",
+            "name": "inherited contained item"
+        }));
+        assert!(
+            load_one(&inherited, &mut items, &mut abstracts)
+                .expect("inherited default container should load")
+        );
+        let inherited = &items["test_inherited_container"];
+        assert_eq!(inherited.default_container, "test_bottle");
+        assert_eq!(inherited.default_container_variant, "blue");
+        assert_eq!(inherited.default_container_sealed, Some(false));
+        assert!(!inherited.unsupported_fields.contains("container"));
+        assert!(!inherited.unsupported_fields.contains("container_variant"));
+        assert!(!inherited.unsupported_fields.contains("sealed"));
+
+        let disabled = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_disabled_container",
+            "copy-from": "test_contained",
+            "name": "uncontained item",
+            "container": "null",
+            "sealed": true
+        }));
+        assert!(
+            load_one(&disabled, &mut items, &mut abstracts)
+                .expect("null container sentinel should load")
+        );
+        let disabled = &items["test_disabled_container"];
+        assert_eq!(disabled.default_container, "null");
+        assert_eq!(disabled.default_container_sealed, Some(true));
     }
 
     #[test]

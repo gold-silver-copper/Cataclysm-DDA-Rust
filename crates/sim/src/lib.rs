@@ -55,7 +55,9 @@ use cdda_protocol::{
 };
 
 pub use items::{
-    ItemGroupIntegralChargeProjection, expand_item_description, item_group_fitted_after_phase,
+    ItemGroupDefaultContainerMode, ItemGroupDefaultContainerProjection,
+    ItemGroupIntegralChargeProjection, expand_item_description,
+    item_group_default_container_projection, item_group_fitted_after_phase,
     item_group_integral_charge_projection,
 };
 use items::{
@@ -13592,7 +13594,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV66");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV67");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13810,6 +13812,7 @@ mod tests {
             description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
+            default_container: None,
             modifier_side_effects_supported: true,
             charges,
             minimum_one_charge,
@@ -26698,6 +26701,7 @@ mod tests {
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
+                            modifier_default_container_sealed: None,
                             direct_wrapper: None,
                             modifier_container: None,
                         },
@@ -26712,6 +26716,7 @@ mod tests {
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
+                            modifier_default_container_sealed: None,
                             direct_wrapper: None,
                             modifier_container: None,
                         },
@@ -26740,6 +26745,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     },
@@ -26754,6 +26760,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     },
@@ -26778,6 +26785,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     },
@@ -26832,6 +26840,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
@@ -26934,6 +26943,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -27032,6 +27042,7 @@ mod tests {
                                 description_expansion: None,
                                 snippets: Vec::new(),
                                 initial_variables: BTreeMap::new(),
+                                default_container: None,
                                 modifier_side_effects_supported: true,
                                 charges: None,
                                 minimum_one_charge: false,
@@ -27044,6 +27055,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
@@ -28656,6 +28668,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
@@ -29084,6 +29097,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],

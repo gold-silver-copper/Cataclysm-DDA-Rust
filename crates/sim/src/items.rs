@@ -5,7 +5,7 @@ use cdda_protocol::{
     IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemDescriptionExpansionV1,
     ItemDescriptionSnippetCategoryV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
     ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
     ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1,
     ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH,
     MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
@@ -358,6 +358,7 @@ pub(super) struct PlannedItemSpawn {
     variants: Vec<ItemGroupVariantOptionV1>,
     pub(super) snippet: Option<ItemSnippetV1>,
     pub(super) initial_variables: BTreeMap<String, ItemVariableValueV1>,
+    default_container: Option<ItemGroupContainerV1>,
     modifier_side_effects_supported: bool,
     charges_supported: bool,
     modifier_container_capacity_applies: bool,
@@ -692,6 +693,7 @@ fn plan_item_group_entry(
         || entry.modifier_charges.is_some()
         || !entry.contents.is_empty()
         || entry.seal_contents
+        || entry.modifier_default_container_sealed.is_some()
         || entry.modifier_container.is_some();
     if modifier_present && matches!(&entry.target, ItemGroupTargetV1::Node(_)) {
         return Err(SimError::InvalidItem);
@@ -753,9 +755,12 @@ fn plan_item_group_target(
                 || item.charges.is_some()
                 || !entry.contents.is_empty()
                 || entry.seal_contents
+                || entry.modifier_default_container_sealed.is_some()
                 || entry.modifier_container.is_some();
             if modifier_present {
                 apply_item_group_modifier(&mut planned, entry, item.charges, item_groups, rng)?;
+            } else {
+                apply_unmodified_default_container(&mut planned, rng)?;
             }
             output.push(planned);
             validate_planned_output_bound(output)?;
@@ -893,6 +898,7 @@ fn construct_item_group_item_with_fit_phase(
         variants: item.variants.clone(),
         snippet,
         initial_variables,
+        default_container: item.default_container.clone(),
         modifier_side_effects_supported: item.modifier_side_effects_supported,
         charges_supported: item.charges_supported,
         modifier_container_capacity_applies: item.modifier_container_capacity_applies,
@@ -928,6 +934,135 @@ pub struct ItemGroupIntegralChargeProjection {
     pub ammunition_type: Option<String>,
     pub ammunition_remaining: i32,
     pub remaining_capacity: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ItemGroupDefaultContainerMode {
+    Unmodified,
+    ModifierFallback {
+        sealed: bool,
+    },
+    ModifierSuppressed,
+    ModifierExplicit {
+        container: ItemGroupContainerV1,
+    },
+    GroupWrapperExplicitNull {
+        container: ItemGroupContainerV1,
+        count: u16,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupDefaultContainerProjection {
+    pub outer_type: String,
+    pub content_types: Vec<String>,
+    pub payload_charges: Option<i32>,
+    pub sealed: bool,
+}
+
+/// Renderer-free direct projection used by the pinned C++ differential
+/// comparator. It executes the production constructor, modifier fallback, and
+/// default-container insertion paths rather than duplicating their semantics
+/// in tooling.
+pub fn item_group_default_container_projection(
+    item: &ItemGroupItemPrototypeV1,
+    mode: ItemGroupDefaultContainerMode,
+) -> Result<ItemGroupDefaultContainerProjection, SimError> {
+    let mut rng = ChaCha8Rng::from_seed([0; 32]);
+    let planned = match mode {
+        ItemGroupDefaultContainerMode::Unmodified => {
+            let mut planned = construct_item_group_item(item, &mut rng)?;
+            apply_unmodified_default_container(&mut planned, &mut rng)?;
+            planned
+        }
+        ItemGroupDefaultContainerMode::ModifierFallback { sealed } => {
+            let mut planned = construct_item_group_item(item, &mut rng)?;
+            let entry = direct_default_container_projection_entry(Some(sealed));
+            apply_item_group_modifier(&mut planned, &entry, None, &BTreeMap::new(), &mut rng)?;
+            planned
+        }
+        ItemGroupDefaultContainerMode::ModifierSuppressed => {
+            let mut planned = construct_item_group_item(item, &mut rng)?;
+            let entry = direct_default_container_projection_entry(None);
+            apply_item_group_modifier(&mut planned, &entry, None, &BTreeMap::new(), &mut rng)?;
+            planned
+        }
+        ItemGroupDefaultContainerMode::ModifierExplicit { container } => {
+            let mut planned = construct_item_group_item(item, &mut rng)?;
+            let mut entry = direct_default_container_projection_entry(None);
+            entry.modifier_container = Some(container);
+            apply_item_group_modifier(&mut planned, &entry, None, &BTreeMap::new(), &mut rng)?;
+            planned
+        }
+        ItemGroupDefaultContainerMode::GroupWrapperExplicitNull { container, count } => {
+            let mut entry = direct_default_container_projection_entry(None);
+            entry.count_min = count;
+            entry.count_max = count;
+            entry.target = ItemGroupTargetV1::Item(Box::new(item.clone()));
+            let graph = ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![entry],
+                }],
+                wrapper: Some(container),
+            };
+            let mut output = Vec::new();
+            plan_item_group_source_into(
+                &ItemGroupSourceV1::Inline(graph),
+                &BTreeMap::new(),
+                &mut rng,
+                &mut output,
+                0,
+            )?;
+            let [planned] = output.try_into().map_err(|_| SimError::InvalidItem)?;
+            planned
+        }
+    };
+    let payloads = planned
+        .pocket_contents
+        .values()
+        .flatten()
+        .collect::<Vec<_>>();
+    let payload_charges = payloads.first().map(|payload| payload.prototype.charges);
+    if let Some(payload_charges) = payload_charges
+        && payloads
+            .iter()
+            .any(|payload| payload.prototype.charges != payload_charges)
+    {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(ItemGroupDefaultContainerProjection {
+        outer_type: planned.prototype.type_id,
+        content_types: payloads
+            .iter()
+            .map(|payload| payload.prototype.type_id.clone())
+            .collect(),
+        payload_charges,
+        sealed: !planned.sealed_pockets.is_empty(),
+    })
+}
+
+fn direct_default_container_projection_entry(sealed: Option<bool>) -> ItemGroupEntryV1 {
+    ItemGroupEntryV1 {
+        probability: 100,
+        count_min: 1,
+        count_max: 1,
+        raw_damage: Some(cdda_protocol::InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        }),
+        variant_id: None,
+        event: None,
+        modifier_charges: None,
+        contents: Vec::new(),
+        seal_contents: false,
+        modifier_default_container_sealed: sealed,
+        direct_wrapper: None,
+        modifier_container: None,
+        target: ItemGroupTargetV1::Node(0),
+    }
 }
 
 pub fn item_group_integral_charge_projection(
@@ -1009,6 +1144,7 @@ fn construct_charge_ammunition(
         variants: Vec::new(),
         snippet: None,
         initial_variables: BTreeMap::new(),
+        default_container: None,
         modifier_side_effects_supported: true,
         charges_supported: true,
         modifier_container_capacity_applies: false,
@@ -1129,10 +1265,21 @@ fn apply_item_group_modifier(
     // modifier container before charge/dressing RNG, and inserts the payload
     // only after those phases have completed.
     apply_item_group_modifier_state(planned, entry, rng)?;
-    let modifier_container = entry
-        .modifier_container
+    let active_wrapper = if let Some(wrapper) = &entry.modifier_container {
+        Some((wrapper.clone(), true))
+    } else if let (Some(sealed), Some(wrapper)) = (
+        entry.modifier_default_container_sealed,
+        planned.default_container.clone(),
+    ) {
+        Some((ItemGroupContainerV1 { sealed, ..wrapper }, false))
+    } else {
+        None
+    };
+    let modifier_container = active_wrapper
         .as_ref()
-        .map(|container| construct_item_group_container(container, rng, true))
+        .map(|(wrapper, consumes_fit_phase)| {
+            construct_item_group_container(wrapper, rng, *consumes_fit_phase)
+        })
         .transpose()?;
     let modifier_container_capacity = modifier_container
         .as_ref()
@@ -1141,7 +1288,7 @@ fn apply_item_group_modifier(
         .flatten();
     apply_item_group_charges(planned, charges, modifier_container_capacity, rng)?;
     consume_item_group_modifier_dressing(planned, rng);
-    if let (Some(container), Some(wrapper)) = (modifier_container, &entry.modifier_container) {
+    if let (Some(container), Some((wrapper, _))) = (modifier_container, active_wrapper.as_ref()) {
         wrap_single_item(planned, container, wrapper)?;
     }
     insert_item_group_contents(planned, &entry.contents, item_groups, rng)?;
@@ -1323,6 +1470,54 @@ fn modifier_container_charge_capacity(
     ))
 }
 
+fn apply_unmodified_default_container(
+    planned: &mut PlannedItemSpawn,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    let Some(wrapper) = planned.default_container.clone() else {
+        return Ok(());
+    };
+    let mut container = construct_item_group_container(&wrapper, rng, false)?;
+    let mut payload = planned.clone();
+    if payload.prototype.containment.count_by_charges
+        || payload.prototype.containment.phase == cdda_protocol::ItemPhaseV1::Liquid
+    {
+        let Some(capacity) = physical_container_charge_capacity(&payload, &container)? else {
+            return Err(SimError::InvalidItem);
+        };
+        if capacity <= 0 {
+            return Ok(());
+        }
+        payload.prototype.charges =
+            if payload.prototype.containment.phase == cdda_protocol::ItemPhaseV1::Liquid {
+                capacity.max(1)
+            } else {
+                payload.prototype.charges.min(capacity)
+            };
+        if payload.prototype.charges <= 0 {
+            return Ok(());
+        }
+    }
+    if insert_planned_item(&mut container, payload)?.is_err() {
+        return Ok(());
+    }
+    if wrapper.sealed {
+        seal_planned_item(&mut container)?;
+    }
+    *planned = container;
+    Ok(())
+}
+
+fn physical_container_charge_capacity(
+    planned: &PlannedItemSpawn,
+    container: &PlannedItemSpawn,
+) -> Result<Option<i32>, SimError> {
+    let mut unrestricted = planned.clone();
+    unrestricted.modifier_container_capacity_applies = true;
+    unrestricted.tool_charge_storage = None;
+    modifier_container_charge_capacity(&unrestricted, container)
+}
+
 fn apply_item_group_modifier_state(
     planned: &mut PlannedItemSpawn,
     entry: &ItemGroupEntryV1,
@@ -1416,6 +1611,14 @@ fn construct_item_group_container(
             .ok_or(SimError::InvalidItem)?;
         set_planned_variant(&mut container, &variant, rng)?;
     }
+    if consumes_fit_phase {
+        // An explicit Item_modifier container is itself a
+        // Single_item_creator. With no nested modifier, pinned C++ applies
+        // that container type's ordinary default-container constructor before
+        // returning it. Raw group wrappers and type-default fallbacks instead
+        // construct the named container directly and skip this phase.
+        apply_unmodified_default_container(&mut container, rng)?;
+    }
     Ok(container)
 }
 
@@ -1487,6 +1690,7 @@ fn insert_item_group_contents(
                 if let Some(charges) = item.default_charge_range {
                     apply_item_group_charges(&mut item, Some(charges), None, rng)?;
                 }
+                apply_unmodified_default_container(&mut item, rng)?;
                 vec![item]
             }
             ItemGroupContentsSourceV1::Group(group_id) => {
@@ -2025,6 +2229,7 @@ mod tests {
             description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
+            default_container: None,
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
@@ -2086,6 +2291,7 @@ mod tests {
             modifier_charges: None,
             contents: Vec::new(),
             seal_contents: false,
+            modifier_default_container_sealed: None,
             direct_wrapper: None,
             modifier_container: None,
         }
@@ -2128,6 +2334,140 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn default_container_item(
+        payload_type: &str,
+        count_by_charges: bool,
+        phase: ItemPhaseV1,
+        payload_volume: u64,
+        container_volume: u64,
+        sealed: bool,
+    ) -> ItemGroupItemPrototypeV1 {
+        let mut payload = leaf_item(payload_type);
+        payload.prototype.containment.count_by_charges = count_by_charges;
+        payload.prototype.charges = i32::from(count_by_charges);
+        payload.prototype.containment.stack_size = 1;
+        payload.prototype.containment.phase = phase;
+        payload.prototype.containment.volume_milliliters = payload_volume;
+        payload.prototype.containment.weight_milligrams = payload_volume;
+        let mut container = leaf_item("default_bottle");
+        let mut pocket = spawn_pocket(
+            SpawnPocketKindV1::Container,
+            true,
+            container_volume,
+            container_volume,
+            Vec::new(),
+            true,
+        );
+        if phase == ItemPhaseV1::Liquid {
+            pocket
+                .spawn_rules
+                .as_mut()
+                .expect("fixture pocket has spawn rules")
+                .watertight = true;
+        }
+        container.prototype.ammunition_containers = vec![pocket];
+        payload.default_container = Some(ItemGroupContainerV1 {
+            item: Box::new(container),
+            variant_id: None,
+            sealed,
+            overflow: ItemGroupOverflowV1::None,
+        });
+        payload
+    }
+
+    #[test]
+    fn default_container_direct_modifier_and_explicit_null_paths_are_distinct() {
+        let water =
+            default_container_item("water_clean", true, ItemPhaseV1::Liquid, 250, 500, true);
+        assert_eq!(
+            item_group_default_container_projection(
+                &water,
+                ItemGroupDefaultContainerMode::Unmodified,
+            )
+            .expect("direct default containment should project"),
+            ItemGroupDefaultContainerProjection {
+                outer_type: String::from("default_bottle"),
+                content_types: vec![String::from("water_clean")],
+                payload_charges: Some(2),
+                sealed: true,
+            }
+        );
+
+        let aspirin = default_container_item("aspirin", false, ItemPhaseV1::Solid, 1, 250, true);
+        assert_eq!(
+            item_group_default_container_projection(
+                &aspirin,
+                ItemGroupDefaultContainerMode::ModifierFallback { sealed: true },
+            )
+            .expect("modifier default containment should project"),
+            ItemGroupDefaultContainerProjection {
+                outer_type: String::from("default_bottle"),
+                content_types: vec![String::from("aspirin")],
+                payload_charges: Some(0),
+                sealed: false,
+            },
+            "a partially filled default bottle cannot seal upstream"
+        );
+        assert_eq!(
+            item_group_default_container_projection(
+                &aspirin,
+                ItemGroupDefaultContainerMode::ModifierSuppressed,
+            )
+            .expect("an explicit null modifier container should suppress fallback"),
+            ItemGroupDefaultContainerProjection {
+                outer_type: String::from("aspirin"),
+                content_types: Vec::new(),
+                payload_charges: None,
+                sealed: false,
+            }
+        );
+
+        let mut ibuprofen = leaf_item("ibuprofen");
+        ibuprofen.prototype.charges = 0;
+        ibuprofen.prototype.containment.volume_milliliters = 1;
+        ibuprofen.prototype.containment.weight_milligrams = 1_000;
+        assert_eq!(
+            item_group_default_container_projection(
+                &ibuprofen,
+                ItemGroupDefaultContainerMode::ModifierExplicit {
+                    container: ItemGroupContainerV1 {
+                        item: Box::new(aspirin.clone()),
+                        variant_id: None,
+                        sealed: true,
+                        overflow: ItemGroupOverflowV1::None,
+                    },
+                },
+            )
+            .expect("an explicit container creator should apply its own default wrapper"),
+            ItemGroupDefaultContainerProjection {
+                outer_type: String::from("default_bottle"),
+                content_types: vec![String::from("ibuprofen"), String::from("aspirin")],
+                payload_charges: Some(0),
+                sealed: false,
+            }
+        );
+
+        assert_eq!(
+            item_group_default_container_projection(
+                &aspirin,
+                ItemGroupDefaultContainerMode::GroupWrapperExplicitNull {
+                    container: aspirin
+                        .default_container
+                        .clone()
+                        .expect("fixture should define a default bottle"),
+                    count: 2,
+                },
+            )
+            .expect("an entry-level null should keep payloads raw inside a group wrapper"),
+            ItemGroupDefaultContainerProjection {
+                outer_type: String::from("default_bottle"),
+                content_types: vec![String::from("aspirin"), String::from("aspirin")],
+                payload_charges: Some(0),
+                sealed: false,
+            }
+        );
     }
 
     #[test]
@@ -2291,6 +2631,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -2335,6 +2676,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -2396,6 +2738,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -2472,6 +2815,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -2561,6 +2905,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
@@ -2634,6 +2979,7 @@ mod tests {
                     }),
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -2706,6 +3052,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: Some(ItemGroupContainerV1 {
                         item: Box::new(container),
@@ -2807,6 +3154,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: Some(ItemGroupContainerV1 {
                             item: Box::new(container),
@@ -2883,6 +3231,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -2947,6 +3296,7 @@ mod tests {
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
+                            modifier_default_container_sealed: None,
                             direct_wrapper: None,
                             modifier_container: None,
                         }],
@@ -2974,6 +3324,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -3034,6 +3385,7 @@ mod tests {
                                 modifier_charges: None,
                                 contents: Vec::new(),
                                 seal_contents: false,
+                                modifier_default_container_sealed: None,
                                 direct_wrapper: None,
                                 modifier_container: None,
                             },
@@ -3048,6 +3400,7 @@ mod tests {
                                 modifier_charges: None,
                                 contents: Vec::new(),
                                 seal_contents: false,
+                                modifier_default_container_sealed: None,
                                 direct_wrapper: None,
                                 modifier_container: None,
                             },
@@ -3076,6 +3429,7 @@ mod tests {
                     modifier_charges: None,
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -3143,6 +3497,7 @@ mod tests {
                             modifier_charges: None,
                             contents: Vec::new(),
                             seal_contents: false,
+                            modifier_default_container_sealed: None,
                             direct_wrapper: None,
                             modifier_container: None,
                         }],
@@ -3170,6 +3525,7 @@ mod tests {
                     }),
                     contents: Vec::new(),
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -3236,6 +3592,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
@@ -3277,6 +3634,7 @@ mod tests {
                     modifier_charges: None,
                     contents: efiles,
                     seal_contents: true,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -3629,6 +3987,7 @@ mod tests {
                         ItemGroupContentsSourceV1::Item(Box::new(second)),
                     ],
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -3714,6 +4073,7 @@ mod tests {
                         "depth_chain",
                     ))],
                     seal_contents: false,
+                    modifier_default_container_sealed: None,
                     direct_wrapper: None,
                     modifier_container: None,
                 }],
@@ -3763,6 +4123,7 @@ mod tests {
                         modifier_charges: None,
                         contents: vec![ItemGroupContentsSourceV1::Item(Box::new(contents.clone()))],
                         seal_contents,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
@@ -3824,6 +4185,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: Some(ItemGroupContainerV1 {
                             item: Box::new(wrapper),
                             variant_id: None,

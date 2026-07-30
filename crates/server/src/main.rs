@@ -4655,11 +4655,44 @@ mod tests {
                     .map(|error| (definition.id.as_str(), error.to_string()))
             })
             .collect::<Vec<_>>();
+        let painkillers = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("bottle_otc_painkiller_1_20")
+                .expect("field closure should retain the painkiller bottle"),
+            item_group_content,
+        )
+        .expect("explicit null containers should suppress, not erase, item defaults");
+        assert_eq!(
+            painkillers
+                .wrapper
+                .as_ref()
+                .map(|wrapper| wrapper.item.prototype.type_id.as_str()),
+            Some("bottle_plastic_pill_painkiller")
+        );
+        assert!(
+            painkillers
+                .nodes
+                .iter()
+                .flat_map(|node| &node.entries)
+                .all(|entry| {
+                    entry.modifier_container.is_none()
+                        && entry.modifier_default_container_sealed.is_none()
+                        && matches!(
+                            &entry.target,
+                            ItemGroupTargetV1::Item(item)
+                                if item.default_container.as_ref().is_some_and(|container| {
+                                    container.item.prototype.type_id
+                                        == "bottle_plastic_pill_painkiller"
+                                })
+                        )
+                })
+        );
         assert_eq!(
             field_runtime_errors.first(),
             Some(&(
-                "bottle_otc_painkiller_1_20",
-                String::from("item group item aspirin requires unimplemented default containment"),
+                "chaw_wrapper_1_20",
+                String::from("item group comestible chaw requires unimplemented temperature state"),
             )),
             "the field closure must retain its exact next unsupported semantic boundary"
         );

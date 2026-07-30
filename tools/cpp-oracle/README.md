@@ -37,6 +37,11 @@ both collection and distribution event filtering outside their holiday. Exact
 modifier-container traces prove ranged charges clamp to physical capacity,
 default liquids fill that capacity, and a fixed post-clamp range consumes no
 extra charge draw. Exact
+default-container traces distinguish direct construction, modifier fallback,
+explicit-null suppression, explicit containers whose own creator applies a
+default wrapper, and the production one/twenty `bottle_otc_painkiller_1_20`
+boundaries. The Rust half executes the production planner for all seven exact
+traces and compares ordered child types directly. Exact
 phone-case witnesses retain the case variant, locked/unlocked phone, battery
 charges, ordered E-files, sealing/capacity state, and downstream RNG draw for
 empty and many-E-file boundaries. The static mapgen
@@ -57,9 +62,11 @@ cargo xtask cpp-oracle-check docs/oracles/item-group-generation-v1.json
 cargo xtask cpp-oracle-check docs/oracles/mapgen-static-semantics-v1.json
 ```
 
-Seed values used to reach range boundaries are deliberately omitted from the
-observation. The adapter finds them within a fixed search bound, then emits only
-normalized semantic results, ordered traces, and downstream RNG-state equality.
+Seed values used to reach range boundaries are retained in the checked
+observation beside normalized semantic results, ordered representative traces,
+and downstream RNG state. The adapter finds each boundary within a fixed search
+bound, so an implementation cannot satisfy the corpus by matching only
+aggregate minima or maxima.
 The static mapgen kernel contains no random choices or seed-dependent expected
 values. It intentionally does not call full overmap generation, whose standard
 library distributions and shuffles are not portable semantic fixtures between

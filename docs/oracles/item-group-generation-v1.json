@@ -146,6 +146,76 @@
       "fixed_downstream_draw": 8831,
       "downstream_draw_matches": true
     },
+    "default_containers": [
+      {
+        "case_id": "direct_water",
+        "seed": 31415,
+        "outer_type": "bottle_plastic",
+        "content_types": ["water_clean"],
+        "payload_charges": 2,
+        "sealed": true,
+        "downstream_draw": 8831
+      },
+      {
+        "case_id": "direct_aspirin",
+        "seed": 31415,
+        "outer_type": "bottle_plastic_pill_painkiller",
+        "content_types": ["aspirin"],
+        "payload_charges": 0,
+        "sealed": false,
+        "downstream_draw": 8831
+      },
+      {
+        "case_id": "modifier_aspirin",
+        "seed": 31415,
+        "outer_type": "bottle_plastic_pill_painkiller",
+        "content_types": ["aspirin"],
+        "payload_charges": 0,
+        "sealed": false,
+        "downstream_draw": 8831
+      },
+      {
+        "case_id": "suppressed_aspirin",
+        "seed": 31415,
+        "outer_type": "aspirin",
+        "content_types": [],
+        "payload_charges": -1,
+        "sealed": false,
+        "downstream_draw": 8831
+      },
+      {
+        "case_id": "explicit_container_default",
+        "seed": 31415,
+        "outer_type": "bottle_plastic_pill_painkiller",
+        "content_types": ["ibuprofen", "aspirin"],
+        "payload_charges": 0,
+        "sealed": false,
+        "downstream_draw": 8323
+      },
+      {
+        "case_id": "production_aspirin_minimum",
+        "seed": 86,
+        "outer_type": "bottle_plastic_pill_painkiller",
+        "content_types": ["aspirin"],
+        "payload_charges": 0,
+        "sealed": false,
+        "downstream_draw": 7093
+      },
+      {
+        "case_id": "production_aspirin_maximum",
+        "seed": 5,
+        "outer_type": "bottle_plastic_pill_painkiller",
+        "content_types": [
+          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin",
+          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin",
+          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin",
+          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin"
+        ],
+        "payload_charges": 0,
+        "sealed": false,
+        "downstream_draw": 6790
+      }
+    ],
     "containers": [
       {
         "case_id": "discard",

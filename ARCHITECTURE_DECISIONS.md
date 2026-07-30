@@ -3230,3 +3230,59 @@ playable. Its next audited fail-closed boundary is default-container ownership:
 containment is retained but not yet materialized. That containment family must
 be completed before food temperature, corpse construction, or later field
 dependencies are expanded.
+
+## Default-container ownership completes one serialized containment family
+
+Protocol 91 advances to schema 69 and CanonicalStateV67 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. This is the one
+final representation checkpoint for wrapper ownership, contents groups,
+sealing, overflow, snippets, variables, and item-type default containers. Each
+normalized item prototype now carries an optional self-contained default
+container descriptor, and each modifier records whether it owns the fallback
+phase. The literal upstream `null` sentinel remains meaningful during content
+normalization but becomes an explicit modifier-without-fallback shape; it is
+not confused with an omitted modifier.
+
+Construction follows the pinned ownership split. A direct item invokes its
+type default through the raw item constructor, fills liquid or count-by-charge
+payloads to physical capacity, leaves an uninsertable payload raw, and seals
+only a full container. A modifier first applies item state, then either creates
+its explicit container (including that creator's own default-container phase),
+uses the target type's fallback, or suppresses fallback through explicit
+`null`. Whole-group and entry wrappers remain raw constructors and never borrow
+the modifier creator phase. Physical contents insert at the front, preserving
+the exact ordered ownership observed upstream. Recursive default descriptors
+are depth- and cycle-bounded. Named-group modifiers whose possible generated
+types have different default-container behavior remain represented but fail
+closed until their aggregate wrapper closure is explicit.
+
+The pinned C++ oracle adds seven exact traces: direct water and aspirin,
+modifier fallback, explicit-null suppression, an explicit ibuprofen creator
+whose aspirin container first becomes a pill bottle, and production
+`bottle_otc_painkiller_1_20` boundaries of one and twenty aspirin. The explicit
+creator fixes ordered children `[ibuprofen, aspirin]` and downstream draw 8323;
+the production boundary seeds and all other downstream draws are retained in
+the checked corpus. The complete item-group kernel passes 104 assertions, then
+the reusable comparator executes the production Rust planner for the same
+traces. Protocol bounds count the creator's complete subtree, and raw wrapper
+validation remains distinct from creator validation.
+
+The shared authoritative scenario generates a pill bottle owning aspirin with
+preorder stable IDs and preserves it through direct, per-tick snapshot, SQLite,
+and portable replay execution. The normal Bevy item menu displays the nested
+count and issues removal by authoritative owner, pocket, and child ID. The
+representative empty-catalog fixture retains identical Postcard bytes: the V66
+domain reproduces
+`7fffb3bccad59a52e64540aeb421cde5f1fd8912e3a11946368170b2eeec91cb`,
+while V67 deliberately produces
+`b5c12b763060907d68bfbd96b4aea6372c17cb02676b5e499b0bc79f5679899e`.
+Serialized catalogs containing item prototypes do change shape, so Protocol 91
+and schema 69 are required; replay format and event representation do not
+change.
+
+This admits `bottle_otc_painkiller_1_20` but earns no weighted progress before
+the real field is generated and playable. The complete field scan now fails
+closed at `chaw` because general comestible temperature state is not yet
+represented. That semantic family, followed by the remaining field closure and
+ordinary client exploration/loot demonstration, is the next dependency
+boundary.

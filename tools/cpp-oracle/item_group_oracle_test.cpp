@@ -412,6 +412,104 @@ struct modifier_container_capacity_trace {
     int downstream_draw = 0;
 };
 
+struct default_container_trace {
+    std::string case_id;
+    unsigned int seed = 0;
+    std::string outer_type;
+    std::vector<std::string> content_types;
+    int payload_charges = -1;
+    bool sealed = false;
+    int downstream_draw = 0;
+};
+
+enum class default_container_mode {
+    unmodified,
+    modifier_fallback,
+    modifier_suppressed,
+    explicit_container_default
+};
+
+default_container_trace observe_default_container( const std::string &case_id,
+        const std::string &item_id, unsigned int seed, default_container_mode mode )
+{
+    Single_item_creator creator( item_id, Single_item_creator::S_ITEM, 100,
+                                 "Rust default-container oracle" );
+    if( mode != default_container_mode::unmodified ) {
+        creator.modifier.emplace();
+    }
+    if( mode == default_container_mode::modifier_suppressed ) {
+        creator.modifier->container = std::make_unique<Single_item_creator>(
+                                          "null", Single_item_creator::S_ITEM, 100,
+                                          "Rust default-container null suppression oracle" );
+    } else if( mode == default_container_mode::explicit_container_default ) {
+        creator.modifier->container = std::make_unique<Single_item_creator>(
+                                          "aspirin", Single_item_creator::S_ITEM, 100,
+                                          "Rust nested explicit default-container oracle" );
+    }
+    Item_spawn_data::ItemList items;
+    Item_spawn_data::RecursionList recursion;
+    rng_set_engine_seed( seed );
+    creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+    REQUIRE( items.size() == 1 );
+    const item &outer = items.front();
+    const std::list<const item *> contents = outer.all_items_top();
+    std::vector<std::string> content_types;
+    int payload_charges = -1;
+    for( const item *content : contents ) {
+        content_types.push_back( content->typeId().str() );
+        if( payload_charges == -1 ) {
+            payload_charges = content->charges;
+        }
+    }
+    return {
+        case_id,
+        seed,
+        outer.typeId().str(),
+        std::move( content_types ),
+        payload_charges,
+        outer.any_pockets_sealed(),
+        rng( 0, 9999 )
+    };
+}
+
+default_container_trace observe_painkiller_group_boundary( const std::string &case_id,
+        std::size_t expected_count )
+{
+    constexpr const char *group_id = "bottle_otc_painkiller_1_20";
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        Single_item_creator creator( group_id, Single_item_creator::S_ITEM_GROUP, 100,
+                                     "Rust production default-container oracle" );
+        Item_spawn_data::ItemList items;
+        Item_spawn_data::RecursionList recursion;
+        rng_set_engine_seed( seed );
+        creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+        if( items.size() != 1 || items.front().typeId() !=
+            itype_id( "bottle_plastic_pill_painkiller" ) ) {
+            continue;
+        }
+        const item &outer = items.front();
+        const std::list<const item *> contents = outer.all_items_top();
+        if( contents.size() != expected_count ||
+            std::any_of( contents.begin(), contents.end(), []( const item * content ) {
+            return content->typeId() != itype_id( "aspirin" );
+        } ) ) {
+            continue;
+        }
+        std::vector<std::string> content_types( expected_count, "aspirin" );
+        return {
+            case_id,
+            seed,
+            outer.typeId().str(),
+            std::move( content_types ),
+            contents.empty() ? -1 : ( *contents.begin() )->charges,
+            outer.any_pockets_sealed(),
+            rng( 0, 9999 )
+        };
+    }
+    FAIL( "could not find production painkiller default-container boundary" );
+    return {};
+}
+
 modifier_container_capacity_trace observe_modifier_container_capacity( unsigned int seed,
         int minimum, int maximum )
 {
@@ -1131,6 +1229,36 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     REQUIRE( explicit_container_capacity.downstream_draw ==
              fixed_container_capacity.downstream_draw );
 
+    const std::vector<default_container_trace> default_containers = {
+        observe_default_container( "direct_water", "water_clean", 31415,
+                                   default_container_mode::unmodified ),
+        observe_default_container( "direct_aspirin", "aspirin", 31415,
+                                   default_container_mode::unmodified ),
+        observe_default_container( "modifier_aspirin", "aspirin", 31415,
+                                   default_container_mode::modifier_fallback ),
+        observe_default_container( "suppressed_aspirin", "aspirin", 31415,
+                                   default_container_mode::modifier_suppressed ),
+        observe_default_container( "explicit_container_default", "ibuprofen", 31415,
+                                   default_container_mode::explicit_container_default ),
+        observe_painkiller_group_boundary( "production_aspirin_minimum", 1 ),
+        observe_painkiller_group_boundary( "production_aspirin_maximum", 20 )
+    };
+    REQUIRE( default_containers[0].outer_type == "bottle_plastic" );
+    REQUIRE( default_containers[0].content_types == std::vector<std::string>{ "water_clean" } );
+    REQUIRE( default_containers[0].payload_charges == 2 );
+    REQUIRE( default_containers[0].sealed );
+    REQUIRE( default_containers[1].outer_type == "bottle_plastic_pill_painkiller" );
+    REQUIRE( default_containers[1].content_types == std::vector<std::string>{ "aspirin" } );
+    REQUIRE( default_containers[2].outer_type == "bottle_plastic_pill_painkiller" );
+    REQUIRE( default_containers[2].content_types == std::vector<std::string>{ "aspirin" } );
+    REQUIRE( default_containers[3].outer_type == "aspirin" );
+    REQUIRE( default_containers[3].content_types.empty() );
+    REQUIRE( default_containers[4].outer_type == "bottle_plastic_pill_painkiller" );
+    REQUIRE( default_containers[4].content_types ==
+             std::vector<std::string>{ "ibuprofen", "aspirin" } );
+    REQUIRE( default_containers[5].content_types.size() == 1 );
+    REQUIRE( default_containers[6].content_types.size() == 20 );
+
     std::set<std::string> event_types;
     std::vector<std::pair<int, std::string>> event_distribution_results;
     {
@@ -1401,6 +1529,22 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
                      explicit_container_capacity.downstream_draw ==
                      fixed_container_capacity.downstream_draw );
         json.end_object();
+
+        json.member( "default_containers" );
+        json.start_array();
+        for( const default_container_trace &trace : default_containers ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "seed", trace.seed );
+            json.member( "outer_type", trace.outer_type );
+            json.member( "content_types" );
+            write_trace( json, trace.content_types );
+            json.member( "payload_charges", trace.payload_charges );
+            json.member( "sealed", trace.sealed );
+            json.member( "downstream_draw", trace.downstream_draw );
+            json.end_object();
+        }
+        json.end_array();
 
         json.member( "containers" );
         json.start_array();

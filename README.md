@@ -799,8 +799,8 @@ now passes `accessory_weaponcarry`.
 Without changing Protocol 90 or schema 68, the generalized ammunition-loading
 engine reuses the existing integral/detachable canonical descriptor for strict
 magazines and supported tools. Every gun remains fail closed because its
-owner-local or `ammo_set` state and constructor/RNG semantics differ. The 85-assertion pinned C++
-item-group oracle fixes direct zero/one/capacity/overflow traces plus production
+owner-local or `ammo_set` state and constructor/RNG semantics differ. The pinned
+C++ item-group oracle fixes direct zero/one/capacity/overflow traces plus production
 `ammo_light_batteries` empty, partial, full, and ultra-light witnesses, including
 downstream RNG; the Rust comparator executes the production charge transition.
 Direct, per-tick snapshot, SQLite, and replay modes preserve nested ammunition,
@@ -808,6 +808,29 @@ and the Bevy item menu shows its authoritative charge count. The field closure
 now passes `ammo_light_batteries` and stops at default-container ownership for
 `aspirin` in `bottle_otc_painkiller_1_20`. Runtime points remain unchanged until
 the real field is generated, explored, looted, persisted, and client-accessible.
+
+Protocol 91/schema 69/CanonicalStateV67 complete the serialized containment
+family by making finalized item-type default containers self-contained in the
+authoritative item-group catalog. Direct construction fills liquids to physical
+capacity, modifier fallback uses the item type's default, explicit
+`container-item: "null"` suppresses that fallback, and an explicit modifier
+container runs its own creator before receiving the payload. Raw whole-group
+wrappers remain a separate constructor path. Sealing occurs only when the
+effective rigid container is full; recursive ownership receives stable IDs in
+preorder and remains renderer-independent. Seven exact default-container traces
+join the pinned item-group oracle, including production one- and twenty-aspirin
+boundaries and an ordered explicit-creator witness; all 104 C++ assertions and
+the reusable direct Rust comparison pass. The shared item-group scenario keeps
+the bottle/aspirin tree identical through direct, snapshot, SQLite, and replay
+execution, and the ordinary Bevy item menu exposes authoritative contained
+loot. The representative empty-catalog fixture has unchanged Postcard bytes:
+hashing them under V66 reproduces
+`7fffb3bccad59a52e64540aeb421cde5f1fd8912e3a11946368170b2eeec91cb`,
+while the deliberate V67 domain yields
+`b5c12b763060907d68bfbd96b4aea6372c17cb02676b5e499b0bc79f5679899e`.
+The real field closure now passes `bottle_otc_painkiller_1_20` and next fails
+closed on unimplemented temperature state for `chaw`; runtime points remain
+unchanged until that field is an ordinary playable surface.
 
 Inherited
 `extend.using` requirements append to root requirements; pinned

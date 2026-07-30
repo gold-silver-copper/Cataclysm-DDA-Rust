@@ -5613,6 +5613,54 @@ mod tests {
             }) if owner_item == phone_case.id && contained_item == phone.id
         ));
         assert!(first_pocket_item_insertion(&battery_snapshot).is_none());
+        let mut painkiller_bottle = item(17, "", "", None);
+        painkiller_bottle.type_id = String::from("bottle_plastic_pill_painkiller");
+        let mut aspirin = item(18, "", "MED", None);
+        aspirin.type_id = String::from("aspirin");
+        aspirin.charges = 1;
+        painkiller_bottle.ammunition_containers =
+            vec![cdda_protocol::AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: 0,
+                pocket_id: String::from("CONTAINER"),
+                capacities: Vec::new(),
+                rigid: true,
+                access_moves: 400,
+                reloadable: false,
+                unloadable: true,
+                contents: vec![aspirin.clone()],
+                spawn_state: Some(cdda_protocol::SpawnPocketStateV1 {
+                    rules: cdda_protocol::SpawnPocketRulesV1 {
+                        kind: cdda_protocol::SpawnPocketKindV1::Container,
+                        max_contains_volume_milliliters: 250,
+                        max_contains_weight_milligrams: 1_000_000,
+                        max_item_volume_milliliters: 17,
+                        min_item_volume_milliliters: 0,
+                        max_item_length_millimeters: 170,
+                        item_restrictions: Vec::new(),
+                        flag_restrictions: Vec::new(),
+                        access_moves: 400,
+                        rigid: true,
+                        watertight: true,
+                        transparent: true,
+                        forbidden: false,
+                        sealable: true,
+                    },
+                    sealed: false,
+                }),
+            }];
+        assert!(
+            item_menu_label(&painkiller_bottle, None).contains("p0 1 items"),
+            "the normal Bevy item menu must expose default-contained loot"
+        );
+        battery_snapshot.controlled_actor.inventory = vec![painkiller_bottle.clone()];
+        assert!(matches!(
+            first_pocket_item_removal(&battery_snapshot),
+            Some(ClientAction::RemovePocketItem {
+                owner_item,
+                pocket_index: 0,
+                contained_item,
+            }) if owner_item == painkiller_bottle.id && contained_item == aspirin.id
+        ));
         battery_snapshot = quiver_snapshot;
         assert!(item_menu_label(&quiver, None).contains("p3 arrow 6/20"));
         assert!(matches!(

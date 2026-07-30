@@ -27,7 +27,7 @@ use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 90;
+pub const PROTOCOL_VERSION: u16 = 91;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -6040,6 +6040,7 @@ mod tests {
             description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
+            default_container: None,
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
@@ -6067,6 +6068,7 @@ mod tests {
             modifier_charges: None,
             contents: Vec::new(),
             seal_contents: false,
+            modifier_default_container_sealed: None,
             direct_wrapper: None,
             modifier_container: None,
         }
@@ -6086,6 +6088,7 @@ mod tests {
             modifier_charges: None,
             contents: Vec::new(),
             seal_contents: false,
+            modifier_default_container_sealed: None,
             direct_wrapper: None,
             modifier_container: None,
             ..item_group_entry(probability, count_min, count_max, target)
@@ -7437,6 +7440,7 @@ mod tests {
                         modifier_charges: None,
                         contents: Vec::new(),
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                         ..item_group_entry(100, 0, count_max, item_group_item("rock"))

@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 68;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 90
-/// added canonical per-instance variable-size FIT state.
+pub const SCHEMA_VERSION: i64 = 69;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 91
+/// added self-contained default-container ownership to item-group catalogs.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 68;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 69;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;

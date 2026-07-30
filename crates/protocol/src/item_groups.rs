@@ -176,6 +176,11 @@ pub struct ItemGroupItemPrototypeV1 {
     pub snippets: Vec<ItemSnippetV1>,
     /// Typed variables copied from the finalized item type before modifiers.
     pub initial_variables: BTreeMap<String, ItemVariableValueV1>,
+    /// Finalized item-type default containment used by the direct constructor
+    /// path and as `Item_modifier`'s fallback when no explicit container was
+    /// supplied. The container prototype is self-contained and is constructed
+    /// without an item-group FIT phase, matching pinned `item(...)` behavior.
+    pub default_container: Option<ItemGroupContainerV1>,
     /// Whether applying an upstream item-group modifier to this leaf has no
     /// authoritative side effects beyond the raw damage, selected variant,
     /// and magazine-dressing RNG phases represented by the protocol.
@@ -251,6 +256,12 @@ pub struct ItemGroupEntryV1 {
     /// Upstream seals the modified item after adding `contents-*` when it is a
     /// comestible. Entry wrappers are a separate always-sealed spawn layer.
     pub seal_contents: bool,
+    /// Sealing policy for the modifier's item-type default-container fallback.
+    /// For a direct leaf the descriptor is carried by that leaf; for a named
+    /// group the generated top-level type is inspected dynamically. `None`
+    /// means the entry has no modifier-owned fallback phase; explicit modifier
+    /// containers carry their policy in their descriptor instead.
+    pub modifier_default_container_sealed: Option<bool>,
     pub direct_wrapper: Option<ItemGroupContainerV1>,
     pub modifier_container: Option<ItemGroupContainerV1>,
     pub target: ItemGroupTargetV1,
@@ -300,6 +311,12 @@ struct ItemGroupMetrics {
     estorable_contents_supported: bool,
     non_estorable_contents_supported: bool,
     all_top_level_estorable: bool,
+    /// Conservative proof input for named-group modifiers. A modifier applied
+    /// after a named group must re-evaluate the generated top-level type's
+    /// default container. The current catalog is self-contained for direct
+    /// leaves, but deliberately rejects that dynamic composite case whenever
+    /// it may occur.
+    top_level_default_container_possible: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -500,24 +517,54 @@ impl<'a> ItemGroupEvaluator<'a> {
         let mut estorable_contents_supported = true;
         let mut non_estorable_contents_supported = true;
         let mut all_top_level_estorable = true;
+        let mut top_level_default_container_possible = false;
         for entry in entries {
-            let target = target_metrics(self, &entry.target)?;
+            let mut target = target_metrics(self, &entry.target)?;
             let modifier_present = entry.raw_damage.is_some()
                 || entry.variant_id.is_some()
                 || entry.modifier_charges.is_some()
                 || !entry.contents.is_empty()
                 || entry.seal_contents
+                || entry.modifier_default_container_sealed.is_some()
                 || entry.modifier_container.is_some();
+            if modifier_present
+                && entry.modifier_default_container_sealed.is_none()
+                && let ItemGroupTargetV1::Item(item) = &entry.target
+            {
+                // An explicit modifier container, including the upstream null
+                // sentinel normalized as no container, suppresses the item
+                // type's default fallback. Metrics must therefore start from
+                // the raw constructed item rather than its ordinary default-
+                // contained result.
+                target = raw_item_group_item_metrics(item);
+            }
+            if entry.modifier_default_container_sealed.is_some()
+                && !matches!(&entry.target, ItemGroupTargetV1::Item(_))
+                && target.top_level_default_container_possible
+            {
+                // A named-group modifier sees already-generated objects and
+                // may therefore fall back through several possible top-level
+                // type defaults. Retain those definitions, but fail closed
+                // until the protocol carries their aggregate wrapper closure.
+                return None;
+            }
             if modifier_present && !target.modifier_side_effects_supported {
                 return None;
             }
             if entry.modifier_charges.is_some() && !target.charges_supported {
                 return None;
             }
-            let modified_contents_support = entry
+            let modifier_creator_metrics = entry
                 .modifier_container
                 .as_ref()
-                .map(item_group_container_insertion_support)
+                .map(item_group_item_creator_metrics);
+            let modified_contents_support = modifier_creator_metrics
+                .map(|metrics| {
+                    (
+                        metrics.estorable_contents_supported,
+                        metrics.non_estorable_contents_supported,
+                    )
+                })
                 .unwrap_or((
                     target.estorable_contents_supported,
                     target.non_estorable_contents_supported,
@@ -564,8 +611,13 @@ impl<'a> ItemGroupEvaluator<'a> {
                 entry_outputs = entry_outputs
                     .checked_add(target.charge_ammunition_candidates.checked_mul(count)?)?;
             }
-            if entry.modifier_container.is_some() {
-                entry_outputs = entry_outputs.checked_mul(2)?;
+            if let Some(container) = modifier_creator_metrics {
+                // Each modified target retains its own subtree and gains the
+                // explicit creator's complete subtree. A creator whose item
+                // has a type default therefore contributes both that item and
+                // its effective outer container; doubling the target count
+                // would undercount that three-node shape.
+                entry_outputs = entry_outputs.checked_add(container.outputs.checked_mul(count)?)?;
             }
             if entry.direct_wrapper.is_some() {
                 // One direct container wraps the entire count result. Spill
@@ -579,19 +631,11 @@ impl<'a> ItemGroupEvaluator<'a> {
             entry_result.charge_ammunition_candidates = entry_result
                 .charge_ammunition_candidates
                 .checked_mul(count)?;
-            if let Some(wrapper) = &entry.modifier_container {
+            if let Some(container) = modifier_creator_metrics {
                 // Modifier containers replace every modified top-level item;
                 // unlike whole-output wrappers, their overflow policy is not
                 // part of the pinned Item_modifier behavior.
-                entry_result.charge_magazine_candidates = 0;
-                entry_result.charge_ammunition_candidates = 0;
-                entry_result.modifier_side_effects_supported =
-                    wrapper.item.modifier_side_effects_supported;
-                entry_result.charges_supported = wrapper.item.charges_supported;
-                let contents_support = item_group_container_insertion_support(wrapper);
-                entry_result.estorable_contents_supported = contents_support.0;
-                entry_result.non_estorable_contents_supported = contents_support.1;
-                entry_result.all_top_level_estorable = wrapper.item.prototype.containment.estorable;
+                entry_result = container;
             }
             if let Some(wrapper) = &entry.direct_wrapper {
                 apply_output_wrapper_metrics(&mut entry_result, wrapper);
@@ -611,6 +655,10 @@ impl<'a> ItemGroupEvaluator<'a> {
             }
             if entry.modifier_container.is_some() {
                 entry_containment_depth = entry_containment_depth.checked_add(1)?;
+                if let Some(container) = modifier_creator_metrics {
+                    entry_containment_depth =
+                        entry_containment_depth.max(container.containment_depth);
+                }
             }
             if !entry.contents.is_empty() {
                 entry_containment_depth =
@@ -651,6 +699,8 @@ impl<'a> ItemGroupEvaluator<'a> {
             estorable_contents_supported &= entry_result.estorable_contents_supported;
             non_estorable_contents_supported &= entry_result.non_estorable_contents_supported;
             all_top_level_estorable &= entry_result.all_top_level_estorable;
+            top_level_default_container_possible |=
+                entry_result.top_level_default_container_possible;
         }
         Some(ItemGroupMetrics {
             outputs,
@@ -663,6 +713,7 @@ impl<'a> ItemGroupEvaluator<'a> {
             estorable_contents_supported,
             non_estorable_contents_supported,
             all_top_level_estorable,
+            top_level_default_container_possible,
         })
     }
 
@@ -690,6 +741,8 @@ fn apply_output_wrapper_metrics(metrics: &mut ItemGroupMetrics, wrapper: &ItemGr
         && (!retains_spilled_payloads || metrics.non_estorable_contents_supported);
     metrics.all_top_level_estorable = wrapper.item.prototype.containment.estorable
         && (!retains_spilled_payloads || metrics.all_top_level_estorable);
+    metrics.top_level_default_container_possible = wrapper.item.default_container.is_some()
+        || (retains_spilled_payloads && metrics.top_level_default_container_possible);
     if !retains_spilled_payloads {
         metrics.charge_magazine_candidates = 0;
         metrics.charge_ammunition_candidates = 0;
@@ -737,6 +790,7 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                 || entry.modifier_charges.is_some()
                 || !entry.contents.is_empty()
                 || entry.seal_contents
+                || entry.modifier_default_container_sealed.is_some()
                 || entry.modifier_container.is_some();
             let modifier_requires_marker = entry.count_min != 1
                 || entry.count_max != 1
@@ -744,6 +798,7 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                 || entry.modifier_charges.is_some()
                 || !entry.contents.is_empty()
                 || entry.seal_contents
+                || entry.modifier_default_container_sealed.is_some()
                 || entry.modifier_container.is_some()
                 || matches!(
                     &entry.target,
@@ -773,6 +828,10 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                     && !matches!(&entry.target, ItemGroupTargetV1::Group(_)))
                 || (entry.modifier_container.is_some()
                     && !matches!(&entry.target, ItemGroupTargetV1::Item(_)))
+                || entry.modifier_default_container_sealed.is_some_and(|_| {
+                    entry.modifier_container.is_some()
+                        || matches!(&entry.target, ItemGroupTargetV1::Node(_))
+                })
                 || matches!(
                     &entry.target,
                     ItemGroupTargetV1::Item(item)
@@ -791,7 +850,7 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                     .is_some_and(|wrapper| !valid_item_group_container(wrapper))
                 || entry.modifier_container.as_ref().is_some_and(|wrapper| {
                     wrapper.overflow != ItemGroupOverflowV1::None
-                        || !valid_item_group_container(wrapper)
+                        || !valid_item_group_creator_container(wrapper)
                 })
                 || !valid_item_group_target(&entry.target, &node_ids)
         }) || (node.kind == ItemGroupKindV1::Distribution && weight_sum.is_none())
@@ -824,6 +883,10 @@ fn valid_item_group_target(target: &ItemGroupTargetV1, node_ids: &BTreeSet<u16>)
 }
 
 fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
+    valid_item_group_item_at_depth(item, 0)
+}
+
+fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize) -> bool {
     let generates_description = item.description_expansion.is_some()
         || item
             .variants
@@ -866,6 +929,11 @@ fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
             .tool_charge_storage
             .as_ref()
             .is_none_or(|_| item.charges_supported)
+        && item.default_container.as_ref().is_none_or(|container| {
+            depth < MAX_ITEM_COMPONENT_DEPTH
+                && container.overflow == ItemGroupOverflowV1::None
+                && valid_item_group_container_at_depth(container, depth + 1)
+        })
         && (!item.modifier_container_capacity_applies
             || (item.tool_charge_storage.is_none()
                 && item.prototype.ranged_weapon.is_none()
@@ -997,6 +1065,20 @@ fn item_group_item_containment_depth(item: &ItemGroupItemPrototypeV1) -> usize {
 }
 
 fn item_group_item_metrics(item: &ItemGroupItemPrototypeV1) -> ItemGroupMetrics {
+    let mut metrics = raw_item_group_item_metrics(item);
+    if let Some(container) = &item.default_container {
+        metrics.outputs = metrics.outputs.saturating_add(1);
+        metrics.containment_depth = metrics.containment_depth.saturating_add(1);
+        apply_output_wrapper_metrics(&mut metrics, container);
+    }
+    metrics
+}
+
+fn item_group_item_creator_metrics(container: &ItemGroupContainerV1) -> ItemGroupMetrics {
+    item_group_item_metrics(&container.item)
+}
+
+fn raw_item_group_item_metrics(item: &ItemGroupItemPrototypeV1) -> ItemGroupMetrics {
     let contents_support = item_contents_insertion_support(item);
     ItemGroupMetrics {
         outputs: item_group_item_max_outputs(item),
@@ -1012,6 +1094,7 @@ fn item_group_item_metrics(item: &ItemGroupItemPrototypeV1) -> ItemGroupMetrics 
         estorable_contents_supported: contents_support.0,
         non_estorable_contents_supported: contents_support.1,
         all_top_level_estorable: item.prototype.containment.estorable,
+        top_level_default_container_possible: item.default_container.is_some(),
     }
 }
 
@@ -1070,7 +1153,28 @@ fn valid_item_group_contents(contents: &ItemGroupContentsSourceV1) -> bool {
 }
 
 fn valid_item_group_container(container: &ItemGroupContainerV1) -> bool {
+    valid_item_group_container_at_depth(container, 0)
+}
+
+fn valid_item_group_creator_container(container: &ItemGroupContainerV1) -> bool {
     valid_item_group_item(&container.item)
+        && container.item.charges.is_none()
+        && container.item.tool_charge_storage.is_none()
+        // Upstream `container-item` is a string-only creator reference; unlike
+        // direct wrappers, it has no independent variant selector.
+        && container.variant_id.is_none()
+        && container
+            .item
+            .default_container
+            .as_ref()
+            .map_or_else(
+                || item_group_container_insertion_supported(container),
+                item_group_container_insertion_supported,
+            )
+}
+
+fn valid_item_group_container_at_depth(container: &ItemGroupContainerV1, depth: usize) -> bool {
+    valid_item_group_item_at_depth(&container.item, depth)
         && container.item.charges.is_none()
         && container.item.tool_charge_storage.is_none()
         && item_group_container_insertion_supported(container)
@@ -1462,6 +1566,7 @@ fn item_group_graph_references(graph: &ItemGroupGraphV1) -> impl Iterator<Item =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AmmunitionContainerPocketPrototypeV1, SpawnPocketKindV1, SpawnPocketRulesV1};
 
     fn valid_test_item() -> ItemGroupItemPrototypeV1 {
         ItemGroupItemPrototypeV1 {
@@ -1487,6 +1592,7 @@ mod tests {
             description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
+            default_container: None,
             modifier_side_effects_supported: true,
             charges: None,
             minimum_one_charge: false,
@@ -1495,6 +1601,172 @@ mod tests {
             modifier_container_capacity_applies: true,
             contents_insertion_supported: true,
         }
+    }
+
+    fn valid_test_container(type_id: &str) -> ItemGroupContainerV1 {
+        let mut item = valid_test_item();
+        item.prototype.type_id = type_id.to_owned();
+        item.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::from("CONTAINER"),
+            capacities: Vec::new(),
+            rigid: true,
+            access_moves: 100,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind: SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: 1_000,
+                max_contains_weight_milligrams: 1_000_000,
+                max_item_volume_milliliters: 1_000,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: 1_000,
+                item_restrictions: Vec::new(),
+                flag_restrictions: Vec::new(),
+                access_moves: 100,
+                rigid: true,
+                watertight: true,
+                transparent: true,
+                forbidden: false,
+                sealable: true,
+            }),
+        }];
+        ItemGroupContainerV1 {
+            item: Box::new(item),
+            variant_id: None,
+            sealed: true,
+            overflow: ItemGroupOverflowV1::None,
+        }
+    }
+
+    fn test_group(group_id: &str, entry: ItemGroupEntryV1) -> ItemGroupDefinitionV1 {
+        ItemGroupDefinitionV1 {
+            group_id: group_id.to_owned(),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: vec![entry],
+                }],
+                wrapper: None,
+            },
+        }
+    }
+
+    fn test_entry(target: ItemGroupTargetV1) -> ItemGroupEntryV1 {
+        ItemGroupEntryV1 {
+            probability: 100,
+            count_min: 1,
+            count_max: 1,
+            raw_damage: None,
+            variant_id: None,
+            event: None,
+            modifier_charges: None,
+            contents: Vec::new(),
+            seal_contents: false,
+            modifier_default_container_sealed: None,
+            direct_wrapper: None,
+            modifier_container: None,
+            target,
+        }
+    }
+
+    #[test]
+    fn default_container_fallback_and_explicit_null_have_distinct_valid_shapes() {
+        let mut item = valid_test_item();
+        item.default_container = Some(valid_test_container("default_bottle"));
+
+        let direct = test_group(
+            "direct_default",
+            test_entry(ItemGroupTargetV1::Item(Box::new(item.clone()))),
+        );
+        assert!(item_group_catalog_is_valid(std::slice::from_ref(&direct)));
+
+        let mut fallback = test_entry(ItemGroupTargetV1::Item(Box::new(item.clone())));
+        fallback.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        fallback.modifier_default_container_sealed = Some(false);
+        assert!(item_group_catalog_is_valid(&[test_group(
+            "modifier_fallback",
+            fallback,
+        )]));
+
+        let mut suppressed = test_entry(ItemGroupTargetV1::Item(Box::new(item)));
+        suppressed.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        assert!(
+            item_group_catalog_is_valid(&[test_group("explicit_null_suppression", suppressed)]),
+            "an explicit null modifier container is represented by a modifier marker without a fallback"
+        );
+    }
+
+    #[test]
+    fn explicit_modifier_container_creator_may_apply_its_own_default_wrapper() {
+        let mut creator_item = valid_test_item();
+        creator_item.prototype.type_id = String::from("creator_payload");
+        creator_item.default_container = Some(valid_test_container("effective_wrapper"));
+        let creator = ItemGroupContainerV1 {
+            item: Box::new(creator_item),
+            variant_id: None,
+            sealed: true,
+            overflow: ItemGroupOverflowV1::None,
+        };
+        let mut entry = test_entry(ItemGroupTargetV1::Item(Box::new(valid_test_item())));
+        entry.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        entry.modifier_container = Some(creator.clone());
+        assert!(item_group_catalog_is_valid(&[test_group(
+            "creator_default_wrapper",
+            entry,
+        )]));
+
+        let mut direct = test_entry(ItemGroupTargetV1::Item(Box::new(valid_test_item())));
+        direct.direct_wrapper = Some(creator);
+        assert!(
+            !item_group_catalog_is_valid(&[test_group("raw_wrapper_stays_raw", direct)]),
+            "whole-group wrappers use the raw item constructor and cannot borrow creator semantics"
+        );
+    }
+
+    #[test]
+    fn dynamic_named_group_default_fallback_is_retained_but_fails_closed() {
+        let mut item = valid_test_item();
+        let mut default_bottle = valid_test_container("default_bottle");
+        default_bottle.item.default_container =
+            Some(valid_test_container("second_level_default_bottle"));
+        item.default_container = Some(default_bottle);
+        let inner = test_group(
+            "inner_default",
+            test_entry(ItemGroupTargetV1::Item(Box::new(item))),
+        );
+        let mut outer_entry = test_entry(ItemGroupTargetV1::Group(inner.group_id.clone()));
+        outer_entry.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        outer_entry.modifier_default_container_sealed = Some(true);
+        let outer = test_group("outer_modifier", outer_entry);
+        assert!(!item_group_catalog_is_valid(&[inner, outer]));
+
+        let plain_inner = test_group(
+            "plain_inner",
+            test_entry(ItemGroupTargetV1::Item(Box::new(valid_test_item()))),
+        );
+        let mut proven_noop = test_entry(ItemGroupTargetV1::Group(plain_inner.group_id.clone()));
+        proven_noop.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        proven_noop.modifier_default_container_sealed = Some(true);
+        let plain_outer = test_group("plain_outer", proven_noop);
+        assert!(item_group_catalog_is_valid(&[plain_inner, plain_outer]));
     }
 
     #[test]
@@ -1519,6 +1791,7 @@ mod tests {
                         modifier_charges: None,
                         contents: vec![ItemGroupContentsSourceV1::Group(String::from("contents"))],
                         seal_contents: false,
+                        modifier_default_container_sealed: None,
                         direct_wrapper: None,
                         modifier_container: None,
                     }],
