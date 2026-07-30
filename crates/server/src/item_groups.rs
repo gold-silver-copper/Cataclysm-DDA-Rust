@@ -729,7 +729,7 @@ fn runtime_item_group_creator_container(
         .default_container
         .as_ref()
         .unwrap_or(&container);
-    require_single_rigid_physical_container(effective)?;
+    require_single_physical_container(effective)?;
     Ok(container)
 }
 
@@ -742,7 +742,7 @@ fn runtime_item_group_container_inner(
     default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupContainerV1, Box<dyn std::error::Error>> {
     let item = runtime_item_group_item_inner(item, None, content, default_container_stack)?;
-    require_single_rigid_physical_item(&item)?;
+    require_single_physical_item(&item)?;
     if variant_id.as_ref().is_some_and(|variant_id| {
         !item
             .variants
@@ -763,13 +763,13 @@ fn runtime_item_group_container_inner(
     })
 }
 
-fn require_single_rigid_physical_container(
+fn require_single_physical_container(
     container: &ItemGroupContainerV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    require_single_rigid_physical_item(&container.item)
+    require_single_physical_item(&container.item)
 }
 
-fn require_single_rigid_physical_item(
+fn require_single_physical_item(
     item: &ItemGroupItemPrototypeV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let physical_pockets = item
@@ -779,10 +779,8 @@ fn require_single_rigid_physical_item(
         .filter_map(|pocket| pocket.spawn_rules.as_ref())
         .filter(|rules| rules.kind == cdda_protocol::SpawnPocketKindV1::Container)
         .collect::<Vec<_>>();
-    if physical_pockets.len() != 1 || !physical_pockets[0].rigid {
-        return Err(
-            "item-group wrappers require exactly one rigid physical container pocket".into(),
-        );
+    if physical_pockets.len() != 1 {
+        return Err("item-group wrappers require exactly one physical container pocket".into());
     }
     Ok(())
 }
@@ -999,12 +997,7 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    const CONSTRUCTOR_STATE_FLAGS: &[&str] = &[
-        "COLLAPSE_CONTENTS",
-        "ENERGY_SHIELD",
-        "NANOFAB_TEMPLATE",
-        "SPAWN_ACTIVE",
-    ];
+    const CONSTRUCTOR_STATE_FLAGS: &[&str] = &["ENERGY_SHIELD", "NANOFAB_TEMPLATE", "SPAWN_ACTIVE"];
     if let Some(flag) = CONSTRUCTOR_STATE_FLAGS
         .iter()
         .find(|flag| item.flags.contains(**flag))

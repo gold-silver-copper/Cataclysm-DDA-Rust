@@ -2999,12 +2999,18 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
                             cdda_protocol::SpawnPocketKindV1::EFileStorage => "e-files",
                         };
                         let sealed = if state.sealed { ", sealed" } else { "" };
+                        let collapsed = if state.contents_collapsed {
+                            ", collapsed"
+                        } else {
+                            ""
+                        };
                         return format!(
-                            "p{} {} {}{}",
+                            "p{} {} {}{}{}",
                             pocket.pocket_index,
                             pocket.contents.len(),
                             kind,
-                            sealed
+                            sealed,
+                            collapsed
                         );
                     }
                     let stored = pocket
@@ -5621,6 +5627,8 @@ mod tests {
                     rules: cdda_protocol::SpawnPocketRulesV1 {
                         kind: cdda_protocol::SpawnPocketKindV1::Container,
                         max_contains_volume_milliliters: 111,
+                        magazine_well_volume_milliliters: 0,
+                        contents_collapsed_by_default: false,
                         max_contains_weight_milligrams: 233_000,
                         max_item_volume_milliliters: 111,
                         min_item_volume_milliliters: 0,
@@ -5634,6 +5642,7 @@ mod tests {
                         forbidden: false,
                         sealable: false,
                     },
+                    contents_collapsed: false,
                     sealed: false,
                 }),
             }];
@@ -5667,6 +5676,8 @@ mod tests {
                     rules: cdda_protocol::SpawnPocketRulesV1 {
                         kind: cdda_protocol::SpawnPocketKindV1::Container,
                         max_contains_volume_milliliters: 250,
+                        magazine_well_volume_milliliters: 0,
+                        contents_collapsed_by_default: false,
                         max_contains_weight_milligrams: 1_000_000,
                         max_item_volume_milliliters: 17,
                         min_item_volume_milliliters: 0,
@@ -5680,12 +5691,13 @@ mod tests {
                         forbidden: false,
                         sealable: true,
                     },
+                    contents_collapsed: true,
                     sealed: false,
                 }),
             }];
         assert!(
-            item_menu_label(&painkiller_bottle, None).contains("p0 1 items"),
-            "the normal Bevy item menu must expose default-contained loot"
+            item_menu_label(&painkiller_bottle, None).contains("p0 1 items, collapsed"),
+            "the normal Bevy item menu must expose auto-collapsed contained loot"
         );
         battery_snapshot.controlled_actor.inventory = vec![painkiller_bottle.clone()];
         assert!(matches!(

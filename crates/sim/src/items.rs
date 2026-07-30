@@ -514,6 +514,7 @@ pub(super) struct PlannedItemSpawn {
     minimum_one_charge: bool,
     default_charge_range: Option<cdda_protocol::InclusiveI32RangeV1>,
     pub(super) pocket_contents: BTreeMap<u16, Vec<PlannedItemSpawn>>,
+    pub(super) collapsed_pockets: BTreeSet<u16>,
     pub(super) sealed_pockets: BTreeSet<u16>,
     pub(super) integral_ammunition: BTreeMap<u16, Box<PlannedItemSpawn>>,
     pub(super) detachable_magazines: BTreeMap<u16, Box<PlannedItemSpawn>>,
@@ -584,8 +585,10 @@ pub(super) fn item_from_craft_prototype(
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 spawn_state: pocket.spawn_rules.clone().map(|rules| {
+                    let contents_collapsed = rules.contents_collapsed_by_default;
                     cdda_protocol::SpawnPocketStateV1 {
                         rules,
+                        contents_collapsed,
                         sealed: false,
                     }
                 }),
@@ -658,8 +661,10 @@ pub(super) fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 spawn_state: pocket.spawn_rules.clone().map(|rules| {
+                    let contents_collapsed = rules.contents_collapsed_by_default;
                     cdda_protocol::SpawnPocketStateV1 {
                         rules,
+                        contents_collapsed,
                         sealed: false,
                     }
                 }),
@@ -720,6 +725,15 @@ pub(super) fn item_from_planned_spawn(
                 item_from_planned_spawn(content_id, content, allocator, birth_tick)?.snapshot(),
             );
         }
+    }
+    for pocket_index in &planned.collapsed_pockets {
+        let state = item
+            .ammunition_containers
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == *pocket_index)
+            .and_then(|pocket| pocket.spawn_state.as_mut())
+            .ok_or(SimError::InvalidItem)?;
+        state.contents_collapsed = true;
     }
     for pocket_index in &planned.sealed_pockets {
         let state = item
@@ -1060,6 +1074,18 @@ fn construct_item_group_item_with_fit_phase(
         minimum_one_charge: item.minimum_one_charge,
         default_charge_range: item.charges,
         pocket_contents: BTreeMap::new(),
+        collapsed_pockets: item
+            .prototype
+            .ammunition_containers
+            .iter()
+            .filter(|pocket| {
+                pocket
+                    .spawn_rules
+                    .as_ref()
+                    .is_some_and(|rules| rules.contents_collapsed_by_default)
+            })
+            .map(|pocket| pocket.pocket_index)
+            .collect(),
         sealed_pockets: BTreeSet::new(),
         integral_ammunition: BTreeMap::new(),
         detachable_magazines: BTreeMap::new(),
@@ -1112,6 +1138,28 @@ pub struct ItemGroupDefaultContainerProjection {
     pub content_types: Vec<String>,
     pub payload_charges: Option<i32>,
     pub sealed: bool,
+    pub pocket_collapsed: bool,
+}
+
+/// Exact physical projection of a generalized whole-group wrapper. Tooling
+/// uses this production transition for direct C++ comparison of flexible
+/// volume, capacity, constructor presentation defaults, and nested ownership.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemGroupFlexibleWrapperProjection {
+    pub outer_type: String,
+    pub outer_variant: String,
+    pub pocket_rigid: bool,
+    pub pocket_collapsed_by_default: bool,
+    pub pocket_collapsed: bool,
+    pub content_types: Vec<String>,
+    pub content_variants: Vec<String>,
+    pub content_charges: Vec<i32>,
+    pub outer_volume_milliliters: u64,
+    pub outer_weight_grams: u64,
+    pub pocket_capacity_volume_milliliters: u64,
+    pub pocket_remaining_volume_milliliters: u64,
+    pub pocket_remaining_weight_grams: u64,
+    pub sealed: bool,
 }
 
 /// Renderer-free direct projection used by the pinned C++ differential
@@ -1149,29 +1197,7 @@ pub fn item_group_default_container_projection(
             planned
         }
         ItemGroupDefaultContainerMode::GroupWrapperExplicitNull { container, count } => {
-            let mut entry = direct_default_container_projection_entry(None);
-            entry.count_min = count;
-            entry.count_max = count;
-            entry.target = ItemGroupTargetV1::Item(Box::new(item.clone()));
-            let graph = ItemGroupGraphV1 {
-                root_node: 0,
-                nodes: vec![ItemGroupNodeV1 {
-                    node_id: 0,
-                    kind: ItemGroupKindV1::Collection,
-                    entries: vec![entry],
-                }],
-                wrapper: Some(container),
-            };
-            let mut output = Vec::new();
-            plan_item_group_source_into(
-                &ItemGroupSourceV1::Inline(graph),
-                &BTreeMap::new(),
-                &mut rng,
-                &mut output,
-                0,
-            )?;
-            let [planned] = output.try_into().map_err(|_| SimError::InvalidItem)?;
-            planned
+            plan_group_wrapper_explicit_null(item, container, count, None, &mut rng)?
         }
     };
     let payloads = planned
@@ -1195,7 +1221,129 @@ pub fn item_group_default_container_projection(
             .collect(),
         payload_charges,
         sealed: !planned.sealed_pockets.is_empty(),
+        pocket_collapsed: !planned.collapsed_pockets.is_empty(),
     })
+}
+
+/// Renderer-free direct projection for the flexible whole-group wrapper
+/// family. The optional content variant models an explicit item-group entry
+/// modifier, not a synthetic post-construction mutation.
+pub fn item_group_flexible_wrapper_projection(
+    item: &ItemGroupItemPrototypeV1,
+    container: ItemGroupContainerV1,
+    count: u16,
+    content_variant_id: Option<&str>,
+) -> Result<ItemGroupFlexibleWrapperProjection, SimError> {
+    let mut rng = ChaCha8Rng::from_seed([0; 32]);
+    let planned =
+        plan_group_wrapper_explicit_null(item, container, count, content_variant_id, &mut rng)?;
+    let [pocket] = planned.prototype.ammunition_containers.as_slice() else {
+        return Err(SimError::InvalidItem);
+    };
+    let rules = pocket.spawn_rules.as_ref().ok_or(SimError::InvalidItem)?;
+    if rules.kind != SpawnPocketKindV1::Container {
+        return Err(SimError::InvalidItem);
+    }
+    let contents = planned
+        .pocket_contents
+        .get(&pocket.pocket_index)
+        .ok_or(SimError::InvalidItem)?;
+    let contents_volume = contents.iter().try_fold(0_u64, |total, content| {
+        total
+            .checked_add(
+                content
+                    .total_volume_milliliters()
+                    .ok_or(SimError::NumericOverflow)?,
+            )
+            .ok_or(SimError::NumericOverflow)
+    })?;
+    let contents_weight = contents.iter().try_fold(0_u64, |total, content| {
+        total
+            .checked_add(
+                content
+                    .total_weight_milligrams()
+                    .ok_or(SimError::NumericOverflow)?,
+            )
+            .ok_or(SimError::NumericOverflow)
+    })?;
+    Ok(ItemGroupFlexibleWrapperProjection {
+        outer_type: planned.prototype.type_id.clone(),
+        outer_variant: planned
+            .variant
+            .as_ref()
+            .map_or_else(String::new, |variant| variant.id.clone()),
+        pocket_rigid: pocket.rigid,
+        pocket_collapsed_by_default: rules.contents_collapsed_by_default,
+        pocket_collapsed: planned.collapsed_pockets.contains(&pocket.pocket_index),
+        content_types: contents
+            .iter()
+            .map(|content| content.prototype.type_id.clone())
+            .collect(),
+        content_variants: contents
+            .iter()
+            .map(|content| {
+                content
+                    .variant
+                    .as_ref()
+                    .map_or_else(String::new, |variant| variant.id.clone())
+            })
+            .collect(),
+        content_charges: contents
+            .iter()
+            .map(|content| content.prototype.charges)
+            .collect(),
+        outer_volume_milliliters: planned
+            .total_volume_milliliters()
+            .ok_or(SimError::NumericOverflow)?,
+        outer_weight_grams: planned
+            .total_weight_milligrams()
+            .ok_or(SimError::NumericOverflow)?
+            / 1_000,
+        pocket_capacity_volume_milliliters: rules.max_contains_volume_milliliters,
+        pocket_remaining_volume_milliliters: rules
+            .max_contains_volume_milliliters
+            .checked_sub(contents_volume)
+            .ok_or(SimError::InvalidItem)?,
+        pocket_remaining_weight_grams: rules
+            .max_contains_weight_milligrams
+            .checked_sub(contents_weight)
+            .ok_or(SimError::InvalidItem)?
+            / 1_000,
+        sealed: planned.sealed_pockets.contains(&pocket.pocket_index),
+    })
+}
+
+fn plan_group_wrapper_explicit_null(
+    item: &ItemGroupItemPrototypeV1,
+    container: ItemGroupContainerV1,
+    count: u16,
+    content_variant_id: Option<&str>,
+    rng: &mut ChaCha8Rng,
+) -> Result<PlannedItemSpawn, SimError> {
+    let mut entry = direct_default_container_projection_entry(None);
+    entry.count_min = count;
+    entry.count_max = count;
+    entry.variant_id = content_variant_id.map(str::to_owned);
+    entry.target = ItemGroupTargetV1::Item(Box::new(item.clone()));
+    let graph = ItemGroupGraphV1 {
+        root_node: 0,
+        nodes: vec![ItemGroupNodeV1 {
+            node_id: 0,
+            kind: ItemGroupKindV1::Collection,
+            entries: vec![entry],
+        }],
+        wrapper: Some(container),
+    };
+    let mut output = Vec::new();
+    plan_item_group_source_into(
+        &ItemGroupSourceV1::Inline(graph),
+        &BTreeMap::new(),
+        rng,
+        &mut output,
+        0,
+    )?;
+    let [planned] = output.try_into().map_err(|_| SimError::InvalidItem)?;
+    Ok(planned)
 }
 
 fn direct_default_container_projection_entry(sealed: Option<bool>) -> ItemGroupEntryV1 {
@@ -1289,6 +1437,17 @@ fn construct_charge_ammunition(
         return Err(SimError::InvalidItem);
     }
     let fitted = item_profile_has_flag(&prototype.containment, "FIT");
+    let collapsed_pockets = prototype
+        .ammunition_containers
+        .iter()
+        .filter(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.contents_collapsed_by_default)
+        })
+        .map(|pocket| pocket.pocket_index)
+        .collect();
     Ok(PlannedItemSpawn {
         prototype,
         raw_damage: 0,
@@ -1306,6 +1465,7 @@ fn construct_charge_ammunition(
         minimum_one_charge: true,
         default_charge_range: None,
         pocket_contents: BTreeMap::new(),
+        collapsed_pockets,
         sealed_pockets: BTreeSet::new(),
         integral_ammunition: BTreeMap::new(),
         detachable_magazines: BTreeMap::new(),
@@ -1655,6 +1815,7 @@ fn apply_unmodified_default_container(
     if insert_planned_item(&mut container, payload)?.is_err() {
         return Ok(());
     }
+    apply_automatic_pocket_collapse(&mut container);
     if wrapper.sealed {
         seal_planned_item(&mut container)?;
     }
@@ -1783,6 +1944,7 @@ fn wrap_single_item(
 ) -> Result<(), SimError> {
     let payload = std::mem::replace(planned, container);
     let _ = insert_planned_item(planned, payload)?;
+    apply_automatic_pocket_collapse(planned);
     if wrapper.sealed {
         seal_planned_item(planned)?;
     }
@@ -1816,6 +1978,7 @@ fn wrap_item_group_output(
             }
         }
     }
+    apply_automatic_pocket_collapse(&mut container);
     if wrapper.sealed {
         seal_planned_item(&mut container)?;
     }
@@ -1982,12 +2145,21 @@ impl PlannedItemSpawn {
                         .ammunition_containers
                         .iter()
                         .find(|pocket| pocket.pocket_index == *pocket_index)?;
-                    if pocket.rigid {
-                        return Some(total);
-                    }
-                    contents.iter().try_fold(total, |total, child| {
-                        total.checked_add(child.total_volume_milliliters()?)
-                    })
+                    let contents_volume = contents.iter().try_fold(0_u64, |volume, child| {
+                        volume.checked_add(child.total_volume_milliliters()?)
+                    })?;
+                    let external = pocket.spawn_rules.as_ref().map_or_else(
+                        || {
+                            if pocket.rigid { 0 } else { contents_volume }
+                        },
+                        |rules| {
+                            cdda_protocol::spawn_pocket_external_volume_milliliters(
+                                rules,
+                                contents_volume,
+                            )
+                        },
+                    );
+                    total.checked_add(external)
                 })?;
         own.checked_add(integral)?
             .checked_add(detachable)?
@@ -2126,9 +2298,6 @@ fn insert_planned_item(
         return Ok(Err(payload));
     };
     let rules = pocket.spawn_rules.as_ref().ok_or(SimError::InvalidItem)?;
-    if rules.kind == SpawnPocketKindV1::Container && !rules.rigid {
-        return Err(SimError::InvalidItem);
-    }
     if !spawn_pocket_accepts(target, pocket.pocket_index, rules, &payload)? {
         return Ok(Err(payload));
     }
@@ -2279,7 +2448,33 @@ fn planned_items_can_combine_for_containment(
         && left.variant == right.variant
         && left.snippet == right.snippet
         && left.initial_variables == right.initial_variables
+        && left.collapsed_pockets == right.collapsed_pockets
         && left.sealed_pockets == right.sealed_pockets
+}
+
+fn apply_automatic_pocket_collapse(item: &mut PlannedItemSpawn) {
+    let mut physical_pockets = item
+        .prototype
+        .ammunition_containers
+        .iter()
+        .filter(|pocket| {
+            pocket
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.kind == SpawnPocketKindV1::Container)
+        });
+    let Some(pocket) = physical_pockets.next() else {
+        return;
+    };
+    if physical_pockets.next().is_some() {
+        return;
+    }
+    let Some(contents) = item.pocket_contents.get(&pocket.pocket_index) else {
+        return;
+    };
+    if !contents.is_empty() && contents.windows(2).all(|pair| pair[0] == pair[1]) {
+        item.collapsed_pockets.insert(pocket.pocket_index);
+    }
 }
 
 fn seal_planned_item(item: &mut PlannedItemSpawn) -> Result<(), SimError> {
@@ -2418,6 +2613,8 @@ mod tests {
             spawn_rules: Some(SpawnPocketRulesV1 {
                 kind,
                 max_contains_volume_milliliters: maximum_volume,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
                 max_contains_weight_milligrams: u64::MAX,
                 max_item_volume_milliliters: maximum_volume,
                 min_item_volume_milliliters: 0,
@@ -2637,6 +2834,7 @@ mod tests {
                 content_types: vec![String::from("water_clean")],
                 payload_charges: Some(2),
                 sealed: true,
+                pocket_collapsed: true,
             }
         );
 
@@ -2652,6 +2850,7 @@ mod tests {
                 content_types: vec![String::from("aspirin")],
                 payload_charges: Some(0),
                 sealed: false,
+                pocket_collapsed: true,
             },
             "a partially filled default bottle cannot seal upstream"
         );
@@ -2666,6 +2865,7 @@ mod tests {
                 content_types: Vec::new(),
                 payload_charges: None,
                 sealed: false,
+                pocket_collapsed: false,
             }
         );
 
@@ -2691,6 +2891,7 @@ mod tests {
                 content_types: vec![String::from("ibuprofen"), String::from("aspirin")],
                 payload_charges: Some(0),
                 sealed: false,
+                pocket_collapsed: true,
             }
         );
 
@@ -2711,6 +2912,7 @@ mod tests {
                 content_types: vec![String::from("aspirin"), String::from("aspirin")],
                 payload_charges: Some(0),
                 sealed: false,
+                pocket_collapsed: true,
             }
         );
     }
@@ -4504,7 +4706,7 @@ mod tests {
     }
 
     #[test]
-    fn rigid_wrapper_boundaries_spill_or_discard_without_losing_the_container() {
+    fn wrapper_boundaries_preserve_overflow_and_flexible_containment() {
         let payload = |type_id: &str, length: u64| {
             let mut item = leaf_item(type_id);
             item.prototype.containment = ItemContainmentProfileV1 {
@@ -4595,12 +4797,15 @@ mod tests {
             Vec::new(),
             false,
         )];
-        let invalid = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
+        let flexible_source = ItemGroupSourceV1::Inline(ItemGroupGraphV1 {
             root_node: 0,
             nodes: vec![ItemGroupNodeV1 {
                 node_id: 0,
                 kind: ItemGroupKindV1::Collection,
-                entries: vec![entry(100, None, "payload")],
+                entries: vec![ItemGroupEntryV1 {
+                    target: ItemGroupTargetV1::Item(Box::new(payload("payload", 10))),
+                    ..entry(100, None, "unused")
+                }],
             }],
             wrapper: Some(ItemGroupContainerV1 {
                 item: Box::new(non_rigid),
@@ -4609,14 +4814,16 @@ mod tests {
                 overflow: ItemGroupOverflowV1::None,
             }),
         });
-        let mut invalid_rng = ChaCha8Rng::seed_from_u64(1);
-        assert!(
-            matches!(
-                plan_item_group_source(&invalid, &BTreeMap::new(), &mut invalid_rng),
-                Err(SimError::InvalidItem)
-            ),
-            "unsupported flexible-container semantics must fail closed"
-        );
+        let mut flexible_rng = ChaCha8Rng::seed_from_u64(1);
+        let [flexible] =
+            plan_item_group_source(&flexible_source, &BTreeMap::new(), &mut flexible_rng)
+                .expect("the generalized flexible wrapper should plan")
+                .try_into()
+                .expect("one wrapper should remain top-level");
+        assert_eq!(flexible.prototype.type_id, "bag");
+        assert_eq!(flexible.pocket_contents[&0][0].prototype.type_id, "payload");
+        assert_eq!(flexible.total_volume_milliliters(), Some(1));
+        assert_eq!(flexible.collapsed_pockets, BTreeSet::from([0]));
     }
 
     #[test]

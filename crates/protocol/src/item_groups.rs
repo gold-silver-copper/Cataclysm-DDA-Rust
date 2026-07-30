@@ -5,8 +5,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CraftItemPrototypeV1, ItemContainmentProfileV1, ItemPhaseV1, MAX_ITEM_COMPONENT_DEPTH,
-    MAX_ITEM_RAW_DAMAGE, SimTick, valid_craft_item_prototype, valid_recipe_id,
+    MAX_ITEM_RAW_DAMAGE, SimTick, SpawnPocketRulesV1, valid_craft_item_prototype, valid_recipe_id,
 };
+
+/// Additional external volume contributed by one physical spawn pocket.
+/// Flexible pockets reserve pinned `magazine_well` volume inside the owning
+/// item's base volume; rigid pockets never expand their owner.
+#[must_use]
+pub fn spawn_pocket_external_volume_milliliters(
+    rules: &SpawnPocketRulesV1,
+    contents_volume_milliliters: u64,
+) -> u64 {
+    if rules.rigid {
+        0
+    } else {
+        contents_volume_milliliters.saturating_sub(rules.magazine_well_volume_milliliters)
+    }
+}
 
 /// Strict current boundary for nonperishable temperature-tracked items whose
 /// finalized material mix is empty. Pinned C++ constructs these items active
@@ -1256,7 +1271,7 @@ fn item_group_container_insertion_support(container: &ItemGroupContainerV1) -> (
         .ammunition_containers
         .iter()
         .filter_map(|pocket| pocket.spawn_rules.as_ref())
-        .filter(|rules| rules.kind == super::SpawnPocketKindV1::Container && rules.rigid)
+        .filter(|rules| rules.kind == super::SpawnPocketKindV1::Container)
         .count();
     if physical != 1 {
         return (false, false);
@@ -1278,9 +1293,6 @@ fn item_contents_insertion_support(item: &ItemGroupItemPrototypeV1) -> (bool, bo
     {
         match rules.kind {
             super::SpawnPocketKindV1::Container => {
-                if !rules.rigid {
-                    return (false, false);
-                }
                 physical += 1;
             }
             super::SpawnPocketKindV1::EFileStorage => {
@@ -1700,6 +1712,8 @@ mod tests {
             spawn_rules: Some(SpawnPocketRulesV1 {
                 kind: SpawnPocketKindV1::Container,
                 max_contains_volume_milliliters: 1_000,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
                 max_contains_weight_milligrams: 1_000_000,
                 max_item_volume_milliliters: 1_000,
                 min_item_volume_milliliters: 0,

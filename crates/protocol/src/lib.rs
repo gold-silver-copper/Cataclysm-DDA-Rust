@@ -24,14 +24,14 @@ pub use item_groups::{
     MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, initial_item_temperature_state,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
     item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
-    item_variant_is_valid, valid_item_variables,
+    item_variant_is_valid, spawn_pocket_external_volume_milliliters, valid_item_variables,
 };
 use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 92;
+pub const PROTOCOL_VERSION: u16 = 93;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -995,6 +995,12 @@ pub enum SpawnPocketKindV1 {
 pub struct SpawnPocketRulesV1 {
     pub kind: SpawnPocketKindV1,
     pub max_contains_volume_milliliters: u64,
+    /// Flexible-pocket content volume already included in the owner's base
+    /// volume. Zero for rigid and E-file pockets.
+    pub magazine_well_volume_milliliters: u64,
+    /// Pinned `COLLAPSE_CONTENTS` constructor default for standard pockets.
+    /// This is presentation state only and never changes insertion access.
+    pub contents_collapsed_by_default: bool,
     pub max_contains_weight_milligrams: u64,
     pub max_item_volume_milliliters: u64,
     pub min_item_volume_milliliters: u64,
@@ -1012,6 +1018,9 @@ pub struct SpawnPocketRulesV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpawnPocketStateV1 {
     pub rules: SpawnPocketRulesV1,
+    /// Current inventory presentation state. Constructors start from the
+    /// immutable rule default; homogeneous auto-wrapped contents also set it.
+    pub contents_collapsed: bool,
     pub sealed: bool,
 }
 
@@ -4014,6 +4023,7 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
                 reloadable: pocket.reloadable,
                 unloadable: pocket.unloadable,
                 spawn_state: pocket.spawn_rules.clone().map(|rules| SpawnPocketStateV1 {
+                    contents_collapsed: rules.contents_collapsed_by_default,
                     rules,
                     sealed: false,
                 }),
@@ -4936,6 +4946,8 @@ fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
             .windows(2)
             .all(|pair| pair[0] < pair[1])
         && rules.min_item_volume_milliliters <= rules.max_item_volume_milliliters
+        && rules.magazine_well_volume_milliliters < rules.max_contains_volume_milliliters
+        && (!rules.rigid || rules.magazine_well_volume_milliliters == 0)
         && match rules.kind {
             SpawnPocketKindV1::Container => {
                 rules.max_contains_volume_milliliters > 0
@@ -4943,7 +4955,11 @@ fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
                     && rules.max_item_volume_milliliters > 0
                     && rules.max_item_length_millimeters > 0
             }
-            SpawnPocketKindV1::EFileStorage => rules.rigid,
+            SpawnPocketKindV1::EFileStorage => {
+                rules.rigid
+                    && rules.magazine_well_volume_milliliters == 0
+                    && !rules.contents_collapsed_by_default
+            }
         }
 }
 
@@ -4969,6 +4985,7 @@ fn valid_ammunition_container_snapshot(
             .all(|pair| pair[0].id < pair[1].id)
         && pocket.spawn_state.as_ref().is_none_or(|state| {
             (!state.sealed || state.rules.sealable)
+                && (!state.rules.contents_collapsed_by_default || state.contents_collapsed)
                 && state.rules.rigid == pocket.rigid
                 && state.rules.access_moves == pocket.access_moves
         })
@@ -5215,9 +5232,16 @@ pub fn item_snapshot_containment_volume_milliliters(item: &ItemSnapshot) -> Opti
             if pocket.rigid {
                 return Some(total);
             }
-            pocket.contents.iter().try_fold(total, |total, content| {
-                total.checked_add(item_snapshot_containment_volume_milliliters(content)?)
-            })
+            let contents_volume = pocket.contents.iter().try_fold(0_u64, |volume, content| {
+                volume.checked_add(item_snapshot_containment_volume_milliliters(content)?)
+            })?;
+            let external = pocket
+                .spawn_state
+                .as_ref()
+                .map_or(contents_volume, |state| {
+                    spawn_pocket_external_volume_milliliters(&state.rules, contents_volume)
+                });
+            total.checked_add(external)
         })?;
     own.checked_add(integral)?
         .checked_add(wells)?
@@ -6141,6 +6165,8 @@ mod tests {
             spawn_rules: Some(SpawnPocketRulesV1 {
                 kind: SpawnPocketKindV1::Container,
                 max_contains_volume_milliliters: u64::MAX,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
                 max_contains_weight_milligrams: u64::MAX,
                 max_item_volume_milliliters: u64::MAX,
                 min_item_volume_milliliters: 0,
@@ -7409,6 +7435,8 @@ mod tests {
                 spawn_rules: Some(SpawnPocketRulesV1 {
                     kind: SpawnPocketKindV1::EFileStorage,
                     max_contains_volume_milliliters: u64::MAX,
+                    magazine_well_volume_milliliters: 0,
+                    contents_collapsed_by_default: false,
                     max_contains_weight_milligrams: u64::MAX,
                     max_item_volume_milliliters: u64::MAX,
                     min_item_volume_milliliters: 0,
@@ -7502,6 +7530,8 @@ mod tests {
             spawn_rules: Some(SpawnPocketRulesV1 {
                 kind: SpawnPocketKindV1::Container,
                 max_contains_volume_milliliters: u64::MAX,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
                 max_contains_weight_milligrams: u64::MAX,
                 max_item_volume_milliliters: u64::MAX,
                 min_item_volume_milliliters: 0,
@@ -7545,6 +7575,8 @@ mod tests {
                         let rules = SpawnPocketRulesV1 {
                             kind: SpawnPocketKindV1::Container,
                             max_contains_volume_milliliters: u64::MAX,
+                            magazine_well_volume_milliliters: 0,
+                            contents_collapsed_by_default: false,
                             max_contains_weight_milligrams: u64::MAX,
                             max_item_volume_milliliters: u64::MAX,
                             min_item_volume_milliliters: 0,
@@ -9261,6 +9293,8 @@ mod tests {
         let rules = SpawnPocketRulesV1 {
             kind: SpawnPocketKindV1::Container,
             max_contains_volume_milliliters: 111,
+            magazine_well_volume_milliliters: 0,
+            contents_collapsed_by_default: false,
             max_contains_weight_milligrams: 233_000,
             max_item_volume_milliliters: 111,
             min_item_volume_milliliters: 0,
@@ -9286,10 +9320,59 @@ mod tests {
             contents: vec![phone],
             spawn_state: Some(SpawnPocketStateV1 {
                 rules: rules.clone(),
+                contents_collapsed: false,
                 sealed: true,
             }),
         }];
         assert!(valid_item_snapshot(&generic_owner));
+        let mut flexible_wrapper = generic_owner.clone();
+        flexible_wrapper.type_id = String::from("wrapper");
+        flexible_wrapper.containment.weight_milligrams = 3_000;
+        flexible_wrapper.containment.volume_milliliters = 50;
+        let flexible_pocket = &mut flexible_wrapper.ammunition_containers[0];
+        flexible_pocket.rigid = false;
+        flexible_pocket.pocket_id.clear();
+        flexible_pocket.contents[0].type_id = String::from("chaw");
+        flexible_pocket.contents[0].containment.weight_milligrams = 4_000;
+        flexible_pocket.contents[0].containment.volume_milliliters = 4;
+        flexible_pocket.contents[0]
+            .containment
+            .longest_side_millimeters = 0;
+        let flexible_state = flexible_pocket
+            .spawn_state
+            .as_mut()
+            .expect("spawn state should exist");
+        flexible_state.rules.rigid = false;
+        flexible_state.rules.max_contains_volume_milliliters = 2_500;
+        flexible_state.rules.magazine_well_volume_milliliters = 45;
+        flexible_state.rules.max_contains_weight_milligrams = 6_000_000;
+        flexible_state.rules.max_item_volume_milliliters = 2_500;
+        flexible_state.rules.max_item_length_millimeters = 191;
+        flexible_state.rules.item_restrictions.clear();
+        flexible_state.contents_collapsed = true;
+        flexible_state.sealed = false;
+        assert_eq!(
+            spawn_pocket_external_volume_milliliters(&flexible_state.rules, 4),
+            0
+        );
+        assert_eq!(
+            spawn_pocket_external_volume_milliliters(&flexible_state.rules, 80),
+            35
+        );
+        assert!(valid_item_snapshot(&flexible_wrapper));
+        assert_eq!(
+            item_snapshot_containment_volume_milliliters(&flexible_wrapper),
+            Some(50),
+            "contents within the reserved base volume must not expand a flexible wrapper"
+        );
+        let mut invalid_collapsed_efile = rules.clone();
+        invalid_collapsed_efile.kind = SpawnPocketKindV1::EFileStorage;
+        invalid_collapsed_efile.rigid = true;
+        invalid_collapsed_efile.contents_collapsed_by_default = true;
+        assert!(
+            !valid_spawn_pocket_rules(&invalid_collapsed_efile),
+            "COLLAPSE_CONTENTS applies only to standard physical pockets upstream"
+        );
         let mut empty_sealed = generic_owner.clone();
         empty_sealed.ammunition_containers[0].contents.clear();
         assert!(
@@ -9494,6 +9577,8 @@ mod tests {
                 rules: SpawnPocketRulesV1 {
                     kind: SpawnPocketKindV1::Container,
                     max_contains_volume_milliliters: 1_000,
+                    magazine_well_volume_milliliters: 0,
+                    contents_collapsed_by_default: false,
                     max_contains_weight_milligrams: 1_000_000,
                     max_item_volume_milliliters: 1_000,
                     min_item_volume_milliliters: 0,
@@ -9507,6 +9592,7 @@ mod tests {
                     forbidden: false,
                     sealable: false,
                 },
+                contents_collapsed: false,
                 sealed: false,
             }),
         }];
@@ -9599,6 +9685,8 @@ mod tests {
                 rules: SpawnPocketRulesV1 {
                     kind: SpawnPocketKindV1::Container,
                     max_contains_volume_milliliters: 1_000,
+                    magazine_well_volume_milliliters: 0,
+                    contents_collapsed_by_default: false,
                     max_contains_weight_milligrams: 1_000,
                     max_item_volume_milliliters: 1_000,
                     min_item_volume_milliliters: 0,
@@ -9612,6 +9700,7 @@ mod tests {
                     forbidden: false,
                     sealable: false,
                 },
+                contents_collapsed: false,
                 sealed: false,
             }),
         }];

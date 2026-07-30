@@ -845,6 +845,28 @@ flexible `chaw_wrapper_1_20` container boundary. No runtime progress credit is
 claimed before that wrapper family unlocks ordinary field exploration and
 loot.
 
+Protocol 93/schema 71/CanonicalStateV69 is the final serialized checkpoint for
+the represented containment family: wrapper ownership, item/group contents,
+sealing, spill/discard overflow, snippets, variables, default containers,
+flexible physical pockets, reserved base volume, constructor collapse, and
+automatic homogeneous-content collapse. Flexible external volume is the
+contents volume above the pocket's retained `magazine_well` reserve; rigid and
+E-file pockets reject that reserve. Constructor-default collapse and actual
+runtime collapse are distinct canonical values, because `wrapper` defaults
+open but CDDA's automatic whitelist collapses it after a homogeneous fill.
+Exact minimum/maximum `chaw_wrapper_1_20`, `chewing_gum_full`, seven
+default-container, and overflow traces bring the item-group oracle to 137 C++
+assertions, followed by the reusable direct Rust comparison. The shared bash
+scenario preserves mixed flexible contents, reserved volume, sealing, nested
+automatic collapse, stable IDs, and temperature through direct, per-tick
+snapshot, SQLite, and portable replay execution; the Bevy item menu exposes
+collapsed authoritative pockets. Selected content now admits the two wrapper
+groups and exactly six additional furniture bashes. The complete `field` scan
+next fails closed at `chewing_gum_full_caff`, whose `caff_gum` needs material
+thermodynamics. The real field is still not generated, so runtime progress
+remains 44 of 263,435 core-DDA weighted points (0.0167%). Replay format 3 and
+CanonicalEventsV18 are unchanged.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

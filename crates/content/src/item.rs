@@ -325,6 +325,10 @@ pub struct StrictSpawnPocketDefinition {
     pub pocket_id: String,
     pub kind: SpawnPocketKindDefinition,
     pub max_contains_volume_milliliters: u64,
+    /// Volume already included by the owning item before a flexible pocket
+    /// expands externally. Pinned JSON calls this `magazine_well` even for
+    /// ordinary general-container pockets.
+    pub magazine_well_volume_milliliters: u64,
     pub max_contains_weight_milligrams: u64,
     pub max_item_volume_milliliters: u64,
     pub min_item_volume_milliliters: u64,
@@ -433,6 +437,7 @@ impl PocketDefinition {
             "forbidden",
             "id",
             "item_restriction",
+            "magazine_well",
             "max_contains_volume",
             "max_contains_weight",
             "max_item_length",
@@ -517,6 +522,14 @@ impl PocketDefinition {
             QuantityKind::Mass,
             DEFAULT_SPAWN_POCKET_WEIGHT_MILLIGRAMS,
         )?;
+        let magazine_well_volume_milliliters = quantity("magazine_well", QuantityKind::Volume, 0)?;
+        if magazine_well_volume_milliliters >= max_contains_volume_milliliters
+            || (boolean("rigid", false)? && magazine_well_volume_milliliters > 0)
+            || (kind == SpawnPocketKindDefinition::EFileStorage
+                && magazine_well_volume_milliliters > 0)
+        {
+            return None;
+        }
         let max_item_length_millimeters = match self.raw_fields.get("max_item_length") {
             Some(value) => u64::try_from(
                 parse_quantity(
@@ -537,6 +550,7 @@ impl PocketDefinition {
             pocket_id: self.pocket_id.clone(),
             kind,
             max_contains_volume_milliliters,
+            magazine_well_volume_milliliters,
             max_contains_weight_milligrams,
             max_item_volume_milliliters: quantity(
                 "max_item_volume",
@@ -3429,6 +3443,7 @@ mod tests {
                 pocket_id: String::from("physical"),
                 kind: SpawnPocketKindDefinition::Container,
                 max_contains_volume_milliliters: 2_000,
+                magazine_well_volume_milliliters: 0,
                 max_contains_weight_milligrams: 3_000_000,
                 max_item_volume_milliliters: 1_500,
                 min_item_volume_milliliters: 5,
@@ -3515,6 +3530,54 @@ mod tests {
             assert!(
                 load_one(&unsupported, &mut items, &mut abstracts)
                     .expect("unsupported pocket should remain inventoried")
+            );
+            assert!(items[id].spawn_pockets.is_empty());
+            assert!(items[id].unsupported_fields.contains("pocket_data"));
+        }
+    }
+
+    #[test]
+    fn flexible_spawn_pockets_preserve_reserved_base_volume_fail_closed() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let wrapper = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_flexible_wrapper",
+            "name": "test flexible wrapper",
+            "pocket_data": [{
+                "pocket_type": "CONTAINER",
+                "magazine_well": "45 ml",
+                "max_contains_volume": "2500 ml",
+                "max_contains_weight": "6 kg"
+            }]
+        }));
+        assert!(load_one(&wrapper, &mut items, &mut abstracts).expect("wrapper should load"));
+        let [pocket] = items["test_flexible_wrapper"].spawn_pockets.as_slice() else {
+            panic!("flexible wrapper should retain one strict spawn pocket")
+        };
+        assert!(!pocket.rigid);
+        assert_eq!(pocket.magazine_well_volume_milliliters, 45);
+        assert_eq!(pocket.max_contains_volume_milliliters, 2_500);
+
+        for (id, magazine_well, rigid) in [
+            ("test_reserved_equals_capacity", "2500 ml", false),
+            ("test_reserved_rigid", "45 ml", true),
+        ] {
+            let unsupported = raw(serde_json::json!({
+                "type": "ITEM",
+                "id": id,
+                "name": id,
+                "pocket_data": [{
+                    "pocket_type": "CONTAINER",
+                    "magazine_well": magazine_well,
+                    "max_contains_volume": "2500 ml",
+                    "max_contains_weight": "6 kg",
+                    "rigid": rigid
+                }]
+            }));
+            assert!(
+                load_one(&unsupported, &mut items, &mut abstracts)
+                    .expect("unsupported reserved-volume shape should remain inventoried")
             );
             assert!(items[id].spawn_pockets.is_empty());
             assert!(items[id].unsupported_fields.contains("pocket_data"));

@@ -154,6 +154,7 @@
         "content_types": ["water_clean"],
         "payload_charges": 2,
         "sealed": true,
+        "pocket_collapsed": true,
         "downstream_draw": 8831
       },
       {
@@ -163,6 +164,7 @@
         "content_types": ["aspirin"],
         "payload_charges": 0,
         "sealed": false,
+        "pocket_collapsed": true,
         "downstream_draw": 8831
       },
       {
@@ -172,6 +174,7 @@
         "content_types": ["aspirin"],
         "payload_charges": 0,
         "sealed": false,
+        "pocket_collapsed": true,
         "downstream_draw": 8831
       },
       {
@@ -181,6 +184,7 @@
         "content_types": [],
         "payload_charges": -1,
         "sealed": false,
+        "pocket_collapsed": false,
         "downstream_draw": 8831
       },
       {
@@ -190,6 +194,7 @@
         "content_types": ["ibuprofen", "aspirin"],
         "payload_charges": 0,
         "sealed": false,
+        "pocket_collapsed": true,
         "downstream_draw": 8323
       },
       {
@@ -199,6 +204,7 @@
         "content_types": ["aspirin"],
         "payload_charges": 0,
         "sealed": false,
+        "pocket_collapsed": true,
         "downstream_draw": 7093
       },
       {
@@ -213,7 +219,85 @@
         ],
         "payload_charges": 0,
         "sealed": false,
+        "pocket_collapsed": true,
         "downstream_draw": 6790
+      }
+    ],
+    "flexible_wrappers": [
+      {
+        "case_id": "production_chaw_minimum",
+        "seed": 30,
+        "outer_type": "wrapper",
+        "outer_variant": "",
+        "pocket_rigid": false,
+        "pocket_collapsed_by_default": false,
+        "pocket_collapsed": true,
+        "content_types": ["chaw"],
+        "content_variants": [""],
+        "content_charges": [0],
+        "outer_volume_ml": 50,
+        "outer_weight_g": 7,
+        "pocket_capacity_volume_ml": 2500,
+        "pocket_remaining_volume_ml": 2496,
+        "pocket_remaining_weight_g": 5996,
+        "sealed": false,
+        "downstream_draw": 8189
+      },
+      {
+        "case_id": "production_chaw_maximum",
+        "seed": 5,
+        "outer_type": "wrapper",
+        "outer_variant": "",
+        "pocket_rigid": false,
+        "pocket_collapsed_by_default": false,
+        "pocket_collapsed": true,
+        "content_types": [
+          "chaw", "chaw", "chaw", "chaw", "chaw",
+          "chaw", "chaw", "chaw", "chaw", "chaw",
+          "chaw", "chaw", "chaw", "chaw", "chaw",
+          "chaw", "chaw", "chaw", "chaw", "chaw"
+        ],
+        "content_variants": [
+          "", "", "", "", "", "", "", "", "", "",
+          "", "", "", "", "", "", "", "", "", ""
+        ],
+        "content_charges": [
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ],
+        "outer_volume_ml": 85,
+        "outer_weight_g": 83,
+        "pocket_capacity_volume_ml": 2500,
+        "pocket_remaining_volume_ml": 2420,
+        "pocket_remaining_weight_g": 5920,
+        "sealed": false,
+        "downstream_draw": 6790
+      },
+      {
+        "case_id": "production_chewing_gum",
+        "seed": 1,
+        "outer_type": "blister_pack_small",
+        "outer_variant": "blister_pack_gum",
+        "pocket_rigid": false,
+        "pocket_collapsed_by_default": true,
+        "pocket_collapsed": true,
+        "content_types": [
+          "gum", "gum", "gum", "gum", "gum", "gum",
+          "gum", "gum", "gum", "gum", "gum", "gum"
+        ],
+        "content_variants": [
+          "gum_watermelon", "gum_watermelon", "gum_watermelon", "gum_watermelon",
+          "gum_watermelon", "gum_watermelon", "gum_watermelon", "gum_watermelon",
+          "gum_watermelon", "gum_watermelon", "gum_watermelon", "gum_watermelon"
+        ],
+        "content_charges": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "outer_volume_ml": 31,
+        "outer_weight_g": 41,
+        "pocket_capacity_volume_ml": 50,
+        "pocket_remaining_volume_ml": 26,
+        "pocket_remaining_weight_g": 14,
+        "sealed": false,
+        "downstream_draw": 6872
       }
     ],
     "temperature_constructors": [

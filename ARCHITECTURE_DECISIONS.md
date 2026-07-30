@@ -3335,3 +3335,49 @@ the V68 domain yields
 `ecf2ff2770054b46562dd7cad15c3aa9326586594374b2710af84754beef6a6a`.
 The prior V67 fixture remains documented as historical evidence rather than
 being mechanically overwritten.
+
+## Flexible containment closes at Protocol 93
+
+Protocol 93 advances to schema 71 and CanonicalStateV69 while retaining
+worldgen algorithm 2, replay format 3, and CanonicalEventsV18. This is the
+single final representation checkpoint for the currently supported containment
+family: wrapper ownership, contents-item and contents-group sources, sealing,
+spill/discard overflow, snippets, variables, default containers, flexible
+physical pockets, reserved base volume, and collapsed presentation state.
+
+A physical pocket now retains the volume already included in its owner as a
+`magazine_well` reserve. Rigid and E-file pockets require a zero reserve;
+flexible external volume is `max(contents - reserve, 0)`. Insertion and wrapper
+planning share that one checked helper. Runtime state stores both the
+constructor default and the actual collapsed setting. Construction applies the
+default first, then reproduces pinned `add_automatic_whitelist`: an item with
+exactly one physical pocket becomes collapsed after a nonempty homogeneous
+fill. Rust deliberately accepts only exact equivalent planned stacks for that
+automatic transition, keeping broader unrepresented `stacks_with` cases fail
+closed.
+
+The item-group oracle records exact one- and twenty-item paper-wrapper traces,
+the production chewing-gum blister pack, and actual collapse on all seven
+default-container traces. The paper wrapper proves the important split between
+an open constructor default and collapsed post-fill state; chewing gum proves
+the explicit `COLLAPSE_CONTENTS` default. Together with the existing overflow
+and ownership witnesses, 137 C++ assertions and the direct production Rust
+projection cover the generalized engine rather than aggregate counts alone.
+
+Direct, per-tick snapshot, SQLite, and portable replay conformance retain a
+mixed flexible sealed wrapper, 45 ml reserve, nested auto-collapsed painkiller
+bottle, stable preorder IDs, and temperature state. The normal Bevy item menu
+renders collapsed pockets and retains server-authoritative removal. Selected
+runtime admission gains `chaw_wrapper_1_20`, `chewing_gum_full`, and exactly six
+furniture bashes: `f_earthbag_half`, `f_earthbag_wall`, `f_exodii_charger`,
+`f_exodii_pump`, `f_pillow_fort`, and `f_string_dimension_pump`. The complete
+field scan remains fail closed at `chewing_gum_full_caff` because material
+thermodynamics for `caff_gum` is not represented. No weighted runtime credit is
+awarded until that real field is generated, explored, looted, persisted, and
+client-accessible.
+
+The Postcard bytes for the representative item-flow fixture are unchanged:
+the old V68 domain still yields
+`ecf2ff2770054b46562dd7cad15c3aa9326586594374b2710af84754beef6a6a`.
+Only the deliberate V69 domain changes that fixture to
+`5f662ff59bc4c66b4c7e0700fdb0838bf41bac385a513458531d5af255bc5456`.

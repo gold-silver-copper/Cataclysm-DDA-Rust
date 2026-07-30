@@ -1,10 +1,10 @@
 {
   "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "green_parent_commit": "e4f74aff4a84019c35818aa0a6746ce33bf309e8",
-  "verified_commit": "84509b8ebb7ceb6b68456e9473ea0816d2b24a80",
-  "protocol_version": 92,
-  "persistence_schema_version": 70,
+  "green_parent_commit": "4ee1df59495691c256ccaa7dfd1c1dec0e6afded",
+  "verified_commit": null,
+  "protocol_version": 93,
+  "persistence_schema_version": 71,
   "replay_format_version": 3,
   "evidence_weights": {
     "generated": 1,

@@ -14,14 +14,15 @@ use cdda_protocol::{
     ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1,
     ItemGroupContainerV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
     ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
-    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemPhaseV1, MagazineWellPrototypeV1, SimTick,
-    SpawnPocketKindV1, SpawnPocketRulesV1, TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT,
-    WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldPosition,
-    WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1,
-    WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
-    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
-    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedTerrainTargetV1, initial_item_temperature_state, worldgen_omt_matches,
+    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemPhaseV1,
+    ItemVariantV1, MagazineWellPrototypeV1, SimTick, SpawnPocketKindV1, SpawnPocketRulesV1,
+    TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT,
+    WORLDGEN_OVERMAP_WIDTH, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, WorldgenCellV1,
+    WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1,
+    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
+    WorldgenOvermapRunV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedTerrainTargetV1,
+    initial_item_temperature_state, worldgen_omt_matches,
 };
 use cdda_sim::{ReservedIdBlock, WorldState};
 use rand::{SeedableRng, rngs::StdRng};
@@ -127,6 +128,7 @@ struct ItemGroupOracleObservationV1 {
     modifiers: ItemGroupModifierObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
     default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
+    flexible_wrappers: Vec<ItemGroupFlexibleWrapperTraceV1>,
     temperature_constructors: Vec<ItemGroupTemperatureConstructorTraceV1>,
     containers: Vec<ItemGroupContainerObservationV1>,
     everyday_corpse: ItemGroupCorpseObservationV1,
@@ -420,6 +422,7 @@ struct ItemGroupDefaultContainerTraceV1 {
     content_types: Vec<String>,
     payload_charges: i32,
     sealed: bool,
+    pocket_collapsed: bool,
     downstream_draw: i32,
 }
 
@@ -430,6 +433,7 @@ struct ItemGroupDefaultContainerDirectV1 {
     content_types: Vec<String>,
     payload_charges: Option<i32>,
     sealed: bool,
+    pocket_collapsed: bool,
 }
 
 impl ItemGroupDefaultContainerTraceV1 {
@@ -439,6 +443,70 @@ impl ItemGroupDefaultContainerTraceV1 {
             outer_type: self.outer_type.clone(),
             content_types: self.content_types.clone(),
             payload_charges: (self.payload_charges >= 0).then_some(self.payload_charges),
+            sealed: self.sealed,
+            pocket_collapsed: self.pocket_collapsed,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupFlexibleWrapperTraceV1 {
+    case_id: String,
+    seed: u32,
+    outer_type: String,
+    outer_variant: String,
+    pocket_rigid: bool,
+    pocket_collapsed_by_default: bool,
+    pocket_collapsed: bool,
+    content_types: Vec<String>,
+    content_variants: Vec<String>,
+    content_charges: Vec<i32>,
+    outer_volume_ml: u64,
+    outer_weight_g: u64,
+    pocket_capacity_volume_ml: u64,
+    pocket_remaining_volume_ml: u64,
+    pocket_remaining_weight_g: u64,
+    sealed: bool,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupFlexibleWrapperDirectV1 {
+    case_id: String,
+    outer_type: String,
+    outer_variant: String,
+    pocket_rigid: bool,
+    pocket_collapsed_by_default: bool,
+    pocket_collapsed: bool,
+    content_types: Vec<String>,
+    content_variants: Vec<String>,
+    content_charges: Vec<i32>,
+    outer_volume_ml: u64,
+    outer_weight_g: u64,
+    pocket_capacity_volume_ml: u64,
+    pocket_remaining_volume_ml: u64,
+    pocket_remaining_weight_g: u64,
+    sealed: bool,
+}
+
+impl ItemGroupFlexibleWrapperTraceV1 {
+    fn direct_projection(&self) -> ItemGroupFlexibleWrapperDirectV1 {
+        ItemGroupFlexibleWrapperDirectV1 {
+            case_id: self.case_id.clone(),
+            outer_type: self.outer_type.clone(),
+            outer_variant: self.outer_variant.clone(),
+            pocket_rigid: self.pocket_rigid,
+            pocket_collapsed_by_default: self.pocket_collapsed_by_default,
+            pocket_collapsed: self.pocket_collapsed,
+            content_types: self.content_types.clone(),
+            content_variants: self.content_variants.clone(),
+            content_charges: self.content_charges.clone(),
+            outer_volume_ml: self.outer_volume_ml,
+            outer_weight_g: self.outer_weight_g,
+            pocket_capacity_volume_ml: self.pocket_capacity_volume_ml,
+            pocket_remaining_volume_ml: self.pocket_remaining_volume_ml,
+            pocket_remaining_weight_g: self.pocket_remaining_weight_g,
             sealed: self.sealed,
         }
     }
@@ -746,6 +814,15 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                     .map(ItemGroupDefaultContainerTraceV1::direct_projection)
                     .collect::<Vec<_>>(),
                 &rust_item_group_default_container_observation()?,
+            )?;
+            compare_direct_observation(
+                "item-group flexible-wrapper containment",
+                &observation
+                    .flexible_wrappers
+                    .iter()
+                    .map(ItemGroupFlexibleWrapperTraceV1::direct_projection)
+                    .collect::<Vec<_>>(),
+                &rust_item_group_flexible_wrapper_observation()?,
             )?;
             compare_direct_observation(
                 "item constructor temperature state",
@@ -1321,6 +1398,7 @@ fn validate_item_group_observation(
             vec!["water_clean"],
             2,
             true,
+            true,
             8_831,
         ),
         (
@@ -1330,6 +1408,7 @@ fn validate_item_group_observation(
             vec!["aspirin"],
             0,
             false,
+            true,
             8_831,
         ),
         (
@@ -1339,6 +1418,7 @@ fn validate_item_group_observation(
             vec!["aspirin"],
             0,
             false,
+            true,
             8_831,
         ),
         (
@@ -1347,6 +1427,7 @@ fn validate_item_group_observation(
             "aspirin",
             vec![],
             -1,
+            false,
             false,
             8_831,
         ),
@@ -1357,6 +1438,7 @@ fn validate_item_group_observation(
             vec!["ibuprofen", "aspirin"],
             0,
             false,
+            true,
             8_323,
         ),
         (
@@ -1366,6 +1448,7 @@ fn validate_item_group_observation(
             vec!["aspirin"],
             0,
             false,
+            true,
             7_093,
         ),
         (
@@ -1375,6 +1458,7 @@ fn validate_item_group_observation(
             vec!["aspirin"; 20],
             0,
             false,
+            true,
             6_790,
         ),
     ];
@@ -1393,6 +1477,7 @@ fn validate_item_group_observation(
                         content_types,
                         payload_charges,
                         sealed,
+                        pocket_collapsed,
                         downstream_draw,
                     ),
                 )| {
@@ -1406,6 +1491,7 @@ fn validate_item_group_observation(
                             .ne(content_types)
                         || actual.payload_charges != payload_charges
                         || actual.sealed != sealed
+                        || actual.pocket_collapsed != pocket_collapsed
                         || actual.downstream_draw != downstream_draw
                 },
             )
@@ -1413,6 +1499,67 @@ fn validate_item_group_observation(
         return Err(format!(
             "item-group default-container characterization is incomplete: {:?}",
             observation.default_containers
+        )
+        .into());
+    }
+    let [chaw_minimum, chaw_maximum, chewing_gum] = observation.flexible_wrappers.as_slice() else {
+        return Err("flexible-wrapper characterization must retain both boundaries and the collapsed production case".into());
+    };
+    if chaw_minimum.case_id != "production_chaw_minimum"
+        || chaw_minimum.seed != 30
+        || chaw_minimum.outer_type != "wrapper"
+        || !chaw_minimum.outer_variant.is_empty()
+        || chaw_minimum.pocket_rigid
+        || chaw_minimum.pocket_collapsed_by_default
+        || !chaw_minimum.pocket_collapsed
+        || chaw_minimum.content_types != ["chaw"]
+        || chaw_minimum.content_variants != [""]
+        || chaw_minimum.content_charges != [0]
+        || chaw_minimum.outer_volume_ml != 50
+        || chaw_minimum.outer_weight_g != 7
+        || chaw_minimum.pocket_capacity_volume_ml != 2_500
+        || chaw_minimum.pocket_remaining_volume_ml != 2_496
+        || chaw_minimum.pocket_remaining_weight_g != 5_996
+        || chaw_minimum.sealed
+        || chaw_minimum.downstream_draw != 8_189
+        || chaw_maximum.case_id != "production_chaw_maximum"
+        || chaw_maximum.seed != 5
+        || chaw_maximum.outer_type != "wrapper"
+        || !chaw_maximum.outer_variant.is_empty()
+        || chaw_maximum.pocket_rigid
+        || chaw_maximum.pocket_collapsed_by_default
+        || !chaw_maximum.pocket_collapsed
+        || chaw_maximum.content_types != vec![String::from("chaw"); 20]
+        || chaw_maximum.content_variants != vec![String::new(); 20]
+        || chaw_maximum.content_charges != vec![0; 20]
+        || chaw_maximum.outer_volume_ml != 85
+        || chaw_maximum.outer_weight_g != 83
+        || chaw_maximum.pocket_capacity_volume_ml != 2_500
+        || chaw_maximum.pocket_remaining_volume_ml != 2_420
+        || chaw_maximum.pocket_remaining_weight_g != 5_920
+        || chaw_maximum.sealed
+        || chaw_maximum.downstream_draw != 6_790
+        || chewing_gum.case_id != "production_chewing_gum"
+        || chewing_gum.seed != 1
+        || chewing_gum.outer_type != "blister_pack_small"
+        || chewing_gum.outer_variant != "blister_pack_gum"
+        || chewing_gum.pocket_rigid
+        || !chewing_gum.pocket_collapsed_by_default
+        || !chewing_gum.pocket_collapsed
+        || chewing_gum.content_types != vec![String::from("gum"); 12]
+        || chewing_gum.content_variants != vec![String::from("gum_watermelon"); 12]
+        || chewing_gum.content_charges != vec![0; 12]
+        || chewing_gum.outer_volume_ml != 31
+        || chewing_gum.outer_weight_g != 41
+        || chewing_gum.pocket_capacity_volume_ml != 50
+        || chewing_gum.pocket_remaining_volume_ml != 26
+        || chewing_gum.pocket_remaining_weight_g != 14
+        || chewing_gum.sealed
+        || chewing_gum.downstream_draw != 6_872
+    {
+        return Err(format!(
+            "flexible-wrapper characterization is incomplete: {:?}",
+            observation.flexible_wrappers
         )
         .into());
     }
@@ -2075,6 +2222,8 @@ fn rust_item_group_default_container_observation()
             spawn_rules: Some(SpawnPocketRulesV1 {
                 kind: SpawnPocketKindV1::Container,
                 max_contains_volume_milliliters: maximum_volume,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
                 max_contains_weight_milligrams: maximum_weight,
                 max_item_volume_milliliters: maximum_item_volume,
                 min_item_volume_milliliters: 0,
@@ -2188,6 +2337,184 @@ fn rust_item_group_default_container_observation()
             outer_type: projection.outer_type,
             content_types: projection.content_types,
             payload_charges: projection.payload_charges,
+            sealed: projection.sealed,
+            pocket_collapsed: projection.pocket_collapsed,
+        })
+    })
+    .collect()
+}
+
+fn rust_item_group_flexible_wrapper_observation()
+-> Result<Vec<ItemGroupFlexibleWrapperDirectV1>, Box<dyn std::error::Error>> {
+    let plain = |type_id: &str| ItemGroupItemPrototypeV1 {
+        prototype: CraftItemPrototypeV1 {
+            type_id: type_id.to_owned(),
+            charges: 0,
+            melee_damage_milli: BTreeMap::new(),
+            calories: 0,
+            quench: 0,
+            comestible_type: String::new(),
+            tracks_temperature: false,
+            ammunition_type: String::new(),
+            ranged_weapon: None,
+            magazine_capacity: 0,
+            integral_magazines: Vec::new(),
+            magazine_wells: Vec::new(),
+            ammunition_containers: Vec::new(),
+            residual_energy_millijoules: 0,
+            powered_tool: None,
+            containment: ItemContainmentProfileV1::default(),
+        },
+        maximum_raw_damage: 0,
+        variants: Vec::new(),
+        description_expansion: None,
+        snippets: Vec::new(),
+        initial_variables: BTreeMap::new(),
+        default_container: None,
+        modifier_side_effects_supported: true,
+        charges: None,
+        minimum_one_charge: false,
+        tool_charge_storage: None,
+        charges_supported: true,
+        modifier_container_capacity_applies: true,
+        contents_insertion_supported: true,
+    };
+    let variant = |id: &str| ItemGroupVariantOptionV1 {
+        variant: ItemVariantV1 {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            description: String::new(),
+            symbol: String::new(),
+            color: String::new(),
+            ascii_picture: String::new(),
+        },
+        weight: 1,
+        description_expansion: None,
+    };
+    let wrapper = |type_id: &str,
+                   own_volume: u64,
+                   own_weight: u64,
+                   capacity_volume: u64,
+                   reserved_volume: u64,
+                   capacity_weight: u64,
+                   collapsed: bool,
+                   variant_id: Option<&str>| {
+        let mut item = plain(type_id);
+        item.prototype.containment = ItemContainmentProfileV1 {
+            weight_milligrams: own_weight,
+            volume_milliliters: own_volume,
+            longest_side_millimeters: 102,
+            stack_size: 1,
+            phase: ItemPhaseV1::Solid,
+            ..ItemContainmentProfileV1::default()
+        };
+        if let Some(variant_id) = variant_id {
+            item.variants.push(variant(variant_id));
+        }
+        item.prototype.ammunition_containers = vec![AmmunitionContainerPocketPrototypeV1 {
+            pocket_index: 0,
+            pocket_id: String::new(),
+            capacities: Vec::new(),
+            access_moves: 400,
+            rigid: false,
+            reloadable: false,
+            unloadable: true,
+            spawn_rules: Some(SpawnPocketRulesV1 {
+                kind: SpawnPocketKindV1::Container,
+                max_contains_volume_milliliters: capacity_volume,
+                magazine_well_volume_milliliters: reserved_volume,
+                contents_collapsed_by_default: collapsed,
+                max_contains_weight_milligrams: capacity_weight,
+                max_item_volume_milliliters: capacity_volume,
+                min_item_volume_milliliters: 0,
+                max_item_length_millimeters: 1_000,
+                item_restrictions: Vec::new(),
+                flag_restrictions: Vec::new(),
+                access_moves: 400,
+                rigid: false,
+                watertight: false,
+                transparent: true,
+                forbidden: false,
+                sealable: false,
+            }),
+        }];
+        ItemGroupContainerV1 {
+            item: Box::new(item),
+            variant_id: variant_id.map(str::to_owned),
+            sealed: false,
+            overflow: ItemGroupOverflowV1::None,
+        }
+    };
+    let mut chaw = plain("chaw");
+    chaw.prototype.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 4_000,
+        volume_milliliters: 4,
+        stack_size: 1,
+        phase: ItemPhaseV1::Solid,
+        ..ItemContainmentProfileV1::default()
+    };
+    let mut gum = plain("gum");
+    gum.prototype.containment = ItemContainmentProfileV1 {
+        weight_milligrams: 3_000,
+        volume_milliliters: 2,
+        stack_size: 1,
+        phase: ItemPhaseV1::Solid,
+        ..ItemContainmentProfileV1::default()
+    };
+    let gum_variant = "gum_watermelon";
+    gum.variants.push(variant(gum_variant));
+    [
+        (
+            "production_chaw_minimum",
+            &chaw,
+            wrapper("wrapper", 50, 3_000, 2_500, 45, 6_000_000, false, None),
+            1,
+            None,
+        ),
+        (
+            "production_chaw_maximum",
+            &chaw,
+            wrapper("wrapper", 50, 3_000, 2_500, 45, 6_000_000, false, None),
+            20,
+            None,
+        ),
+        (
+            "production_chewing_gum",
+            &gum,
+            wrapper(
+                "blister_pack_small",
+                7,
+                5_000,
+                50,
+                0,
+                50_000,
+                true,
+                Some("blister_pack_gum"),
+            ),
+            12,
+            Some(gum_variant),
+        ),
+    ]
+    .into_iter()
+    .map(|(case_id, item, wrapper, count, content_variant)| {
+        let projection =
+            cdda_sim::item_group_flexible_wrapper_projection(item, wrapper, count, content_variant)
+                .map_err(|error| format!("Rust flexible-wrapper projection failed: {error}"))?;
+        Ok(ItemGroupFlexibleWrapperDirectV1 {
+            case_id: case_id.to_owned(),
+            outer_type: projection.outer_type,
+            outer_variant: projection.outer_variant,
+            pocket_rigid: projection.pocket_rigid,
+            pocket_collapsed_by_default: projection.pocket_collapsed_by_default,
+            pocket_collapsed: projection.pocket_collapsed,
+            content_types: projection.content_types,
+            content_variants: projection.content_variants,
+            content_charges: projection.content_charges,
+            outer_volume_ml: projection.outer_volume_milliliters,
+            outer_weight_g: projection.outer_weight_grams,
+            pocket_capacity_volume_ml: projection.pocket_capacity_volume_milliliters,
+            pocket_remaining_volume_ml: projection.pocket_remaining_volume_milliliters,
+            pocket_remaining_weight_g: projection.pocket_remaining_weight_grams,
             sealed: projection.sealed,
         })
     })

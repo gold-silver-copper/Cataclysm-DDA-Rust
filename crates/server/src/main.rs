@@ -2174,6 +2174,11 @@ fn runtime_ammunition_containers(
                         }
                     },
                     max_contains_volume_milliliters: pocket.max_contains_volume_milliliters,
+                    magazine_well_volume_milliliters: pocket.magazine_well_volume_milliliters,
+                    contents_collapsed_by_default: matches!(
+                        pocket.kind,
+                        cdda_content::SpawnPocketKindDefinition::Container
+                    ) && item.flags.contains("COLLAPSE_CONTENTS"),
                     max_contains_weight_milligrams: pocket.max_contains_weight_milligrams,
                     max_item_volume_milliliters: pocket.max_item_volume_milliliters,
                     min_item_volume_milliliters: pocket.min_item_volume_milliliters,
@@ -4758,12 +4763,55 @@ mod tests {
                         )
                 })
         );
+        let chaw_wrapper = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("chaw_wrapper_1_20")
+                .expect("field closure should retain chewing tobacco wrappers"),
+            item_group_content,
+        )
+        .expect("flexible reserved-volume wrappers should normalize");
+        let chaw_wrapper = chaw_wrapper
+            .wrapper
+            .as_ref()
+            .expect("chewing tobacco should retain its group wrapper");
+        assert_eq!(chaw_wrapper.item.prototype.type_id, "wrapper");
+        let [chaw_pocket] = chaw_wrapper.item.prototype.ammunition_containers.as_slice() else {
+            panic!("paper wrapper should retain one physical pocket")
+        };
+        let chaw_rules = chaw_pocket
+            .spawn_rules
+            .as_ref()
+            .expect("paper wrapper should retain spawn rules");
+        assert!(!chaw_rules.rigid);
+        assert_eq!(chaw_rules.magazine_well_volume_milliliters, 45);
+        assert!(!chaw_rules.contents_collapsed_by_default);
+
+        let chewing_gum = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("chewing_gum_full")
+                .expect("field closure should retain ordinary chewing gum"),
+            item_group_content,
+        )
+        .expect("COLLAPSE_CONTENTS wrappers should normalize");
+        let gum_wrapper = chewing_gum
+            .wrapper
+            .as_ref()
+            .expect("chewing gum should retain its blister pack");
+        assert_eq!(gum_wrapper.variant_id.as_deref(), Some("blister_pack_gum"));
+        assert!(
+            gum_wrapper.item.prototype.ammunition_containers[0]
+                .spawn_rules
+                .as_ref()
+                .is_some_and(|rules| rules.contents_collapsed_by_default)
+        );
         assert_eq!(
             field_runtime_errors.first(),
             Some(&(
-                "chaw_wrapper_1_20",
+                "chewing_gum_full_caff",
                 String::from(
-                    "item-group wrappers require exactly one rigid physical container pocket",
+                    "temperature-tracked item caff_gum requires unimplemented material thermodynamics",
                 ),
             )),
             "the field closure must retain its exact next unsupported semantic boundary"
@@ -5242,8 +5290,8 @@ mod tests {
         .expect("admitted furniture bashes should normalize");
         assert_eq!(
             furniture_bashes.len(),
-            524,
-            "unsupported containment, constructor state, and temperature paths must remain closed"
+            530,
+            "only the six audited flexible/collapsed containment bashes should newly normalize"
         );
         for furniture_id in [
             "f_cardboard_door_o",
@@ -5255,6 +5303,21 @@ mod tests {
                     .iter()
                     .any(|bash| bash.furniture_id == furniture_id),
                 "the audited damage/variant family should admit {furniture_id}"
+            );
+        }
+        for furniture_id in [
+            "f_earthbag_half",
+            "f_earthbag_wall",
+            "f_exodii_charger",
+            "f_exodii_pump",
+            "f_pillow_fort",
+            "f_string_dimension_pump",
+        ] {
+            assert!(
+                furniture_bashes
+                    .iter()
+                    .any(|bash| bash.furniture_id == furniture_id),
+                "the audited flexible/collapsed containment family should admit {furniture_id}"
             );
         }
         let furniture_bash_ids = furniture
@@ -5280,15 +5343,11 @@ mod tests {
             "f_beach_seaweed",
             "f_drophammer",
             "f_dumpster",
-            "f_exodii_charger",
             "f_exodii_charger_cheap",
-            "f_exodii_pump",
             "f_firefly_terrarium",
             "f_hay",
-            "f_pillow_fort",
             "f_power_hammer",
             "f_straw_bed",
-            "f_string_dimension_pump",
             "f_tatami",
             "f_treadmill",
         ] {

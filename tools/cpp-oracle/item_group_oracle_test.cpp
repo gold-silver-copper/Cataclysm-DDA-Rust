@@ -422,6 +422,27 @@ struct default_container_trace {
     std::vector<std::string> content_types;
     int payload_charges = -1;
     bool sealed = false;
+    bool pocket_collapsed = false;
+    int downstream_draw = 0;
+};
+
+struct flexible_wrapper_trace {
+    std::string case_id;
+    unsigned int seed = 0;
+    std::string outer_type;
+    std::string outer_variant;
+    bool pocket_rigid = false;
+    bool pocket_collapsed_by_default = false;
+    bool pocket_collapsed = false;
+    std::vector<std::string> content_types;
+    std::vector<std::string> content_variants;
+    std::vector<int> content_charges;
+    std::int64_t outer_volume_ml = 0;
+    std::int64_t outer_weight_g = 0;
+    std::int64_t pocket_capacity_volume_ml = 0;
+    std::int64_t pocket_remaining_volume_ml = 0;
+    std::int64_t pocket_remaining_weight_g = 0;
+    bool sealed = false;
     int downstream_draw = 0;
 };
 
@@ -507,6 +528,10 @@ default_container_trace observe_default_container( const std::string &case_id,
     REQUIRE( items.size() == 1 );
     const item &outer = items.front();
     const std::list<const item *> contents = outer.all_items_top();
+    const std::vector<const item_pocket *> pockets = outer.get_pockets(
+                []( const item_pocket & pocket ) {
+        return pocket.is_type( pocket_type::CONTAINER );
+    } );
     std::vector<std::string> content_types;
     int payload_charges = -1;
     for( const item *content : contents ) {
@@ -522,6 +547,7 @@ default_container_trace observe_default_container( const std::string &case_id,
         std::move( content_types ),
         payload_charges,
         outer.any_pockets_sealed(),
+        pockets.size() == 1 && pockets.front()->settings.is_collapsed(),
         rng( 0, 9999 )
     };
 }
@@ -543,6 +569,10 @@ default_container_trace observe_painkiller_group_boundary( const std::string &ca
         }
         const item &outer = items.front();
         const std::list<const item *> contents = outer.all_items_top();
+        const std::vector<const item_pocket *> pockets = outer.get_pockets(
+                    []( const item_pocket & pocket ) {
+            return pocket.is_type( pocket_type::CONTAINER );
+        } );
         if( contents.size() != expected_count ||
             std::any_of( contents.begin(), contents.end(), []( const item * content ) {
             return content->typeId() != itype_id( "aspirin" );
@@ -557,10 +587,133 @@ default_container_trace observe_painkiller_group_boundary( const std::string &ca
             std::move( content_types ),
             contents.empty() ? -1 : ( *contents.begin() )->charges,
             outer.any_pockets_sealed(),
+            pockets.size() == 1 && pockets.front()->settings.is_collapsed(),
             rng( 0, 9999 )
         };
     }
     FAIL( "could not find production painkiller default-container boundary" );
+    return {};
+}
+
+flexible_wrapper_trace observe_chaw_wrapper_boundary( const std::string &case_id,
+        std::size_t expected_count )
+{
+    constexpr const char *group_id = "chaw_wrapper_1_20";
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        Single_item_creator creator( group_id, Single_item_creator::S_ITEM_GROUP, 100,
+                                     "Rust production flexible-wrapper oracle" );
+        Item_spawn_data::ItemList items;
+        Item_spawn_data::RecursionList recursion;
+        rng_set_engine_seed( seed );
+        creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+        if( items.size() != 1 || items.front().typeId() != itype_id( "wrapper" ) ) {
+            continue;
+        }
+        const item &outer = items.front();
+        const std::list<const item *> contents = outer.all_items_top( pocket_type::CONTAINER );
+        const std::vector<const item_pocket *> pockets = outer.get_pockets(
+                    []( const item_pocket & pocket ) {
+            return pocket.is_type( pocket_type::CONTAINER );
+        } );
+        if( contents.size() != expected_count || pockets.size() != 1 ||
+            std::any_of( contents.begin(), contents.end(), []( const item * content ) {
+            return content->typeId() != itype_id( "chaw" );
+        } ) ) {
+            continue;
+        }
+        std::vector<std::string> content_types;
+        std::vector<std::string> content_variants;
+        std::vector<int> content_charges;
+        content_types.reserve( contents.size() );
+        content_variants.reserve( contents.size() );
+        content_charges.reserve( contents.size() );
+        for( const item *content : contents ) {
+            content_types.push_back( content->typeId().str() );
+            content_variants.push_back( content->has_itype_variant( false ) ?
+                                        content->itype_variant().id : "" );
+            content_charges.push_back( content->charges );
+        }
+        const item_pocket &pocket = *pockets.front();
+        return {
+            case_id,
+            seed,
+            outer.typeId().str(),
+            outer.has_itype_variant( false ) ? outer.itype_variant().id : "",
+            pocket.rigid(),
+            outer.has_flag( flag_COLLAPSE_CONTENTS ),
+            pocket.settings.is_collapsed(),
+            std::move( content_types ),
+            std::move( content_variants ),
+            std::move( content_charges ),
+            units::to_milliliter( outer.volume() ),
+            units::to_gram( outer.weight() ),
+            units::to_milliliter( pocket.volume_capacity() ),
+            units::to_milliliter( pocket.remaining_volume() ),
+            units::to_gram( pocket.remaining_weight() ),
+            outer.any_pockets_sealed(),
+            rng( 0, 9999 )
+        };
+    }
+    FAIL( "could not find production flexible-wrapper boundary" );
+    return {};
+}
+
+flexible_wrapper_trace observe_chewing_gum_wrapper()
+{
+    constexpr const char *group_id = "chewing_gum_full";
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        Single_item_creator creator( group_id, Single_item_creator::S_ITEM_GROUP, 100,
+                                     "Rust production collapsed-wrapper oracle" );
+        Item_spawn_data::ItemList items;
+        Item_spawn_data::RecursionList recursion;
+        rng_set_engine_seed( seed );
+        creator.create( items, calendar::turn_zero, recursion, spawn_flags::none );
+        if( items.size() != 1 || items.front().typeId() != itype_id( "blister_pack_small" ) ) {
+            continue;
+        }
+        const item &outer = items.front();
+        const std::list<const item *> contents = outer.all_items_top( pocket_type::CONTAINER );
+        const std::vector<const item_pocket *> pockets = outer.get_pockets(
+                    []( const item_pocket & pocket ) {
+            return pocket.is_type( pocket_type::CONTAINER );
+        } );
+        if( contents.size() != 12 || pockets.size() != 1 ||
+            std::any_of( contents.begin(), contents.end(), []( const item * content ) {
+            return content->typeId() != itype_id( "gum" );
+        } ) ) {
+            continue;
+        }
+        std::vector<std::string> content_types;
+        std::vector<std::string> content_variants;
+        std::vector<int> content_charges;
+        for( const item *content : contents ) {
+            content_types.push_back( content->typeId().str() );
+            content_variants.push_back( content->has_itype_variant( false ) ?
+                                        content->itype_variant().id : "" );
+            content_charges.push_back( content->charges );
+        }
+        const item_pocket &pocket = *pockets.front();
+        return {
+            "production_chewing_gum",
+            seed,
+            outer.typeId().str(),
+            outer.has_itype_variant( false ) ? outer.itype_variant().id : "",
+            pocket.rigid(),
+            outer.has_flag( flag_COLLAPSE_CONTENTS ),
+            pocket.settings.is_collapsed(),
+            std::move( content_types ),
+            std::move( content_variants ),
+            std::move( content_charges ),
+            units::to_milliliter( outer.volume() ),
+            units::to_gram( outer.weight() ),
+            units::to_milliliter( pocket.volume_capacity() ),
+            units::to_milliliter( pocket.remaining_volume() ),
+            units::to_gram( pocket.remaining_weight() ),
+            outer.any_pockets_sealed(),
+            rng( 0, 9999 )
+        };
+    }
+    FAIL( "could not find production collapsed chewing-gum wrapper" );
     return {};
 }
 
@@ -1297,6 +1450,34 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         observe_painkiller_group_boundary( "production_aspirin_minimum", 1 ),
         observe_painkiller_group_boundary( "production_aspirin_maximum", 20 )
     };
+    const std::vector<flexible_wrapper_trace> flexible_wrappers = {
+        observe_chaw_wrapper_boundary( "production_chaw_minimum", 1 ),
+        observe_chaw_wrapper_boundary( "production_chaw_maximum", 20 ),
+        observe_chewing_gum_wrapper()
+    };
+    REQUIRE( flexible_wrappers[0].outer_type == "wrapper" );
+    REQUIRE_FALSE( flexible_wrappers[0].pocket_rigid );
+    REQUIRE_FALSE( flexible_wrappers[0].pocket_collapsed_by_default );
+    REQUIRE( flexible_wrappers[0].pocket_collapsed );
+    REQUIRE( flexible_wrappers[0].content_types == std::vector<std::string>{ "chaw" } );
+    REQUIRE( flexible_wrappers[0].content_charges == std::vector<int>{ 0 } );
+    REQUIRE( flexible_wrappers[0].outer_volume_ml == 50 );
+    REQUIRE( flexible_wrappers[0].pocket_remaining_volume_ml <
+             flexible_wrappers[0].pocket_capacity_volume_ml );
+    REQUIRE( flexible_wrappers[1].content_types == std::vector<std::string>( 20, "chaw" ) );
+    REQUIRE( flexible_wrappers[1].content_charges == std::vector<int>( 20, 0 ) );
+    REQUIRE( flexible_wrappers[1].outer_volume_ml > flexible_wrappers[0].outer_volume_ml );
+    REQUIRE( flexible_wrappers[1].outer_weight_g > flexible_wrappers[0].outer_weight_g );
+    REQUIRE( flexible_wrappers[1].pocket_remaining_volume_ml <
+             flexible_wrappers[0].pocket_remaining_volume_ml );
+    REQUIRE( flexible_wrappers[2].outer_variant == "blister_pack_gum" );
+    REQUIRE( flexible_wrappers[2].pocket_collapsed_by_default );
+    REQUIRE( flexible_wrappers[2].pocket_collapsed );
+    REQUIRE( flexible_wrappers[2].content_types == std::vector<std::string>( 12, "gum" ) );
+    REQUIRE( std::all_of( flexible_wrappers[2].content_variants.begin(),
+                         flexible_wrappers[2].content_variants.end(), []( const std::string & variant ) {
+        return !variant.empty();
+    } ) );
     const std::vector<temperature_constructor_trace> temperature_constructors = {
         observe_temperature_constructor( "materialless_comestible", "chaw", 123 ),
         observe_temperature_constructor( "material_comestible", "water_clean", 123 ),
@@ -1615,6 +1796,39 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.member( "content_types" );
             write_trace( json, trace.content_types );
             json.member( "payload_charges", trace.payload_charges );
+            json.member( "sealed", trace.sealed );
+            json.member( "pocket_collapsed", trace.pocket_collapsed );
+            json.member( "downstream_draw", trace.downstream_draw );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "flexible_wrappers" );
+        json.start_array();
+        for( const flexible_wrapper_trace &trace : flexible_wrappers ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "seed", trace.seed );
+            json.member( "outer_type", trace.outer_type );
+            json.member( "outer_variant", trace.outer_variant );
+            json.member( "pocket_rigid", trace.pocket_rigid );
+            json.member( "pocket_collapsed_by_default", trace.pocket_collapsed_by_default );
+            json.member( "pocket_collapsed", trace.pocket_collapsed );
+            json.member( "content_types" );
+            write_trace( json, trace.content_types );
+            json.member( "content_variants" );
+            write_trace( json, trace.content_variants );
+            json.member( "content_charges" );
+            json.start_array();
+            for( const int charges : trace.content_charges ) {
+                json.write( charges );
+            }
+            json.end_array();
+            json.member( "outer_volume_ml", trace.outer_volume_ml );
+            json.member( "outer_weight_g", trace.outer_weight_g );
+            json.member( "pocket_capacity_volume_ml", trace.pocket_capacity_volume_ml );
+            json.member( "pocket_remaining_volume_ml", trace.pocket_remaining_volume_ml );
+            json.member( "pocket_remaining_weight_g", trace.pocket_remaining_weight_g );
             json.member( "sealed", trace.sealed );
             json.member( "downstream_draw", trace.downstream_draw );
             json.end_object();

@@ -56,9 +56,9 @@ use cdda_protocol::{
 
 pub use items::{
     ItemGroupDefaultContainerMode, ItemGroupDefaultContainerProjection,
-    ItemGroupIntegralChargeProjection, expand_item_description,
+    ItemGroupFlexibleWrapperProjection, ItemGroupIntegralChargeProjection, expand_item_description,
     item_group_default_container_projection, item_group_fitted_after_phase,
-    item_group_integral_charge_projection,
+    item_group_flexible_wrapper_projection, item_group_integral_charge_projection,
 };
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
@@ -1372,6 +1372,8 @@ fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
             .windows(2)
             .all(|pair| pair[0] < pair[1])
         && rules.min_item_volume_milliliters <= rules.max_item_volume_milliliters
+        && rules.magazine_well_volume_milliliters < rules.max_contains_volume_milliliters
+        && (!rules.rigid || rules.magazine_well_volume_milliliters == 0)
         && match rules.kind {
             cdda_protocol::SpawnPocketKindV1::Container => {
                 rules.max_contains_volume_milliliters > 0
@@ -1379,7 +1381,11 @@ fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
                     && rules.max_item_volume_milliliters > 0
                     && rules.max_item_length_millimeters > 0
             }
-            cdda_protocol::SpawnPocketKindV1::EFileStorage => rules.rigid,
+            cdda_protocol::SpawnPocketKindV1::EFileStorage => {
+                rules.rigid
+                    && rules.magazine_well_volume_milliliters == 0
+                    && !rules.contents_collapsed_by_default
+            }
         }
 }
 
@@ -1428,6 +1434,7 @@ fn validate_ammunition_container_snapshot(
     }
     if let Some(state) = &pocket.spawn_state {
         if (state.sealed && !state.rules.sealable)
+            || (state.rules.contents_collapsed_by_default && !state.contents_collapsed)
             || state.rules.rigid != pocket.rigid
             || state.rules.access_moves != pocket.access_moves
         {
@@ -5046,8 +5053,10 @@ impl WorldState {
                             reloadable: pocket.reloadable,
                             unloadable: pocket.unloadable,
                             spawn_state: pocket.spawn_rules.map(|rules| {
+                                let contents_collapsed = rules.contents_collapsed_by_default;
                                 cdda_protocol::SpawnPocketStateV1 {
                                     rules,
+                                    contents_collapsed,
                                     sealed: false,
                                 }
                             }),
@@ -13659,7 +13668,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV68");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV69");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -23734,6 +23743,8 @@ mod tests {
             spawn_rules: Some(cdda_protocol::SpawnPocketRulesV1 {
                 kind: cdda_protocol::SpawnPocketKindV1::Container,
                 max_contains_volume_milliliters: 1,
+                magazine_well_volume_milliliters: 0,
+                contents_collapsed_by_default: false,
                 max_contains_weight_milligrams: 1,
                 max_item_volume_milliliters: 1,
                 min_item_volume_milliliters: 0,
@@ -23758,6 +23769,42 @@ mod tests {
         non_rigid_rules.rigid = false;
         assert!(matches!(
             validate_ammunition_container_prototype(&non_rigid_efile),
+            Err(SimError::InvalidItem)
+        ));
+        let invalid_rules = |mutate: fn(&mut cdda_protocol::SpawnPocketRulesV1)| {
+            let mut pocket = owner_prototype.ammunition_containers[0].clone();
+            mutate(
+                pocket
+                    .spawn_rules
+                    .as_mut()
+                    .expect("spawn rules should exist"),
+            );
+            pocket.rigid = pocket
+                .spawn_rules
+                .as_ref()
+                .expect("spawn rules should exist")
+                .rigid;
+            validate_ammunition_container_prototype(&pocket)
+        };
+        assert!(matches!(
+            invalid_rules(|rules| {
+                rules.rigid = false;
+                rules.magazine_well_volume_milliliters = rules.max_contains_volume_milliliters;
+            }),
+            Err(SimError::InvalidItem)
+        ));
+        assert!(matches!(
+            invalid_rules(|rules| {
+                rules.max_contains_volume_milliliters = 2;
+                rules.magazine_well_volume_milliliters = 1;
+            }),
+            Err(SimError::InvalidItem)
+        ));
+        assert!(matches!(
+            invalid_rules(|rules| {
+                rules.kind = cdda_protocol::SpawnPocketKindV1::EFileStorage;
+                rules.contents_collapsed_by_default = true;
+            }),
             Err(SimError::InvalidItem)
         ));
         let mut content_prototype = test_craft_item_prototype("note");
@@ -23799,6 +23846,17 @@ mod tests {
             .expect("actor exists")
             .inventory
             .insert(owner_id, owner);
+        let mut impossible_recovery = world.snapshot();
+        let collapse_state = impossible_recovery.actors[0].inventory[0].ammunition_containers[0]
+            .spawn_state
+            .as_mut()
+            .expect("spawn state");
+        collapse_state.rules.contents_collapsed_by_default = true;
+        collapse_state.contents_collapsed = false;
+        assert!(matches!(
+            WorldState::from_snapshot(&impossible_recovery),
+            Err(SimError::InvalidItem)
+        ));
 
         let outcome = world
             .advance_tick(vec![ClientCommand {

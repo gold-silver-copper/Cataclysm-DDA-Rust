@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xec, 0xf2, 0xff, 0x27, 0x70, 0x05, 0x4b, 0x46, 0x56, 0x2d, 0xd7, 0xca, 0xd1,
-                    0x5c, 0x3a, 0xa9, 0x32, 0x65, 0x86, 0x59, 0x43, 0x74, 0xb2, 0x71, 0x0a, 0xf8,
-                    0x47, 0x54, 0xbe, 0xef, 0x6a, 0x6a,
+                    0x5f, 0x66, 0x2f, 0xf5, 0x9b, 0xc4, 0xc6, 0x6b, 0x4c, 0x7e, 0x07, 0x00, 0xfd,
+                    0xb0, 0x83, 0x8b, 0xf4, 0x1b, 0xac, 0x38, 0x5a, 0x51, 0x34, 0x58, 0x53, 0x1d,
+                    0x5a, 0xf2, 0x55, 0xbc, 0x54, 0x56,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1054,16 +1054,16 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV67");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV68");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0xd0, 0xb9, 0xe7, 0xa8, 0x4f, 0xbd, 0xb6, 0xef, 0x8a, 0x75, 0x1d, 0x35, 0x36, 0xbf,
-                0xb5, 0x7a, 0x8c, 0xd0, 0x92, 0xf1, 0x7d, 0x37, 0x9e, 0xa7, 0xa9, 0x60, 0xc1, 0x4e,
-                0xde, 0x43, 0xf1, 0x87,
+                0xec, 0xf2, 0xff, 0x27, 0x70, 0x05, 0x4b, 0x46, 0x56, 0x2d, 0xd7, 0xca, 0xd1, 0x5c,
+                0x3a, 0xa9, 0x32, 0x65, 0x86, 0x59, 0x43, 0x74, 0xb2, 0x71, 0x0a, 0xf8, 0x47, 0x54,
+                0xbe, 0xef, 0x6a, 0x6a,
             ],
-            "the old V67 domain must pin Protocol 92's changed Postcard bytes independently of the V68 domain bump"
+            "the old V68 domain must pin the unchanged item-flow Postcard bytes independently of the V69 domain bump"
         );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
@@ -1286,7 +1286,7 @@ mod tests {
             ))
         };
         let cdda_protocol::ItemGroupTargetV1::Item(mut wrapper_item) =
-            item_leaf("rigid_salvage_box", None)
+            item_leaf("flexible_salvage_wrapper", None)
         else {
             unreachable!("wrapper fixture is a direct item")
         };
@@ -1295,16 +1295,18 @@ mod tests {
                 pocket_index: 0,
                 pocket_id: String::from("SALVAGE"),
                 capacities: Vec::new(),
-                rigid: true,
+                rigid: false,
                 access_moves: 100,
                 reloadable: false,
                 unloadable: true,
                 spawn_rules: Some(cdda_protocol::SpawnPocketRulesV1 {
                     kind: cdda_protocol::SpawnPocketKindV1::Container,
                     // Two 250 ml splinters, one 500 ml nail stack, and the
-                    // 251 ml rigid painkiller bottle exactly fill the wrapper,
+                    // 251 ml painkiller bottle exactly fill the wrapper,
                     // preserving pinned seal-on-full behavior.
                     max_contains_volume_milliliters: 1_251,
+                    magazine_well_volume_milliliters: 45,
+                    contents_collapsed_by_default: false,
                     max_contains_weight_milligrams: 10_000,
                     max_item_volume_milliliters: 1_000,
                     min_item_volume_milliliters: 0,
@@ -1312,7 +1314,7 @@ mod tests {
                     item_restrictions: Vec::new(),
                     flag_restrictions: Vec::new(),
                     access_moves: 100,
-                    rigid: true,
+                    rigid: false,
                     watertight: false,
                     transparent: false,
                     forbidden: false,
@@ -1424,6 +1426,8 @@ mod tests {
                 spawn_rules: Some(cdda_protocol::SpawnPocketRulesV1 {
                     kind: cdda_protocol::SpawnPocketKindV1::Container,
                     max_contains_volume_milliliters: 250,
+                    magazine_well_volume_milliliters: 0,
+                    contents_collapsed_by_default: false,
                     max_contains_weight_milligrams: 1_000_000,
                     max_item_volume_milliliters: 17,
                     min_item_volume_milliliters: 0,
@@ -1747,15 +1751,19 @@ mod tests {
         let [salvage_box] = direct.final_snapshot.ground_items.as_slice() else {
             panic!("the group wrapper should leave one top-level salvage box");
         };
-        assert_eq!(salvage_box.item.type_id, "rigid_salvage_box");
+        assert_eq!(salvage_box.item.type_id, "flexible_salvage_wrapper");
         let [pocket] = salvage_box.item.ammunition_containers.as_slice() else {
             panic!("the salvage box should retain one physical pocket");
         };
+        let wrapper_state = pocket
+            .spawn_state
+            .as_ref()
+            .expect("the flexible wrapper should retain spawn state");
+        assert!(!pocket.rigid);
+        assert_eq!(wrapper_state.rules.magazine_well_volume_milliliters, 45);
+        assert!(!wrapper_state.contents_collapsed);
         assert!(
-            pocket
-                .spawn_state
-                .as_ref()
-                .is_some_and(|state| state.sealed),
+            wrapper_state.sealed,
             "the group-level seal must survive every recovery mode"
         );
         assert_eq!(pocket.contents.len(), 6);
@@ -1824,6 +1832,13 @@ mod tests {
         let [aspirin] = painkiller_pocket.contents.as_slice() else {
             panic!("the painkiller bottle should own one aspirin");
         };
+        assert!(
+            painkiller_pocket
+                .spawn_state
+                .as_ref()
+                .is_some_and(|state| state.contents_collapsed),
+            "homogeneous auto-wrapped contents must remain collapsed in every recovery mode"
+        );
         assert_eq!(aspirin.type_id, "aspirin");
         assert_eq!(
             aspirin.temperature,
