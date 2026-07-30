@@ -10,7 +10,8 @@ use cdda_content::{
 };
 use cdda_protocol::{
     BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1, FurnitureTileSnapshot,
-    IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1, ItemGroupDefinitionV1,
+    IntegralMagazinePocketPrototypeV1, ItemContainmentProfileV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupDefinitionV1,
     ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
     ItemGroupTargetV1, ItemGroupToolChargeStorageV1, MagazineWellPrototypeV1, TerrainTileSnapshot,
     WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH,
@@ -21,6 +22,7 @@ use cdda_protocol::{
     WorldgenWeightedTerrainTargetV1, worldgen_omt_matches,
 };
 use cdda_sim::{ReservedIdBlock, WorldState};
+use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
 const ORACLE_FORMAT_VERSION: u16 = 1;
@@ -116,6 +118,7 @@ struct ItemGroupOracleObservationV1 {
     repeated_tool_charges: ItemGroupRepeatedToolChargeObservationV1,
     modifier_rng_phase: ItemGroupModifierRngPhaseObservationV1,
     constructor_variants: Vec<ItemGroupConstructorVariantTraceV1>,
+    description_expansion: ItemGroupDescriptionExpansionObservationV1,
     nested: ItemGroupNestedObservationV1,
     modifiers: ItemGroupModifierObservationV1,
     modifier_container_capacity: ItemGroupModifierContainerCapacityObservationV1,
@@ -223,6 +226,35 @@ struct ItemGroupConstructorVariantTraceV1 {
     name: String,
     description: String,
     downstream_draw: i32,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupDescriptionExpansionObservationV1 {
+    direct_input: String,
+    direct_output: String,
+    direct_downstream_draw: i32,
+    source_group: String,
+    seed: u32,
+    item_type: String,
+    variant_id: String,
+    expanded_description: String,
+    downstream_draw: i32,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct ItemGroupDescriptionExpansionDirectV1 {
+    direct_input: String,
+    direct_output: String,
+}
+
+impl ItemGroupDescriptionExpansionObservationV1 {
+    fn direct_projection(&self) -> ItemGroupDescriptionExpansionDirectV1 {
+        ItemGroupDescriptionExpansionDirectV1 {
+            direct_input: self.direct_input.clone(),
+            direct_output: self.direct_output.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -545,6 +577,11 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 &observation.repeated_tool_charges.direct_projection(),
                 &rust_repeated_item_group_tool_charge_observation()?,
             )?;
+            compare_direct_observation(
+                "item description snippet expansion",
+                &observation.description_expansion.direct_projection(),
+                &rust_item_group_description_expansion_observation()?,
+            )?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&observation)
@@ -858,6 +895,24 @@ fn validate_item_group_observation(
             })
     {
         return Err("item-group constructor variant traces are incomplete".into());
+    }
+    let description_expansion = &observation.description_expansion;
+    if description_expansion.direct_input != "Foo <lt>lt<gt> <unknown>"
+        || description_expansion.direct_output != "Foo <lt> <unknown>"
+        || !(0..=9_999).contains(&description_expansion.direct_downstream_draw)
+        || description_expansion.source_group != "accessory_necklace"
+        || description_expansion.seed == 0
+        || description_expansion.item_type != "holy_symbol"
+        || description_expansion.variant_id != "saint_necklace"
+        || !description_expansion
+            .expanded_description
+            .starts_with("A necklace made of a fine gold chain")
+        || description_expansion
+            .expanded_description
+            .contains("<catholic_saints>")
+        || !(0..=9_999).contains(&description_expansion.downstream_draw)
+    {
+        return Err("item-group description expansion characterization is incomplete".into());
     }
     let nested_trace = ["child_conditional", "child_always", "root_last"];
     if observation.nested.rolls_consumed != 4
@@ -1283,6 +1338,37 @@ fn rust_repeated_item_group_tool_charge_observation()
     })
 }
 
+fn rust_item_group_description_expansion_observation()
+-> Result<ItemGroupDescriptionExpansionDirectV1, Box<dyn std::error::Error>> {
+    let direct_input = String::from("Foo <lt>lt<gt> <unknown>");
+    let expansion = ItemDescriptionExpansionV1 {
+        template: direct_input.clone(),
+        categories: vec![
+            ItemDescriptionSnippetCategoryV1 {
+                category: String::from("<gt>"),
+                choices: vec![ItemDescriptionSnippetChoiceV1 {
+                    text: String::from(">"),
+                    weight: 1,
+                }],
+            },
+            ItemDescriptionSnippetCategoryV1 {
+                category: String::from("<lt>"),
+                choices: vec![ItemDescriptionSnippetChoiceV1 {
+                    text: String::from("<"),
+                    weight: 1,
+                }],
+            },
+        ],
+    };
+    let mut rng = StdRng::seed_from_u64(113);
+    let direct_output = cdda_sim::expand_item_description(&expansion, &mut rng)
+        .map_err(|error| format!("Rust direct description expansion failed: {error}"))?;
+    Ok(ItemGroupDescriptionExpansionDirectV1 {
+        direct_input,
+        direct_output,
+    })
+}
+
 fn rust_item_group_tool_charge_case_with_replacement(
     leaf_minimum: i32,
     leaf_maximum: i32,
@@ -1342,6 +1428,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         prototype: tool,
         maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
         variants: Vec::new(),
+        description_expansion: None,
         snippets: Vec::new(),
         initial_variables: BTreeMap::new(),
         modifier_side_effects_supported: true,

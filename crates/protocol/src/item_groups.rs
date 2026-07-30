@@ -11,6 +11,12 @@ use super::{
 pub const MAX_ITEM_VARIANTS: usize = 256;
 pub const MAX_ITEM_SNIPPETS: usize = 256;
 pub const MAX_ITEM_VARIABLES: usize = 64;
+pub const MAX_DESCRIPTION_SNIPPET_CATEGORIES: usize = 256;
+/// Includes the pinned 20,900-choice English `<world_name>` category while
+/// keeping one normalized item's self-contained closure explicitly bounded.
+pub const MAX_DESCRIPTION_SNIPPET_CHOICES: usize = 32_768;
+pub const MAX_DESCRIPTION_SNIPPET_DEPTH: usize = 32;
+pub const MAX_EXPANDED_DESCRIPTION_BYTES: usize = 16_384;
 
 /// A selected cosmetic item variant retained in canonical state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -30,6 +36,31 @@ pub struct ItemVariantV1 {
 pub struct ItemGroupVariantOptionV1 {
     pub variant: ItemVariantV1,
     pub weight: u32,
+    /// Recursive description expansion performed when this variant becomes
+    /// active. The plan is self-contained and never consults live content.
+    pub description_expansion: Option<ItemDescriptionExpansionV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemDescriptionSnippetChoiceV1 {
+    pub text: String,
+    pub weight: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemDescriptionSnippetCategoryV1 {
+    pub category: String,
+    /// Upstream selection order: identified entries followed by anonymous
+    /// entries, with source order retained inside each partition.
+    pub choices: Vec<ItemDescriptionSnippetChoiceV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemDescriptionExpansionV1 {
+    pub template: String,
+    /// Sorted reachable closure. Categories not present here remain literal
+    /// tags and consume no simulation RNG.
+    pub categories: Vec<ItemDescriptionSnippetCategoryV1>,
 }
 
 /// Self-contained selected snippet presentation. Constructor choices use the
@@ -119,6 +150,9 @@ pub struct ItemGroupItemPrototypeV1 {
     pub maximum_raw_damage: u16,
     /// Source-ordered finalized generic variants.
     pub variants: Vec<ItemGroupVariantOptionV1>,
+    /// Base-type description expansion. Variant expansion, when selected,
+    /// occurs later and overwrites the same canonical description variable.
+    pub description_expansion: Option<ItemDescriptionExpansionV1>,
     /// Source-ordered inline snippet choices. Named categories remain closed.
     pub snippets: Vec<ItemSnippetV1>,
     /// Typed variables copied from the finalized item type before modifiers.
@@ -771,11 +805,23 @@ fn valid_item_group_target(target: &ItemGroupTargetV1, node_ids: &BTreeSet<u16>)
 }
 
 fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
+    let generates_description = item.description_expansion.is_some()
+        || item
+            .variants
+            .iter()
+            .any(|variant| variant.description_expansion.is_some());
     valid_craft_item_prototype(&item.prototype)
         && matches!(item.maximum_raw_damage, 0 | MAX_ITEM_RAW_DAMAGE)
         && valid_item_group_variants(&item.variants)
+        && item
+            .description_expansion
+            .as_ref()
+            .is_none_or(item_description_expansion_is_valid)
         && valid_item_snippets(&item.snippets)
         && valid_item_variables(&item.initial_variables)
+        && (!generates_description
+            || item.initial_variables.contains_key("description")
+            || item.initial_variables.len() < MAX_ITEM_VARIABLES)
         && item
             .initial_variables
             .keys()
@@ -964,7 +1010,10 @@ pub fn valid_item_variables(variables: &BTreeMap<String, ItemVariableValueV1>) -
                 && match value {
                     ItemVariableValueV1::Integer(_) => true,
                     ItemVariableValueV1::String(value) => {
-                        value.len() <= 16_384 && !value.chars().any(char::is_control)
+                        value.len() <= 16_384
+                            && !value.chars().any(|character| {
+                                character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+                            })
                     }
                 }
         })
@@ -1087,6 +1136,10 @@ fn valid_item_group_variants(variants: &[ItemGroupVariantOptionV1]) -> bool {
     let mut total_weight = 0_u32;
     for option in variants {
         if !item_variant_is_valid(&option.variant)
+            || option
+                .description_expansion
+                .as_ref()
+                .is_some_and(|expansion| !item_description_expansion_is_valid(expansion))
             || option.weight > i32::MAX as u32
             || !ids.insert(option.variant.id.as_str())
         {
@@ -1101,6 +1154,137 @@ fn valid_item_group_variants(variants: &[ItemGroupVariantOptionV1]) -> bool {
         }
     }
     true
+}
+
+#[must_use]
+pub fn item_description_expansion_is_valid(expansion: &ItemDescriptionExpansionV1) -> bool {
+    if expansion.template.len() > MAX_EXPANDED_DESCRIPTION_BYTES
+        || invalid_description_text(&expansion.template)
+        || expansion.categories.len() > MAX_DESCRIPTION_SNIPPET_CATEGORIES
+    {
+        return false;
+    }
+    let mut categories = BTreeMap::new();
+    let mut choice_count = 0_usize;
+    for category in &expansion.categories {
+        if category.category.is_empty()
+            || category.category.len() > 512
+            || !category.category.starts_with('<')
+            || !category.category.ends_with('>')
+            || category.category.chars().any(char::is_control)
+            || categories
+                .insert(category.category.as_str(), category)
+                .is_some()
+        {
+            return false;
+        }
+        let Some(next_count) = choice_count.checked_add(category.choices.len()) else {
+            return false;
+        };
+        choice_count = next_count;
+        if choice_count > MAX_DESCRIPTION_SNIPPET_CHOICES
+            || category.choices.iter().any(|choice| {
+                choice.text.len() > MAX_EXPANDED_DESCRIPTION_BYTES
+                    || invalid_description_text(&choice.text)
+            })
+            || category
+                .choices
+                .iter()
+                .try_fold(0_u64, |total, choice| total.checked_add(choice.weight))
+                .is_none()
+        {
+            return false;
+        }
+    }
+    if expansion
+        .categories
+        .windows(2)
+        .any(|pair| pair[0].category >= pair[1].category)
+    {
+        return false;
+    }
+    let mut visiting = BTreeSet::new();
+    let mut reachable = BTreeSet::new();
+    let mut memoized_lengths = BTreeMap::new();
+    let Some(maximum) = maximum_expanded_description_len(
+        &expansion.template,
+        &categories,
+        &mut visiting,
+        &mut reachable,
+        &mut memoized_lengths,
+        0,
+    ) else {
+        return false;
+    };
+    maximum <= MAX_EXPANDED_DESCRIPTION_BYTES && reachable.len() == categories.len()
+}
+
+fn invalid_description_text(text: &str) -> bool {
+    text.chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
+fn maximum_expanded_description_len(
+    text: &str,
+    categories: &BTreeMap<&str, &ItemDescriptionSnippetCategoryV1>,
+    visiting: &mut BTreeSet<String>,
+    reachable: &mut BTreeSet<String>,
+    memoized_lengths: &mut BTreeMap<(String, usize), usize>,
+    depth: usize,
+) -> Option<usize> {
+    if depth > MAX_DESCRIPTION_SNIPPET_DEPTH {
+        return None;
+    }
+    let mut total = 0_usize;
+    let mut remaining = text;
+    while let Some(begin) = remaining.find('<') {
+        let after_begin = &remaining[begin + 1..];
+        let Some(relative_end) = after_begin.find('>') else {
+            return total.checked_add(remaining.len());
+        };
+        let end = begin.checked_add(relative_end)?.checked_add(2)?;
+        total = total.checked_add(begin)?;
+        let tag = &remaining[begin..end];
+        let Some(category) = categories.get(tag) else {
+            total = total.checked_add(tag.len())?;
+            remaining = &remaining[end..];
+            continue;
+        };
+        reachable.insert(tag.to_owned());
+        if let Some(length) = memoized_lengths.get(&(tag.to_owned(), depth)) {
+            total = total.checked_add(*length)?;
+            if total > MAX_EXPANDED_DESCRIPTION_BYTES {
+                return None;
+            }
+            remaining = &remaining[end..];
+            continue;
+        }
+        if !visiting.insert(tag.to_owned()) {
+            return None;
+        }
+        let mut replacement_maximum = None;
+        for choice in category.choices.iter().filter(|choice| choice.weight > 0) {
+            let length = maximum_expanded_description_len(
+                &choice.text,
+                categories,
+                visiting,
+                reachable,
+                memoized_lengths,
+                depth.checked_add(1)?,
+            )?;
+            replacement_maximum =
+                Some(replacement_maximum.map_or(length, |current: usize| current.max(length)));
+        }
+        visiting.remove(tag);
+        let replacement_maximum = replacement_maximum.unwrap_or(tag.len());
+        memoized_lengths.insert((tag.to_owned(), depth), replacement_maximum);
+        total = total.checked_add(replacement_maximum)?;
+        if total > MAX_EXPANDED_DESCRIPTION_BYTES {
+            return None;
+        }
+        remaining = &remaining[end..];
+    }
+    total.checked_add(remaining.len())
 }
 
 #[must_use]
@@ -1260,6 +1444,40 @@ fn item_group_graph_references(graph: &ItemGroupGraphV1) -> impl Iterator<Item =
 mod tests {
     use super::*;
 
+    fn valid_test_item() -> ItemGroupItemPrototypeV1 {
+        ItemGroupItemPrototypeV1 {
+            prototype: CraftItemPrototypeV1 {
+                type_id: String::from("test_item"),
+                charges: 1,
+                melee_damage_milli: BTreeMap::new(),
+                calories: 0,
+                quench: 0,
+                comestible_type: String::new(),
+                ammunition_type: String::new(),
+                ranged_weapon: None,
+                magazine_capacity: 0,
+                integral_magazines: Vec::new(),
+                magazine_wells: Vec::new(),
+                ammunition_containers: Vec::new(),
+                residual_energy_millijoules: 0,
+                powered_tool: None,
+                containment: Default::default(),
+            },
+            maximum_raw_damage: 0,
+            variants: Vec::new(),
+            description_expansion: None,
+            snippets: Vec::new(),
+            initial_variables: BTreeMap::new(),
+            modifier_side_effects_supported: true,
+            charges: None,
+            minimum_one_charge: false,
+            tool_charge_storage: None,
+            charges_supported: true,
+            modifier_container_capacity_applies: true,
+            contents_insertion_supported: true,
+        }
+    }
+
     #[test]
     fn graph_shape_rejects_contents_modifiers_on_local_node_targets() {
         let graph = ItemGroupGraphV1 {
@@ -1299,5 +1517,108 @@ mod tests {
             !valid_item_group_graph_shape(&graph),
             "canonical-valid Node entries must not reach simulator-rejected modifier shapes"
         );
+    }
+
+    #[test]
+    fn description_expansion_requires_exact_acyclic_reachable_closure() {
+        let choice = |text: &str, weight| ItemDescriptionSnippetChoiceV1 {
+            text: text.to_owned(),
+            weight,
+        };
+        let category = |category: &str, choices| ItemDescriptionSnippetCategoryV1 {
+            category: category.to_owned(),
+            choices,
+        };
+        let valid = ItemDescriptionExpansionV1 {
+            template: String::from("Before <outer> <unknown>"),
+            categories: vec![
+                category("<inner>", vec![choice("done", 1)]),
+                category(
+                    "<outer>",
+                    vec![choice("nested <inner>", 2), choice("plain", 0)],
+                ),
+            ],
+        };
+        assert!(item_description_expansion_is_valid(&valid));
+
+        let mut unsorted = valid.clone();
+        unsorted.categories.reverse();
+        assert!(!item_description_expansion_is_valid(&unsorted));
+
+        let mut unreachable = valid.clone();
+        unreachable
+            .categories
+            .insert(0, category("<extra>", vec![choice("unused", 1)]));
+        assert!(!item_description_expansion_is_valid(&unreachable));
+
+        let cyclic = ItemDescriptionExpansionV1 {
+            template: String::from("<cycle_a>"),
+            categories: vec![
+                category("<cycle_a>", vec![choice("<cycle_b>", 1)]),
+                category("<cycle_b>", vec![choice("<cycle_a>", 1)]),
+            ],
+        };
+        assert!(!item_description_expansion_is_valid(&cyclic));
+
+        let literal_zero_weight = ItemDescriptionExpansionV1 {
+            template: String::from("<zero>"),
+            categories: vec![category("<zero>", vec![choice("never", 0)])],
+        };
+        assert!(item_description_expansion_is_valid(&literal_zero_weight));
+    }
+
+    #[test]
+    fn description_expansion_memoizes_repeated_dag_branches() {
+        let mut categories = Vec::new();
+        for index in 0..MAX_DESCRIPTION_SNIPPET_DEPTH {
+            let replacement = if index + 1 == MAX_DESCRIPTION_SNIPPET_DEPTH {
+                String::from("done")
+            } else {
+                format!("<dag_{:02}>", index + 1)
+            };
+            categories.push(ItemDescriptionSnippetCategoryV1 {
+                category: format!("<dag_{index:02}>"),
+                choices: vec![
+                    ItemDescriptionSnippetChoiceV1 {
+                        text: replacement.clone(),
+                        weight: 1,
+                    },
+                    ItemDescriptionSnippetChoiceV1 {
+                        text: replacement,
+                        weight: 1,
+                    },
+                ],
+            });
+        }
+        let expansion = ItemDescriptionExpansionV1 {
+            template: String::from("<dag_00>"),
+            categories,
+        };
+        assert!(item_description_expansion_is_valid(&expansion));
+    }
+
+    #[test]
+    fn generated_description_reserves_variable_capacity() {
+        let mut item = valid_test_item();
+        item.description_expansion = Some(ItemDescriptionExpansionV1 {
+            template: String::from("expanded"),
+            categories: Vec::new(),
+        });
+        item.initial_variables = (0..MAX_ITEM_VARIABLES)
+            .map(|index| {
+                (
+                    format!("variable_{index}"),
+                    ItemVariableValueV1::Integer(index as i64),
+                )
+            })
+            .collect();
+        assert!(!valid_item_group_item(&item));
+
+        item.initial_variables.remove("variable_0");
+        item.initial_variables.insert(
+            String::from("description"),
+            ItemVariableValueV1::String(String::from("old")),
+        );
+        assert!(valid_item_group_item(&item));
     }
 }

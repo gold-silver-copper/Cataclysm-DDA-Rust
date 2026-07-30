@@ -11,10 +11,10 @@ use cdda_content::MapgenIdChoice;
 use cdda_content::{
     AmmunitionRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition, ConstructionRegistry,
     ContentManifest, DEFAULT_MANIFEST_PATH, DefaultRegionTerrainFurnitureRegistry,
-    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
-    ItemGroupRegistry, ItemRegistry, MapgenRegistry, ModCatalog, MonsterDefinition,
-    MonsterRegistry, OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry,
-    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    DescriptionSnippetRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
+    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry, ModCatalog,
+    MonsterDefinition, MonsterRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
+    RecipeRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -73,7 +73,7 @@ use item_groups::{
     RuntimeItemGroupContent, runtime_bash_item_group_catalog, runtime_bash_item_group_source,
 };
 #[cfg(test)]
-use item_groups::{runtime_item_group_charges, runtime_item_group_graph};
+use item_groups::{runtime_item_group_charges, runtime_item_group_graph, runtime_item_group_item};
 use worldgen::{RuntimeMapgenContent, bootstrap_lmoe_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
 use worldgen::{runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice};
@@ -95,6 +95,7 @@ struct OpenedWorld {
 
 struct RuntimeWorldContent<'a> {
     ammunition: &'a AmmunitionRegistry,
+    snippets: &'a DescriptionSnippetRegistry,
     items: &'a ItemRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
@@ -233,6 +234,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let snippets = DescriptionSnippetRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let items =
         ItemRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let item_groups = ItemGroupRegistry::load_selected(
@@ -366,6 +373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &database_path,
         &RuntimeWorldContent {
             ammunition: &ammunition,
+            snippets: &snippets,
             items: &items,
             item_groups: &item_groups,
             monsters: &monsters,
@@ -411,6 +419,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         content.enabled_mods.join(",")
     );
     println!("Ammunition types: {}", ammunition.len());
+    println!("Description snippet categories: {}", snippets.len());
     println!(
         "Items: {} concrete definitions; {} abstracts",
         items.len(),
@@ -694,6 +703,7 @@ fn open_world(
     let item_group_content = RuntimeItemGroupContent {
         items: content.items,
         ammunition: content.ammunition,
+        snippets: content.snippets,
     };
     let items = content.items;
     let item_groups = content.item_groups;
@@ -4426,9 +4436,13 @@ mod tests {
         let ammunition =
             AmmunitionRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("ammunition should load");
+        let snippets =
+            DescriptionSnippetRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("description snippets should load");
         let item_group_content = RuntimeItemGroupContent {
             items: &items,
             ammunition: &ammunition,
+            snippets: &snippets,
         };
         let item_groups =
             ItemGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
@@ -4478,6 +4492,78 @@ mod tests {
         assert_eq!(magazine.type_id, "medium_battery_cell");
         assert_eq!(magazine.integral_magazines[0].capacity, 56);
         assert_eq!(charge_ammunition.type_id, "battery");
+        let necklaces = runtime_item_group_graph(
+            field_graph
+                .groups
+                .get("accessory_necklace")
+                .expect("field closure should retain necklaces"),
+            item_group_content,
+        )
+        .expect("description snippet expansion should admit necklaces");
+        let saint = necklaces
+            .nodes
+            .iter()
+            .flat_map(|node| &node.entries)
+            .find_map(|entry| match &entry.target {
+                ItemGroupTargetV1::Item(item) if item.prototype.type_id == "holy_symbol" => item
+                    .variants
+                    .iter()
+                    .find(|variant| variant.variant.id == "saint_necklace"),
+                ItemGroupTargetV1::Item(_)
+                | ItemGroupTargetV1::Group(_)
+                | ItemGroupTargetV1::Node(_) => None,
+            })
+            .expect("holy symbols should retain the saint necklace variant");
+        let saint_expansion = saint
+            .description_expansion
+            .as_ref()
+            .expect("saint description should retain its expansion closure");
+        assert_eq!(saint_expansion.categories.len(), 1);
+        assert_eq!(saint_expansion.categories[0].category, "<catholic_saints>");
+        assert_eq!(saint_expansion.categories[0].choices.len(), 14);
+        let dog_tag = runtime_item_group_item(
+            items.get("dog_tag").expect("dog tags should be loaded"),
+            None,
+            item_group_content,
+        )
+        .expect("English name categories should admit the dog-tag variant");
+        let dog_tag_expansion = dog_tag
+            .variants
+            .iter()
+            .find(|variant| variant.variant.id == "dog_tag_id")
+            .and_then(|variant| variant.description_expansion.as_ref())
+            .expect("dog-tag identification should retain its complete name closure");
+        assert_eq!(dog_tag_expansion.categories.len(), 7);
+        assert_eq!(
+            dog_tag_expansion
+                .categories
+                .iter()
+                .find(|category| category.category == "<family_name>")
+                .expect("family names should be reachable")
+                .choices
+                .len(),
+            3_045
+        );
+        assert_eq!(
+            dog_tag_expansion
+                .categories
+                .iter()
+                .find(|category| category.category == "<female_given_name>")
+                .expect("female given names should be reachable")
+                .choices
+                .len(),
+            4_275
+        );
+        assert_eq!(
+            dog_tag_expansion
+                .categories
+                .iter()
+                .find(|category| category.category == "<male_given_name>")
+                .expect("male given names should be reachable")
+                .choices
+                .len(),
+            1_219
+        );
         let next_field_runtime_blocker = field_graph
             .groups
             .values()
@@ -4490,9 +4576,9 @@ mod tests {
         assert_eq!(
             next_field_runtime_blocker,
             (
-                "accessory_necklace",
+                "accessory_weaponcarry",
                 String::from(
-                    "item-group item holy_symbol variant saint_necklace requires unsupported fields {\"expand_snippets\"}"
+                    "item group item leg_sheath6 requires unimplemented variable-size FIT state"
                 ),
             )
         );

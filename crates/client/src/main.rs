@@ -2970,6 +2970,12 @@ fn item_menu_label(item: &ItemSnapshot, content: Option<&ContentItems>) -> Strin
         || name.to_owned(),
         |snippet| format!("{name} — {}", snippet.text),
     );
+    let name = match item.variables.get("description") {
+        Some(cdda_protocol::ItemVariableValueV1::String(description)) => {
+            format!("{name} — {description}")
+        }
+        _ => name,
+    };
     let charges = if !item.ammunition_containers.is_empty() {
         Some(format!(
             " [{}]",
@@ -5253,6 +5259,16 @@ mod tests {
             item_menu_label(&variant_item, None)
                 .starts_with("weathered splinter — Found near the river x5"),
             "authoritative snippet text should be visible without consulting live content"
+        );
+        variant_item.variables.insert(
+            String::from("description"),
+            cdda_protocol::ItemVariableValueV1::String(String::from("A weathered splinter.")),
+        );
+        assert!(
+            item_menu_label(&variant_item, None).starts_with(
+                "weathered splinter — Found near the river — A weathered splinter. x5"
+            ),
+            "authoritative expanded descriptions should be visible in normal item menus"
         );
         let mut distinct_variables = variant_item.clone();
         distinct_variables.variables.insert(

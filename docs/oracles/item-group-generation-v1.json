@@ -75,6 +75,17 @@
         "downstream_draw": 6855
       }
     ],
+    "description_expansion": {
+      "direct_input": "Foo <lt>lt<gt> <unknown>",
+      "direct_output": "Foo <lt> <unknown>",
+      "direct_downstream_draw": 3420,
+      "source_group": "accessory_necklace",
+      "seed": 59,
+      "item_type": "holy_symbol",
+      "variant_id": "saint_necklace",
+      "expanded_description": "A necklace made of a fine gold chain with a medallion bearing the image of a Catholic saint.  The back reads \"St. Mary, Mother of God, pray for us\".",
+      "downstream_draw": 1652
+    },
     "nested": {
       "rolls_consumed": 4,
       "expected_trace": ["child_conditional", "child_always", "root_last"],

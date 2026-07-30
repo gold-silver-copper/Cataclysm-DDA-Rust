@@ -54,6 +54,7 @@ use cdda_protocol::{
     ItemGroupTargetV1,
 };
 
+pub use items::expand_item_description;
 use items::{ItemInstance, PlannedItemSpawn, item_from_planned_spawn, plan_item_group_source};
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
@@ -13715,7 +13716,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV64");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV65");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13930,6 +13931,7 @@ mod tests {
             prototype: test_craft_item_prototype(type_id),
             maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
             variants: Vec::new(),
+            description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
             modifier_side_effects_supported: true,
@@ -27095,6 +27097,7 @@ mod tests {
                                 },
                                 maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
                                 variants: Vec::new(),
+                                description_expansion: None,
                                 snippets: Vec::new(),
                                 initial_variables: BTreeMap::new(),
                                 modifier_side_effects_supported: true,

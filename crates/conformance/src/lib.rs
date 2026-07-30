@@ -1013,9 +1013,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0xc4, 0x76, 0xa1, 0xcc, 0xd1, 0x53, 0xec, 0xe5, 0x71, 0xeb, 0xf4, 0xa9, 0x8b,
-                    0xe1, 0x32, 0x42, 0xab, 0x3a, 0x71, 0x63, 0x12, 0x4a, 0xbf, 0xf4, 0x17, 0x3d,
-                    0x9c, 0x90, 0x50, 0xc1, 0xf9, 0xb7,
+                    0x08, 0x78, 0xf4, 0x7b, 0x5e, 0x8e, 0x15, 0x9f, 0xde, 0xe5, 0xa5, 0x7a, 0x6c,
+                    0x7f, 0x90, 0xba, 0xb5, 0xe1, 0x3e, 0x6b, 0xb9, 0x44, 0x82, 0x0a, 0x10, 0x58,
+                    0x5b, 0x83, 0x5f, 0xb8, 0x57, 0xbe,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1054,14 +1054,14 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV63");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV64");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0x80, 0xe0, 0x72, 0xe7, 0x55, 0xe6, 0x8b, 0xe0, 0xaa, 0xd7, 0x82, 0x13, 0x2f, 0x71,
-                0x18, 0xf4, 0x26, 0x9b, 0x5f, 0x66, 0x4e, 0xad, 0x99, 0xbc, 0x50, 0xa1, 0xb1, 0xcd,
-                0x8b, 0x27, 0xd3, 0x35,
+                0xc4, 0x76, 0xa1, 0xcc, 0xd1, 0x53, 0xec, 0xe5, 0x71, 0xeb, 0xf4, 0xa9, 0x8b, 0xe1,
+                0x32, 0x42, 0xab, 0x3a, 0x71, 0x63, 0x12, 0x4a, 0xbf, 0xf4, 0x17, 0x3d, 0x9c, 0x90,
+                0x50, 0xc1, 0xf9, 0xb7,
             ],
             "the representative state bytes stay fixed; only the hash domain advances"
         );
@@ -1270,6 +1270,7 @@ mod tests {
                     },
                     maximum_raw_damage: cdda_protocol::MAX_ITEM_RAW_DAMAGE,
                     variants: Vec::new(),
+                    description_expansion: None,
                     snippets: Vec::new(),
                     initial_variables: BTreeMap::new(),
                     modifier_side_effects_supported: true,
@@ -1473,6 +1474,16 @@ mod tests {
                 ascii_picture: String::new(),
             },
             weight: 1,
+            description_expansion: Some(cdda_protocol::ItemDescriptionExpansionV1 {
+                template: String::from("A <condition> splinter."),
+                categories: vec![cdda_protocol::ItemDescriptionSnippetCategoryV1 {
+                    category: String::from("<condition>"),
+                    choices: vec![cdda_protocol::ItemDescriptionSnippetChoiceV1 {
+                        text: String::from("weathered"),
+                        weight: 1,
+                    }],
+                }],
+            }),
         }];
         splinter_item.snippets = vec![cdda_protocol::ItemSnippetV1 {
             id: String::from("salvage_note"),
@@ -1647,12 +1658,12 @@ mod tests {
         assert_eq!(
             contained,
             [
-                ("nail", 6),
+                ("nail", 4),
                 ("splinter", 1),
                 ("splinter", 1),
                 ("wearable_light", 0),
             ],
-            "the fixed seed must include each generated item's constructor, variant, fit, and wrapper phases"
+            "the fixed seed must include both constructor variant expansions, the explicit variant, fit, and wrapper phases"
         );
         let headlamp = pocket
             .contents
@@ -1691,6 +1702,10 @@ mod tests {
                 && item.variables.get("browsed")
                     == Some(&cdda_protocol::ItemVariableValueV1::String(String::from(
                         "false",
+                    )))
+                && item.variables.get("description")
+                    == Some(&cdda_protocol::ItemVariableValueV1::String(String::from(
+                        "A weathered splinter.",
                     )))
         }));
         let (coord, local) = wall_position.chunk_and_local();

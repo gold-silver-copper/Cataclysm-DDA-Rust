@@ -2,15 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
-    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupContainerV1,
-    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
-    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupOverflowV1, ItemGroupSourceV1,
-    ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemId,
-    ItemSnapshot, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1, MAX_ITEM_COMPONENT_DEPTH,
-    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MILLIJOULES_PER_BATTERY_CHARGE,
-    MagazineWellSnapshotV1, PoweredToolStateV1, RangedWeaponSnapshot, SpawnPocketKindV1,
-    item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
-    item_containment_weight_milligrams,
+    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
+    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
+    ItemGroupKindV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
+    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH,
+    MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_VARIABLES,
+    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
+    RangedWeaponSnapshot, SpawnPocketKindV1, item_containment_single_charge_volume_milliliters,
+    item_containment_volume_milliliters, item_containment_weight_milligrams,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -619,7 +620,7 @@ fn plan_item_group_target(
 fn select_constructor_variant(
     variants: &[ItemGroupVariantOptionV1],
     draw: u64,
-) -> Result<Option<ItemVariantV1>, SimError> {
+) -> Result<Option<ItemGroupVariantOptionV1>, SimError> {
     let total = variants.iter().try_fold(0_u64, |total, option| {
         total.checked_add(u64::from(option.weight))
     });
@@ -635,7 +636,7 @@ fn select_constructor_variant(
         .iter()
         .find_map(|option| {
             accumulated = accumulated.checked_add(u64::from(option.weight))?;
-            (ticket < accumulated).then(|| option.variant.clone())
+            (ticket < accumulated).then(|| option.clone())
         })
         .map(Some)
         .ok_or(SimError::InvalidItem)
@@ -656,11 +657,36 @@ fn construct_item_group_item_with_fit_phase(
     if validate_craft_item_prototype(&item.prototype).is_err() {
         return Err(SimError::InvalidItem);
     }
+    let generates_description = item.description_expansion.is_some()
+        || item
+            .variants
+            .iter()
+            .any(|variant| variant.description_expansion.is_some());
+    if item.initial_variables.len() > MAX_ITEM_VARIABLES
+        || (generates_description
+            && !item.initial_variables.contains_key("description")
+            && item.initial_variables.len() == MAX_ITEM_VARIABLES)
+    {
+        return Err(SimError::InvalidItem);
+    }
     // Every item constructor retains presentation and finalized-variant RNG.
     // Only the item-group creator layer performs the later variable-size FIT
     // phase; raw wrapper construction does not.
     let _ = rng.next_u64();
-    let variant = select_constructor_variant(&item.variants, rng.next_u64())?;
+    let selected_variant = select_constructor_variant(&item.variants, rng.next_u64())?;
+    let variant = selected_variant
+        .as_ref()
+        .map(|option| option.variant.clone());
+    let mut initial_variables = item.initial_variables.clone();
+    if let Some(expansion) = selected_variant
+        .as_ref()
+        .and_then(|option| option.description_expansion.as_ref())
+    {
+        set_description_variable(
+            &mut initial_variables,
+            expand_item_description(expansion, rng)?,
+        )?;
+    }
     let snippet = if item.snippets.is_empty() {
         None
     } else {
@@ -673,6 +699,21 @@ fn construct_item_group_item_with_fit_phase(
                 .clone(),
         )
     };
+    if let Some(expansion) = &item.description_expansion {
+        set_description_variable(
+            &mut initial_variables,
+            expand_item_description(expansion, rng)?,
+        )?;
+    }
+    if let Some(expansion) = selected_variant
+        .as_ref()
+        .and_then(|option| option.description_expansion.as_ref())
+    {
+        set_description_variable(
+            &mut initial_variables,
+            expand_item_description(expansion, rng)?,
+        )?;
+    }
     if consumes_fit_phase {
         let _ = rng.next_u64();
     }
@@ -683,7 +724,7 @@ fn construct_item_group_item_with_fit_phase(
         maximum_raw_damage: item.maximum_raw_damage,
         variants: item.variants.clone(),
         snippet,
-        initial_variables: item.initial_variables.clone(),
+        initial_variables,
         modifier_side_effects_supported: item.modifier_side_effects_supported,
         charges_supported: item.charges_supported,
         modifier_container_capacity_applies: item.modifier_container_capacity_applies,
@@ -728,6 +769,102 @@ fn construct_charge_ammunition(
         integral_ammunition: BTreeMap::new(),
         detachable_magazines: BTreeMap::new(),
     })
+}
+
+pub fn expand_item_description<R: Rng + ?Sized>(
+    expansion: &ItemDescriptionExpansionV1,
+    rng: &mut R,
+) -> Result<String, SimError> {
+    let expanded = expand_description_text(&expansion.template, &expansion.categories, rng, 0)?;
+    if expanded.len() > MAX_EXPANDED_DESCRIPTION_BYTES {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(expanded)
+}
+
+fn set_description_variable(
+    variables: &mut BTreeMap<String, ItemVariableValueV1>,
+    description: String,
+) -> Result<(), SimError> {
+    if !variables.contains_key("description") && variables.len() >= MAX_ITEM_VARIABLES {
+        return Err(SimError::InvalidItem);
+    }
+    variables.insert(
+        String::from("description"),
+        ItemVariableValueV1::String(description),
+    );
+    Ok(())
+}
+
+fn expand_description_text<R: Rng + ?Sized>(
+    text: &str,
+    categories: &[ItemDescriptionSnippetCategoryV1],
+    rng: &mut R,
+    depth: usize,
+) -> Result<String, SimError> {
+    if depth > cdda_protocol::MAX_DESCRIPTION_SNIPPET_DEPTH {
+        return Err(SimError::InvalidItem);
+    }
+    let mut output = String::new();
+    let mut remaining = text;
+    loop {
+        let Some(begin) = remaining.find('<') else {
+            output.push_str(remaining);
+            break;
+        };
+        let Some(relative_end) = remaining[begin + 1..].find('>') else {
+            output.push_str(remaining);
+            break;
+        };
+        let end = begin
+            .checked_add(relative_end)
+            .and_then(|end| end.checked_add(2))
+            .ok_or(SimError::NumericOverflow)?;
+        let tag = &remaining[begin..end];
+        output.push_str(&remaining[..begin]);
+        let Some(category) = categories.iter().find(|category| category.category == tag) else {
+            output.push_str(tag);
+            remaining = &remaining[end..];
+            continue;
+        };
+        // Pinned `random_from_category` obtains a fresh seed even for a
+        // one-choice or zero-total category. Rust intentionally uses its
+        // canonical RNG while retaining that one-draw phase boundary.
+        let draw = rng.next_u64();
+        let total = category
+            .choices
+            .iter()
+            .try_fold(0_u64, |total, choice| total.checked_add(choice.weight))
+            .ok_or(SimError::NumericOverflow)?;
+        let replacement = if total == 0 {
+            None
+        } else {
+            let ticket = draw % total;
+            let mut accumulated = 0_u64;
+            category.choices.iter().find_map(|choice| {
+                accumulated = accumulated.checked_add(choice.weight)?;
+                (ticket < accumulated).then_some(choice.text.as_str())
+            })
+        };
+        if let Some(replacement) = replacement {
+            output.push_str(&expand_description_text(
+                replacement,
+                categories,
+                rng,
+                depth.checked_add(1).ok_or(SimError::NumericOverflow)?,
+            )?);
+        } else {
+            output.push_str(tag);
+        }
+        if output.len() > MAX_EXPANDED_DESCRIPTION_BYTES {
+            return Err(SimError::InvalidItem);
+        }
+        remaining = &remaining[end..];
+    }
+    if output.len() > MAX_EXPANDED_DESCRIPTION_BYTES {
+        return Err(SimError::InvalidItem);
+    }
+    Ok(output)
 }
 
 fn apply_item_group_modifier(
@@ -966,16 +1103,29 @@ fn apply_item_group_modifier_state(
                 && let Some(variant) =
                     select_constructor_variant(&planned.variants, rng.next_u64())?
             {
-                planned.variant = Some(variant);
+                set_planned_variant(planned, &variant, rng)?;
             }
         } else if let Some(variant) = planned
             .variants
             .iter()
             .find(|option| option.variant.id == *variant_id)
-            .map(|option| option.variant.clone())
+            .cloned()
         {
-            planned.variant = Some(variant);
+            set_planned_variant(planned, &variant, rng)?;
         }
+    }
+    Ok(())
+}
+
+fn set_planned_variant(
+    planned: &mut PlannedItemSpawn,
+    option: &ItemGroupVariantOptionV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    planned.variant = Some(option.variant.clone());
+    if let Some(expansion) = &option.description_expansion {
+        let description = expand_item_description(expansion, rng)?;
+        set_description_variable(&mut planned.initial_variables, description)?;
     }
     Ok(())
 }
@@ -1006,13 +1156,13 @@ fn construct_item_group_container(
     let mut container =
         construct_item_group_item_with_fit_phase(&wrapper.item, rng, consumes_fit_phase)?;
     if let Some(variant_id) = &wrapper.variant_id {
-        container.variant = container
+        let variant = container
             .variants
             .iter()
             .find(|option| option.variant.id == *variant_id)
-            .map(|option| option.variant.clone())
-            .ok_or(SimError::InvalidItem)?
-            .into();
+            .cloned()
+            .ok_or(SimError::InvalidItem)?;
+        set_planned_variant(&mut container, &variant, rng)?;
     }
     Ok(container)
 }
@@ -1619,6 +1769,7 @@ mod tests {
             },
             maximum_raw_damage: 0,
             variants: Vec::new(),
+            description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
             modifier_side_effects_supported: true,
@@ -1698,7 +1849,115 @@ mod tests {
                 ascii_picture: String::new(),
             },
             weight,
+            description_expansion: None,
         }
+    }
+
+    fn description_expansion(
+        template: &str,
+        categories: &[(&str, &[(&str, u64)])],
+    ) -> ItemDescriptionExpansionV1 {
+        ItemDescriptionExpansionV1 {
+            template: template.to_owned(),
+            categories: categories
+                .iter()
+                .map(|(category, choices)| ItemDescriptionSnippetCategoryV1 {
+                    category: (*category).to_owned(),
+                    choices: choices
+                        .iter()
+                        .map(
+                            |(text, weight)| cdda_protocol::ItemDescriptionSnippetChoiceV1 {
+                                text: (*text).to_owned(),
+                                weight: *weight,
+                            },
+                        )
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn base_and_variant_description_snippets_expand_in_constructor_phase_order() {
+        let mut item = leaf_item("described_item");
+        item.description_expansion = Some(description_expansion(
+            "Base <outer> <unknown>",
+            &[
+                ("<inner>", &[("done", 1)]),
+                ("<outer>", &[("nested <inner>", 1)]),
+            ],
+        ));
+        let mut selected = variant("described", 1);
+        selected.description_expansion = Some(description_expansion(
+            "Variant <saint> <unknown>",
+            &[("<saint>", &[("first", 1), ("second", 1)])],
+        ));
+        item.variants = vec![selected.clone()];
+
+        let seed = 1_337;
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+        let _ = expected_rng.next_u64(); // presentation
+        let _ = expected_rng.next_u64(); // constructor variant
+        let _initial_variant_choice = if expected_rng.next_u64() % 2 == 0 {
+            "first"
+        } else {
+            "second"
+        }; // set_itype_variant expansion
+        let _ = expected_rng.next_u64(); // base <outer>
+        let _ = expected_rng.next_u64(); // nested base <inner>
+        let expected_variant_choice = if expected_rng.next_u64() % 2 == 0 {
+            "first"
+        } else {
+            "second"
+        }; // constructor's final variant expansion
+        let _ = expected_rng.next_u64(); // item-group FIT phase
+        let expected_next = expected_rng.next_u64();
+        let mut actual_rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut planned = construct_item_group_item(&item, &mut actual_rng)
+            .expect("bounded description closure should construct");
+        assert_eq!(
+            planned.initial_variables.get("description"),
+            Some(&ItemVariableValueV1::String(format!(
+                "Variant {expected_variant_choice} <unknown>"
+            )))
+        );
+        assert_eq!(
+            planned.variant.as_ref().map(|variant| variant.id.as_str()),
+            Some("described")
+        );
+        assert_eq!(actual_rng.next_u64(), expected_next);
+
+        let explicit_expected = if actual_rng.clone().next_u64() % 2 == 0 {
+            "first"
+        } else {
+            "second"
+        };
+        set_planned_variant(&mut planned, &selected, &mut actual_rng)
+            .expect("an explicit variant modifier should expand again");
+        assert_eq!(
+            planned.initial_variables.get("description"),
+            Some(&ItemVariableValueV1::String(format!(
+                "Variant {explicit_expected} <unknown>"
+            )))
+        );
+
+        let literal_tags = "<>".repeat(MAX_EXPANDED_DESCRIPTION_BYTES / 2);
+        let literal_expansion = ItemDescriptionExpansionV1 {
+            template: literal_tags.clone(),
+            categories: Vec::new(),
+        };
+        let mut literal_rng = ChaCha8Rng::seed_from_u64(2_041);
+        let expected_next = literal_rng.clone().next_u64();
+        assert_eq!(
+            expand_item_description(&literal_expansion, &mut literal_rng)
+                .expect("sequential unknown tags should remain bounded and literal"),
+            literal_tags
+        );
+        assert_eq!(
+            literal_rng.next_u64(),
+            expected_next,
+            "unknown tags must not consume the canonical stream"
+        );
     }
 
     #[test]

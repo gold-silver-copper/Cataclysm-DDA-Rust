@@ -1,239 +1,158 @@
 # Implementation Status
 
-Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`
+Upstream baseline: `4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
+`210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
 ## Live checkpoint
 
-- Verified green commit: `bdeb8570615fae97288b0d5d5d8b1e18e407e04c`
-  (`Implement detachable item-group tool charging`).
-- Active milestone: `regional-terrain-base`. The three runnable mapgen/overmap
-  families now have their reusable direct Rust-to-C++ comparator and complete
-  six-part evidence. Detachable tool-charge storage is verified; field
-  admission now resumes at variant description snippet expansion.
-- Current representation: protocol 88, worldgen algorithm 2, persistence
-  schema/minimum recoverable schema 66, replay format 3, CanonicalStateV64,
-  and CanonicalEventsV18.
-- Conformance: scenario 7 and observation 6.
-- Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only. The server and
-  simulation are plain Rust; iroh 1.0.3 owns networking and authentication.
+- Last fully green repository commit:
+  `bcd868170d4fdf50b6e1a2aadff7ebc980dac40d` (`Record Protocol 88
+  tool-charge checkpoint`). Its verified implementation tree is
+  `bdeb8570615fae97288b0d5d5d8b1e18e407e04c`.
+- Active milestone: `regional-terrain-base`.
+- Active candidate: generalized base/variant item-description snippet
+  expansion and strict admission of `accessory_necklace`.
+- Candidate representation: protocol 89, worldgen algorithm 2, persistence
+  schema/minimum recoverable schema 67, replay format 3, CanonicalStateV65,
+  and CanonicalEventsV18. Scenario format 7 and observation format 6 do not
+  change.
+- Hosts: macOS, Linux, and Windows. Bevy 0.19 is client-only; the server and
+  simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
 
-Mapgen/overmap progress is split into durable submilestones:
+Mapgen/overmap completion is intentionally split:
 
-- `atomic-static-mapgen`: `complete`; pinned static-template characterization,
-  the generalized 24x24 engine, direct Rust/C++ execution, four recovery modes,
-  admitted LMOE runtime content, and the authoritative client view are linked
-  in the checked completion evidence.
-- `omt-identities-routing`: `complete`; the same direct run covers finalized
-  rotatable and linear identities while conformance covers durable coordinate
-  routing and bounded recovery.
-- `start-location-selection`: `complete`; the pinned production `sloc_lmoe`
-  definition, chosen target, constraints, and matching candidate set compare
-  directly. Normal server-authoritative character creation and the explicitly
-  Rust-specific multiplayer occupied-tile fallback agree through all four
-  recovery modes.
-- `regional-terrain-base`: `in_progress`; the containment engine removes the
-  `civilian_phones_case` blocker, and detachable tool-charge storage admits
-  `accesories_personal_unisex_child`. The exact field closure now stops at
-  `accessory_necklace` because `saint_necklace` requires description snippet
-  expansion.
+- `atomic-static-mapgen`: `complete`.
+- `omt-identities-routing`: `complete`.
+- `start-location-selection`: `complete`.
+- `regional-terrain-base`: `in_progress`; description expansion is admitted,
+  and exact field closure now stops at `accessory_weaponcarry` because
+  `leg_sheath6` requires unimplemented variable-size `FIT` state.
 - `overmap-cities`, `overmap-roads`, `overmap-rivers`, `overmap-specials`, and
   `mapgen-spawning`: `planned`.
 
-Protocol 81-era and earlier narration is archived in
-[docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md](docs/history/IMPLEMENTATION_STATUS_PROTOCOL_81.md).
+The mapgen completion evidence is in
+[docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
+Earlier protocol narration is retained in `docs/history` and scoped review
+records instead of this live status.
 
 ## Runnable behavior
 
-This is a persistent server-authoritative multiplayer foundation, not yet a
-complete CDDA port. The Bevy client can authenticate with iroh, create/select a
-persistent character, traverse durable generated terrain, fight admitted
-creatures, manipulate visible items, smash admitted structures, and use the
-implemented crafting, reading, disassembly, construction, survival, recovery,
-and replay paths. Characters remain present and vulnerable while disconnected,
-and world time continues with zero players.
+The persistent server-authoritative multiplayer foundation can authenticate
+through iroh, create/select durable characters, keep the world running with no
+players, traverse generated terrain, fight admitted creatures, manipulate
+visible items, smash admitted structures, and use the implemented crafting,
+reading, disassembly, construction, survival, recovery, and replay paths.
+Disconnected characters remain physically present and vulnerable.
 
-Fresh worlds retain a bounded 180x180 z=0 overmap layout. Production still
-repeats the exact admitted `lmoe_north` generator so the bootstrap remains
-playable. Coordinate-owned OMT identities, atomic 24x24 generation, shared
-terrain/furniture/item rotation, matching start selection, durable chunks, and
-ordinary blocked layout edges are implemented. The real default `field` layer
-is not admitted until its entire loot/containment closure is exact.
+Worlds currently retain a bounded 180x180 z=0 overmap filled by the admitted
+`lmoe_north` generator. Coordinate-owned OMT identities, atomic 24x24
+generation, rotation, server-selected starts, durable chunks, and blocked
+layout edges are runnable. The real default `field` layer remains outside the
+production surface until its entire loot closure is exact.
 
-## Active Protocol 88 containment extension
+## Active description-expansion family
 
-- One generalized planner covers whole-group, direct-entry, and modifier-owned
-  wrappers; `contents-item` and `contents-group`; sealing; spill/discard;
-  snippets; typed variables; and recursive preorder stable-ID allocation.
-- Strict ITEM projections retain physical/E-file spawn pockets, phase,
-  count-by-charge mass and volume, longest side, restrictions, watertight and
-  sealable state, wrapper capacity, and represented item flags. Unsupported
-  pocket shapes and ambiguous material-derived softness remain explicit and
-  fail closed.
-- Capacity checks use recursive weight, volume, and length. `NO_DROP`,
-  `REDUCED_WEIGHT`, explicit `SOFT`/`HARD`, liquid stacking, E-file exclusion,
-  item-or-flag restrictions, `NO_UNWIELD`, and exact full-container sealing are
-  characterized. Reserved physical variables cannot overwrite canonical
-  weight or volume.
-- Charge modifiers preserve constructor/dressing RNG order, clamp liquids and
-  count-by-charge items to at least one even through outer named groups, and
-  apply modifier-container capacity/default liquid fill before insertion. Tool
-  modifiers now resolve one integral or detachable storage plan; a detachable
-  default magazine is present at zero charges, positive ammunition clamps to
-  capacity, and every nested object receives a stable ID.
-- Magazine-well rigidity is canonical. Recursive fit excludes an installed
-  magazine from rigid wells and includes its complete volume in non-rigid wells.
-- The pinned item-group oracle has 70 exact assertions, including representative
-  traces and boundary/downstream-RNG witnesses rather than aggregate ranges
-  alone. Its production `accesories_personal_unisex_child` witness proves that
-  an outer charge modifier reuses the installed magazine and replaces only its
-  ammunition; the Rust regression retains the same 17-draw phase boundary. The
-  server normalization admits the complete
-  `civilian_phones_case` closure and 524 furniture-bash definitions.
-- The structural-bash conformance path now generates a sealed rigid wrapper
-  with contained drops and proves its nested ownership through direct,
-  per-tick snapshot, SQLite, portable replay, and the ordinary Bevy item view.
+- `DescriptionSnippetRegistry` loads selected content in source order while
+  retaining upstream's identified-before-anonymous weighted choice order,
+  overrides, translations, duplicate-ID rejection, and checked weights.
+- Server normalization emits only the recursively reachable category closure,
+  sorted canonically. Unknown tags remain literal; cycles, excessive depth,
+  excessive choices, overflows, and oversized output fail closed.
+- The simulation expands base descriptions and then selected variant
+  descriptions in constructor order. Variant text overwrites base text exactly
+  as upstream does; explicit variant modifiers expand again. Each recognized
+  tag consumes one canonical RNG draw, including one-choice and zero-total
+  categories.
+- The pinned C++ oracle records the exact recursive/literal boundary
+  `Foo <lt>lt<gt> <unknown>` -> `Foo <lt> <unknown>`, including downstream RNG,
+  plus production seed 59 for
+  `accessory_necklace` -> `holy_symbol/saint_necklace`. The production text is
+  expanded to St. Mary and leaves downstream draw 1652. The direct comparator
+  executes the same bounded expansion through Rust.
+- Direct, per-tick snapshot, SQLite, and portable-replay conformance preserve
+  an authoritative expanded item variable. The ordinary Bevy item menu renders
+  that replicated description without consulting live content.
+- Protocol 89 batches the description template and its reachable weighted
+  categories into this containment-family checkpoint. Schema 67 and
+  CanonicalStateV65 follow because Postcard state changed; replay format and
+  CanonicalEvents remain unchanged.
 
 ## Measured progress
 
-Runtime evidence remains four core definitions and 44 weighted points. Each
-counted definition is generated, authoritatively interacted with, persisted, and
-client-accessible. No production definition receives four-mode credit from a
-normalized semantic substitute. The three newly normalizable furniture bashes
-earn no points yet because the current playable LMOE mapgen does not place
-them. The synthetic heterogeneous conformance catalog proves all four engine
-recovery modes but does not award production-definition credit to the admitted
-mapgen generator, OMT identity, or start location. The structural-bash item
-group also lacks production four-mode credit.
-Parser inventory remains separate: 7,621 item groups, 9,520 mapgen
-objects, 2,712 OMTs, and 150 starts earn no runtime credit merely for loading.
+Runtime credit remains four core definitions and 44 weighted points. This
+family enables strict normalization but does not earn production runtime credit
+until the real field is generated, explored, looted, persisted, and exercised
+through all four recovery modes.
 
-The independently checked ordinary-gameplay denominator is split by source:
-core DDA has 13,865 target definitions and 263,435 possible weighted points,
-with 44 earned (0.0167%); selectable bundled mods have 5,967 target definitions
-and 113,373 possible points, with zero earned. The bundled universe is the
-union of nonobsolete pinned mods that participate in at least one valid
-new-world selection; mutually exclusive configurations still contribute their
-distinct playable definitions. Ordinary playable loops remain listed separately
-from parser and weighted coverage.
+- Core DDA ordinary-gameplay target: 13,865 definitions and 263,435 possible
+  weighted points; 44 earned (0.0167%).
+- Selectable bundled-mod target: 5,967 definitions and 113,373 possible
+  weighted points; zero earned.
+- Parser-only inventory remains separate: 7,621 item groups, 9,520 mapgen
+  objects, 2,712 OMTs, and 150 starts.
 
-Current ownership sizes are 29,300 lines in `sim/lib.rs`, 3,569 in
-`sim/items.rs`, 9,753 in `protocol/lib.rs`, 1,303 in
+Current ownership sizes are 29,303 lines in `sim/lib.rs`, 3,790 in
+`sim/items.rs`, 9,758 in `protocol/lib.rs`, 1,511 in
 `protocol/item_groups.rs`, 13,065 in persistence, 8,793 in the server library,
-and 1,198 in server item-group normalization. Protocol 87's containment family,
-measured against its pre-family green base `2a3ab9d`, primarily grows the three
-bounded owners:
-`sim/items.rs` +2,115 net lines, `protocol/item_groups.rs` +552, and
-`server/item_groups.rs` +446. Central growth is limited to canonical/wire
-integration: `sim/lib.rs` +643, `protocol/lib.rs` +1,542, server `lib.rs` +15,
-and persistence +6. The protocol exception is large because item snapshots and
-their validators have not yet been mechanically extracted; after this
-checkpoint, further item-group behavior has a zero-growth budget in central
-`lib.rs` files unless a review record identifies an unavoidable schema-only
-integration. New behavior belongs in the three bounded owners.
+and 1,293 in `server/item_groups.rs`.
 
-Against the immediately preceding documentation-bound tree, this detachable
-tool-charge increment adds 304 lines to `sim/items.rs`, 111 to
-`protocol/item_groups.rs`, and 87 to `server/item_groups.rs`; it removes 39
-lines from `sim/lib.rs`. The 31-line `protocol/lib.rs` increase is the canonical
-well field, recursive-volume implementation, and focused tests, while the
-two-line server-library increase updates fixtures only. No new item behavior
-was added to a central `lib.rs`.
+Against `bcd8681`, this candidate adds 221 net lines to `sim/items.rs`, 208 to
+`protocol/item_groups.rs`, and 95 to `server/item_groups.rs`. Central-file
+growth is limited to three net lines in `sim/lib.rs` for an initializer, the
+V65 domain, and the reusable comparator export, and five net lines in
+`protocol/lib.rs` for exports, initializers, and the Protocol 89 constant. No
+new item behavior is implemented in a central `lib.rs`.
 
 Actors, combat, activities, monsters, canonical state, remaining protocol
-domains, persistence responsibilities, and sessions/replication remain explicit
+domains, persistence responsibilities, and sessions/replication remain
 mechanical extraction milestones before anatomy or EOC expansion.
 
 ## Explicit boundaries
 
-- Production overmap population is still LMOE, not an upstream regional
-  forest/city/road/river/special layout.
-- Flexible physical spawn pockets, arbitrary player-driven general containment,
-  material-derived softness, and unprojected constructor/pocket semantics remain
-  unavailable. They are retained explicitly and rejected rather than guessed.
-- The real field base is not normalization-ready yet: its next exact retained
-  blocker is `saint_necklace` variant description snippet expansion. It remains
-  outside the production surface until the full closure, exploration/loot
-  client proof, and fixed-tree review are green.
-- Adjacent overmaps, additional generated z-levels, cities, forests, roads,
-  rivers, specials, extras, spawn groups/populations, zones, vehicles, and
-  mapgen monsters remain unavailable.
-- Rich start placement/scoring, nested/update mapgen, mapgen parameters,
-  multi-layer glyphs, weighted one-time fill, and recursive regional targets
-  remain fail-closed.
-- Remote start generation remains unavailable until its worldgen mutations are
-  journaled atomically with character creation.
+- The real field is not yet runtime-admitted. Its next exact retained blocker
+  is variable-size `FIT` state on `leg_sheath6`.
+- Flexible physical spawn pockets, arbitrary player-driven containment,
+  material-derived softness, and other unprojected constructor/pocket semantics
+  remain explicit and fail closed.
+- Cities, roads, rivers, specials, extras, spawn groups/populations, zones,
+  vehicles, adjacent overmaps, and additional generated z-levels remain
+  unavailable.
+- Rich start scoring, nested/update mapgen, parameters, multi-layer glyphs,
+  weighted one-time fill, and recursive regional targets remain unavailable.
+- Remote start generation remains unavailable until its worldgen mutations can
+  journal atomically with character creation.
 
 ## Latest verification
 
-The exact verified implementation commit
-`bdeb8570615fae97288b0d5d5d8b1e18e407e04c`, parent
-`57d542235f7d1fa0049591d234f3ae25907072cb`, tree
-`36edcec2a01c5a747e943867324b1479a84843ce`, and stable patch ID
-`5ca50adee4f93d81d4cfdd46a4a8d7d3e7330ea1` passes formatting, all-target
-workspace checking, strict Clippy, 374 workspace tests plus doc-tests, and
-warning-free rustdoc. All six dependency/parity/progress/astronomy/content
-gates pass; runtime progress remains four definitions and 44 points. The
-implementation gate's three pinned C++ oracles pass 8 pocket, 70 item-group,
-and 1,179 mapgen assertions. The production content test confirms exactly 524
-admitted furniture bashes and the 7,992-file manifest hash
-`45d913ee0d0dbd3ef353668e9fb7c4839033227ea3de1ed6650333ffd560ca82`.
+The active candidate currently passes:
 
-The comparator loads the pinned production OMT and start-location registries,
-runs the Rust 24x24 `WorldState` generator, and compares eight match witnesses,
-eight concrete rotatable/linear identities, every cell in an exact 24-row
-terrain/furniture trace, and the production `sloc_lmoe` target, constraints,
-fixed candidates, matching subset, and selected candidate with C++. It exposed
-and corrected the stale assumption that a linear peer rotates by the requested
-compass label: concrete `road_ns` uses rotation 0, and `road_ew` uses rotation
-3. Multiplayer occupied-tile fallback remains a Rust-specific adaptation and
-is proven through direct, per-tick snapshot, SQLite, and portable replay.
+- targeted content, protocol, simulation, server production-closure, client,
+  and four-mode conformance tests;
+- the pinned item-group C++ oracle with 76 exact assertions and the direct Rust
+  comparison;
+- production normalization of `accessory_necklace`, including all 14
+  `<catholic_saints>` choices, followed by the exact `leg_sheath6` fail-closed
+  boundary.
 
-The first exact-commit review of `6da2b7a21fa5f595c596fefa7535cf2a1f5a116e`
-confirmed one P1 and two P2 findings: the start milestone lacked a real start
-observation, synthetic conformance definitions had been awarded production
-four-mode credit, and a manifested 16-byte translation fixture was ignored by
-the repository. The review/fix commit adds the direct production start
-observation, restores the honest 44-point score, and force-tracks the exact
-upstream `INVALID_RAND.mo` fixture.
+The representative canonical fixture changes from
+`c476a1ccd153ece571ebf4a98be13242ab3a7163124abff4173d9c9050c1f9b7` to
+`0878f47b5e8e159fdee5a57a6c7f90bab5e13e6bb944820a10585b835fb857be`.
+Hashing the same Postcard bytes under CanonicalStateV64 reproduces the old
+root, so this fixture change is solely the intentional V65 domain. The named
+item-group scenario separately proves the new description representation
+through all four recovery modes. CanonicalEventsV18 is unchanged.
 
-The final independent review used clean detached worktree
-`/tmp/cdda-mapgen-final-review.9F0RwO`, fixed tree
-`4551187dfc6992ee63ff11d5d6dbde8bef0dc17a`, cumulative patch ID
-`7a7d1fdfac24417e73215cda94f07b245b07e2a8`, and review/fix patch ID
-`406ced6df0b58daf20cd4f7e67f2c1ae369a9625`. It reviewed the complete 12-file
-family diff and 9-file fix delta, reproduced the pristine content and direct
-oracle gates, and found no remaining P0-P3 issue. Scope, findings, resolutions,
-verification, rejected concerns, and residual limitations are recorded in
-[docs/reviews/mapgen-direct-comparator-completion.md](docs/reviews/mapgen-direct-comparator-completion.md).
-
-The implementation's only checked canonical fixture hash changes from
-`80e072e755e68be0aad782132f7118f4269b5f664ead99bc50a1b1cd8b27d335` to
-`c476a1ccd153ece571ebf4a98be13242ab3a7163124abff4173d9c9050c1f9b7`.
-A durable audit assertion hashes the same representative Postcard bytes under
-CanonicalStateV63 and reproduces the old root, proving the fixture change is
-only the intentional CanonicalStateV64 domain. Tick, actors, inventory, ground
-items, commands, and the CanonicalEventsV18 trace/hash remain unchanged. No
-other checked canonical hash was edited. Direct, per-tick snapshot, SQLite, and
-portable-replay modes all reproduce the new representation.
-
-The fixed upstream checkout remains
-`4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
-`210f31db2e8b2f0caed1809f1a66781859f9d129`.
-
-The pre-freeze independent review found one P1: an outer named-group charge
-modifier reconstructed an already installed detachable magazine and consumed
-two extra constructor RNG draws. The implementation now reuses the matching
-magazine and replaces only its ammunition. The final exact-commit review used
-clean detached worktree `/tmp/cdda-bdeb-review.J4hsfF`, inspected the complete
-20-file, +1,657/-326 diff, reproduced the 17-draw Rust boundary and the C++
-seed-235/downstream-2632 witness, reran the broad gates, and found no remaining
-confirmed P0-P3 issue. The scoped evidence, rejected concerns, and residual
-test boundary are recorded in
-[docs/reviews/protocol-88-detachable-tool-charges.md](docs/reviews/protocol-88-detachable-tool-charges.md).
+The full formatting, all-target check, strict Clippy, 378-test workspace,
+warning-free rustdoc, content, inventory, parity, progress, astronomy, and
+dependency-boundary gates pass. All three pinned C++ oracles pass; the
+item-group oracle includes 76 assertions and the new direct comparison. The
+fixed-commit independent review is still pending, so runtime progress remains
+deliberately unbound above green parent `bcd8681`.
 
 ## Next dependency boundary
 
-Admit the real field base and demonstrate ordinary client
-exploration and loot. Forest/city/road/river/special placement starts only after
-that playable base is exact and green; anatomy and EOCs remain behind the
-listed modularization milestones.
+Complete and independently review this description family, then implement the
+generalized variable-size `FIT` constructor state needed by the field closure.
+Do not start cities, roads, rivers, specials, anatomy, or EOCs first. The next
+playable unlock remains the real field plus ordinary client exploration and
+loot.

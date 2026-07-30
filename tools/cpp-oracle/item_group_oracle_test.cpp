@@ -23,6 +23,7 @@
 #include "options.h"
 #include "pocket_type.h"
 #include "rng.h"
+#include "text_snippets.h"
 #include "type_id.h"
 #include "units.h"
 
@@ -367,6 +368,56 @@ struct constructor_variant_trace {
     std::string description;
     int downstream_draw = 0;
 };
+
+struct description_expansion_trace {
+    std::string direct_input;
+    std::string direct_output;
+    int direct_downstream_draw = 0;
+    std::string source_group;
+    unsigned int seed = 0;
+    std::string item_type;
+    std::string variant_id;
+    std::string expanded_description;
+    int downstream_draw = 0;
+};
+
+description_expansion_trace observe_description_expansion()
+{
+    description_expansion_trace trace;
+    trace.direct_input = "Foo <lt>lt<gt> <unknown>";
+    rng_set_engine_seed( 113 );
+    trace.direct_output = SNIPPET.expand( trace.direct_input );
+    trace.direct_downstream_draw = rng( 0, 9999 );
+    REQUIRE( trace.direct_output == "Foo <lt> <unknown>" );
+
+    trace.source_group = "accessory_necklace";
+    for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
+        rng_set_engine_seed( seed );
+        const item_group::ItemList items = item_group::items_from(
+                    item_group_id( trace.source_group ) );
+        if( items.size() != 1 ) {
+            continue;
+        }
+        const item &generated = items.front();
+        if( generated.typeId() != itype_id( "holy_symbol" ) ||
+            !generated.has_itype_variant() ||
+            generated.itype_variant().id != "saint_necklace" ) {
+            continue;
+        }
+        trace.seed = seed;
+        trace.item_type = generated.typeId().str();
+        trace.variant_id = generated.itype_variant().id;
+        trace.expanded_description = generated.get_var( "description" );
+        trace.downstream_draw = rng( 0, 9999 );
+        break;
+    }
+    REQUIRE( trace.seed > 0 );
+    REQUIRE( trace.item_type == "holy_symbol" );
+    REQUIRE( trace.variant_id == "saint_necklace" );
+    REQUIRE( trace.expanded_description.find( "A necklace made of a fine gold chain" ) == 0 );
+    REQUIRE( trace.expanded_description.find( "<catholic_saints>" ) == std::string::npos );
+    return trace;
+}
 
 std::vector<constructor_variant_trace> observe_constructor_variants()
 {
@@ -820,6 +871,7 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
     const int modifier_rng_actual_downstream = downstream_after_fixed_count( modifier_rng_seed );
     const std::vector<constructor_variant_trace> constructor_variants =
         observe_constructor_variants();
+    const description_expansion_trace description_expansion = observe_description_expansion();
 
     const unsigned int nested_seed = seed_for_collection_branch( branch_probability );
     rng_set_engine_seed( nested_seed );
@@ -1056,6 +1108,19 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.end_object();
         }
         json.end_array();
+
+        json.member( "description_expansion" );
+        json.start_object();
+        json.member( "direct_input", description_expansion.direct_input );
+        json.member( "direct_output", description_expansion.direct_output );
+        json.member( "direct_downstream_draw", description_expansion.direct_downstream_draw );
+        json.member( "source_group", description_expansion.source_group );
+        json.member( "seed", description_expansion.seed );
+        json.member( "item_type", description_expansion.item_type );
+        json.member( "variant_id", description_expansion.variant_id );
+        json.member( "expanded_description", description_expansion.expanded_description );
+        json.member( "downstream_draw", description_expansion.downstream_draw );
+        json.end_object();
 
         json.member( "nested" );
         json.start_object();

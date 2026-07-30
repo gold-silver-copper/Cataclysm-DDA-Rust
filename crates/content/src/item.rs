@@ -15,6 +15,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "subtypes",
     "name",
     "description",
+    "expand_snippets",
     "category",
     "weight",
     "volume",
@@ -72,6 +73,9 @@ pub struct ItemDefinition {
     pub subtypes: BTreeSet<String>,
     pub name: String,
     pub description: String,
+    /// Whether the finalized base description is recursively expanded through
+    /// the selected snippet library when an instance is constructed.
+    pub expand_description_snippets: bool,
     pub category: String,
     pub weight_milligrams: i64,
     pub volume_milliliters: i64,
@@ -194,6 +198,7 @@ pub struct ItemVariantDefinition {
     pub ascii_picture: Option<String>,
     pub weight: u32,
     pub append: bool,
+    pub expand_description_snippets: bool,
     pub unsupported_fields: BTreeSet<String>,
 }
 
@@ -862,6 +867,12 @@ fn apply_common_fields(
     apply_string_set(object, "subtypes", &mut item.subtypes, source)?;
     apply_text(object, "name", &mut item.name, source)?;
     apply_text(object, "description", &mut item.description, source)?;
+    apply_boolean(
+        object,
+        "expand_snippets",
+        &mut item.expand_description_snippets,
+        source,
+    )?;
     apply_string(object, "category", &mut item.category, source)?;
     apply_quantity(
         object,
@@ -1181,7 +1192,7 @@ fn parse_item_variant(
         )
         .map_err(|_| invalid_field(source, "variants"))
     })?;
-    let mut unsupported_fields = object
+    let unsupported_fields = object
         .keys()
         .filter(|field| {
             !field.starts_with("//")
@@ -1199,13 +1210,11 @@ fn parse_item_variant(
         })
         .cloned()
         .collect::<BTreeSet<_>>();
-    if object
-        .get("expand_snippets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        unsupported_fields.insert(String::from("expand_snippets"));
-    }
+    let expand_description_snippets = match object.get("expand_snippets") {
+        None => false,
+        Some(Value::Bool(expand)) => *expand,
+        Some(_) => return Err(invalid_field(source, "variants")),
+    };
     Ok(ItemVariantDefinition {
         id,
         name: optional_text(object, "name", source)?,
@@ -1219,8 +1228,23 @@ fn parse_item_variant(
             Some(Value::Bool(append)) => *append,
             Some(_) => return Err(invalid_field(source, "variants")),
         },
+        expand_description_snippets,
         unsupported_fields,
     })
+}
+
+fn apply_boolean(
+    object: &Map<String, Value>,
+    field: &str,
+    target: &mut bool,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    if let Some(value) = object.get(field) {
+        *target = value
+            .as_bool()
+            .ok_or_else(|| invalid_field(source, field))?;
+    }
+    Ok(())
 }
 
 fn parse_deleted_variant_ids(
@@ -3536,6 +3560,7 @@ mod tests {
             "abstract": "variant_base",
             "name": "variant base",
             "description": "base description",
+            "expand_snippets": true,
             "ascii_picture": "base_art",
             "variant_type": "generic",
             "variants": [
@@ -3565,6 +3590,7 @@ mod tests {
             ["blue", "green", "snippet"]
         );
         assert_eq!(variants[0].name.as_deref(), Some("blue base"));
+        assert!(items["variant_item"].expand_description_snippets);
         assert_eq!(items["variant_item"].ascii_picture, "base_art");
         assert_eq!(variants[0].weight, 2);
         assert_eq!(
@@ -3572,10 +3598,8 @@ mod tests {
             Some("green description")
         );
         assert!(variants[1].append);
-        assert_eq!(
-            variants[2].unsupported_fields,
-            BTreeSet::from([String::from("expand_snippets")])
-        );
+        assert!(variants[2].unsupported_fields.is_empty());
+        assert!(variants[2].expand_description_snippets);
         assert!(
             !items["variant_item"]
                 .unsupported_fields

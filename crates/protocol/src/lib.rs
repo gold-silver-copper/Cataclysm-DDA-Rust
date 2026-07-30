@@ -11,18 +11,21 @@ mod item_groups;
 
 use item_groups::item_group_sources_have_exact_named_closure;
 pub use item_groups::{
-    InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1,
-    ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1,
-    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1,
-    ItemSnippetV1, ItemVariableValueV1, ItemVariantV1, MAX_ITEM_GROUP_DEFINITIONS,
+    InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
+    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
+    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1,
+    MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
+    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_GROUP_DEFINITIONS,
     MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
-    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
-    item_variant_is_valid, valid_item_variables,
+    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, item_description_expansion_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
+    item_snippet_is_valid, item_variant_is_valid, valid_item_variables,
 };
 
-pub const PROTOCOL_VERSION: u16 = 88;
+pub const PROTOCOL_VERSION: u16 = 89;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -6022,6 +6025,7 @@ mod tests {
             prototype,
             maximum_raw_damage: 0,
             variants: Vec::new(),
+            description_expansion: None,
             snippets: Vec::new(),
             initial_variables: BTreeMap::new(),
             modifier_side_effects_supported: true,
@@ -6848,6 +6852,7 @@ mod tests {
                 ascii_picture: String::new(),
             },
             weight,
+            description_expansion: None,
         };
         assert!(
             !item_variant_is_valid(&variant("<any>", 1).variant),

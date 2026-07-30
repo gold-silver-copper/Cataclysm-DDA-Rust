@@ -13,6 +13,7 @@ mod proficiency;
 mod recipe;
 mod region;
 mod skill;
+mod snippet;
 mod start_location;
 mod terrain;
 
@@ -73,6 +74,10 @@ pub use region::{
     MAX_REGION_SUBSTITUTION_WEIGHT, RegionSubstitutionTable, WeightedRegionSubstitution,
 };
 pub use skill::{SkillDefinition, SkillRegistry, SkillRegistryError};
+pub use snippet::{
+    DescriptionSnippetCategory, DescriptionSnippetChoice, DescriptionSnippetRegistry,
+    DescriptionSnippetRegistryError,
+};
 pub use start_location::{
     DEFAULT_START_LOCATION_MAX_Z, DEFAULT_START_LOCATION_MIN_Z, InclusiveI32Interval,
     MAX_START_LOCATION_FLAGS, MAX_START_LOCATION_ID_BYTES, MAX_START_LOCATION_NAME_BYTES,

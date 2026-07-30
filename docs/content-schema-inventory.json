@@ -586,7 +586,7 @@
           "occurrences": 19
         },
         "expand_snippets": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 14
         },
         "explode_in_fire": {

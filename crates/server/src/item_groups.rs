@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    AmmunitionRegistry, BashDefinition, BashItemGroupSource, ItemDefinition,
-    ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
+    AmmunitionRegistry, BashDefinition, BashItemGroupSource, DescriptionSnippetRegistry,
+    ItemDefinition, ItemGroupContentsSource, ItemGroupEvent, ItemGroupOverflow, ItemGroupRegistry,
     ItemGroupSubtype, ItemRegistry, ItemVariableValueDefinition, PocketTypeDefinition,
     StrictItemGroupDefinition, StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
 };
 use cdda_protocol::{
-    CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemGroupContainerV1,
+    CraftItemPrototypeV1, InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupContainerV1,
     ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
     ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
     ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
     ItemGroupVariantOptionV1, ItemSnippetV1, ItemVariableValueV1, ItemVariantV1,
-    MAX_ITEM_RAW_DAMAGE, item_group_catalog_is_valid, item_group_source_max_outputs,
+    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE, item_description_expansion_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs,
 };
 
 use super::{craft_item_prototype, default_instance_charges};
@@ -21,6 +23,7 @@ use super::{craft_item_prototype, default_instance_charges};
 pub(super) struct RuntimeItemGroupContent<'a> {
     pub(super) items: &'a ItemRegistry,
     pub(super) ammunition: &'a AmmunitionRegistry,
+    pub(super) snippets: &'a DescriptionSnippetRegistry,
 }
 
 pub(super) fn runtime_bash_item_group_source(
@@ -414,7 +417,7 @@ fn runtime_item_group_entry(
     })
 }
 
-fn runtime_item_group_item(
+pub(super) fn runtime_item_group_item(
     item: &ItemDefinition,
     charges: Option<cdda_content::ItemGroupChargesRange>,
     content: RuntimeItemGroupContent<'_>,
@@ -441,7 +444,11 @@ fn runtime_item_group_item(
         } else {
             MAX_ITEM_RAW_DAMAGE
         },
-        variants: runtime_item_variants(item)?,
+        variants: runtime_item_variants(item, content.snippets)?,
+        description_expansion: item
+            .expand_description_snippets
+            .then(|| runtime_description_expansion(&item.description, content.snippets))
+            .transpose()?,
         snippets: item
             .snippets
             .iter()
@@ -613,7 +620,8 @@ fn item_group_contents_insertion_supported(
 fn validate_charge_item_constructor_state(
     item: &ItemDefinition,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !runtime_item_variants(item)?.is_empty()
+    if !item.variants.is_empty()
+        || item.expand_description_snippets
         || !item.snippets.is_empty()
         || !item.variables.is_empty()
     {
@@ -668,6 +676,7 @@ fn runtime_item_group_container(
 
 fn runtime_item_variants(
     item: &ItemDefinition,
+    snippets: &DescriptionSnippetRegistry,
 ) -> Result<Vec<ItemGroupVariantOptionV1>, Box<dyn std::error::Error>> {
     if item.variants.is_empty() {
         return Ok(Vec::new());
@@ -706,6 +715,10 @@ fn runtime_item_variants(
             } else {
                 alternate_description
             };
+            let description_expansion = variant
+                .expand_description_snippets
+                .then(|| runtime_description_expansion(&description, snippets))
+                .transpose()?;
             Ok(ItemGroupVariantOptionV1 {
                 variant: ItemVariantV1 {
                     id: variant.id.clone(),
@@ -723,9 +736,91 @@ fn runtime_item_variants(
                         .unwrap_or_else(|| item.ascii_picture.clone()),
                 },
                 weight: variant.weight,
+                description_expansion,
             })
         })
         .collect()
+}
+
+fn runtime_description_expansion(
+    template: &str,
+    snippets: &DescriptionSnippetRegistry,
+) -> Result<ItemDescriptionExpansionV1, Box<dyn std::error::Error>> {
+    let mut reachable = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    for tag in description_tags(template) {
+        collect_description_category(tag, snippets, &mut reachable, &mut visiting, 0)?;
+    }
+    let expansion = ItemDescriptionExpansionV1 {
+        template: template.to_owned(),
+        categories: reachable.into_values().collect(),
+    };
+    if !item_description_expansion_is_valid(&expansion) {
+        return Err("description snippet closure exceeds canonical bounds or is cyclic".into());
+    }
+    Ok(expansion)
+}
+
+fn collect_description_category(
+    category_id: &str,
+    snippets: &DescriptionSnippetRegistry,
+    reachable: &mut BTreeMap<String, ItemDescriptionSnippetCategoryV1>,
+    visiting: &mut BTreeSet<String>,
+    depth: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if reachable.contains_key(category_id) || snippets.get(category_id).is_none() {
+        return Ok(());
+    }
+    if depth > MAX_DESCRIPTION_SNIPPET_DEPTH || !visiting.insert(category_id.to_owned()) {
+        return Err(
+            format!("cyclic or oversized description snippet category {category_id}").into(),
+        );
+    }
+    let category = snippets
+        .get(category_id)
+        .ok_or("description snippet category disappeared")?;
+    let choices = category
+        .choices()
+        .map(|choice| ItemDescriptionSnippetChoiceV1 {
+            text: choice.text.clone(),
+            weight: choice.weight,
+        })
+        .collect::<Vec<_>>();
+    for choice in choices.iter().filter(|choice| choice.weight > 0) {
+        for tag in description_tags(&choice.text) {
+            collect_description_category(
+                tag,
+                snippets,
+                reachable,
+                visiting,
+                depth.checked_add(1).ok_or("snippet depth overflow")?,
+            )?;
+        }
+    }
+    visiting.remove(category_id);
+    reachable.insert(
+        category_id.to_owned(),
+        ItemDescriptionSnippetCategoryV1 {
+            category: category_id.to_owned(),
+            choices,
+        },
+    );
+    Ok(())
+}
+
+fn description_tags(text: &str) -> Vec<&str> {
+    let mut tags = Vec::new();
+    let mut offset = 0_usize;
+    while let Some(relative_begin) = text[offset..].find('<') {
+        let begin = offset + relative_begin;
+        let Some(relative_end) = text[begin + 1..].find('>') else {
+            break;
+        };
+        let end = begin + relative_end + 2;
+        tags.push(&text[begin..end]);
+        offset = end;
+    }
+    tags
 }
 
 fn validate_item_group_item_spawn(
@@ -803,7 +898,6 @@ fn validate_item_group_item_spawn(
         "trait_group",
         "built_in_mods",
         "default_mods",
-        "expand_snippets",
     ];
     if let Some(field) = CONSTRUCTOR_RNG_FIELDS
         .iter()
@@ -1003,7 +1097,8 @@ mod tests {
             ..ItemDefinition::default()
         };
 
-        let variants = runtime_item_variants(&item).expect("generic variants should project");
+        let variants = runtime_item_variants(&item, &DescriptionSnippetRegistry::default())
+            .expect("generic variants should project");
         assert_eq!(variants[0].variant.name, "base name");
         assert_eq!(variants[0].variant.description, "base description");
         assert_eq!(variants[0].variant.ascii_picture, "base_art");
