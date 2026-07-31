@@ -41,7 +41,7 @@ impl WorldState {
         let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
         evaluate_condition(
             condition,
-            &eoc_actor_context(actor),
+            &eoc_actor_context(self, actor),
             &actor.effects,
             &actor.eoc_variables,
             Some(&npc.effects),
@@ -220,7 +220,7 @@ impl WorldState {
             .get(&creature_id)
             .ok_or(SimError::UnknownCreature)?;
         let mut execution = EocExecution {
-            actor: eoc_actor_context(victim_actor),
+            actor: eoc_actor_context(self, victim_actor),
             effects: victim_actor.effects.clone(),
             variables: victim_actor.eoc_variables.clone(),
             target_effects: Some(creature.effects.clone()),
@@ -322,7 +322,7 @@ impl WorldState {
         }
 
         let mut execution = EocExecution {
-            actor: eoc_actor_context(actor),
+            actor: eoc_actor_context(self, actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
             target_effects: None,
@@ -443,7 +443,7 @@ impl WorldState {
             return Ok(false);
         }
         let mut execution = EocExecution {
-            actor: eoc_actor_context(actor),
+            actor: eoc_actor_context(self, actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
             target_effects: None,
@@ -531,7 +531,7 @@ impl WorldState {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
         let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
         let mut execution = EocExecution {
-            actor: eoc_actor_context(actor),
+            actor: eoc_actor_context(self, actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
             target_effects: Some(npc.effects.clone()),
@@ -675,7 +675,7 @@ impl WorldState {
             .ok_or(SimError::InvalidMission)?;
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
         let mut execution = EocExecution {
-            actor: eoc_actor_context(actor),
+            actor: eoc_actor_context(self, actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
             target_effects: None,
@@ -739,7 +739,7 @@ impl WorldState {
             .map(|mission| mission.mission_type_id.clone())
             .ok_or(SimError::InvalidMission)?;
         let mut execution = EocExecution {
-            actor: eoc_actor_context(actor),
+            actor: eoc_actor_context(self, actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
             target_effects: None,
@@ -897,7 +897,7 @@ impl WorldState {
                 let mut scheduled_eocs = actor.scheduled_eocs.clone();
                 scheduled_eocs.remove(index);
                 let execution = EocExecution {
-                    actor: eoc_actor_context(actor),
+                    actor: eoc_actor_context(self, actor),
                     effects: actor.effects.clone(),
                     variables: actor.eoc_variables.clone(),
                     target_effects: None,
@@ -1061,7 +1061,7 @@ impl WorldState {
                 continue;
             };
             let mut execution = EocExecution {
-                actor: eoc_actor_context(actor),
+                actor: eoc_actor_context(self, actor),
                 effects: actor.effects.clone(),
                 variables: actor.eoc_variables.clone(),
                 target_effects: None,
@@ -1170,7 +1170,7 @@ impl WorldState {
         for (actor_id, eoc_id) in candidates {
             let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
             let mut execution = EocExecution {
-                actor: eoc_actor_context(actor),
+                actor: eoc_actor_context(self, actor),
                 effects: actor.effects.clone(),
                 variables: actor.eoc_variables.clone(),
                 target_effects: None,
@@ -1274,6 +1274,8 @@ struct EocActorContext {
     mission_inventory: BTreeMap<ItemId, ItemInstance>,
     mission_worn: Vec<ItemId>,
     mission_wielded: Option<ItemId>,
+    mission_vehicles: BTreeMap<cdda_protocol::VehicleId, cdda_protocol::VehicleSnapshotV1>,
+    mission_source_positions: Vec<cdda_protocol::WorldPosition>,
     worn_item_types: BTreeSet<String>,
     has_weapon: bool,
     learned_recipes: BTreeSet<String>,
@@ -1289,12 +1291,14 @@ struct EocActorContext {
     sleepiness: i32,
 }
 
-fn eoc_actor_context(actor: &crate::Actor) -> EocActorContext {
+fn eoc_actor_context(world: &WorldState, actor: &crate::Actor) -> EocActorContext {
     EocActorContext {
         inventory: summarize_inventory_by_type(actor.inventory.values()),
         mission_inventory: actor.inventory.clone(),
         mission_worn: actor.worn.clone(),
         mission_wielded: actor.wielded,
+        mission_vehicles: world.vehicles.clone(),
+        mission_source_positions: world.mission_turn_in_source_positions(actor.position),
         worn_item_types: actor
             .worn
             .iter()

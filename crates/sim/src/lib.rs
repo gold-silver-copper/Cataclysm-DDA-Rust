@@ -8,6 +8,7 @@ mod fields;
 mod interactions;
 mod items;
 mod mapgen;
+mod mission_items;
 mod missions;
 mod monsters;
 mod npc_dialogue;
@@ -1090,8 +1091,8 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
         return Err(SimError::InvalidItem);
     }
     if snapshot.id.counter() == 0
-        || (!snapshot.owner_faction_id.is_empty()
-            && validate_item_type_id(&snapshot.owner_faction_id).is_err())
+        || snapshot.owner_faction_id.len() > cdda_protocol::MAX_FACTION_ID_BYTES
+        || snapshot.owner_faction_id.chars().any(char::is_control)
         || snapshot.damage > MAX_ITEM_DAMAGE_LEVEL
         || snapshot.raw_damage > cdda_protocol::MAX_ITEM_RAW_DAMAGE
         || snapshot.damage != cdda_protocol::item_damage_level(snapshot.raw_damage)
@@ -12240,6 +12241,16 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotHere)?);
             return Ok(());
         }
+        if !ground.item.owner_faction_id.is_empty()
+            && ground.item.owner_faction_id != cdda_protocol::PLAYER_FACTION_ID
+        {
+            // Multiplayer adaptation: theft witnesses and faction-law
+            // consequences are not represented yet. Rejecting the transfer is
+            // the only fail-closed behavior; a foreign item must never enter a
+            // player inventory while retaining stale ownership.
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        }
         let ground = self
             .ground_items
             .remove(&item_id)
@@ -16349,6 +16360,7 @@ mod tests {
         let item = ItemInstance::from_snapshot(&ItemSnapshot {
             id: item_id,
             type_id: String::from("wizard_cane_cheap_on"),
+            owner_faction_id: String::new(),
             charges: 0,
             damage: 0,
             raw_damage: 0,
@@ -16378,6 +16390,7 @@ mod tests {
                         .allocate_item()
                         .expect("battery should receive a stable ID"),
                     type_id: String::from("light_minus_battery_cell"),
+                    owner_faction_id: String::new(),
                     charges: 1,
                     damage: 0,
                     raw_damage: 0,
@@ -23026,6 +23039,7 @@ mod tests {
         powered_actor.inventory = vec![ItemSnapshot {
             id: ItemId::new(13, 2),
             type_id: String::from("flashlight"),
+            owner_faction_id: String::new(),
             charges: 0,
             damage: 0,
             raw_damage: 0,
@@ -23052,6 +23066,7 @@ mod tests {
                 installed_magazine: Some(Box::new(ItemSnapshot {
                     id: ItemId::new(13, 3),
                     type_id: String::from("medium_battery_cell"),
+                    owner_faction_id: String::new(),
                     charges: 37,
                     damage: 0,
                     raw_damage: 0,
@@ -26176,6 +26191,7 @@ mod tests {
             let filler = ItemInstance::from_snapshot(&ItemSnapshot {
                 id: filler_id,
                 type_id: String::from("rock"),
+                owner_faction_id: String::new(),
                 charges: 1,
                 damage: 0,
                 raw_damage: 0,

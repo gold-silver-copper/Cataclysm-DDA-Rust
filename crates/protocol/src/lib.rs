@@ -2736,9 +2736,9 @@ pub struct ItemSnapshot {
     pub id: ItemId,
     pub type_id: String,
     /// Faction that owns this item. The empty ID represents upstream's null
-    /// owner and is available to take. Ownership is copied recursively when a
-    /// character claims an item so nested contents cannot retain a different
-    /// theft boundary.
+    /// owner and is available to take. `set_owner` copies ownership recursively
+    /// at claim time; later insertion may legitimately give nested contents a
+    /// different owner, matching upstream item ownership.
     #[serde(default)]
     pub owner_faction_id: String,
     pub charges: i32,
@@ -7712,6 +7712,11 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
     }
     !item.type_id.is_empty()
         && item.type_id.len() <= 512
+        && item.owner_faction_id.len() <= MAX_FACTION_ID_BYTES
+        && item
+            .owner_faction_id
+            .chars()
+            .all(|character| !character.is_control())
         && item.damage <= MAX_ITEM_DAMAGE_LEVEL
         && item.raw_damage <= MAX_ITEM_RAW_DAMAGE
         && item.damage == item_damage_level(item.raw_damage)
@@ -11570,6 +11575,7 @@ mod tests {
             item: ItemSnapshot {
                 id: ItemId::new(3, 2),
                 type_id: String::from("rock"),
+                owner_faction_id: String::new(),
                 charges: 1,
                 damage: 0,
                 raw_damage: 0,
@@ -11864,6 +11870,7 @@ mod tests {
             .map(|index| ItemSnapshot {
                 id: ItemId::new(1, u64::from(index) + 4),
                 type_id: "x".repeat(512),
+                owner_faction_id: String::new(),
                 charges: i32::MAX,
                 damage: MAX_ITEM_DAMAGE_LEVEL,
                 raw_damage: MAX_ITEM_RAW_DAMAGE,
@@ -12042,6 +12049,7 @@ mod tests {
         let magazine = ItemSnapshot {
             id: ItemId::new(1, 2),
             type_id: String::from("medium_battery"),
+            owner_faction_id: String::new(),
             charges: 0,
             damage: 0,
             raw_damage: 0,
@@ -12073,6 +12081,7 @@ mod tests {
         let mut tool = ItemSnapshot {
             id: ItemId::new(1, 1),
             type_id: String::from("flashlight"),
+            owner_faction_id: String::new(),
             charges: 0,
             damage: 0,
             raw_damage: 0,
@@ -12238,6 +12247,7 @@ mod tests {
         let ammunition = ItemSnapshot {
             id: ItemId::new(1, 2),
             type_id: String::from("battery"),
+            owner_faction_id: String::new(),
             charges: 6,
             damage: 0,
             raw_damage: 0,
@@ -12279,6 +12289,7 @@ mod tests {
         let mut magazine = ItemSnapshot {
             id: ItemId::new(1, 1),
             type_id: String::from("test_cell"),
+            owner_faction_id: String::new(),
             charges: 0,
             damage: 0,
             raw_damage: 0,
@@ -12370,6 +12381,7 @@ mod tests {
         let ammunition = |counter: u64, ammunition_type: &str, charges: i32| ItemSnapshot {
             id: ItemId::new(1, counter),
             type_id: format!("{ammunition_type}_round_{counter}"),
+            owner_faction_id: String::new(),
             charges,
             damage: 0,
             raw_damage: 0,
@@ -12411,6 +12423,7 @@ mod tests {
         let owner = ItemSnapshot {
             id: ItemId::new(1, 1),
             type_id: String::from("ammo_pouch"),
+            owner_faction_id: String::new(),
             charges: 1,
             damage: 0,
             raw_damage: 0,
@@ -12965,6 +12978,7 @@ mod tests {
         let ammunition = |counter: u64, ammunition_type: &str, charges: i32| ItemSnapshot {
             id: ItemId::new(1, counter),
             type_id: format!("{ammunition_type}_round_{counter}"),
+            owner_faction_id: String::new(),
             charges,
             damage: 0,
             raw_damage: 0,
@@ -13075,6 +13089,7 @@ mod tests {
         let corpse = ItemSnapshot {
             id: ItemId::new(1, 9),
             type_id: String::from("corpse"),
+            owner_faction_id: String::new(),
             charges: 1,
             damage: 1,
             raw_damage: 1,

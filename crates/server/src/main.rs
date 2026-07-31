@@ -103,7 +103,7 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
-use missions::runtime_mission_catalog;
+use missions::{runtime_item_group_item_type_ids, runtime_mission_catalog};
 use npc_classes::runtime_npc_classes;
 use npc_faction::runtime_npc_factions;
 use use_actions::{runtime_item_place_monster_types, runtime_item_transform_types};
@@ -879,6 +879,8 @@ fn open_world(
         content.missions,
         content.items,
         content.monsters,
+        item_group_content,
+        None,
         &actor_anatomy,
         content.proficiencies,
         content.recipes,
@@ -1007,6 +1009,7 @@ fn open_world(
             item_group_content,
         )?,
     ])?;
+    let runtime_item_type_ids = runtime_item_group_item_type_ids(&item_group_catalog);
     let worldgen = runtime_mapgen_worldgen(
         regional_overmap,
         cities,
@@ -1057,6 +1060,8 @@ fn open_world(
             content.missions,
             content.items,
             content.monsters,
+            item_group_content,
+            Some(&runtime_item_type_ids),
             &actor_anatomy,
             content.proficiencies,
             content.recipes,

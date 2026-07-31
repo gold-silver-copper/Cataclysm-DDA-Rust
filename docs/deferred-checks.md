@@ -98,7 +98,8 @@ Run only when the user explicitly requests a verification checkpoint.
 - NPC owned-source item-turn-in checkpoint: verify recursive ownership across
   pickup/crafting/vehicle cargo, visible completion sources, pinned reachable
   map-before-inventory consumption order, container spill, hostile ownership,
-  protocol 137/schema 114 recovery, replay, and two-client dialogue completion.
+  protocol 137/schema 114 and canonical-state-V113/event-V31 recovery, replay,
+  and two-client dialogue completion.
 - NPC actor-generation checkpoint: run pinned NPC-class distribution, global
   skill-order, base-stat/personality/age/height, template-override, dodge,
   armor, effect, resource, death, attitude scheduling, talk/follow pathing,

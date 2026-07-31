@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
-    ActorId, ItemSnapshot, MissionDefinitionV1, MissionGoalV1, MissionId, MissionSnapshotV1,
-    MissionStatusV1, NpcId, PLAYER_FACTION_ID, VehicleSnapshotV1, WorldEvent, WorldEventKind,
-    WorldPosition,
+    ActorId, MissionDefinitionV1, MissionGoalV1, MissionId, MissionSnapshotV1, MissionStatusV1,
+    NpcId, PLAYER_FACTION_ID, VehicleSnapshotV1, WorldEvent, WorldEventKind, WorldPosition,
 };
 
 use crate::{Actor, SimError, WorldState};
@@ -339,11 +338,12 @@ impl WorldState {
         let mut found = 0_u64;
         for item in actor.inventory.values() {
             found = found
-                .checked_add(item_instance_quantity(
+                .checked_add(crate::mission_items::item_instance_quantity(
                     item,
                     item_type_id,
                     count_by_charges,
                     limit - found,
+                    false,
                 )?)
                 .ok_or(SimError::NumericOverflow)?;
             if found >= limit {
@@ -351,43 +351,30 @@ impl WorldState {
             }
         }
         let visible = self.visible_mission_source_positions(actor.id, actor.position)?;
-        for ground in self.ground_items.values() {
-            if visible.contains(&ground.position)
-                && mission_item_is_available_to_player(&ground.item.owner_faction_id)
-            {
+        // Terrain/furniture SEALED and LIQUIDCONT flags are not yet canonical.
+        // Ground stacks therefore remain fail-closed instead of being treated
+        // as accessible. Pinned vehicle cargo bypasses `accessible_items`.
+        for position in visible {
+            let Some(cargo) =
+                crate::mission_items::selected_vehicle_cargo(&self.vehicles, position)
+            else {
+                continue;
+            };
+            for item in cargo {
+                if !mission_item_is_available_to_player(&item.owner_faction_id) {
+                    continue;
+                }
                 found = found
-                    .checked_add(item_instance_quantity(
-                        &ground.item,
+                    .checked_add(crate::mission_items::item_snapshot_quantity(
+                        item,
                         item_type_id,
                         count_by_charges,
                         limit - found,
+                        false,
                     )?)
                     .ok_or(SimError::NumericOverflow)?;
                 if found >= limit {
                     return Ok(found);
-                }
-            }
-        }
-        for vehicle in self.vehicles.values() {
-            for part in &vehicle.parts {
-                if !visible.contains(&part.position) {
-                    continue;
-                }
-                for item in &part.cargo {
-                    if !mission_item_is_available_to_player(&item.owner_faction_id) {
-                        continue;
-                    }
-                    found = found
-                        .checked_add(item_snapshot_quantity(
-                            item,
-                            item_type_id,
-                            count_by_charges,
-                            limit - found,
-                        )?)
-                        .ok_or(SimError::NumericOverflow)?;
-                    if found >= limit {
-                        return Ok(found);
-                    }
                 }
             }
         }
@@ -414,10 +401,10 @@ impl WorldState {
     fn reachable_mission_source_positions(&self, origin: WorldPosition) -> BTreeSet<WorldPosition> {
         let mut reachable = BTreeSet::from([origin]);
         let mut frontier = BTreeSet::from([origin]);
-        // Pinned `reachable_flood_steps(PICKUP_RANGE)` expands four movement
-        // steps for range five, then marks each reached tile and its neighbors
-        // as an accessible source square.
-        for _ in 0..4 {
+        // Pinned `reachable_flood_steps(PICKUP_RANGE=6, 1, 100)` visits through
+        // distance five, then marks each visited tile and its neighbors as a
+        // source square. Completion visibility remains the separate radius 5.
+        for _ in 0..5 {
             let mut next_frontier = BTreeSet::new();
             for current in frontier {
                 for (dx, dy) in [
@@ -433,10 +420,10 @@ impl WorldState {
                     let Some(next) = current.checked_offset(dx, dy, 0) else {
                         continue;
                     };
-                    if next.x.abs_diff(origin.x) > 5
-                        || next.y.abs_diff(origin.y) > 5
+                    if next.x.abs_diff(origin.x) > 6
+                        || next.y.abs_diff(origin.y) > 6
                         || reachable.contains(&next)
-                        || !self.is_passable(next)
+                        || !matches!(self.tile_movement_cost(next), Some(1..=100))
                     {
                         continue;
                     }
@@ -449,10 +436,26 @@ impl WorldState {
         reachable
     }
 
+    pub(super) fn mission_turn_in_source_positions(
+        &self,
+        origin: WorldPosition,
+    ) -> Vec<WorldPosition> {
+        let reachable = self.reachable_mission_source_positions(origin);
+        let mut source_positions = self
+            .vehicles
+            .values()
+            .flat_map(|vehicle| vehicle.parts.iter().map(|part| part.position))
+            .filter(|position| mission_source_is_reachable(*position, &reachable))
+            .collect::<Vec<_>>();
+        source_positions.sort_by_key(|position| (position.z, position.y, position.x));
+        source_positions.dedup();
+        source_positions
+    }
+
     fn consume_mission_items(
         &self,
         actor: &mut Actor,
-        ground_items: &mut BTreeMap<cdda_protocol::ItemId, crate::GroundItem>,
+        _ground_items: &mut BTreeMap<cdda_protocol::ItemId, crate::GroundItem>,
         vehicles: &mut BTreeMap<cdda_protocol::VehicleId, VehicleSnapshotV1>,
         goal: &MissionGoalV1,
     ) -> Result<(), SimError> {
@@ -464,76 +467,17 @@ impl WorldState {
         else {
             return Ok(());
         };
-        let mut remaining = i64::from(*count);
-        let reachable = self.reachable_mission_source_positions(actor.position);
-        let mut spilled = Vec::new();
-        let mut source_positions = ground_items
-            .values()
-            .map(|ground| ground.position)
-            .chain(
-                vehicles
-                    .values()
-                    .flat_map(|vehicle| vehicle.parts.iter().map(|part| part.position)),
-            )
-            .filter(|position| mission_source_is_reachable(*position, &reachable))
-            .collect::<Vec<_>>();
-        source_positions.sort_by_key(|position| (position.z, position.y, position.x));
-        source_positions.dedup();
-        for position in source_positions {
-            if remaining == 0 {
-                break;
-            }
-            if *count_by_charges {
-                consume_ground_mission_items_at(
-                    ground_items,
-                    position,
-                    item_type_id,
-                    true,
-                    &mut remaining,
-                    &mut spilled,
-                )?;
-                consume_vehicle_mission_items_at(
-                    vehicles,
-                    position,
-                    item_type_id,
-                    true,
-                    &mut remaining,
-                    &mut spilled,
-                )?;
-            } else {
-                consume_vehicle_mission_items_at(
-                    vehicles,
-                    position,
-                    item_type_id,
-                    false,
-                    &mut remaining,
-                    &mut spilled,
-                )?;
-                consume_ground_mission_items_at(
-                    ground_items,
-                    position,
-                    item_type_id,
-                    false,
-                    &mut remaining,
-                    &mut spilled,
-                )?;
-            }
-            place_spilled_items(ground_items, position, &mut spilled)?;
-        }
-        consume_mission_items_from_inventory_with_spills(
+        let source_positions = self.mission_turn_in_source_positions(actor.position);
+        crate::mission_items::consume_mission_items_from_sources(
             &mut actor.inventory,
             &mut actor.worn,
             &mut actor.wielded,
+            vehicles,
+            &source_positions,
             item_type_id,
             *count_by_charges,
-            &mut remaining,
-            &mut spilled,
-        )?;
-        place_spilled_items(ground_items, actor.position, &mut spilled)?;
-        if remaining != 0 {
-            return Err(SimError::InvalidMission);
-        }
-        Ok(())
+            *count,
+        )
     }
 
     pub(super) fn advance_missions(
@@ -643,310 +587,6 @@ pub(super) fn current_kill_count_for_recovery(
     current_kill_count(goal, kill_counts)
 }
 
-pub(super) fn consume_mission_items_from_inventory(
-    inventory: &mut BTreeMap<cdda_protocol::ItemId, crate::items::ItemInstance>,
-    worn: &mut Vec<cdda_protocol::ItemId>,
-    wielded: &mut Option<cdda_protocol::ItemId>,
-    goal: &MissionGoalV1,
-) -> Result<(), SimError> {
-    let MissionGoalV1::FindItem {
-        item_type_id,
-        count,
-        count_by_charges,
-    } = goal
-    else {
-        return Ok(());
-    };
-    let mut remaining = i64::from(*count);
-    let mut spilled = Vec::new();
-    consume_mission_items_from_inventory_with_spills(
-        inventory,
-        worn,
-        wielded,
-        item_type_id,
-        *count_by_charges,
-        &mut remaining,
-        &mut spilled,
-    )?;
-    // This compatibility path is used only by transactional EOC evaluation,
-    // which cannot commit map mutations. Fail closed if consuming a container
-    // would require materializing its surviving contents in the world.
-    if !spilled.is_empty() {
-        return Err(SimError::InvalidMission);
-    }
-    Ok(())
-}
-
-fn consume_mission_items_from_inventory_with_spills(
-    inventory: &mut BTreeMap<cdda_protocol::ItemId, crate::items::ItemInstance>,
-    worn: &mut Vec<cdda_protocol::ItemId>,
-    wielded: &mut Option<cdda_protocol::ItemId>,
-    item_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<(), SimError> {
-    let ids = inventory.keys().copied().collect::<Vec<_>>();
-    for id in ids {
-        if *remaining == 0 {
-            break;
-        }
-        let remove = consume_item_instance(
-            inventory.get_mut(&id).ok_or(SimError::InvalidItem)?,
-            item_type_id,
-            count_by_charges,
-            remaining,
-            spilled,
-        )?;
-        if remove {
-            let mut removed = inventory.remove(&id).ok_or(SimError::InvalidItem)?;
-            drain_item_instance_contents(&mut removed, spilled);
-            worn.retain(|worn| *worn != id);
-            if *wielded == Some(id) {
-                *wielded = None;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn consume_item_instance(
-    item: &mut crate::items::ItemInstance,
-    item_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<bool, SimError> {
-    if count_by_charges {
-        if consume_matching_item(
-            &item.type_id,
-            &mut item.charges,
-            item_type_id,
-            true,
-            remaining,
-        )? {
-            return Ok(true);
-        }
-    }
-    consume_nested_items(
-        &mut item.integral_magazines,
-        &mut item.magazine_wells,
-        &mut item.ammunition_containers,
-        item_type_id,
-        count_by_charges,
-        remaining,
-        spilled,
-    )?;
-    if count_by_charges {
-        Ok(false)
-    } else {
-        consume_matching_item(
-            &item.type_id,
-            &mut item.charges,
-            item_type_id,
-            false,
-            remaining,
-        )
-    }
-}
-
-fn consume_item_snapshot(
-    item: &mut ItemSnapshot,
-    item_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<bool, SimError> {
-    if count_by_charges {
-        if consume_matching_item(
-            &item.type_id,
-            &mut item.charges,
-            item_type_id,
-            true,
-            remaining,
-        )? {
-            return Ok(true);
-        }
-    }
-    consume_nested_items(
-        &mut item.integral_magazines,
-        &mut item.magazine_wells,
-        &mut item.ammunition_containers,
-        item_type_id,
-        count_by_charges,
-        remaining,
-        spilled,
-    )?;
-    if count_by_charges {
-        Ok(false)
-    } else {
-        consume_matching_item(
-            &item.type_id,
-            &mut item.charges,
-            item_type_id,
-            false,
-            remaining,
-        )
-    }
-}
-
-fn consume_matching_item(
-    actual_type_id: &str,
-    charges: &mut i32,
-    sought_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-) -> Result<bool, SimError> {
-    if *remaining == 0 || actual_type_id != sought_type_id {
-        return Ok(false);
-    }
-    if !count_by_charges {
-        *remaining -= 1;
-        return Ok(true);
-    }
-    let available = i64::from((*charges).max(0));
-    if available == 0 {
-        return Ok(false);
-    }
-    let consumed = (*remaining).min(available);
-    *charges = i32::try_from(available - consumed).map_err(|_| SimError::NumericOverflow)?;
-    *remaining -= consumed;
-    Ok(*charges == 0)
-}
-
-fn consume_nested_items(
-    integral_magazines: &mut [cdda_protocol::IntegralMagazinePocketSnapshotV1],
-    magazine_wells: &mut [cdda_protocol::MagazineWellSnapshotV1],
-    ammunition_containers: &mut [cdda_protocol::AmmunitionContainerPocketSnapshotV1],
-    item_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<(), SimError> {
-    for pocket in integral_magazines {
-        if *remaining == 0 {
-            return Ok(());
-        }
-        let remove = if let Some(item) = pocket.loaded_ammunition.as_deref_mut() {
-            consume_item_snapshot(item, item_type_id, count_by_charges, remaining, spilled)?
-        } else {
-            false
-        };
-        if remove {
-            let mut removed = pocket
-                .loaded_ammunition
-                .take()
-                .ok_or(SimError::InvalidItem)?;
-            drain_item_snapshot_contents(&mut removed, spilled);
-        }
-    }
-    for well in magazine_wells {
-        if *remaining == 0 {
-            return Ok(());
-        }
-        let remove = if let Some(item) = well.installed_magazine.as_deref_mut() {
-            consume_item_snapshot(item, item_type_id, count_by_charges, remaining, spilled)?
-        } else {
-            false
-        };
-        if remove {
-            let mut removed = well
-                .installed_magazine
-                .take()
-                .ok_or(SimError::InvalidItem)?;
-            drain_item_snapshot_contents(&mut removed, spilled);
-        }
-    }
-    for pocket in ammunition_containers {
-        let mut index = 0;
-        while index < pocket.contents.len() && *remaining > 0 {
-            if consume_item_snapshot(
-                &mut pocket.contents[index],
-                item_type_id,
-                count_by_charges,
-                remaining,
-                spilled,
-            )? {
-                let mut removed = pocket.contents.remove(index);
-                drain_item_snapshot_contents(&mut removed, spilled);
-            } else {
-                index += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn consume_ground_mission_items_at(
-    ground_items: &mut BTreeMap<cdda_protocol::ItemId, crate::GroundItem>,
-    position: WorldPosition,
-    item_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<(), SimError> {
-    let item_ids = ground_items
-        .iter()
-        .filter_map(|(item_id, ground)| (ground.position == position).then_some(*item_id))
-        .collect::<Vec<_>>();
-    for item_id in item_ids {
-        if *remaining == 0 {
-            break;
-        }
-        let remove = consume_item_instance(
-            &mut ground_items
-                .get_mut(&item_id)
-                .ok_or(SimError::InvalidItem)?
-                .item,
-            item_type_id,
-            count_by_charges,
-            remaining,
-            spilled,
-        )?;
-        if remove {
-            let mut removed = ground_items
-                .remove(&item_id)
-                .ok_or(SimError::InvalidItem)?
-                .item;
-            drain_item_instance_contents(&mut removed, spilled);
-        }
-    }
-    Ok(())
-}
-
-fn consume_vehicle_mission_items_at(
-    vehicles: &mut BTreeMap<cdda_protocol::VehicleId, VehicleSnapshotV1>,
-    position: WorldPosition,
-    item_type_id: &str,
-    count_by_charges: bool,
-    remaining: &mut i64,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<(), SimError> {
-    for vehicle in vehicles.values_mut() {
-        for part in &mut vehicle.parts {
-            if part.position != position {
-                continue;
-            }
-            let mut index = 0;
-            while index < part.cargo.len() && *remaining > 0 {
-                if consume_item_snapshot(
-                    &mut part.cargo[index],
-                    item_type_id,
-                    count_by_charges,
-                    remaining,
-                    spilled,
-                )? {
-                    let mut removed = part.cargo.remove(index);
-                    drain_item_snapshot_contents(&mut removed, spilled);
-                } else {
-                    index += 1;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn mission_item_is_available_to_player(owner_faction_id: &str) -> bool {
     owner_faction_id.is_empty() || owner_faction_id == PLAYER_FACTION_ID
 }
@@ -969,115 +609,4 @@ fn mission_source_is_reachable(
         .into_iter()
         .filter_map(|(dx, dy)| position.checked_offset(dx, dy, 0))
         .any(|neighbor| reachable.contains(&neighbor))
-}
-
-fn item_instance_quantity(
-    item: &crate::items::ItemInstance,
-    item_type_id: &str,
-    count_by_charges: bool,
-    limit: u64,
-) -> Result<u64, SimError> {
-    item_snapshot_quantity(&item.snapshot(), item_type_id, count_by_charges, limit)
-}
-
-fn item_snapshot_quantity(
-    item: &ItemSnapshot,
-    item_type_id: &str,
-    count_by_charges: bool,
-    limit: u64,
-) -> Result<u64, SimError> {
-    if limit == 0 {
-        return Ok(0);
-    }
-    let mut found = if item.type_id == item_type_id {
-        if count_by_charges {
-            u64::try_from(item.charges.max(0)).map_err(|_| SimError::NumericOverflow)?
-        } else {
-            1
-        }
-    } else {
-        0
-    };
-    found = found.min(limit);
-    for nested in item
-        .integral_magazines
-        .iter()
-        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
-        .chain(
-            item.magazine_wells
-                .iter()
-                .filter_map(|well| well.installed_magazine.as_deref()),
-        )
-        .chain(
-            item.ammunition_containers
-                .iter()
-                .flat_map(|pocket| &pocket.contents),
-        )
-    {
-        found = found
-            .checked_add(item_snapshot_quantity(
-                nested,
-                item_type_id,
-                count_by_charges,
-                limit - found,
-            )?)
-            .ok_or(SimError::NumericOverflow)?;
-        if found >= limit {
-            break;
-        }
-    }
-    Ok(found)
-}
-
-fn drain_item_instance_contents(
-    item: &mut crate::items::ItemInstance,
-    spilled: &mut Vec<ItemSnapshot>,
-) {
-    for pocket in &mut item.integral_magazines {
-        if let Some(nested) = pocket.loaded_ammunition.take() {
-            spilled.push(*nested);
-        }
-    }
-    for well in &mut item.magazine_wells {
-        if let Some(nested) = well.installed_magazine.take() {
-            spilled.push(*nested);
-        }
-    }
-    for pocket in &mut item.ammunition_containers {
-        spilled.append(&mut pocket.contents);
-    }
-}
-
-fn drain_item_snapshot_contents(item: &mut ItemSnapshot, spilled: &mut Vec<ItemSnapshot>) {
-    for pocket in &mut item.integral_magazines {
-        if let Some(nested) = pocket.loaded_ammunition.take() {
-            spilled.push(*nested);
-        }
-    }
-    for well in &mut item.magazine_wells {
-        if let Some(nested) = well.installed_magazine.take() {
-            spilled.push(*nested);
-        }
-    }
-    for pocket in &mut item.ammunition_containers {
-        spilled.append(&mut pocket.contents);
-    }
-}
-
-fn place_spilled_items(
-    ground_items: &mut BTreeMap<cdda_protocol::ItemId, crate::GroundItem>,
-    position: WorldPosition,
-    spilled: &mut Vec<ItemSnapshot>,
-) -> Result<(), SimError> {
-    for snapshot in spilled.drain(..) {
-        let id = snapshot.id;
-        let item = crate::items::ItemInstance::from_snapshot(&snapshot)?;
-        if ground_items
-            .insert(id, crate::GroundItem { item, position })
-            .is_some()
-        {
-            return Err(SimError::InvalidItem);
-        }
-    }
-    Ok(())
 }

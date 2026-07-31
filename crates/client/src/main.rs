@@ -6297,6 +6297,7 @@ mod tests {
             ItemSnapshot {
                 id: ItemId::new(1, counter),
                 type_id: format!("item_{counter}"),
+                owner_faction_id: String::new(),
                 charges: 5,
                 damage: 0,
                 raw_damage: 0,
@@ -6921,6 +6922,7 @@ mod tests {
         let item = |counter: u64, type_id: &str| ItemSnapshot {
             id: ItemId::new(1, counter),
             type_id: type_id.to_owned(),
+            owner_faction_id: String::new(),
             charges: 1,
             damage: 0,
             raw_damage: 0,
@@ -7615,6 +7617,7 @@ mod tests {
         let gun = ItemSnapshot {
             id: gun_id,
             type_id: String::from("test_revolver"),
+            owner_faction_id: String::new(),
             charges: 1,
             damage: 0,
             raw_damage: 0,

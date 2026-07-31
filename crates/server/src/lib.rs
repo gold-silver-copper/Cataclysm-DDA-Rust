@@ -6765,6 +6765,7 @@ mod tests {
         let low_output_item = cdda_protocol::ItemSnapshot {
             id: cdda_protocol::ItemId::new(31, 110),
             type_id: String::from("wizard_cane_cheap_on"),
+            owner_faction_id: String::new(),
             charges: 0,
             damage: 0,
             raw_damage: 0,
@@ -6791,6 +6792,7 @@ mod tests {
                 installed_magazine: Some(Box::new(cdda_protocol::ItemSnapshot {
                     id: cdda_protocol::ItemId::new(31, 111),
                     type_id: String::from("light_minus_battery_cell"),
+                    owner_faction_id: String::new(),
                     charges: 1,
                     damage: 0,
                     raw_damage: 0,
@@ -6895,6 +6897,7 @@ mod tests {
             .push(cdda_protocol::ItemSnapshot {
                 id: cdda_protocol::ItemId::new(31, 100),
                 type_id: String::from("flashlight_on"),
+                owner_faction_id: String::new(),
                 charges: 0,
                 damage: 0,
                 raw_damage: 0,
@@ -6921,6 +6924,7 @@ mod tests {
                     installed_magazine: Some(Box::new(cdda_protocol::ItemSnapshot {
                         id: cdda_protocol::ItemId::new(31, 101),
                         type_id: String::from("medium_battery_cell"),
+                        owner_faction_id: String::new(),
                         charges: 0,
                         damage: 0,
                         raw_damage: 0,

@@ -1,21 +1,26 @@
 use std::collections::BTreeSet;
 
 use cdda_content::{
-    EocEffectDefinition, ItemRegistry, MissionDefinition, MissionGoalDefinition, MissionRegistry,
-    MonsterRegistry, ProficiencyRegistry, RecipeRegistry,
+    EocEffectDefinition, ItemDefinition, ItemRegistry, MissionDefinition, MissionGoalDefinition,
+    MissionRegistry, MonsterRegistry, ProficiencyRegistry, RecipeRegistry,
 };
 use cdda_protocol::{
-    AnatomyDefinitionV1, EocConditionV1, EocEffectV1, MissionDefinitionV1, MissionGoalV1,
+    AnatomyDefinitionV1, CraftItemPrototypeV1, EocConditionV1, EocEffectV1, ItemGroupContainerV1,
+    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupItemPrototypeV1, ItemGroupTargetV1,
+    ItemGroupToolChargeStorageV1, ItemPhaseV1, MissionDefinitionV1, MissionGoalV1,
 };
 
 use crate::eocs::{
     effects_references_are_supported, runtime_dialogue_effects_are_supported, runtime_effect,
 };
+use crate::item_groups::{RuntimeItemGroupContent, runtime_item_group_item};
 
 pub(super) fn runtime_mission_catalog(
     registry: &MissionRegistry,
     items: &ItemRegistry,
     monsters: &MonsterRegistry,
+    item_group_content: RuntimeItemGroupContent<'_>,
+    runtime_item_type_ids: Option<&BTreeSet<String>>,
     anatomy: &AnatomyDefinitionV1,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
@@ -34,6 +39,8 @@ pub(super) fn runtime_mission_catalog(
                 definition,
                 items,
                 monsters,
+                item_group_content,
+                runtime_item_type_ids,
                 anatomy,
                 proficiencies,
                 recipes,
@@ -77,6 +84,8 @@ fn runtime_mission_candidate(
     definition: &MissionDefinition,
     items: &ItemRegistry,
     monsters: &MonsterRegistry,
+    item_group_content: RuntimeItemGroupContent<'_>,
+    runtime_item_type_ids: Option<&BTreeSet<String>>,
     anatomy: &AnatomyDefinitionV1,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
@@ -134,7 +143,11 @@ fn runtime_mission_candidate(
                 return None;
             }
             let item = items.get(&definition.item_type_id)?;
-            if item.category == "software" {
+            if !runtime_find_item_target_is_supported(
+                item,
+                item_group_content,
+                runtime_item_type_ids,
+            ) {
                 return None;
             }
             MissionGoalV1::FindItem {
@@ -222,6 +235,104 @@ fn phase_is_supported(
                 .into_iter()
                 .all(|reference| admitted.contains(reference))
         })
+}
+
+fn runtime_find_item_target_is_supported(
+    item: &ItemDefinition,
+    content: RuntimeItemGroupContent<'_>,
+    runtime_item_type_ids: Option<&BTreeSet<String>>,
+) -> bool {
+    if item.category == "software"
+        || runtime_item_type_ids.is_some_and(|ids| !ids.contains(&item.id))
+        || !matches!(item.phase.as_str(), "" | "SOLID" | "solid")
+        || !item.pockets.is_empty()
+        || item.flags.contains("HIDDEN_POISON")
+        || item.flags.contains("HIDDEN_HALLU")
+        || item.subtypes.iter().any(|kind| {
+            matches!(
+                kind.as_str(),
+                "GUN" | "TOOL" | "MAGAZINE" | "GUNMOD" | "TOOLMOD"
+            )
+        })
+    {
+        return false;
+    }
+    let Ok(runtime) = runtime_item_group_item(item, None, content) else {
+        return false;
+    };
+    runtime.prototype.containment.phase == ItemPhaseV1::Solid
+        && runtime.prototype.containment.count_by_charges == item.count_by_charges()
+        && runtime.prototype.integral_magazines.is_empty()
+        && runtime.prototype.magazine_wells.is_empty()
+        && runtime.prototype.ammunition_containers.is_empty()
+        && runtime.prototype.ranged_weapon.is_none()
+        && runtime.prototype.powered_tool.is_none()
+}
+
+pub(super) fn runtime_item_group_item_type_ids(
+    catalog: &[ItemGroupDefinitionV1],
+) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for definition in catalog {
+        if let Some(wrapper) = &definition.graph.wrapper {
+            collect_container_item_type_ids(wrapper, &mut ids);
+        }
+        for node in &definition.graph.nodes {
+            for entry in &node.entries {
+                if let ItemGroupTargetV1::Item(item) = &entry.target {
+                    collect_group_item_type_ids(item, &mut ids);
+                }
+                for content in &entry.contents {
+                    if let ItemGroupContentsSourceV1::Item(item) = content {
+                        collect_group_item_type_ids(item, &mut ids);
+                    }
+                }
+                if let Some(wrapper) = &entry.direct_wrapper {
+                    collect_container_item_type_ids(wrapper, &mut ids);
+                }
+                if let Some(wrapper) = &entry.modifier_container {
+                    collect_container_item_type_ids(wrapper, &mut ids);
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn collect_container_item_type_ids(container: &ItemGroupContainerV1, ids: &mut BTreeSet<String>) {
+    collect_group_item_type_ids(&container.item, ids);
+}
+
+fn collect_group_item_type_ids(item: &ItemGroupItemPrototypeV1, ids: &mut BTreeSet<String>) {
+    collect_craft_item_type_id(&item.prototype, ids);
+    if let Some(container) = &item.default_container {
+        collect_container_item_type_ids(container, ids);
+    }
+    if let Some(storage) = &item.tool_charge_storage {
+        match storage {
+            ItemGroupToolChargeStorageV1::Integral { ammunition } => {
+                collect_craft_item_type_id(ammunition, ids);
+            }
+            ItemGroupToolChargeStorageV1::Detachable {
+                magazine,
+                ammunition,
+                ..
+            } => {
+                collect_craft_item_type_id(magazine, ids);
+                collect_craft_item_type_id(ammunition, ids);
+            }
+            ItemGroupToolChargeStorageV1::MultiDetachable { wells } => {
+                for well in wells {
+                    collect_craft_item_type_id(&well.magazine, ids);
+                    collect_craft_item_type_id(&well.ammunition, ids);
+                }
+            }
+        }
+    }
+}
+
+fn collect_craft_item_type_id(item: &CraftItemPrototypeV1, ids: &mut BTreeSet<String>) {
+    ids.insert(item.type_id.clone());
 }
 
 fn phases_reference_only_admitted_missions<const N: usize>(
