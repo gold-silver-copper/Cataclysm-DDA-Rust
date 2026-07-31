@@ -46,9 +46,11 @@ pub use interactions::{
 };
 pub use npc_dialogue::{
     DialogueResponseV1, DialogueTopicV1, MAX_DIALOGUE_ID_BYTES, MAX_DIALOGUE_RESPONSES,
-    MAX_DIALOGUE_TEXT_BYTES, MAX_NPC_NAME_BYTES, MAX_NPC_OPINION_ABS, MAX_NPC_TEMPLATES,
-    NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1, VisibleNpcSnapshotV1,
-    npc_dialogue_catalog_is_valid, npc_snapshot_is_valid, opinion_is_valid,
+    MAX_DIALOGUE_TEXT_BYTES, MAX_DIALOGUE_TOPIC_STACK, MAX_NPC_NAME_BYTES, MAX_NPC_OPINION_ABS,
+    MAX_NPC_TEMPLATES, NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1,
+    VisibleNpcSnapshotV1, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
+    npc_template_attitude_is_supported, npc_template_attitude_will_talk,
+    opinion_delta_cannot_trigger_hostility, opinion_is_valid,
 };
 
 pub use item_groups::{
@@ -8174,7 +8176,10 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
                 && !npc.template_id.is_empty()
                 && npc.template_id.len() <= MAX_DIALOGUE_ID_BYTES
                 && !npc.template_id.chars().any(char::is_control)
-                && opinion_is_valid(&npc.opinion_of_controlled_actor)
+                && npc
+                    .opinion_of_controlled_actor
+                    .as_ref()
+                    .is_none_or(opinion_is_valid)
         })
         && snapshot.creatures.iter().all(|creature| {
             creature.id.counter() > 0

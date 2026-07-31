@@ -4298,6 +4298,13 @@ fn interest_snapshot(
             sleeping: actor.sleeping,
         })
         .collect();
+    let dialogue_npc_id = controlled_actor
+        .pending_interaction
+        .as_ref()
+        .and_then(|interaction| match &interaction.context {
+            cdda_protocol::InteractionContextV1::NpcDialogue { npc_id, .. } => Some(*npc_id),
+            _ => None,
+        });
     let npcs = snapshot
         .npcs
         .iter()
@@ -4307,12 +4314,13 @@ fn interest_snapshot(
             template_id: npc.template_id.clone(),
             name: npc.name.clone(),
             position: npc.position,
-            opinion_of_controlled_actor: npc
-                .social
-                .iter()
-                .find(|social| social.actor_id == actor_id)
-                .map(|social| social.opinion.clone())
-                .unwrap_or_default(),
+            opinion_of_controlled_actor: (dialogue_npc_id == Some(npc.id)).then(|| {
+                npc.social
+                    .iter()
+                    .find(|social| social.actor_id == actor_id)
+                    .map(|social| social.opinion.clone())
+                    .unwrap_or_default()
+            }),
         })
         .collect();
     let creatures = snapshot

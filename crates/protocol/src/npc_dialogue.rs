@@ -12,6 +12,7 @@ use super::{
 pub const MAX_NPC_TEMPLATES: usize = 4_096;
 pub const MAX_DIALOGUE_TOPICS: usize = 16_384;
 pub const MAX_DIALOGUE_RESPONSES: usize = 64;
+pub const MAX_DIALOGUE_TOPIC_STACK: usize = 64;
 pub const MAX_DIALOGUE_TEXT_BYTES: usize = MAX_INTERACTION_CHOICE_LABEL_BYTES;
 pub const MAX_DIALOGUE_ID_BYTES: usize = 512;
 pub const MAX_NPC_NAME_BYTES: usize = 1_024;
@@ -59,7 +60,8 @@ pub struct DialogueTopicV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NpcTemplateV1 {
     pub template_id: String,
-    pub name: String,
+    pub name_unique: Option<String>,
+    pub name_suffix: Option<String>,
     pub gender: Option<String>,
     pub faction_id: String,
     pub class_id: String,
@@ -89,7 +91,7 @@ pub struct VisibleNpcSnapshotV1 {
     pub template_id: String,
     pub name: String,
     pub position: WorldPosition,
-    pub opinion_of_controlled_actor: NpcOpinionV1,
+    pub opinion_of_controlled_actor: Option<NpcOpinionV1>,
 }
 
 #[must_use]
@@ -114,24 +116,38 @@ pub fn npc_dialogue_catalog_is_valid(
         .collect::<BTreeSet<_>>();
     templates.iter().all(|template| {
         valid_id(&template.template_id)
-            && valid_text(&template.name, MAX_NPC_NAME_BYTES)
+            && template
+                .name_unique
+                .as_ref()
+                .is_none_or(|name| valid_text(name, MAX_NPC_NAME_BYTES))
+            && template
+                .name_suffix
+                .as_ref()
+                .is_none_or(|name| valid_text(name, MAX_NPC_NAME_BYTES))
             && template
                 .gender
                 .as_ref()
                 .is_none_or(|gender| valid_id(gender))
             && optional_id_is_valid(&template.faction_id)
             && optional_id_is_valid(&template.class_id)
+            && npc_template_attitude_is_supported(template.attitude)
             && optional_id_is_valid(&template.mission)
-            && topic_ids.contains(template.chat_topic_id.as_str())
+            && (template.chat_topic_id == "TALK_DONE"
+                || topic_ids.contains(template.chat_topic_id.as_str()))
     }) && topics.iter().all(|topic| {
         valid_id(&topic.topic_id)
+            && topic.topic_id != "TALK_NONE"
+            && topic.topic_id != "TALK_DONE"
             && valid_text(&topic.dynamic_line, MAX_DIALOGUE_TEXT_BYTES)
+            && !matches!(topic.dynamic_line.as_str(), "*" | "&")
             && (1..=MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())
             && topic.responses.iter().enumerate().all(|(index, response)| {
                 response.response_id == index.to_string()
                     && valid_text(&response.text, MAX_DIALOGUE_TEXT_BYTES)
-                    && topic_ids.contains(response.next_topic_id.as_str())
+                    && (matches!(response.next_topic_id.as_str(), "TALK_NONE" | "TALK_DONE")
+                        || topic_ids.contains(response.next_topic_id.as_str()))
                     && opinion_is_valid(&response.opinion_delta)
+                    && opinion_delta_cannot_trigger_hostility(&response.opinion_delta)
                     && eoc_effects_are_valid(&response.effects)
                     && response
                         .condition
@@ -151,7 +167,8 @@ pub fn npc_snapshot_is_valid(
         && npc.id.world_namespace() == world_namespace
         && templates
             .iter()
-            .any(|template| template.template_id == npc.template_id && template.name == npc.name)
+            .any(|template| template.template_id == npc.template_id)
+        && valid_text(&npc.name, MAX_NPC_NAME_BYTES)
         && npc
             .social
             .windows(2)
@@ -161,6 +178,25 @@ pub fn npc_snapshot_is_valid(
                 && social.actor_id.world_namespace() == world_namespace
                 && opinion_is_valid(&social.opinion)
         })
+}
+
+/// Values accepted by the pinned `npc_template::load` implementation.
+#[must_use]
+pub const fn npc_template_attitude_is_supported(attitude: i32) -> bool {
+    matches!(attitude, 0 | 1 | 3 | 5 | 6 | 8 | 9 | 10 | 11 | 13)
+}
+
+/// The pinned non-forced dialogue entry rejects hostile and fleeing template attitudes.
+#[must_use]
+pub const fn npc_template_attitude_will_talk(attitude: i32) -> bool {
+    npc_template_attitude_is_supported(attitude) && !matches!(attitude, 10 | 11)
+}
+
+/// The current canonical NPC model has no pinned personality values. Admit only deltas that
+/// cannot make a previously false `anger >= 20 + fear - aggression` comparison become true.
+#[must_use]
+pub const fn opinion_delta_cannot_trigger_hostility(delta: &NpcOpinionV1) -> bool {
+    delta.anger <= 0 && delta.fear >= 0
 }
 
 #[must_use]

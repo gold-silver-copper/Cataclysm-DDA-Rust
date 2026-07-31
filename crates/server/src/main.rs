@@ -1745,22 +1745,11 @@ fn runtime_npc_dialogue(
         }
         unavailable_dialogue_eocs.extend(inherited);
     }
-    let done = cdda_protocol::DialogueTopicV1 {
-        topic_id: String::from("TALK_DONE"),
-        dynamic_line: String::from("The conversation has reached its end."),
-        responses: vec![cdda_protocol::DialogueResponseV1 {
-            response_id: String::from("0"),
-            text: String::from("Goodbye."),
-            next_topic_id: String::from("TALK_DONE"),
-            opinion_delta: cdda_protocol::NpcOpinionV1::default(),
-            effects: Vec::new(),
-            condition: None,
-        }],
-    };
     let mut topics = registry
         .topic_iter()
-        .filter(|(_, topic)| {
-            !topic.unsupported
+        .filter(|(topic_id, topic)| {
+            !matches!(*topic_id, "TALK_NONE" | "TALK_DONE")
+                && !topic.unsupported
                 && !topic.dynamic_line.is_empty()
                 && !contains_unresolved_dialogue_tag(&topic.dynamic_line)
                 && (1..=cdda_protocol::MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())
@@ -1773,6 +1762,15 @@ fn runtime_npc_dialogue(
                             anger: response.opinion.anger,
                             owed: response.opinion.owed,
                         })
+                        && cdda_protocol::opinion_delta_cannot_trigger_hostility(
+                            &cdda_protocol::NpcOpinionV1 {
+                                trust: response.opinion.trust,
+                                fear: response.opinion.fear,
+                                value: response.opinion.value,
+                                anger: response.opinion.anger,
+                                owed: response.opinion.owed,
+                            },
+                        )
                         && runtime_dialogue_effects_are_supported(&response.effects, anatomy)
                         && {
                             let effects = response
@@ -1831,17 +1829,15 @@ fn runtime_npc_dialogue(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    topics.insert(done.topic_id.clone(), done);
     loop {
         let ids = topics.keys().cloned().collect::<BTreeSet<_>>();
         let rejected = topics
             .iter()
             .filter(|(topic_id, topic)| {
-                topic_id.as_str() != "TALK_DONE"
-                    && topic
-                        .responses
-                        .iter()
-                        .any(|response| !ids.contains(&response.next_topic_id))
+                topic.responses.iter().any(|response| {
+                    !matches!(response.next_topic_id.as_str(), "TALK_NONE" | "TALK_DONE")
+                        && !ids.contains(&response.next_topic_id)
+                })
             })
             .map(|(topic_id, _)| topic_id.clone())
             .collect::<Vec<_>>();
@@ -1856,12 +1852,22 @@ fn runtime_npc_dialogue(
         .npc_iter()
         .filter(|(_, template)| {
             template.unsupported_fields.is_empty()
-                && topics.contains_key(&template.chat_topic_id)
-                && !contains_unresolved_dialogue_tag(&template.name)
+                && (template.chat_topic_id == "TALK_DONE"
+                    || topics.contains_key(&template.chat_topic_id))
+                && cdda_protocol::npc_template_attitude_is_supported(template.attitude)
+                && template
+                    .name_unique
+                    .as_ref()
+                    .is_none_or(|name| !contains_unresolved_dialogue_tag(name))
+                && template
+                    .name_suffix
+                    .as_ref()
+                    .is_none_or(|name| !contains_unresolved_dialogue_tag(name))
         })
         .map(|(template_id, template)| cdda_protocol::NpcTemplateV1 {
             template_id: template_id.to_owned(),
-            name: template.name.clone(),
+            name_unique: template.name_unique.clone(),
+            name_suffix: template.name_suffix.clone(),
             gender: template.gender.clone(),
             faction_id: template.faction_id.clone(),
             class_id: template.class_id.clone(),
@@ -1871,11 +1877,7 @@ fn runtime_npc_dialogue(
         })
         .collect::<Vec<_>>();
     let topics = topics.into_values().collect::<Vec<_>>();
-    if !templates
-        .iter()
-        .any(|template| template.template_id == "apis")
-        || !cdda_protocol::npc_dialogue_catalog_is_valid(&templates, &topics)
-    {
+    if !cdda_protocol::npc_dialogue_catalog_is_valid(&templates, &topics) {
         return Err("pinned content has no closed supported NPC dialogue family".into());
     }
     Ok((templates, topics))

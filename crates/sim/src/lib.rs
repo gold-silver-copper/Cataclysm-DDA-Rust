@@ -5850,10 +5850,6 @@ impl WorldState {
             },
         );
         self.refresh_actor_memory(id)?;
-        if let Err(error) = self.spawn_initial_npc_near(position) {
-            self.actors.remove(&id);
-            return Err(error);
-        }
         Ok(id)
     }
 
@@ -6087,10 +6083,6 @@ impl WorldState {
                 map_memory: map_memory_from_snapshot(actor.map_memory),
             },
         );
-        if let Err(error) = self.spawn_initial_npc_near(restored_position) {
-            self.actors.remove(&restored_id);
-            return Err(error);
-        }
         Ok(())
     }
 
@@ -7612,9 +7604,7 @@ impl WorldState {
             CommandKind::Attack { .. } | CommandKind::AttackCreature { .. } => {
                 self.actor_melee_action_cost(actor_id)
             }
-            CommandKind::TalkToNpc { target } => {
-                Ok(self.npc_dialogue_action_cost(actor_id, *target))
-            }
+            CommandKind::TalkToNpc { .. } => Ok(0),
             CommandKind::InsertPocketItem {
                 owner_item,
                 pocket_index,
@@ -14771,16 +14761,29 @@ impl WorldState {
                 .pending_interaction
                 .as_ref()
                 .is_some_and(|interaction| {
-                    if let cdda_protocol::InteractionContextV1::NpcDialogue { npc_id, topic_id } =
-                        &interaction.context
+                    if let cdda_protocol::InteractionContextV1::NpcDialogue {
+                        npc_id,
+                        topic_stack,
+                    } = &interaction.context
                     {
                         let Some(npc) = npcs.get(npc_id) else {
                             return true;
                         };
-                        let Some(topic) = dialogue_topics.get(topic_id) else {
+                        if !topic_stack
+                            .iter()
+                            .all(|topic_id| dialogue_topics.contains_key(topic_id))
+                        {
+                            return true;
+                        }
+                        let Some(topic) = topic_stack
+                            .last()
+                            .and_then(|topic_id| dialogue_topics.get(topic_id))
+                        else {
                             return true;
                         };
-                        if interaction.prompt != format!("{}: {}", npc.name, topic.dynamic_line) {
+                        if interaction.prompt
+                            != npc_dialogue::render_dialogue_prompt(&npc.name, &topic.dynamic_line)
+                        {
                             return true;
                         }
                         if interaction.choices.as_slice()

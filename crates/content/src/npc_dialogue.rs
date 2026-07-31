@@ -64,7 +64,8 @@ pub struct DialogueTopicDefinition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NpcTemplateDefinition {
     pub id: String,
-    pub name: String,
+    pub name_unique: Option<String>,
+    pub name_suffix: Option<String>,
     pub gender: Option<String>,
     pub faction_id: String,
     pub class_id: String,
@@ -150,29 +151,37 @@ fn load_npc(
 ) -> Result<(), DialogueRegistryError> {
     let object = object(&value, file, "npc")?;
     let id = required_string(object.get("id"), file, "id")?;
-    let name = object
+    if registry.npcs.contains_key(&id) {
+        return Ok(());
+    }
+    let name_unique = object
         .get("name_unique")
-        .or_else(|| object.get("name_suffix"))
-        .map(|value| translated_string(value, file, "name"))
-        .transpose()?
-        .unwrap_or_else(|| id.clone());
+        .map(|value| translated_string(value, file, "name_unique"))
+        .transpose()?;
+    let name_suffix = object
+        .get("name_suffix")
+        .map(|value| translated_string(value, file, "name_suffix"))
+        .transpose()?;
     let definition = NpcTemplateDefinition {
         id: id.clone(),
-        name,
+        name_unique,
+        name_suffix,
         gender: optional_string(object.get("gender"), file, "gender")?,
         faction_id: optional_string(object.get("faction"), file, "faction")?.unwrap_or_default(),
         class_id: optional_string(object.get("class"), file, "class")?.unwrap_or_default(),
-        attitude: object
-            .get("attitude")
-            .map(|value| integer(value, file, "attitude"))
-            .transpose()?
-            .unwrap_or_default(),
+        attitude: integer(
+            object
+                .get("attitude")
+                .ok_or_else(|| invalid(file, "attitude"))?,
+            file,
+            "attitude",
+        )?,
         mission: optional_string(object.get("mission"), file, "mission")?.unwrap_or_default(),
         chat_topic_id: required_string(object.get("chat"), file, "chat")?,
         unsupported_fields: unsupported_fields(object, NPC_FIELDS),
         source: file.upstream_path.clone(),
     };
-    registry.npcs.insert(id, definition);
+    registry.npcs.entry(id).or_insert(definition);
     Ok(())
 }
 
@@ -233,15 +242,17 @@ fn load_topic(
 
 fn dynamic_line_shape_is_supported(value: &Value) -> bool {
     match value {
-        Value::String(value) => !value.is_empty(),
+        Value::String(value) => dialogue_line_is_supported(value),
         Value::Object(values) => {
-            translated_string_shape_is_supported(value)
+            (translated_string_shape_is_supported(value)
+                && translated_string_value(value).is_some_and(dialogue_line_is_supported))
                 || (values
                     .keys()
                     .all(|key| key == "gendered_line" || key == "relevant_genders")
-                    && values
-                        .get("gendered_line")
-                        .is_some_and(translated_string_shape_is_supported)
+                    && values.get("gendered_line").is_some_and(|line| {
+                        translated_string_shape_is_supported(line)
+                            && translated_string_value(line).is_some_and(dialogue_line_is_supported)
+                    })
                     && values
                         .get("relevant_genders")
                         .and_then(Value::as_array)
@@ -265,10 +276,9 @@ fn response_shapes_are_supported(value: &Value) -> bool {
                         && response
                             .get("text")
                             .is_some_and(translated_string_shape_is_supported)
-                        && response
-                            .get("topic")
-                            .and_then(Value::as_str)
-                            .is_some_and(|topic| !topic.is_empty())
+                        && response.get("topic").is_none_or(|topic| {
+                            topic.as_str().is_some_and(|topic| !topic.is_empty())
+                        })
                         && response.get("opinion").is_none_or(|opinion| {
                             opinion.as_object().is_some_and(|opinion| {
                                 unsupported_fields(opinion, OPINION_FIELDS).is_empty()
@@ -338,7 +348,8 @@ fn responses(
                     file,
                     "text",
                 )?,
-                next_topic_id: required_string(response.get("topic"), file, "topic")?,
+                next_topic_id: optional_string(response.get("topic"), file, "topic")?
+                    .unwrap_or_else(|| String::from("TALK_NONE")),
                 opinion: response
                     .get("opinion")
                     .map(|value| opinion(value, file))
@@ -434,6 +445,20 @@ fn translated_string_shape_is_supported(value: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+fn translated_string_value(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(value) => Some(value),
+        Value::Object(values) => ["str", "str_sp", "str_pl"]
+            .into_iter()
+            .find_map(|key| values.get(key).and_then(Value::as_str)),
+        _ => None,
+    }
+}
+
+fn dialogue_line_is_supported(line: &str) -> bool {
+    !line.is_empty() && !matches!(line, "*" | "&")
 }
 
 fn required_string(

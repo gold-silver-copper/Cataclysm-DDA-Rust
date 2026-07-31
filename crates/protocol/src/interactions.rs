@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, NpcId, SimTick,
-    eoc_confirmation_branches_are_valid,
+    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, MAX_DIALOGUE_TOPIC_STACK, NpcId,
+    SimTick, eoc_confirmation_branches_are_valid,
 };
 
 pub const MAX_INTERACTION_CHOICES: usize = 64;
@@ -38,7 +38,7 @@ pub enum InteractionContextV1 {
     },
     NpcDialogue {
         npc_id: NpcId,
-        topic_id: String,
+        topic_stack: Vec<String>,
     },
 }
 
@@ -119,10 +119,17 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                         ]
                     && eoc_confirmation_branches_are_valid(accept_effects, decline_effects)
             }
-            InteractionContextV1::NpcDialogue { npc_id, topic_id } => {
+            InteractionContextV1::NpcDialogue {
+                npc_id,
+                topic_stack,
+            } => {
                 npc_id.counter() > 0
                     && npc_id.world_namespace() == actor_id.world_namespace()
-                    && valid_id(topic_id, MAX_INTERACTION_CHOICE_ID_BYTES)
+                    && (1..=MAX_DIALOGUE_TOPIC_STACK).contains(&topic_stack.len())
+                    && topic_stack.iter().all(|topic_id| {
+                        !matches!(topic_id.as_str(), "TALK_NONE" | "TALK_DONE")
+                            && valid_id(topic_id, MAX_INTERACTION_CHOICE_ID_BYTES)
+                    })
             }
         }
 }

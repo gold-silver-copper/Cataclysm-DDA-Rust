@@ -5261,17 +5261,18 @@ fn gameplay_status(
                 + npc.position.z.abs_diff(actor.position.z)
         })
         .map(|npc| {
+            let opinion =
+                npc.opinion_of_controlled_actor
+                    .as_ref()
+                    .map_or_else(String::new, |opinion| {
+                        format!(
+                            " (trust {}, fear {}, value {}, anger {}, owed {})",
+                            opinion.trust, opinion.fear, opinion.value, opinion.anger, opinion.owed,
+                        )
+                    });
             format!(
-                "{} at ({}, {}, {}) (trust {}, fear {}, value {}, anger {}, owed {})",
-                npc.name,
-                npc.position.x,
-                npc.position.y,
-                npc.position.z,
-                npc.opinion_of_controlled_actor.trust,
-                npc.opinion_of_controlled_actor.fear,
-                npc.opinion_of_controlled_actor.value,
-                npc.opinion_of_controlled_actor.anger,
-                npc.opinion_of_controlled_actor.owed,
+                "{} at ({}, {}, {}){}",
+                npc.name, npc.position.x, npc.position.y, npc.position.z, opinion,
             )
         })
         .unwrap_or_else(|| String::from("none"));

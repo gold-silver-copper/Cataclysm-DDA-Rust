@@ -233,9 +233,7 @@ impl WorldState {
                         .ok_or(SimError::NumericOverflow)
                 }),
             InteractionContextV1::EocConfirmation { .. } => Ok(0),
-            InteractionContextV1::NpcDialogue { npc_id, .. } => {
-                Ok(self.npc_dialogue_action_cost(actor_id, *npc_id))
-            }
+            InteractionContextV1::NpcDialogue { .. } => Ok(0),
         }
     }
 
@@ -338,16 +336,18 @@ impl WorldState {
                     return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
                 }
             }
-            InteractionContextV1::NpcDialogue { npc_id, topic_id } => self
-                .apply_npc_dialogue_response(
-                    actor_id,
-                    sequence,
-                    interaction_id,
-                    *npc_id,
-                    topic_id,
-                    &choice_id,
-                    events,
-                )?,
+            InteractionContextV1::NpcDialogue {
+                npc_id,
+                topic_stack,
+            } => self.apply_npc_dialogue_response(
+                actor_id,
+                sequence,
+                interaction_id,
+                *npc_id,
+                topic_stack,
+                &choice_id,
+                events,
+            )?,
         }
         Ok(())
     }
@@ -377,6 +377,29 @@ impl WorldState {
         if pending.interaction_id != interaction_id {
             events.push(self.rejection(actor_id, sequence, CommandRejection::StaleInteraction)?);
             return Ok(());
+        }
+        if let InteractionContextV1::NpcDialogue {
+            npc_id,
+            topic_stack,
+        } = &pending.context
+        {
+            let Some(choice_id) = self.npc_dialogue_quit_choice(&pending) else {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::InvalidInteractionChoice,
+                )?);
+                return Ok(());
+            };
+            return self.apply_npc_dialogue_response(
+                actor_id,
+                sequence,
+                interaction_id,
+                *npc_id,
+                topic_stack,
+                &choice_id,
+                events,
+            );
         }
         self.actors
             .get_mut(&actor_id)
@@ -433,6 +456,45 @@ impl WorldState {
             })
             .collect::<Vec<_>>();
         for (actor_id, interaction) in expired {
+            if let InteractionContextV1::NpcDialogue {
+                npc_id,
+                topic_stack,
+            } = &interaction.context
+            {
+                if let Some(choice_id) = self.npc_dialogue_quit_choice(&interaction) {
+                    let sequence = self
+                        .actors
+                        .get(&actor_id)
+                        .ok_or(SimError::UnknownActor)?
+                        .last_command_sequence;
+                    self.apply_npc_dialogue_response(
+                        actor_id,
+                        sequence,
+                        interaction.interaction_id,
+                        *npc_id,
+                        topic_stack,
+                        &choice_id,
+                        events,
+                    )?;
+                } else {
+                    let created_at_tick = self.tick;
+                    let renewed = self
+                        .tick
+                        .0
+                        .checked_add(EOC_CONFIRMATION_LIFETIME_TICKS)
+                        .ok_or(SimError::NumericOverflow)?;
+                    let pending = self
+                        .actors
+                        .get_mut(&actor_id)
+                        .ok_or(SimError::UnknownActor)?
+                        .pending_interaction
+                        .as_mut()
+                        .ok_or(SimError::InvalidNpcDialogue)?;
+                    pending.created_at_tick = created_at_tick;
+                    pending.expires_at_tick = SimTick(renewed);
+                }
+                continue;
+            }
             self.actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?
@@ -463,7 +525,7 @@ impl WorldState {
                     )?
                 }
                 InteractionContextV1::MedicalBodyPart { .. } => false,
-                InteractionContextV1::NpcDialogue { .. } => false,
+                InteractionContextV1::NpcDialogue { .. } => unreachable!(),
             };
             if !resolved {
                 events.push(self.make_event(WorldEventKind::InteractionCanceled {
@@ -494,5 +556,66 @@ impl WorldState {
         })?);
         events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotActivatable)?);
         Ok(())
+    }
+
+    pub(super) fn resolve_pending_before_npc_dialogue(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let pending = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction
+            .clone();
+        let Some(pending) = pending else {
+            return Ok(true);
+        };
+        let InteractionContextV1::EocConfirmation {
+            item_id,
+            item_type_id,
+            activation_sequence,
+            default,
+            accept_effects,
+            decline_effects,
+        } = &pending.context
+        else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ActorBusy)?);
+            return Ok(false);
+        };
+        let effects = if *default {
+            accept_effects
+        } else {
+            decline_effects
+        };
+        self.actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction = None;
+        if !self.apply_eoc_confirmation_response(
+            actor_id,
+            *activation_sequence,
+            sequence,
+            *item_id,
+            item_type_id,
+            effects,
+            false,
+            events,
+        )? {
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .pending_interaction = Some(pending);
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ActorBusy)?);
+            return Ok(false);
+        }
+        Ok(self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction
+            .is_none())
     }
 }
