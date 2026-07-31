@@ -4883,7 +4883,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV28");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV29");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -7778,9 +7778,9 @@ impl WorldState {
                 self.actor_melee_action_cost(actor_id)
             }
             CommandKind::TalkToNpc { .. } => Ok(0),
-            CommandKind::BoardVehicle { .. } | CommandKind::UnboardVehicle { .. } => {
-                Ok(self.vehicle_board_action_cost())
-            }
+            CommandKind::BoardVehicle { .. }
+            | CommandKind::UnboardVehicle { .. }
+            | CommandKind::SetVehiclePartOpen { .. } => Ok(self.vehicle_board_action_cost()),
             CommandKind::InsertPocketItem {
                 owner_item,
                 pocket_index,
@@ -8066,6 +8066,9 @@ impl WorldState {
         if !self.ensure_active_bubble_generated(to)? {
             return Ok(());
         }
+        if self.try_open_vehicle_at_from_movement(actor_id, to, events)? {
+            return Ok(());
+        }
         if !self.is_passable(to)
             || self.actor_at(to).is_some()
             || self.creature_at(to).is_some()
@@ -8147,6 +8150,18 @@ impl WorldState {
                 vehicle_id,
                 prototype_part_index,
                 item_id,
+                events,
+            ),
+            CommandKind::SetVehiclePartOpen {
+                vehicle_id,
+                prototype_part_index,
+                open,
+            } => self.apply_set_vehicle_part_open(
+                actor_id,
+                sequence,
+                vehicle_id,
+                prototype_part_index,
+                open,
                 events,
             ),
             CommandKind::ShootActor { target } => {
@@ -8374,6 +8389,9 @@ impl WorldState {
         };
         if !self.ensure_active_bubble_generated(to)? {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        if self.try_open_vehicle_at_from_movement(actor_id, to, events)? {
             return Ok(());
         }
         if !self.is_passable(to)

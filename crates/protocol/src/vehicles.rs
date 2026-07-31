@@ -184,6 +184,8 @@ pub struct VisibleVehicleTileV1 {
     pub open: bool,
     /// Authoritative boardable part at this displayed tile, if one is live.
     pub boardable_prototype_part_index: Option<u16>,
+    /// Server-selected live `OPENABLE` part at this displayed tile.
+    pub openable_prototype_part_index: Option<u16>,
     /// Adjacent, unlocked cargo boundary selected by the server, if present.
     pub cargo_prototype_part_index: Option<u16>,
     pub passenger: Option<ActorId>,

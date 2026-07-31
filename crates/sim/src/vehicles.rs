@@ -142,6 +142,82 @@ pub(crate) fn initial_vehicle_part_hp(
     }
 }
 
+fn contiguous_vehicle_axis(candidates: &mut [(usize, i16)], target_index: usize) -> Vec<usize> {
+    candidates.sort_unstable_by(|(left_index, left), (right_index, right)| {
+        right.cmp(left).then(left_index.cmp(right_index))
+    });
+    let Some(target_position) = candidates
+        .iter()
+        .position(|(index, _)| *index == target_index)
+    else {
+        return Vec::new();
+    };
+    let mut first = target_position;
+    while first > 0 && candidates[first - 1].1.abs_diff(candidates[first].1) <= 1 {
+        first -= 1;
+    }
+    let mut end = target_position + 1;
+    while end < candidates.len() && candidates[end - 1].1.abs_diff(candidates[end].1) <= 1 {
+        end += 1;
+    }
+    candidates[first..end]
+        .iter()
+        .map(|(index, _)| *index)
+        .collect()
+}
+
+fn connected_openable_vehicle_parts(
+    prototype: &cdda_protocol::WorldgenVehiclePrototypeV1,
+    part_types: &[cdda_protocol::WorldgenVehiclePartTypeV1],
+    target_index: usize,
+) -> Result<Vec<usize>, SimError> {
+    let target = prototype
+        .parts
+        .get(target_index)
+        .ok_or(SimError::InvalidTerrain)?;
+    let target_type = part_types
+        .get(usize::from(target.part_type_index))
+        .ok_or(SimError::InvalidTerrain)?;
+    let is_multisquare = target_type
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("MULTISQUARE"))
+        .is_ok();
+    let mut connected = std::collections::BTreeSet::from([target_index]);
+    if !is_multisquare {
+        return Ok(connected.into_iter().collect());
+    }
+    let mut same_x = Vec::new();
+    let mut same_y = Vec::new();
+    for (index, candidate) in prototype.parts.iter().enumerate() {
+        if candidate.part_type_index != target.part_type_index {
+            continue;
+        }
+        let candidate_type = part_types
+            .get(usize::from(candidate.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        if candidate_type
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
+            .is_err()
+            || candidate_type
+                .flags
+                .binary_search_by(|flag| flag.as_str().cmp("MULTISQUARE"))
+                .is_err()
+        {
+            continue;
+        }
+        if candidate.mount_x == target.mount_x {
+            same_x.push((index, candidate.mount_y));
+        }
+        if candidate.mount_y == target.mount_y {
+            same_y.push((index, candidate.mount_x));
+        }
+    }
+    connected.extend(contiguous_vehicle_axis(&mut same_x, target_index));
+    connected.extend(contiguous_vehicle_axis(&mut same_y, target_index));
+    Ok(connected.into_iter().collect())
+}
+
 impl WorldState {
     pub(super) fn actor_is_boarded(&self, actor_id: ActorId) -> bool {
         self.vehicles.values().any(|vehicle| {
@@ -163,6 +239,195 @@ impl WorldState {
 
     pub(super) fn vehicle_board_action_cost(&self) -> i64 {
         i64::from(ACTOR_ACTION_THRESHOLD)
+    }
+
+    pub(super) fn apply_set_vehicle_part_open(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        open: bool,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor_position = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(vehicle) = self.vehicles.get(&vehicle_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
+            return Ok(());
+        };
+        let target_index = usize::from(prototype_part_index);
+        let Some(target_part) = vehicle.parts.get(target_index) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartMissing,
+            )?);
+            return Ok(());
+        };
+        if actor_position.z != target_part.position.z
+            || actor_position.x.abs_diff(target_part.position.x) > 1
+            || actor_position.y.abs_diff(target_part.position.y) > 1
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotHere)?);
+            return Ok(());
+        }
+        let catalog = self.worldgen.as_ref().ok_or(SimError::InvalidTerrain)?;
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let target_prototype_part = prototype
+            .parts
+            .get(target_index)
+            .ok_or(SimError::InvalidTerrain)?;
+        let target_type = catalog
+            .vehicle_part_types
+            .get(usize::from(target_prototype_part.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        if target_part.hp == 0 {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::VehiclePartBroken)?);
+            return Ok(());
+        }
+        if target_type
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
+            .is_err()
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartNotOpenable,
+            )?);
+            return Ok(());
+        }
+        let connected =
+            connected_openable_vehicle_parts(prototype, &catalog.vehicle_part_types, target_index)?;
+        if !open
+            && connected.iter().any(|index| {
+                let position = vehicle.parts[*index].position;
+                self.actors
+                    .values()
+                    .any(|actor| actor.hp > 0 && actor.position == position)
+                    || self
+                        .creatures
+                        .values()
+                        .any(|creature| creature.hp > 0 && creature.position == position)
+                    || self.npcs.values().any(|npc| npc.position == position)
+            })
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartObstructed,
+            )?);
+            return Ok(());
+        }
+        let mut changed = Vec::new();
+        let vehicle = self
+            .vehicles
+            .get_mut(&vehicle_id)
+            .ok_or(SimError::InvalidTerrain)?;
+        for index in connected {
+            let part = vehicle
+                .parts
+                .get_mut(index)
+                .ok_or(SimError::InvalidTerrain)?;
+            if part.open == open {
+                continue;
+            }
+            part.open = open;
+            if open {
+                part.locked = false;
+            }
+            changed.push((part.prototype_part_index, part.position));
+        }
+        for (prototype_part_index, position) in changed {
+            events.push(self.make_event(WorldEventKind::VehiclePartOpenChanged {
+                actor_id,
+                vehicle_id,
+                prototype_part_index,
+                position,
+                open,
+            })?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn try_open_vehicle_at_from_movement(
+        &mut self,
+        actor_id: ActorId,
+        position: WorldPosition,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return Ok(false);
+        };
+        let target = self.vehicles.iter().find_map(|(vehicle_id, vehicle)| {
+            if !vehicle.owner_faction_id.is_empty() {
+                return None;
+            }
+            let prototype = catalog
+                .vehicle_prototypes
+                .get(usize::from(vehicle.prototype_index))?;
+            vehicle.parts.iter().enumerate().find_map(|(index, part)| {
+                let prototype_part = prototype.parts.get(index)?;
+                let part_type = catalog
+                    .vehicle_part_types
+                    .get(usize::from(prototype_part.part_type_index))?;
+                (part.position == position
+                    && part.hp > 0
+                    && !part.open
+                    && part_type
+                        .flags
+                        .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
+                        .is_ok())
+                .then_some((*vehicle_id, index))
+            })
+        });
+        let Some((vehicle_id, target_index)) = target else {
+            return Ok(false);
+        };
+        let vehicle = self
+            .vehicles
+            .get(&vehicle_id)
+            .ok_or(SimError::InvalidTerrain)?;
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let connected =
+            connected_openable_vehicle_parts(prototype, &catalog.vehicle_part_types, target_index)?;
+        let mut changed = Vec::new();
+        let vehicle = self
+            .vehicles
+            .get_mut(&vehicle_id)
+            .ok_or(SimError::InvalidTerrain)?;
+        for index in connected {
+            let part = vehicle
+                .parts
+                .get_mut(index)
+                .ok_or(SimError::InvalidTerrain)?;
+            if part.open {
+                continue;
+            }
+            part.open = true;
+            part.locked = false;
+            changed.push((part.prototype_part_index, part.position));
+        }
+        for (prototype_part_index, position) in changed {
+            events.push(self.make_event(WorldEventKind::VehiclePartOpenChanged {
+                actor_id,
+                vehicle_id,
+                prototype_part_index,
+                position,
+                open: true,
+            })?);
+        }
+        Ok(true)
     }
 
     pub(super) fn apply_board_vehicle(

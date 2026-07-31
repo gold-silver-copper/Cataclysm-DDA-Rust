@@ -4526,6 +4526,7 @@ fn visible_vehicles(
         let mut displayed = BTreeMap::<WorldPosition, (i16, VisibleVehicleTileV1)>::new();
         let mut passengers = BTreeMap::new();
         let mut boardable_parts = BTreeMap::new();
+        let mut openable_parts = BTreeMap::new();
         let mut cargo_parts = BTreeMap::new();
         let mut cargo = BTreeMap::<WorldPosition, Vec<cdda_protocol::ItemSnapshot>>::new();
         for (index, part) in vehicle.parts.iter().enumerate() {
@@ -4548,6 +4549,16 @@ fn visible_vehicles(
                     .is_ok()
             {
                 boardable_parts
+                    .entry(part.position)
+                    .or_insert(part.prototype_part_index);
+            }
+            if part.hp > 0
+                && part_type
+                    .flags
+                    .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
+                    .is_ok()
+            {
+                openable_parts
                     .entry(part.position)
                     .or_insert(part.prototype_part_index);
             }
@@ -4626,6 +4637,7 @@ fn visible_vehicles(
                         boardable_prototype_part_index: boardable_parts
                             .get(&part.position)
                             .copied(),
+                        openable_prototype_part_index: openable_parts.get(&part.position).copied(),
                         cargo_prototype_part_index: cargo_parts.get(&part.position).copied(),
                         passenger: passengers.get(&part.position).copied(),
                         cargo: cargo.remove(&part.position).unwrap_or_default(),
@@ -5068,6 +5080,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             ..
         }
         | WorldEventKind::VehicleCargoStored {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::VehiclePartOpenChanged {
             actor_id: event_actor,
             ..
         }

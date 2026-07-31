@@ -139,7 +139,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 133;
+pub const PROTOCOL_VERSION: u16 = 134;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1770,6 +1770,11 @@ pub enum CommandKind {
         prototype_part_index: u16,
         item_id: ItemId,
     },
+    SetVehiclePartOpen {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        open: bool,
+    },
     ShootActor {
         target: ActorId,
     },
@@ -1909,7 +1914,9 @@ pub enum CommandRejection {
     VehiclePartBroken,
     VehiclePartNotBoardable,
     VehiclePartNotCargo,
+    VehiclePartNotOpenable,
     VehicleCargoLocked,
+    VehiclePartObstructed,
     VehiclePartOccupied,
     ActorAlreadyBoarded,
     ActorNotBoarded,
@@ -2055,6 +2062,13 @@ pub enum WorldEventKind {
         prototype_part_index: u16,
         item_id: ItemId,
         position: WorldPosition,
+    },
+    VehiclePartOpenChanged {
+        actor_id: ActorId,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        position: WorldPosition,
+        open: bool,
     },
     ActorMoved {
         actor_id: ActorId,
@@ -4675,6 +4689,10 @@ fn valid_client_command(command: &ClientCommand) -> bool {
                 && vehicle_id.world_namespace() == command.actor_id.world_namespace()
                 && item_id.counter() > 0
                 && item_id.world_namespace() == command.actor_id.world_namespace()
+        }
+        CommandKind::SetVehiclePartOpen { vehicle_id, .. } => {
+            vehicle_id.counter() > 0
+                && vehicle_id.world_namespace() == command.actor_id.world_namespace()
         }
         CommandKind::RespondInteraction {
             interaction_id,

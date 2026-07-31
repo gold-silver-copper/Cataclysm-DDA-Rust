@@ -75,6 +75,11 @@ enum ClientAction {
         prototype_part_index: u16,
         item_id: ItemId,
     },
+    SetVehiclePartOpen {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        open: bool,
+    },
     Wield {
         item_id: ItemId,
     },
@@ -1050,6 +1055,15 @@ async fn run_game_session(
                         vehicle_id,
                         prototype_part_index,
                         item_id,
+                    }),
+                    Some(ClientAction::SetVehiclePartOpen {
+                        vehicle_id,
+                        prototype_part_index,
+                        open,
+                    }) => Some(CommandKind::SetVehiclePartOpen {
+                        vehicle_id,
+                        prototype_part_index,
+                        open,
                     }),
                     Some(ClientAction::Wield { item_id }) => {
                         Some(CommandKind::Wield { item_id })
@@ -4277,6 +4291,36 @@ fn handle_movement_input(
         let _send_result = game.actions.try_send(ClientAction::Wait);
     } else if keys.just_pressed(KeyCode::KeyR) && actor.wielded.is_some() {
         let _send_result = game.actions.try_send(ClientAction::Unwield);
+    } else if keys.just_pressed(KeyCode::KeyO) {
+        if let Some((vehicle, tile, prototype_part_index)) = snapshot
+            .vehicles
+            .iter()
+            .flat_map(|vehicle| {
+                vehicle.tiles.iter().filter_map(move |tile| {
+                    tile.openable_prototype_part_index
+                        .map(|part_index| (vehicle, tile, part_index))
+                })
+            })
+            .filter(|(_, tile, _)| {
+                tile.position.z == actor.position.z
+                    && tile.position.x.abs_diff(actor.position.x) <= 1
+                    && tile.position.y.abs_diff(actor.position.y) <= 1
+            })
+            .min_by_key(|(vehicle, tile, part_index)| {
+                (
+                    actor.position.x.abs_diff(tile.position.x)
+                        + actor.position.y.abs_diff(tile.position.y),
+                    vehicle.id,
+                    *part_index,
+                )
+            })
+        {
+            let _send_result = game.actions.try_send(ClientAction::SetVehiclePartOpen {
+                vehicle_id: vehicle.id,
+                prototype_part_index,
+                open: !tile.open,
+            });
+        }
     } else if keys.just_pressed(KeyCode::KeyK) {
         if let Some((vehicle, tile)) = snapshot.vehicles.iter().find_map(|vehicle| {
             vehicle
@@ -4666,6 +4710,13 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::VehicleCargoStored { .. } => {
             String::from("Stored the item in the vehicle.")
         }
+        WorldEventKind::VehiclePartOpenChanged { open, .. } => {
+            if *open {
+                String::from("Opened the vehicle part.")
+            } else {
+                String::from("Closed the vehicle part.")
+            }
+        }
         WorldEventKind::ActorMoved { .. } => String::from("Moved."),
         WorldEventKind::DamageApplied {
             body_part_id,
@@ -5050,7 +5101,9 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::VehiclePartBroken => "the vehicle part is broken",
         CommandRejection::VehiclePartNotBoardable => "that vehicle part cannot be boarded",
         CommandRejection::VehiclePartNotCargo => "that vehicle part cannot hold cargo",
+        CommandRejection::VehiclePartNotOpenable => "that vehicle part cannot be opened",
         CommandRejection::VehicleCargoLocked => "that vehicle cargo is locked",
+        CommandRejection::VehiclePartObstructed => "something is blocking that vehicle part",
         CommandRejection::VehiclePartOccupied => "that vehicle seat is occupied",
         CommandRejection::ActorAlreadyBoarded => "your character is already aboard a vehicle",
         CommandRejection::ActorNotBoarded => "your character is not aboard that vehicle",
