@@ -484,7 +484,8 @@
         { "id": "permanent-hostile-summon-spell-special-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "hostile-typed-damage-blast-spell-special-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "hostile-whole-body-status-blast-spell-special-actors", "state": "implementation_complete_verification_deferred" },
-        { "id": "eoc-field-shape-and-extra-chain-spell-special-actors", "state": "planned" }
+        { "id": "hostile-eoc-backed-blast-spell-special-actors", "state": "implementation_complete_verification_deferred" },
+        { "id": "field-shape-and-extra-chain-spell-special-actors", "state": "planned" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],

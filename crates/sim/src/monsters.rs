@@ -672,6 +672,10 @@ impl WorldState {
             .map(|(actor_id, _actor)| *actor_id)
             .collect::<Vec<_>>();
         for target in targets {
+            if !profile.eoc_ids.is_empty() {
+                let _ = self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
+                continue;
+            }
             let mut rng = self.named_rng(
                 b"creature-special-spell-attack",
                 &[source.as_u128(), target.as_u128()],

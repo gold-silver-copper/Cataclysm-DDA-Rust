@@ -52,6 +52,7 @@ pub(crate) fn field_is_implemented(field: &str) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpellEffectKind {
     Attack,
+    EffectOnCondition,
     Summon,
     Unsupported,
 }
@@ -237,6 +238,39 @@ impl SpellDefinition {
             && (!self.flags.contains("RANDOM_DURATION")
                 || self.minimum_duration_moves == self.maximum_duration_moves)
     }
+
+    #[must_use]
+    pub fn supports_hostile_effect_on_condition(&self) -> bool {
+        const ALLOWED_FLAGS: &[&str] = &["NO_PROJECTILE", "NO_EXPLOSION_SFX", "SILENT"];
+        self.unsupported_fields.is_empty()
+            && self.effect == SpellEffectKind::EffectOnCondition
+            && self.shape == "blast"
+            && self.damage_type_id.is_empty()
+            && !self.effect_str.is_empty()
+            && self.minimum_damage == 0
+            && self.maximum_damage == 0
+            && self
+                .flags
+                .iter()
+                .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
+            && self
+                .valid_targets
+                .iter()
+                .all(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self
+                .valid_targets
+                .iter()
+                .any(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self.maximum_level >= 0
+            && self.minimum_range > 0
+            && self.maximum_range > 0
+            && self.minimum_aoe >= 0
+            && self.maximum_aoe >= 0
+            && self.base_casting_time_moves >= 0
+            && self.final_casting_time_moves >= 0
+            && self.minimum_duration_moves == 0
+            && self.maximum_duration_moves == 0
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -374,6 +408,7 @@ fn apply_fields(
     if let Some(value) = object.get("effect") {
         spell.effect = match value.as_str() {
             Some("attack") => SpellEffectKind::Attack,
+            Some("effect_on_condition") => SpellEffectKind::EffectOnCondition,
             Some("summon") => SpellEffectKind::Summon,
             Some(_) => SpellEffectKind::Unsupported,
             None => {

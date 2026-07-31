@@ -541,6 +541,7 @@ struct RuntimeMonsterSpellProfile {
     status_effect_id: String,
     minimum_duration_turns: u32,
     maximum_duration_turns: u32,
+    eoc_id: String,
     target_self: bool,
     minimum_summons: u16,
     maximum_summons: u16,
@@ -962,6 +963,7 @@ fn finalized_spell_stat(
 fn runtime_monster_spell_profile(
     attack: &cdda_content::MonsterSpecialAttackDefinition,
     spells: &SpellRegistry,
+    creature_eoc_ids: &BTreeSet<String>,
 ) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
     if attack.kind != MonsterSpecialAttackKind::Spell {
         return Ok(None);
@@ -975,7 +977,9 @@ fn runtime_monster_spell_profile(
     let summon = spell.supports_hostile_permanent_summoning();
     let typed_damage = spell.supports_hostile_typed_damage();
     let status_effect = spell.supports_hostile_status_effect();
-    if (!summon && !typed_damage && !status_effect)
+    let effect_on_condition = spell.supports_hostile_effect_on_condition()
+        && creature_eoc_ids.contains(&spell.effect_str);
+    if (!summon && !typed_damage && !status_effect && !effect_on_condition)
         || attack.spell_min_level > 1_000
         || attack
             .spell_max_level
@@ -1085,7 +1089,7 @@ fn runtime_monster_spell_profile(
         || (target_self && range != 0)
         || (!target_self && range == 0)
         || (summon && aoe == 0)
-        || ((typed_damage || status_effect) && target_self)
+        || ((typed_damage || status_effect || effect_on_condition) && target_self)
     {
         return Ok(None);
     }
@@ -1113,6 +1117,9 @@ fn runtime_monster_spell_profile(
             .then(|| u32::try_from(maximum_duration_moves).map(|moves| moves.div_ceil(100)))
             .transpose()?
             .unwrap_or(0),
+        eoc_id: effect_on_condition
+            .then(|| spell.effect_str.clone())
+            .unwrap_or_default(),
         target_self,
         minimum_summons: summon
             .then(|| u16::try_from(minimum_damage))
@@ -1212,11 +1219,14 @@ fn runtime_monster_catalog(
                 MonsterSpecialAttackKind::Polymorph => {
                     Some(attack.polymorph_monster_type_id.clone())
                 }
-                MonsterSpecialAttackKind::Spell => runtime_monster_spell_profile(attack, spells)?
-                    .and_then(|profile| {
-                        (!profile.summoned_monster_type_id.is_empty())
-                            .then_some(profile.summoned_monster_type_id)
-                    }),
+                MonsterSpecialAttackKind::Spell => {
+                    runtime_monster_spell_profile(attack, spells, creature_eoc_ids)?.and_then(
+                        |profile| {
+                            (!profile.summoned_monster_type_id.is_empty())
+                                .then_some(profile.summoned_monster_type_id)
+                        },
+                    )
+                }
                 MonsterSpecialAttackKind::Melee
                 | MonsterSpecialAttackKind::Bite
                 | MonsterSpecialAttackKind::Leap
@@ -1388,7 +1398,9 @@ fn runtime_monster_catalog(
                     && creature_eoc_context_is_supported(attack)
                     && attack.kind == MonsterSpecialAttackKind::Spell
             }) {
-                if let Some(profile) = runtime_monster_spell_profile(attack, spells)? {
+                if let Some(profile) =
+                    runtime_monster_spell_profile(attack, spells, creature_eoc_ids)?
+                {
                     spell_profiles.insert(attack.id.clone(), profile);
                 } else {
                     deferred_behavior_fields.insert(format!(
@@ -1543,7 +1555,14 @@ fn runtime_monster_catalog(
                             .condition
                             .as_ref()
                             .map(crate::eocs::runtime_condition),
-                        eoc_ids: attack.eoc_ids.clone(),
+                        eoc_ids: spell_profile.map_or_else(
+                            || attack.eoc_ids.clone(),
+                            |profile| {
+                                (!profile.eoc_id.is_empty())
+                                    .then(|| vec![profile.eoc_id.clone()])
+                                    .unwrap_or_default()
+                            },
+                        ),
                         polymorph_monster_type_id: if attack.kind
                             == MonsterSpecialAttackKind::Polymorph
                         {

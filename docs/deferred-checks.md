@@ -48,8 +48,10 @@ Run only when the user explicitly requests a verification checkpoint.
   prototype closure, stable IDs and authoritative summon events; hostile typed
   damage scaling, armor/body-part resolution, multi-survivor blast ordering,
   interruption, wake and death handling; deterministic whole-body status spell
-  durations, stacking and expiry including production wraith darkness; and
-  combat scenarios at protocol 125/schema 103, CanonicalStateV101,
+  durations, stacking and expiry including production wraith darkness;
+  supported creature-alpha/survivor-beta EOC spell closure and multi-target
+  activation; and combat scenarios at protocol 125/schema 103,
+  CanonicalStateV101,
   canonical-event-V25.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
