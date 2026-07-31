@@ -2930,18 +2930,32 @@ fn item_menu_entries(
                 .inventory
                 .iter()
                 .filter(|item| {
-                    item.powered_tool.as_ref().is_some_and(|powered| {
-                        powered.active
-                            || item
-                                .magazine_wells
-                                .iter()
-                                .find(|well| well.pocket_index == powered.power_pocket_index)
-                                .and_then(|well| well.installed_magazine.as_deref())
-                                .is_some_and(|magazine| {
-                                    item_stored_ammunition_charges(magazine)
-                                        >= i32::from(powered.activation_charges)
-                                })
-                    })
+                    let healing = content
+                        .and_then(|content| content.0.get(&item.type_id))
+                        .filter(|definition| {
+                            definition.healing_actions.len() == 1
+                                && !definition.has_unsupported_use_actions
+                                && definition.transform_actions.is_empty()
+                                && definition.healing_actions[0].deferred_fields.is_empty()
+                                && u16::try_from(definition.charges_per_use).is_ok()
+                        });
+                    if let Some(definition) = healing {
+                        !actor.worn.contains(&item.id)
+                            && item.charges >= definition.charges_per_use.max(1)
+                    } else {
+                        item.powered_tool.as_ref().is_some_and(|powered| {
+                            powered.active
+                                || item
+                                    .magazine_wells
+                                    .iter()
+                                    .find(|well| well.pocket_index == powered.power_pocket_index)
+                                    .and_then(|well| well.installed_magazine.as_deref())
+                                    .is_some_and(|magazine| {
+                                        item_stored_ammunition_charges(magazine)
+                                            >= i32::from(powered.activation_charges)
+                                    })
+                        })
+                    }
                 })
                 .collect(),
             ItemMenuAction::Read => actor
@@ -4323,6 +4337,14 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::ItemConsumed {
             remaining_charges, ..
         } => format!("Consumed the item; {remaining_charges} charge(s) remain."),
+        WorldEventKind::MedicalItemApplied {
+            body_part_id,
+            healed_hp,
+            remaining_charges,
+            ..
+        } => format!(
+            "Treated {body_part_id}; restored {healed_hp} HP and left {remaining_charges} charge(s)."
+        ),
         WorldEventKind::ActorNeedsUpdated { .. } => String::from("Needs advanced."),
         WorldEventKind::ActorDiedFromNeeds { .. } => {
             String::from("Your character died from unmet needs.")

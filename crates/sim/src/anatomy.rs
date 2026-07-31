@@ -1,11 +1,12 @@
 use cdda_protocol::{
-    ActorBodyPartSnapshotV1, AnatomyDefinitionV1, BodyPartHpModifiersV1, BodyPartPrototypeV1,
-    CharacterCreationStatsV1, actor_body_part_summary_hp, actor_body_parts_are_valid,
+    ActorBodyPartSnapshotV1, ActorEffectSnapshotV1, ActorId, AnatomyDefinitionV1,
+    BodyPartHpModifiersV1, BodyPartPrototypeV1, CharacterCreationStatsV1, HealingItemTypeV1,
+    ItemId, SimTick, actor_body_part_summary_hp, actor_body_parts_are_valid,
     anatomy_definition_is_valid,
 };
 use rand_core::Rng;
 
-use crate::{NEEDS_INTERVAL_TICKS, SimError, WorldState};
+use crate::{NEEDS_INTERVAL_TICKS, SimError, WorldState, actor_skill_level};
 
 pub(super) struct ActorDamageOutcome {
     pub body_part_id: String,
@@ -21,6 +22,12 @@ pub(super) struct ActorEffectApplication {
     pub duration_turns: u32,
     pub max_intensity: u32,
     pub max_duration_turns: u32,
+}
+
+pub(super) struct HealingItemOutcome {
+    pub body_part_id: String,
+    pub healed_hp: i32,
+    pub remaining_charges: i32,
 }
 
 pub(super) fn default_actor_anatomy() -> AnatomyDefinitionV1 {
@@ -243,6 +250,201 @@ fn roll_scaled_value(
 }
 
 impl WorldState {
+    pub(super) fn apply_healing_item(
+        &mut self,
+        actor_id: ActorId,
+        item_id: ItemId,
+        healing: &HealingItemTypeV1,
+        sequence: u64,
+    ) -> Result<Option<HealingItemOutcome>, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let required_charges = i32::from(healing.charges_per_use.max(1));
+        if actor.worn.contains(&item_id)
+            || actor.inventory.get(&item_id).is_none_or(|item| {
+                item.type_id != healing.item_type_id || item.charges < required_charges
+            })
+        {
+            return Ok(None);
+        }
+        let first_aid = actor_skill_level(actor, "firstaid", false);
+        let mut selected = None;
+        let mut selected_score = 0_u64;
+        for (index, part) in actor.body_parts.iter().enumerate() {
+            if part.current_hp <= 0 {
+                continue;
+            }
+            let missing = part.maximum_hp.saturating_sub(part.current_hp) as u64;
+            let effect_score = actor
+                .effects
+                .iter()
+                .filter(|effect| effect.body_part_id.as_deref() == Some(&part.body_part_id))
+                .fold(0_u64, |score, effect| {
+                    score
+                        + match effect.effect_id.as_str() {
+                            "bleed" if healing.bleed > 0 => u64::from(effect.intensity) * 100,
+                            "bite" if healing.bite_chance_millionths > 0 => 1_000,
+                            "infected" if healing.infect_chance_millionths > 0 => 2_000,
+                            _ => 0,
+                        }
+                });
+            let dressing = missing > 0
+                && (healing.bandages_power_milli > 0 || healing.disinfectant_power_milli > 0);
+            let score = missing.saturating_add(effect_score);
+            if (score > 0 || dressing) && selected.is_none_or(|_| score > selected_score) {
+                selected = Some(index);
+                selected_score = score;
+            }
+        }
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let part_id = actor.body_parts[selected].body_part_id.clone();
+        let (base, scaling) = match part_id.as_str() {
+            "head" => (healing.head_power_milli, healing.head_scaling_milli),
+            "torso" => (healing.torso_power_milli, healing.torso_scaling_milli),
+            _ => (healing.limb_power_milli, healing.limb_scaling_milli),
+        };
+        let scaled = |base: i32, per_skill: i32| -> Result<u32, SimError> {
+            let milli = i64::from(base)
+                .checked_add(i64::from(per_skill) * i64::from(first_aid))
+                .ok_or(SimError::NumericOverflow)?;
+            u32::try_from((milli + 500) / 1_000).map_err(|_| SimError::NumericOverflow)
+        };
+        let heal_amount = scaled(base, scaling)?;
+        let bandage_intensity =
+            scaled(healing.bandages_power_milli, healing.bandages_scaling_milli)?;
+        let disinfectant_intensity = scaled(
+            healing.disinfectant_power_milli,
+            healing.disinfectant_scaling_milli,
+        )?;
+        let mut rng = self.named_session_rng(
+            b"healing-item",
+            &[actor_id.as_u128(), item_id.as_u128()],
+            sequence,
+        );
+        let clean_bite = rng.next_u32() % 1_000_000 < healing.bite_chance_millionths;
+        let clean_infection = rng.next_u32() % 1_000_000 < healing.infect_chance_millionths;
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let part = actor
+            .body_parts
+            .get_mut(selected)
+            .ok_or(SimError::InvalidActorAnatomy)?;
+        let previous_hp = part.current_hp;
+        part.current_hp = part
+            .current_hp
+            .saturating_add(i32::try_from(heal_amount).map_err(|_| SimError::NumericOverflow)?)
+            .min(part.maximum_hp);
+        let healed_hp = part.current_hp.saturating_sub(previous_hp);
+        if healing.bleed > 0 {
+            let stop_level = u32::from(healing.bleed) * u32::from(first_aid) / 2;
+            actor.effects.retain(|effect| {
+                !(effect.effect_id == "bleed"
+                    && effect.body_part_id.as_deref() == Some(&part_id)
+                    && stop_level.saturating_mul(3) > effect.intensity)
+            });
+        }
+        if clean_bite {
+            actor.effects.retain(|effect| {
+                !(effect.effect_id == "bite" && effect.body_part_id.as_deref() == Some(&part_id))
+            });
+        }
+        if clean_infection {
+            let recovered_until = actor
+                .effects
+                .iter()
+                .find(|effect| {
+                    effect.effect_id == "infected"
+                        && effect.body_part_id.as_deref() == Some(&part_id)
+                })
+                .map(|effect| effect.expires_at_tick);
+            actor.effects.retain(|effect| {
+                !(effect.effect_id == "infected"
+                    && effect.body_part_id.as_deref() == Some(&part_id))
+            });
+            if let Some(expires_at_tick) = recovered_until {
+                let expires_at_tick = actor
+                    .effects
+                    .iter()
+                    .find(|effect| effect.effect_id == "recover" && effect.body_part_id.is_none())
+                    .map_or(expires_at_tick, |effect| {
+                        effect.expires_at_tick.max(expires_at_tick)
+                    });
+                actor.effects.retain(|effect| {
+                    !(effect.effect_id == "recover" && effect.body_part_id.is_none())
+                });
+                actor.effects.push(ActorEffectSnapshotV1 {
+                    effect_id: String::from("recover"),
+                    body_part_id: None,
+                    intensity: 1,
+                    expires_at_tick,
+                });
+            }
+        }
+        for (effect_id, intensity) in [
+            ("bandaged", bandage_intensity),
+            ("disinfected", disinfectant_intensity),
+        ] {
+            if intensity == 0 {
+                continue;
+            }
+            let intensity = intensity.clamp(1, 16);
+            let duration = u64::from(intensity)
+                .checked_mul(6 * 60 * 60 * SimTick::HZ)
+                .ok_or(SimError::NumericOverflow)?;
+            actor.effects.retain(|effect| {
+                !(effect.effect_id == effect_id && effect.body_part_id.as_deref() == Some(&part_id))
+            });
+            actor.effects.push(ActorEffectSnapshotV1 {
+                effect_id: String::from(effect_id),
+                body_part_id: Some(part_id.clone()),
+                intensity,
+                expires_at_tick: SimTick(
+                    self.tick
+                        .0
+                        .checked_add(duration)
+                        .ok_or(SimError::NumericOverflow)?,
+                ),
+            });
+        }
+        actor.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        actor.hp = actor_body_part_summary_hp(&self.actor_anatomy, &actor.body_parts)
+            .ok_or(SimError::InvalidActorAnatomy)?;
+        let previous_charges = actor
+            .inventory
+            .get(&item_id)
+            .ok_or(SimError::UnknownItem)?
+            .charges;
+        let remove = previous_charges <= required_charges;
+        let remaining_charges = if remove {
+            0
+        } else {
+            previous_charges - required_charges
+        };
+        if remove {
+            actor.inventory.remove(&item_id);
+            if actor.wielded == Some(item_id) {
+                actor.wielded = None;
+            }
+            actor.worn.retain(|worn| *worn != item_id);
+        } else {
+            actor
+                .inventory
+                .get_mut(&item_id)
+                .ok_or(SimError::UnknownItem)?
+                .charges -= required_charges;
+        }
+        Ok(Some(HealingItemOutcome {
+            body_part_id: part_id,
+            healed_hp,
+            remaining_charges,
+        }))
+    }
+
     /// Pinned default avatar healing while fully at rest: 0.0001 HP per
     /// upstream turn becomes a 0.03-HP deterministic remainder roll at the
     /// existing five-minute needs boundary. Awake healing is zero without a

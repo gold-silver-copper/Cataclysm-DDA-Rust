@@ -27,27 +27,28 @@ use cdda_protocol::{
     CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
     DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason,
     DisassemblyRecipeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
-    FurnitureTileSnapshot, GroundItemSnapshot, HeldInputSequence, HeldMovementUpdateSource,
-    HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
-    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
-    ItemGroupSourceV1, ItemId, ItemSnapshot, LocalTileCoord, MAX_ACTOR_BASE_STAT,
-    MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES,
-    MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES,
-    MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES,
-    MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS,
-    MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
-    MAX_DISASSEMBLY_COMPONENT_TYPES, MAX_ITEM_AMMUNITION_CONTAINER_POCKETS,
-    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL,
-    MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
-    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
-    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
-    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
-    MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot, PoweredToolStateV1,
-    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
-    RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
-    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WearableArmorTypeV1,
-    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
-    adjusted_book_study_time_moves, item_group_catalog_is_valid, item_group_source_max_outputs,
+    FurnitureTileSnapshot, GroundItemSnapshot, HealingItemTypeV1, HeldInputSequence,
+    HeldMovementUpdateSource, HeldMovementUpdateV1, HorizontalDirection,
+    IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1,
+    ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot, LocalTileCoord,
+    MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES,
+    MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS,
+    MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS,
+    MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER,
+    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES,
+    MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
+    MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
+    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
+    MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
+    MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
+    MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
+    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
+    PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
+    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, SimTick,
+    SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
+    TerrainTileSnapshot, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind,
+    WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves,
+    healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
     item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
     item_snapshots_can_combine_for_containment, worldgen_catalog_is_valid,
 };
@@ -4620,6 +4621,7 @@ pub struct WorldState {
     furniture_bash_ids: BTreeSet<String>,
     furniture_bash_types: BTreeMap<String, FurnitureBashTypeV1>,
     smash_item_types: BTreeMap<String, SmashItemTypeV1>,
+    healing_item_types: BTreeMap<String, HealingItemTypeV1>,
     worldgen: Option<WorldgenCatalogV1>,
     actors: BTreeMap<ActorId, Actor>,
     creatures: BTreeMap<CreatureId, Creature>,
@@ -4649,6 +4651,7 @@ impl WorldState {
             furniture_bash_ids: BTreeSet::new(),
             furniture_bash_types: BTreeMap::new(),
             smash_item_types: BTreeMap::new(),
+            healing_item_types: BTreeMap::new(),
             worldgen: None,
             actors: BTreeMap::new(),
             creatures: BTreeMap::new(),
@@ -4851,6 +4854,23 @@ impl WorldState {
                 Ok(())
             }
         }
+    }
+
+    pub fn register_healing_item_types(
+        &mut self,
+        catalog: Vec<HealingItemTypeV1>,
+    ) -> Result<(), SimError> {
+        if self.tick != SimTick(0)
+            || !self.actors.is_empty()
+            || !healing_item_catalog_is_valid(&catalog)
+        {
+            return Err(SimError::InvalidItem);
+        }
+        self.healing_item_types = catalog
+            .into_iter()
+            .map(|healing| (healing.item_type_id.clone(), healing))
+            .collect();
+        Ok(())
     }
 
     /// Adds intensity using upstream field semantics: an existing type keeps
@@ -7207,8 +7227,20 @@ impl WorldState {
                 *pocket_index,
                 *contained_item,
             ),
+            CommandKind::Activate { item_id } => {
+                let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+                let Some(item) = actor.inventory.get(item_id) else {
+                    return Ok(0);
+                };
+                self.healing_item_types
+                    .get(&item.type_id)
+                    .map_or(Ok(0), |healing| {
+                        i64::from(healing.move_cost_moves)
+                            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+                            .ok_or(SimError::NumericOverflow)
+                    })
+            }
             CommandKind::Wake
-            | CommandKind::Activate { .. }
             | CommandKind::Craft { .. }
             | CommandKind::ResumeCraft
             | CommandKind::CancelCraft
@@ -11191,6 +11223,26 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
             return Ok(());
         };
+        if let Some(healing) = self.healing_item_types.get(&item.type_id).cloned() {
+            if let Some(outcome) =
+                self.apply_healing_item(actor_id, item_id, &healing, sequence.0)?
+            {
+                events.push(self.make_event(WorldEventKind::MedicalItemApplied {
+                    actor_id,
+                    item_id,
+                    body_part_id: outcome.body_part_id,
+                    healed_hp: outcome.healed_hp,
+                    remaining_charges: outcome.remaining_charges,
+                })?);
+                return Ok(());
+            }
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::ItemNotActivatable,
+            )?);
+            return Ok(());
+        }
         let Some(powered) = item.powered_tool.clone() else {
             events.push(self.rejection(
                 actor_id,
@@ -13710,6 +13762,7 @@ impl WorldState {
             furniture_bash_ids: self.furniture_bash_ids.iter().cloned().collect(),
             furniture_bash_types: self.furniture_bash_types.values().cloned().collect(),
             smash_item_types: self.smash_item_types.values().cloned().collect(),
+            healing_item_types: self.healing_item_types.values().cloned().collect(),
             worldgen: self.worldgen.clone(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
             creatures: self.creatures.values().map(Creature::snapshot).collect(),
@@ -13849,6 +13902,15 @@ impl WorldState {
         {
             return Err(SimError::InvalidSnapshot);
         }
+        if !healing_item_catalog_is_valid(&snapshot.healing_item_types) {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let healing_item_types = snapshot
+            .healing_item_types
+            .iter()
+            .cloned()
+            .map(|healing| (healing.item_type_id.clone(), healing))
+            .collect();
         let mut actors = BTreeMap::new();
         let mut occupied = BTreeSet::new();
         let mut item_ids = BTreeSet::new();
@@ -14182,6 +14244,7 @@ impl WorldState {
             furniture_bash_ids,
             furniture_bash_types,
             smash_item_types,
+            healing_item_types,
             worldgen: snapshot.worldgen.clone(),
             actors,
             creatures,
@@ -14198,7 +14261,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV78");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV79");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

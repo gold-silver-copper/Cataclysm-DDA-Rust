@@ -65,7 +65,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 102;
+pub const PROTOCOL_VERSION: u16 = 103;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2044,6 +2044,13 @@ pub enum WorldEventKind {
         stored_kcal: i32,
         thirst: i32,
     },
+    MedicalItemApplied {
+        actor_id: ActorId,
+        item_id: ItemId,
+        body_part_id: String,
+        healed_hp: i32,
+        remaining_charges: i32,
+    },
     ActorNeedsUpdated {
         actor_id: ActorId,
         stored_kcal: i32,
@@ -3401,6 +3408,67 @@ pub struct SmashItemTypeV1 {
     pub melee_to_hit: i16,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HealingItemTypeV1 {
+    pub item_type_id: String,
+    pub move_cost_moves: u32,
+    pub charges_per_use: u16,
+    pub limb_power_milli: i32,
+    pub head_power_milli: i32,
+    pub torso_power_milli: i32,
+    pub limb_scaling_milli: i32,
+    pub head_scaling_milli: i32,
+    pub torso_scaling_milli: i32,
+    pub bandages_power_milli: i32,
+    pub bandages_scaling_milli: i32,
+    pub disinfectant_power_milli: i32,
+    pub disinfectant_scaling_milli: i32,
+    pub bleed: u16,
+    pub bite_chance_millionths: u32,
+    pub infect_chance_millionths: u32,
+}
+
+#[must_use]
+pub fn healing_item_catalog_is_valid(catalog: &[HealingItemTypeV1]) -> bool {
+    catalog.len() <= 65_536
+        && catalog
+            .windows(2)
+            .all(|pair| pair[0].item_type_id < pair[1].item_type_id)
+        && catalog.iter().all(|healing| {
+            !healing.item_type_id.is_empty()
+                && healing.item_type_id.len() <= 512
+                && healing
+                    .item_type_id
+                    .chars()
+                    .all(|character| !character.is_control())
+                && healing.move_cost_moves > 0
+                && healing.bite_chance_millionths <= 1_000_000
+                && healing.infect_chance_millionths <= 1_000_000
+                && [
+                    healing.limb_power_milli,
+                    healing.head_power_milli,
+                    healing.torso_power_milli,
+                    healing.limb_scaling_milli,
+                    healing.head_scaling_milli,
+                    healing.torso_scaling_milli,
+                    healing.bandages_power_milli,
+                    healing.bandages_scaling_milli,
+                    healing.disinfectant_power_milli,
+                    healing.disinfectant_scaling_milli,
+                ]
+                .into_iter()
+                .all(|value| value >= 0)
+                && (healing.limb_power_milli > 0
+                    || healing.head_power_milli > 0
+                    || healing.torso_power_milli > 0
+                    || healing.bandages_power_milli > 0
+                    || healing.disinfectant_power_milli > 0
+                    || healing.bleed > 0
+                    || healing.bite_chance_millionths > 0
+                    || healing.infect_chance_millionths > 0)
+        })
+}
+
 const fn default_smash_item_melee_to_hit() -> i16 {
     -2
 }
@@ -3460,6 +3528,8 @@ pub struct WorldSnapshotV1 {
     pub furniture_bash_types: Vec<FurnitureBashTypeV1>,
     /// Item-type-ID-sorted strict player-smashing profiles.
     pub smash_item_types: Vec<SmashItemTypeV1>,
+    /// Item-type-ID-sorted strict authoritative medical-use profiles.
+    pub healing_item_types: Vec<HealingItemTypeV1>,
     /// Immutable coordinate-owned layout and normalized mapgen definitions,
     /// plus the server-authoritative start selector.
     /// Generated four-submap cells live in `chunks`; the catalog is retained

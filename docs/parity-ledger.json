@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 102,
-  "persistence_schema_version": 80,
+  "protocol_version": 103,
+  "persistence_schema_version": 81,
   "replay_format_version": 3,
   "active_milestone": "anatomy-combat",
   "completion_gate": [
@@ -411,7 +411,7 @@
         { "id": "on-hit-effects", "state": "in_progress" },
         { "id": "dodge-and-stamina", "state": "implementation_complete" },
         { "id": "natural-healing", "state": "implementation_complete" },
-        { "id": "medical-item-healing", "state": "planned" }
+        { "id": "medical-item-healing", "state": "implementation_complete_verification_deferred" }
       ],
       "priority": 22,
       "depends_on": ["cpp-differential-oracle", "simulation-actors-module", "simulation-combat-module", "simulation-canonical-state-module", "protocol-domain-modules", "persistence-domain-modules"],

@@ -4865,6 +4865,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             actor_id: event_actor,
             ..
         }
+        | WorldEventKind::MedicalItemApplied {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::ActorNeedsUpdated {
             actor_id: event_actor,
             ..

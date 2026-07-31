@@ -18,6 +18,11 @@ Run only when the user explicitly requests a verification checkpoint.
   library, binary, and test-target checks are used during implementation.
 - Anatomy/combat checkpoint: run exact C++ body-part HP, hit-selection, armor
   layer, on-hit-effect, stamina regeneration/burn, dodge threshold/attempt, and
-  actor/monster hit traces plus sleeping natural-healing remainder rolls;
+  actor/monster hit traces plus sleeping natural-healing remainder rolls and
+  medical selection, scaling, wound-treatment, and charge-consumption traces;
   canonical fixture updates; recovery/replay modes; production admission; and
   two-client melee/ranged/monster combat.
+- Content test-target cleanup: `cargo check -p cdda-content --tests` currently
+  fails in untouched `material.rs` because one test-only
+  `MaterialThermalDefinition` literal lacks `damage_resistance_milli`; the
+  ordinary `cdda-content` library check is green.

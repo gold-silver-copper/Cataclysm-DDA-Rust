@@ -115,10 +115,14 @@ pub struct ItemDefinition {
     /// still retained as unsupported; this projection admits exact, audited
     /// transform pairs without implying support for other actions.
     pub transform_actions: Vec<ItemTransformActionDefinition>,
+    /// Strict inline `heal` actions retained for authoritative medical use.
+    pub healing_actions: Vec<ItemHealingActionDefinition>,
     /// Whether the finalized `use_action` value also contains any action that
     /// is not an inline transform. Strict runtime projections use this to
     /// avoid silently discarding link-up, firestarter, or actor behavior.
     pub has_non_transform_use_actions: bool,
+    /// A non-transform action that is not a supported inline `heal` object.
+    pub has_unsupported_use_actions: bool,
     /// Whether an inline transform contains a behavioral field outside the
     /// strict runtime projection. Cosmetic menu/message fields are safe to
     /// omit, but conditions and target mutations must keep a pair fail-closed.
@@ -700,6 +704,25 @@ pub struct ItemTransformActionDefinition {
     pub need_charges: i32,
     pub ammo_scale: i32,
     pub moves: i32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ItemHealingActionDefinition {
+    pub move_cost_moves: u32,
+    pub limb_power_milli: i32,
+    pub head_power_milli: i32,
+    pub torso_power_milli: i32,
+    pub limb_scaling_milli: i32,
+    pub head_scaling_milli: i32,
+    pub torso_scaling_milli: i32,
+    pub bandages_power_milli: i32,
+    pub bandages_scaling_milli: i32,
+    pub disinfectant_power_milli: i32,
+    pub disinfectant_scaling_milli: i32,
+    pub bleed: u16,
+    pub bite_chance_millionths: u32,
+    pub infect_chance_millionths: u32,
+    pub deferred_fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1972,6 +1995,8 @@ fn apply_transform_action_projection(
             .and_then(Value::as_str)
             != Some("transform")
     });
+    item.has_unsupported_use_actions = false;
+    item.healing_actions.clear();
     const PROJECTED_OR_COSMETIC_TRANSFORM_FIELDS: &[&str] = &[
         "type",
         "target",
@@ -1987,9 +2012,17 @@ fn apply_transform_action_projection(
     let mut actions = Vec::new();
     for value in values {
         let Some(action) = value.as_object() else {
+            item.has_unsupported_use_actions = true;
             continue;
         };
-        if action.get("type").and_then(Value::as_str) != Some("transform") {
+        let action_type = action.get("type").and_then(Value::as_str);
+        if action_type == Some("heal") {
+            item.healing_actions
+                .push(parse_healing_action(action, source)?);
+            continue;
+        }
+        if action_type != Some("transform") {
+            item.has_unsupported_use_actions = true;
             continue;
         }
         if action
@@ -2040,6 +2073,101 @@ fn apply_transform_action_projection(
     }
     item.transform_actions = actions;
     Ok(())
+}
+
+fn parse_healing_action(
+    action: &Map<String, Value>,
+    source: &str,
+) -> Result<ItemHealingActionDefinition, ItemRegistryError> {
+    const SUPPORTED: &[&str] = &[
+        "type",
+        "move_cost",
+        "limb_power",
+        "head_power",
+        "torso_power",
+        "limb_scaling",
+        "head_scaling",
+        "torso_scaling",
+        "bandages_power",
+        "bandages_scaling",
+        "disinfectant_power",
+        "disinfectant_scaling",
+        "bleed",
+        "bite",
+        "infect",
+    ];
+    let fixed = |field: &str, default: i32| -> Result<i32, ItemRegistryError> {
+        action.get(field).map_or(Ok(default), |value| {
+            let value = value
+                .as_f64()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| invalid_field(source, "use_action"))?;
+            let scaled = value * 1_000.0;
+            if scaled > f64::from(i32::MAX) {
+                return Err(invalid_field(source, "use_action"));
+            }
+            Ok(scaled.round() as i32)
+        })
+    };
+    let chance = |field: &str| -> Result<u32, ItemRegistryError> {
+        action.get(field).map_or(Ok(0), |value| {
+            let value = value
+                .as_f64()
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                .ok_or_else(|| invalid_field(source, "use_action"))?;
+            Ok((value * 1_000_000.0).round() as u32)
+        })
+    };
+    let limb_power = fixed("limb_power", 0)?;
+    let head_power = fixed("head_power", limb_power.saturating_mul(8) / 10)?;
+    let torso_power = fixed("torso_power", limb_power.saturating_mul(3) / 2)?;
+    let limb_scaling = fixed("limb_scaling", limb_power / 4)?;
+    let scaling_ratio_millionths = if limb_power == 0 {
+        0_i64
+    } else {
+        i64::from(limb_scaling) * 1_000_000 / i64::from(limb_power)
+    };
+    let scaled_default = |power: i32| {
+        i32::try_from(i64::from(power) * scaling_ratio_millionths / 1_000_000).unwrap_or(i32::MAX)
+    };
+    let bandages_power = fixed("bandages_power", 0)?;
+    let disinfectant_power = fixed("disinfectant_power", 0)?;
+    let move_cost_moves = u32::try_from(
+        action
+            .get("move_cost")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid_field(source, "use_action"))?,
+    )
+    .map_err(|_| invalid_field(source, "use_action"))?;
+    let bleed = u16::try_from(
+        action
+            .get("bleed")
+            .map_or(Some(0), Value::as_u64)
+            .ok_or_else(|| invalid_field(source, "use_action"))?,
+    )
+    .map_err(|_| invalid_field(source, "use_action"))?;
+    Ok(ItemHealingActionDefinition {
+        move_cost_moves,
+        limb_power_milli: limb_power,
+        head_power_milli: head_power,
+        torso_power_milli: torso_power,
+        limb_scaling_milli: limb_scaling,
+        head_scaling_milli: fixed("head_scaling", scaled_default(head_power))?,
+        torso_scaling_milli: fixed("torso_scaling", scaled_default(torso_power))?,
+        bandages_power_milli: bandages_power,
+        bandages_scaling_milli: fixed("bandages_scaling", bandages_power / 4)?,
+        disinfectant_power_milli: disinfectant_power,
+        disinfectant_scaling_milli: fixed("disinfectant_scaling", disinfectant_power / 4)?,
+        bleed,
+        bite_chance_millionths: chance("bite")?,
+        infect_chance_millionths: chance("infect")?,
+        deferred_fields: action
+            .keys()
+            .filter(|field| !field.starts_with("//") && !SUPPORTED.contains(&field.as_str()))
+            .cloned()
+            .collect(),
+    })
 }
 
 fn apply_duration_moves(

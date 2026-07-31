@@ -40,7 +40,7 @@ use cdda_protocol::{
     CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
     CraftSkillRequirementV1, CraftToolRequirementV1, CreaturePathSettingsV1, CreatureSizeV1,
     DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1,
-    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN,
+    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN, HealingItemTypeV1,
     IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
     MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
     MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
@@ -909,6 +909,7 @@ fn open_world(
     for profile in runtime_smash_item_types(items) {
         initial.register_smash_item_type(profile)?;
     }
+    initial.register_healing_item_types(runtime_healing_item_types(items))?;
     for definition in furniture
         .iter()
         .filter(|definition| definition.bash.is_some())
@@ -2797,6 +2798,41 @@ fn runtime_smash_item_types(items: &ItemRegistry) -> Vec<SmashItemTypeV1> {
                 bash_damage: u16::try_from(bash_milli / 1_000).ok()?,
                 attack_time_moves: definition.ordinary_attack_time_moves()?,
                 melee_to_hit: i16::try_from(definition.melee_to_hit()).ok()?,
+            })
+        })
+        .collect()
+}
+
+fn runtime_healing_item_types(items: &ItemRegistry) -> Vec<HealingItemTypeV1> {
+    items
+        .iter()
+        .filter_map(|(_id, definition)| {
+            let [healing] = definition.healing_actions.as_slice() else {
+                return None;
+            };
+            if definition.has_unsupported_use_actions
+                || !definition.transform_actions.is_empty()
+                || !healing.deferred_fields.is_empty()
+            {
+                return None;
+            }
+            Some(HealingItemTypeV1 {
+                item_type_id: definition.id.clone(),
+                move_cost_moves: healing.move_cost_moves,
+                charges_per_use: u16::try_from(definition.charges_per_use).ok()?,
+                limb_power_milli: healing.limb_power_milli,
+                head_power_milli: healing.head_power_milli,
+                torso_power_milli: healing.torso_power_milli,
+                limb_scaling_milli: healing.limb_scaling_milli,
+                head_scaling_milli: healing.head_scaling_milli,
+                torso_scaling_milli: healing.torso_scaling_milli,
+                bandages_power_milli: healing.bandages_power_milli,
+                bandages_scaling_milli: healing.bandages_scaling_milli,
+                disinfectant_power_milli: healing.disinfectant_power_milli,
+                disinfectant_scaling_milli: healing.disinfectant_scaling_milli,
+                bleed: healing.bleed,
+                bite_chance_millionths: healing.bite_chance_millionths,
+                infect_chance_millionths: healing.infect_chance_millionths,
             })
         })
         .collect()
