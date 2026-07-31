@@ -53,6 +53,7 @@ impl WorldState {
     pub(super) fn creature_eoc_condition_matches(
         &self,
         creature_id: CreatureId,
+        target: Option<ActorId>,
         condition: &EocConditionV1,
     ) -> Result<bool, SimError> {
         let creature = self
@@ -64,6 +65,12 @@ impl WorldState {
             &EocActorContext::default(),
             &creature.effects,
             &creature.eoc_variables,
+            target.and_then(|target| {
+                self.actors
+                    .get(&target)
+                    .map(|actor| actor.effects.as_slice())
+            }),
+            target.and_then(|target| self.actors.get(&target).map(|actor| &actor.eoc_variables)),
             &mut 0,
         )
     }
@@ -75,9 +82,11 @@ impl WorldState {
         eoc_ids: &[String],
         activation_sequence: u64,
     ) -> Result<bool, SimError> {
-        if !self.actors.contains_key(&target) {
-            return Err(SimError::UnknownActor);
-        }
+        let (target_effects, target_variables) = self
+            .actors
+            .get(&target)
+            .map(|actor| (actor.effects.clone(), actor.eoc_variables.clone()))
+            .ok_or(SimError::UnknownActor)?;
         let creature = self
             .creatures
             .get(&creature_id)
@@ -86,6 +95,8 @@ impl WorldState {
             actor: EocActorContext::default(),
             effects: creature.effects.clone(),
             variables: creature.eoc_variables.clone(),
+            target_effects: Some(target_effects),
+            target_variables: Some(target_variables),
             next_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
@@ -107,6 +118,14 @@ impl WorldState {
             }
         }
         if execution.effects.len() > 1_024
+            || execution
+                .target_effects
+                .as_ref()
+                .is_none_or(|effects| effects.len() > 1_024)
+            || execution
+                .target_variables
+                .as_ref()
+                .is_none_or(|variables| !cdda_protocol::actor_eoc_variables_are_valid(variables))
             || !execution.messages.is_empty()
             || execution.confirmation.is_some()
             || !execution.scheduled_eocs.is_empty()
@@ -117,12 +136,22 @@ impl WorldState {
         execution.effects.sort_by(|left, right| {
             (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
         });
+        execution
+            .target_effects
+            .as_mut()
+            .ok_or(SimError::InvalidItem)?
+            .sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
         let creature = self
             .creatures
             .get_mut(&creature_id)
             .ok_or(SimError::UnknownCreature)?;
         creature.effects = execution.effects;
         creature.eoc_variables = execution.variables;
+        let target_actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+        target_actor.effects = execution.target_effects.ok_or(SimError::InvalidItem)?;
+        target_actor.eoc_variables = execution.target_variables.ok_or(SimError::InvalidItem)?;
         Ok(true)
     }
 
@@ -156,6 +185,8 @@ impl WorldState {
             actor: eoc_actor_context(actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
+            target_effects: None,
+            target_variables: None,
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -270,6 +301,8 @@ impl WorldState {
             actor: eoc_actor_context(actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
+            target_effects: None,
+            target_variables: None,
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -411,6 +444,8 @@ impl WorldState {
                     actor: eoc_actor_context(actor),
                     effects: actor.effects.clone(),
                     variables: actor.eoc_variables.clone(),
+                    target_effects: None,
+                    target_variables: None,
                     next_schedule_sequence: actor.next_eoc_schedule_sequence,
                     scheduled_eocs: actor.scheduled_eocs.clone(),
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -444,6 +479,8 @@ impl WorldState {
                             &execution.actor,
                             &execution.effects,
                             &execution.variables,
+                            None,
+                            None,
                             &mut execution.operations,
                         ) {
                             Ok(matches) => matches,
@@ -578,6 +615,8 @@ impl WorldState {
                 actor: eoc_actor_context(actor),
                 effects: actor.effects.clone(),
                 variables: actor.eoc_variables.clone(),
+                target_effects: None,
+                target_variables: None,
                 next_schedule_sequence: actor.next_eoc_schedule_sequence,
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -630,6 +669,8 @@ impl WorldState {
             actor: EocActorContext::default(),
             effects: Vec::new(),
             variables: BTreeMap::new(),
+            target_effects: None,
+            target_variables: None,
             next_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
@@ -686,6 +727,8 @@ impl WorldState {
                 actor: eoc_actor_context(actor),
                 effects: actor.effects.clone(),
                 variables: actor.eoc_variables.clone(),
+                target_effects: None,
+                target_variables: None,
                 next_schedule_sequence: actor.next_eoc_schedule_sequence,
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -715,6 +758,8 @@ impl WorldState {
                 &execution.actor,
                 &execution.effects,
                 &execution.variables,
+                None,
+                None,
                 &mut execution.operations,
             ) else {
                 break;
@@ -746,6 +791,8 @@ struct EocExecution {
     actor: EocActorContext,
     effects: Vec<ActorEffectSnapshotV1>,
     variables: BTreeMap<String, String>,
+    target_effects: Option<Vec<ActorEffectSnapshotV1>>,
+    target_variables: Option<BTreeMap<String, String>>,
     next_schedule_sequence: u64,
     scheduled_eocs: Vec<ScheduledEocV1>,
     inactive_recurring_eocs: Vec<String>,
@@ -841,6 +888,8 @@ fn execute_eoc(
             &execution.actor,
             &execution.effects,
             &execution.variables,
+            execution.target_effects.as_deref(),
+            execution.target_variables.as_ref(),
             &mut execution.operations,
         )?,
         None => true,
@@ -859,6 +908,8 @@ fn evaluate_condition(
     actor: &EocActorContext,
     effects: &[ActorEffectSnapshotV1],
     variables: &BTreeMap<String, String>,
+    target_effects: Option<&[ActorEffectSnapshotV1]>,
+    target_variables: Option<&BTreeMap<String, String>>,
     operations: &mut usize,
 ) -> Result<bool, SimError> {
     *operations = operations.saturating_add(1);
@@ -889,16 +940,39 @@ fn evaluate_condition(
                     .as_ref()
                     .is_none_or(|body_part_id| effect.body_part_id.as_ref() == Some(body_part_id))
         }),
+        EocConditionV1::TargetHasEffect {
+            effect_id,
+            body_part_id,
+            minimum_intensity,
+        } => target_effects
+            .ok_or(SimError::InvalidItem)?
+            .iter()
+            .any(|effect| {
+                effect.effect_id == *effect_id
+                    && effect.intensity >= *minimum_intensity
+                    && body_part_id.as_ref().is_none_or(|body_part_id| {
+                        effect.body_part_id.as_ref() == Some(body_part_id)
+                    })
+            }),
+        EocConditionV1::TargetHasAnyEffect {
+            effect_ids,
+            body_part_id,
+            minimum_intensity,
+        } => target_effects
+            .ok_or(SimError::InvalidItem)?
+            .iter()
+            .any(|effect| {
+                effect_ids.contains(&effect.effect_id)
+                    && effect.intensity >= *minimum_intensity
+                    && body_part_id.as_ref().is_none_or(|body_part_id| {
+                        effect.body_part_id.as_ref() == Some(body_part_id)
+                    })
+            }),
         EocConditionV1::CompareString(values) => {
             let mut seen = BTreeSet::new();
             let mut matches = false;
             for value in values {
-                let value = match value {
-                    EocStringValueV1::Literal(value) => value.as_str(),
-                    EocStringValueV1::ActorVariable(variable_id) => {
-                        variables.get(variable_id).map_or("", String::as_str)
-                    }
-                };
+                let value = resolve_eoc_string_value(value, variables, target_variables)?;
                 if !seen.insert(value) {
                     matches = true;
                     break;
@@ -907,14 +981,19 @@ fn evaluate_condition(
             matches
         }
         EocConditionV1::CompareStringAll(values) => {
-            let mut values = values.iter().map(|value| match value {
-                EocStringValueV1::Literal(value) => value.as_str(),
-                EocStringValueV1::ActorVariable(variable_id) => {
-                    variables.get(variable_id).map_or("", String::as_str)
+            let first = resolve_eoc_string_value(
+                values.first().ok_or(SimError::InvalidItem)?,
+                variables,
+                target_variables,
+            )?;
+            let mut matches = true;
+            for value in &values[1..] {
+                if resolve_eoc_string_value(value, variables, target_variables)? != first {
+                    matches = false;
+                    break;
                 }
-            });
-            let first = values.next().ok_or(SimError::InvalidItem)?;
-            values.all(|value| value == first)
+            }
+            matches
         }
         EocConditionV1::HasItem {
             item_type_id,
@@ -948,13 +1027,27 @@ fn evaluate_condition(
         EocConditionV1::Math(expression) => {
             evaluate_math_expression(expression, actor, effects, variables, operations)? != 0
         }
-        EocConditionV1::Not(condition) => {
-            !evaluate_condition(condition, actor, effects, variables, operations)?
-        }
+        EocConditionV1::Not(condition) => !evaluate_condition(
+            condition,
+            actor,
+            effects,
+            variables,
+            target_effects,
+            target_variables,
+            operations,
+        )?,
         EocConditionV1::And(conditions) => {
             let mut matches = true;
             for condition in conditions {
-                if !evaluate_condition(condition, actor, effects, variables, operations)? {
+                if !evaluate_condition(
+                    condition,
+                    actor,
+                    effects,
+                    variables,
+                    target_effects,
+                    target_variables,
+                    operations,
+                )? {
                     matches = false;
                     break;
                 }
@@ -964,13 +1057,38 @@ fn evaluate_condition(
         EocConditionV1::Or(conditions) => {
             let mut matches = false;
             for condition in conditions {
-                if evaluate_condition(condition, actor, effects, variables, operations)? {
+                if evaluate_condition(
+                    condition,
+                    actor,
+                    effects,
+                    variables,
+                    target_effects,
+                    target_variables,
+                    operations,
+                )? {
                     matches = true;
                     break;
                 }
             }
             matches
         }
+    })
+}
+
+fn resolve_eoc_string_value<'a>(
+    value: &'a EocStringValueV1,
+    variables: &'a BTreeMap<String, String>,
+    target_variables: Option<&'a BTreeMap<String, String>>,
+) -> Result<&'a str, SimError> {
+    Ok(match value {
+        EocStringValueV1::Literal(value) => value.as_str(),
+        EocStringValueV1::ActorVariable(variable_id) => {
+            variables.get(variable_id).map_or("", String::as_str)
+        }
+        EocStringValueV1::TargetVariable(variable_id) => target_variables
+            .ok_or(SimError::InvalidItem)?
+            .get(variable_id)
+            .map_or("", String::as_str),
     })
 }
 
@@ -1232,6 +1350,67 @@ fn execute_effects(
             EocEffectV1::RemoveActorVariable { variable_id } => {
                 execution.variables.remove(variable_id);
             }
+            EocEffectV1::AddTargetEffect {
+                effect_id,
+                body_part_id,
+                duration_turns,
+                permanent,
+                intensity,
+                intensity_is_explicit,
+            } => {
+                let target_effects = execution
+                    .target_effects
+                    .as_mut()
+                    .ok_or(SimError::InvalidItem)?;
+                add_effect_to(
+                    target_effects,
+                    execution.tick,
+                    effect_id,
+                    body_part_id.clone(),
+                    *duration_turns,
+                    *permanent,
+                    *intensity,
+                    *intensity_is_explicit,
+                )?;
+            }
+            EocEffectV1::RemoveTargetEffects {
+                effect_ids,
+                body_part_id,
+            } => execution
+                .target_effects
+                .as_mut()
+                .ok_or(SimError::InvalidItem)?
+                .retain(|effect| {
+                    !effect_ids.iter().any(|id| id == &effect.effect_id)
+                        || body_part_id
+                            .as_ref()
+                            .is_some_and(|part| effect.body_part_id.as_ref() != Some(part))
+                }),
+            EocEffectV1::SetTargetVariable {
+                variable_id,
+                possible_values,
+            } => {
+                let target_variables = execution
+                    .target_variables
+                    .as_mut()
+                    .ok_or(SimError::InvalidItem)?;
+                if !target_variables.contains_key(variable_id)
+                    && target_variables.len() >= MAX_EOC_ACTOR_VARIABLES
+                {
+                    return Err(SimError::InvalidItem);
+                }
+                let index = usize::try_from(execution.rng.next_u32())
+                    .map_err(|_| SimError::NumericOverflow)?
+                    % possible_values.len();
+                target_variables.insert(variable_id.clone(), possible_values[index].clone());
+            }
+            EocEffectV1::RemoveTargetVariable { variable_id } => {
+                execution
+                    .target_variables
+                    .as_mut()
+                    .ok_or(SimError::InvalidItem)?
+                    .remove(variable_id);
+            }
             EocEffectV1::MathAssignment {
                 target,
                 operation,
@@ -1318,6 +1497,8 @@ fn execute_effects(
                     &execution.actor,
                     &execution.effects,
                     &execution.variables,
+                    execution.target_effects.as_deref(),
+                    execution.target_variables.as_ref(),
                     &mut execution.operations,
                 )? {
                     then_effects
@@ -1380,11 +1561,32 @@ fn add_effect(
     intensity: u32,
     intensity_is_explicit: bool,
 ) -> Result<(), SimError> {
+    add_effect_to(
+        &mut execution.effects,
+        execution.tick,
+        effect_id,
+        body_part_id,
+        duration_turns,
+        permanent,
+        intensity,
+        intensity_is_explicit,
+    )
+}
+
+fn add_effect_to(
+    effects: &mut Vec<ActorEffectSnapshotV1>,
+    tick: SimTick,
+    effect_id: &str,
+    body_part_id: Option<String>,
+    duration_turns: u32,
+    permanent: bool,
+    intensity: u32,
+    intensity_is_explicit: bool,
+) -> Result<(), SimError> {
     let duration_ticks = u64::from(duration_turns)
         .checked_mul(SimTick::HZ)
         .ok_or(SimError::NumericOverflow)?;
-    if let Some(existing) = execution
-        .effects
+    if let Some(existing) = effects
         .iter_mut()
         .find(|effect| effect.effect_id == effect_id && effect.body_part_id == body_part_id)
     {
@@ -1409,7 +1611,7 @@ fn add_effect(
             )
         };
     } else {
-        execution.effects.push(ActorEffectSnapshotV1 {
+        effects.push(ActorEffectSnapshotV1 {
             effect_id: effect_id.to_owned(),
             body_part_id,
             intensity,
@@ -1417,9 +1619,7 @@ fn add_effect(
                 SimTick(u64::MAX)
             } else {
                 SimTick(
-                    execution
-                        .tick
-                        .0
+                    tick.0
                         .checked_add(duration_ticks)
                         .ok_or(SimError::NumericOverflow)?,
                 )
@@ -1489,7 +1689,9 @@ fn condition_body_parts_are_valid(
         | EocConditionV1::StatAtLeast { .. }
         | EocConditionV1::Math(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
-        | EocConditionV1::HasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
+        | EocConditionV1::HasAnyEffect { body_part_id, .. }
+        | EocConditionV1::TargetHasEffect { body_part_id, .. }
+        | EocConditionV1::TargetHasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => condition_body_parts_are_valid(condition, valid_part),
         EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => conditions
             .iter()
@@ -1503,7 +1705,9 @@ fn effects_body_parts_are_valid(
 ) -> bool {
     effects.iter().all(|effect| match effect {
         EocEffectV1::AddEffect { body_part_id, .. }
-        | EocEffectV1::RemoveEffects { body_part_id, .. } => valid_part(body_part_id),
+        | EocEffectV1::RemoveEffects { body_part_id, .. }
+        | EocEffectV1::AddTargetEffect { body_part_id, .. }
+        | EocEffectV1::RemoveTargetEffects { body_part_id, .. } => valid_part(body_part_id),
         EocEffectV1::Conditional {
             condition,
             then_effects,
@@ -1524,6 +1728,8 @@ fn effects_body_parts_are_valid(
         EocEffectV1::Message { .. }
         | EocEffectV1::SetActorVariable { .. }
         | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. }
         | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. } => true,
     })

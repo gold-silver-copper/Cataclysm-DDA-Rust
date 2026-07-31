@@ -71,6 +71,57 @@ pub(super) fn runtime_eoc_catalog(
         }
     }
 
+    let mut target_context_ids = definitions
+        .iter()
+        .filter(|(_id, definition)| {
+            cdda_protocol::eoc_definition_requires_target_context(&runtime_eoc_definition(
+                definition,
+            ))
+        })
+        .map(|(id, _definition)| id.clone())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let inherited = definitions
+            .iter()
+            .filter(|(id, definition)| {
+                !target_context_ids.contains(*id)
+                    && definition
+                        .referenced_eocs()
+                        .iter()
+                        .any(|reference| target_context_ids.contains(*reference))
+            })
+            .map(|(id, _definition)| id.clone())
+            .collect::<Vec<_>>();
+        if inherited.is_empty() {
+            break;
+        }
+        target_context_ids.extend(inherited);
+    }
+    definitions.retain(|id, definition| {
+        !target_context_ids.contains(id)
+            || (definition.recurrence.is_none() && definition.event_trigger.is_none())
+    });
+    loop {
+        let unavailable = definitions
+            .iter()
+            .filter(|(_id, definition)| {
+                definition
+                    .referenced_eocs()
+                    .iter()
+                    .any(|reference| !definitions.contains_key(*reference))
+            })
+            .map(|(id, _definition)| id.clone())
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            break;
+        }
+        for id in unavailable {
+            definitions.remove(&id);
+            target_context_ids.remove(&id);
+        }
+    }
+    target_context_ids.retain(|id| definitions.contains_key(id));
+
     let runtime_definitions = definitions
         .values()
         .map(runtime_eoc_definition)
@@ -87,6 +138,10 @@ pub(super) fn runtime_eoc_catalog(
                 || !item.comestible_type.is_empty()
                 || !action.deferred_fields.is_empty()
                 || action.eoc_ids.is_empty()
+                || action
+                    .eoc_ids
+                    .iter()
+                    .any(|id| target_context_ids.contains(id))
                 || action.eoc_ids.iter().any(|id| {
                     definitions.get(id).is_none_or(|definition| {
                         definition.recurrence.is_some() || definition.event_trigger.is_some()
@@ -157,6 +212,8 @@ fn condition_references_are_supported(
         EocConditionDefinition::Constant(_)
         | EocConditionDefinition::HasEffect { .. }
         | EocConditionDefinition::HasAnyEffect { .. }
+        | EocConditionDefinition::TargetHasEffect { .. }
+        | EocConditionDefinition::TargetHasAnyEffect { .. }
         | EocConditionDefinition::CompareString(_)
         | EocConditionDefinition::CompareStringAll(_)
         | EocConditionDefinition::HasWeapon
@@ -194,6 +251,10 @@ fn effects_references_are_supported(
         | EocEffectDefinition::RemoveEffects { .. }
         | EocEffectDefinition::SetActorVariable { .. }
         | EocEffectDefinition::RemoveActorVariable { .. }
+        | EocEffectDefinition::AddTargetEffect { .. }
+        | EocEffectDefinition::RemoveTargetEffects { .. }
+        | EocEffectDefinition::SetTargetVariable { .. }
+        | EocEffectDefinition::RemoveTargetVariable { .. }
         | EocEffectDefinition::MathAssignment(_)
         | EocEffectDefinition::RunEocs { .. } => true,
     })
@@ -241,7 +302,9 @@ fn runtime_condition_body_parts_are_supported(
         | EocConditionV1::StatAtLeast { .. }
         | EocConditionV1::Math(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
-        | EocConditionV1::HasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
+        | EocConditionV1::HasAnyEffect { body_part_id, .. }
+        | EocConditionV1::TargetHasEffect { body_part_id, .. }
+        | EocConditionV1::TargetHasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => {
             runtime_condition_body_parts_are_supported(condition, valid_part)
         }
@@ -257,7 +320,9 @@ fn runtime_effect_body_parts_are_supported(
 ) -> bool {
     effects.iter().all(|effect| match effect {
         EocEffectV1::AddEffect { body_part_id, .. }
-        | EocEffectV1::RemoveEffects { body_part_id, .. } => valid_part(body_part_id),
+        | EocEffectV1::RemoveEffects { body_part_id, .. }
+        | EocEffectV1::AddTargetEffect { body_part_id, .. }
+        | EocEffectV1::RemoveTargetEffects { body_part_id, .. } => valid_part(body_part_id),
         EocEffectV1::Conditional {
             condition,
             then_effects,
@@ -278,6 +343,8 @@ fn runtime_effect_body_parts_are_supported(
         EocEffectV1::Message { .. }
         | EocEffectV1::SetActorVariable { .. }
         | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. }
         | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. } => true,
     })
@@ -342,6 +409,24 @@ pub(super) fn runtime_condition(condition: &EocConditionDefinition) -> EocCondit
             body_part_id: body_part_id.clone(),
             minimum_intensity: *minimum_intensity,
         },
+        EocConditionDefinition::TargetHasEffect {
+            effect_id,
+            body_part_id,
+            minimum_intensity,
+        } => EocConditionV1::TargetHasEffect {
+            effect_id: effect_id.clone(),
+            body_part_id: body_part_id.clone(),
+            minimum_intensity: *minimum_intensity,
+        },
+        EocConditionDefinition::TargetHasAnyEffect {
+            effect_ids,
+            body_part_id,
+            minimum_intensity,
+        } => EocConditionV1::TargetHasAnyEffect {
+            effect_ids: effect_ids.clone(),
+            body_part_id: body_part_id.clone(),
+            minimum_intensity: *minimum_intensity,
+        },
         EocConditionDefinition::CompareString(values) => EocConditionV1::CompareString(
             values
                 .iter()
@@ -351,6 +436,9 @@ pub(super) fn runtime_condition(condition: &EocConditionDefinition) -> EocCondit
                     }
                     EocStringValueDefinition::ActorVariable(variable_id) => {
                         EocStringValueV1::ActorVariable(variable_id.clone())
+                    }
+                    EocStringValueDefinition::TargetVariable(variable_id) => {
+                        EocStringValueV1::TargetVariable(variable_id.clone())
                     }
                 })
                 .collect(),
@@ -364,6 +452,9 @@ pub(super) fn runtime_condition(condition: &EocConditionDefinition) -> EocCondit
                     }
                     EocStringValueDefinition::ActorVariable(variable_id) => {
                         EocStringValueV1::ActorVariable(variable_id.clone())
+                    }
+                    EocStringValueDefinition::TargetVariable(variable_id) => {
+                        EocStringValueV1::TargetVariable(variable_id.clone())
                     }
                 })
                 .collect(),
@@ -447,6 +538,40 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
         },
         EocEffectDefinition::RemoveActorVariable { variable_id } => {
             EocEffectV1::RemoveActorVariable {
+                variable_id: variable_id.clone(),
+            }
+        }
+        EocEffectDefinition::AddTargetEffect {
+            effect_id,
+            body_part_id,
+            duration_turns,
+            permanent,
+            intensity,
+            intensity_is_explicit,
+        } => EocEffectV1::AddTargetEffect {
+            effect_id: effect_id.clone(),
+            body_part_id: body_part_id.clone(),
+            duration_turns: *duration_turns,
+            permanent: *permanent,
+            intensity: *intensity,
+            intensity_is_explicit: *intensity_is_explicit,
+        },
+        EocEffectDefinition::RemoveTargetEffects {
+            effect_ids,
+            body_part_id,
+        } => EocEffectV1::RemoveTargetEffects {
+            effect_ids: effect_ids.clone(),
+            body_part_id: body_part_id.clone(),
+        },
+        EocEffectDefinition::SetTargetVariable {
+            variable_id,
+            possible_values,
+        } => EocEffectV1::SetTargetVariable {
+            variable_id: variable_id.clone(),
+            possible_values: possible_values.clone(),
+        },
+        EocEffectDefinition::RemoveTargetVariable { variable_id } => {
+            EocEffectV1::RemoveTargetVariable {
                 variable_id: variable_id.clone(),
             }
         }

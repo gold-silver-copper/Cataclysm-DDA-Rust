@@ -434,7 +434,11 @@ impl WorldState {
             }
             if profile.condition.as_ref().is_some_and(|condition| {
                 !self
-                    .creature_eoc_condition_matches(source, condition)
+                    .creature_eoc_condition_matches(
+                        source,
+                        visible_target.map(|(target, _position)| target),
+                        condition,
+                    )
                     .unwrap_or(false)
             }) {
                 continue;

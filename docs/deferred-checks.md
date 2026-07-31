@@ -41,8 +41,10 @@ Run only when the user explicitly requests a verification checkpoint.
   per-projectile fields/damage/sound, stun blocking, intra-burst recoil and
   cycling boundaries; polymorph prototype dependency closure, proportional HP,
   exact keep-speed/HP/aggression overrides, stable creature identity, target
-  special-cooldown reset, and authoritative transform events; combat scenarios
-  at protocol 123/schema 101, CanonicalStateV99, canonical-event-V24.
+  special-cooldown reset, authoritative transform events, beta/target effect and
+  variable conditions/mutations, no-target root rejection, target-context
+  reference closure, and combat scenarios at protocol 124/schema 102,
+  CanonicalStateV100, canonical-event-V24.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
   possible-value selection traces, strict
@@ -63,9 +65,10 @@ Run only when the user explicitly requests a verification checkpoint.
   monster-alpha effect/variable persistence, effect-intensity conditions,
   immediate EOC chains, melee EOC hooks, dedicated EOC special actors,
   creature effect expiry and unsafe target-context/delayed graph rejection,
-  two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 120/schema 98, CanonicalStateV96,
-  canonical-event-V23, and
+  two-client item activation, target/beta effect and variable reads and writes,
+  target-context reference closure, and generic medical-choice request, reconnect,
+  expiry, stale-response, protocol 124/schema 102, CanonicalStateV100,
+  canonical-event-V24, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, stationary/disconnected

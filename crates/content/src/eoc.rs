@@ -19,6 +19,7 @@ const MAX_EOC_VARIABLE_VALUE_BYTES: usize = 16 * 1_024;
 pub enum EocStringValueDefinition {
     Literal(String),
     ActorVariable(String),
+    TargetVariable(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +47,16 @@ pub enum EocConditionDefinition {
         minimum_intensity: u32,
     },
     HasAnyEffect {
+        effect_ids: Vec<String>,
+        body_part_id: Option<String>,
+        minimum_intensity: u32,
+    },
+    TargetHasEffect {
+        effect_id: String,
+        body_part_id: Option<String>,
+        minimum_intensity: u32,
+    },
+    TargetHasAnyEffect {
         effect_ids: Vec<String>,
         body_part_id: Option<String>,
         minimum_intensity: u32,
@@ -109,6 +120,25 @@ pub enum EocEffectDefinition {
     RemoveActorVariable {
         variable_id: String,
     },
+    AddTargetEffect {
+        effect_id: String,
+        body_part_id: Option<String>,
+        duration_turns: u32,
+        permanent: bool,
+        intensity: u32,
+        intensity_is_explicit: bool,
+    },
+    RemoveTargetEffects {
+        effect_ids: Vec<String>,
+        body_part_id: Option<String>,
+    },
+    SetTargetVariable {
+        variable_id: String,
+        possible_values: Vec<String>,
+    },
+    RemoveTargetVariable {
+        variable_id: String,
+    },
     MathAssignment(EocMathAssignmentDefinition),
     Confirmation {
         prompt: String,
@@ -150,6 +180,10 @@ impl EocEffectDefinition {
             | Self::RemoveEffects { .. }
             | Self::SetActorVariable { .. }
             | Self::RemoveActorVariable { .. }
+            | Self::AddTargetEffect { .. }
+            | Self::RemoveTargetEffects { .. }
+            | Self::SetTargetVariable { .. }
+            | Self::RemoveTargetVariable { .. }
             | Self::MathAssignment(_) => {}
         }
     }
@@ -697,15 +731,22 @@ pub(crate) fn parse_condition(
             return Some(EocConditionDefinition::StatAtLeast { stat, minimum });
         }
     }
-    if let Some(effect) = object.get("u_has_effect") {
+    if object.contains_key("u_has_effect") && object.contains_key("npc_has_effect") {
+        unsupported.insert(path.to_owned());
+        return None;
+    }
+    for (field, targets_beta) in [("u_has_effect", false), ("npc_has_effect", true)] {
+        let Some(effect) = object.get(field) else {
+            continue;
+        };
         let Some(effect_id) = effect.as_str().filter(|id| valid_id(id)) else {
-            unsupported.insert(format!("{path}.u_has_effect"));
+            unsupported.insert(format!("{path}.{field}"));
             return None;
         };
         if object.keys().any(|field| {
             !matches!(
                 field.as_str(),
-                "u_has_effect" | "bodypart" | "target_part" | "intensity"
+                "u_has_effect" | "npc_has_effect" | "bodypart" | "target_part" | "intensity"
             )
         }) {
             unsupported.insert(path.to_owned());
@@ -725,17 +766,36 @@ pub(crate) fn parse_condition(
             unsupported.insert(format!("{path}.intensity"));
             return None;
         };
-        return Some(EocConditionDefinition::HasEffect {
-            effect_id: effect_id.to_owned(),
-            body_part_id,
-            minimum_intensity,
+        return Some(if targets_beta {
+            EocConditionDefinition::TargetHasEffect {
+                effect_id: effect_id.to_owned(),
+                body_part_id,
+                minimum_intensity,
+            }
+        } else {
+            EocConditionDefinition::HasEffect {
+                effect_id: effect_id.to_owned(),
+                body_part_id,
+                minimum_intensity,
+            }
         });
     }
-    if let Some(effects) = object.get("u_has_any_effect") {
+    if object.contains_key("u_has_any_effect") && object.contains_key("npc_has_any_effect") {
+        unsupported.insert(path.to_owned());
+        return None;
+    }
+    for (field, targets_beta) in [("u_has_any_effect", false), ("npc_has_any_effect", true)] {
+        let Some(effects) = object.get(field) else {
+            continue;
+        };
         if object.keys().any(|field| {
             !matches!(
                 field.as_str(),
-                "u_has_any_effect" | "bodypart" | "target_part" | "intensity"
+                "u_has_any_effect"
+                    | "npc_has_any_effect"
+                    | "bodypart"
+                    | "target_part"
+                    | "intensity"
             )
         }) {
             unsupported.insert(path.to_owned());
@@ -751,7 +811,7 @@ pub(crate) fn parse_condition(
                     .collect::<Option<Vec<_>>>()
             })
         else {
-            unsupported.insert(format!("{path}.u_has_any_effect"));
+            unsupported.insert(format!("{path}.{field}"));
             return None;
         };
         let body_part_id = object
@@ -768,10 +828,18 @@ pub(crate) fn parse_condition(
             unsupported.insert(format!("{path}.intensity"));
             return None;
         };
-        return Some(EocConditionDefinition::HasAnyEffect {
-            effect_ids,
-            body_part_id,
-            minimum_intensity,
+        return Some(if targets_beta {
+            EocConditionDefinition::TargetHasAnyEffect {
+                effect_ids,
+                body_part_id,
+                minimum_intensity,
+            }
+        } else {
+            EocConditionDefinition::HasAnyEffect {
+                effect_ids,
+                body_part_id,
+                minimum_intensity,
+            }
         });
     }
     unsupported.insert(path.to_owned());
@@ -885,15 +953,32 @@ fn parse_effects(
             effects.push(EocEffectDefinition::Message { text });
             continue;
         }
-        if let Some(effect) = object.get("u_add_effect") {
+        if object.contains_key("u_add_effect") && object.contains_key("npc_add_effect") {
+            unsupported.insert(item_path);
+            continue;
+        }
+        if let Some((field, targets_beta, effect)) =
+            [("u_add_effect", false), ("npc_add_effect", true)]
+                .into_iter()
+                .find_map(|(field, targets_beta)| {
+                    object
+                        .get(field)
+                        .map(|effect| (field, targets_beta, effect))
+                })
+        {
             let Some(effect_id) = effect.as_str().filter(|id| valid_id(id)) else {
-                unsupported.insert(format!("{item_path}.u_add_effect"));
+                unsupported.insert(format!("{item_path}.{field}"));
                 continue;
             };
             if object.keys().any(|field| {
                 !matches!(
                     field.as_str(),
-                    "u_add_effect" | "duration" | "target_part" | "bodypart" | "intensity"
+                    "u_add_effect"
+                        | "npc_add_effect"
+                        | "duration"
+                        | "target_part"
+                        | "bodypart"
+                        | "intensity"
                 )
             }) {
                 unsupported.insert(item_path);
@@ -926,25 +1011,51 @@ fn parse_effects(
                 unsupported.insert(item_path);
                 continue;
             }
-            effects.push(EocEffectDefinition::AddEffect {
-                effect_id: effect_id.to_owned(),
-                body_part_id,
-                duration_turns,
-                permanent,
-                intensity,
-                intensity_is_explicit: object.contains_key("intensity"),
+            effects.push(if targets_beta {
+                EocEffectDefinition::AddTargetEffect {
+                    effect_id: effect_id.to_owned(),
+                    body_part_id,
+                    duration_turns,
+                    permanent,
+                    intensity,
+                    intensity_is_explicit: object.contains_key("intensity"),
+                }
+            } else {
+                EocEffectDefinition::AddEffect {
+                    effect_id: effect_id.to_owned(),
+                    body_part_id,
+                    duration_turns,
+                    permanent,
+                    intensity,
+                    intensity_is_explicit: object.contains_key("intensity"),
+                }
             });
             continue;
         }
-        if let Some(effect) = object.get("u_lose_effect") {
+        if object.contains_key("u_lose_effect") && object.contains_key("npc_lose_effect") {
+            unsupported.insert(item_path);
+            continue;
+        }
+        if let Some((field, targets_beta, effect)) =
+            [("u_lose_effect", false), ("npc_lose_effect", true)]
+                .into_iter()
+                .find_map(|(field, targets_beta)| {
+                    object
+                        .get(field)
+                        .map(|effect| (field, targets_beta, effect))
+                })
+        {
             if object.keys().any(|field| {
-                !matches!(field.as_str(), "u_lose_effect" | "target_part" | "bodypart")
+                !matches!(
+                    field.as_str(),
+                    "u_lose_effect" | "npc_lose_effect" | "target_part" | "bodypart"
+                )
             }) {
                 unsupported.insert(item_path);
                 continue;
             }
             let Some(effect_ids) = string_or_string_array(effect) else {
-                unsupported.insert(format!("{item_path}.u_lose_effect"));
+                unsupported.insert(format!("{item_path}.{field}"));
                 continue;
             };
             let body_part_id = object
@@ -956,25 +1067,46 @@ fn parse_effects(
                 unsupported.insert(item_path);
                 continue;
             }
-            effects.push(EocEffectDefinition::RemoveEffects {
-                effect_ids,
-                body_part_id,
+            effects.push(if targets_beta {
+                EocEffectDefinition::RemoveTargetEffects {
+                    effect_ids,
+                    body_part_id,
+                }
+            } else {
+                EocEffectDefinition::RemoveEffects {
+                    effect_ids,
+                    body_part_id,
+                }
             });
             continue;
         }
-        if let Some(variable) = object.get("u_add_var") {
+        if object.contains_key("u_add_var") && object.contains_key("npc_add_var") {
+            unsupported.insert(item_path);
+            continue;
+        }
+        if let Some((field, targets_beta, variable)) = [("u_add_var", false), ("npc_add_var", true)]
+            .into_iter()
+            .find_map(|(field, targets_beta)| {
+                object
+                    .get(field)
+                    .map(|variable| (field, targets_beta, variable))
+            })
+        {
             let has_value = object.contains_key("value");
             let has_possible_values = object.contains_key("possible_values");
             if has_value == has_possible_values
                 || object.keys().any(|field| {
-                    !matches!(field.as_str(), "u_add_var" | "value" | "possible_values")
+                    !matches!(
+                        field.as_str(),
+                        "u_add_var" | "npc_add_var" | "value" | "possible_values"
+                    )
                 })
             {
                 unsupported.insert(item_path);
                 continue;
             }
             let Some(variable_id) = variable.as_str().filter(|id| valid_id(id)) else {
-                unsupported.insert(format!("{item_path}.u_add_var"));
+                unsupported.insert(format!("{item_path}.{field}"));
                 continue;
             };
             let Some(possible_values) = object.get("value").map_or_else(
@@ -1003,23 +1135,48 @@ fn parse_effects(
                 unsupported.insert(format!("{item_path}.value"));
                 continue;
             };
-            effects.push(EocEffectDefinition::SetActorVariable {
-                variable_id: variable_id.to_owned(),
-                possible_values,
+            effects.push(if targets_beta {
+                EocEffectDefinition::SetTargetVariable {
+                    variable_id: variable_id.to_owned(),
+                    possible_values,
+                }
+            } else {
+                EocEffectDefinition::SetActorVariable {
+                    variable_id: variable_id.to_owned(),
+                    possible_values,
+                }
             });
             continue;
         }
-        if let Some(variable) = object.get("u_lose_var") {
+        if object.contains_key("u_lose_var") && object.contains_key("npc_lose_var") {
+            unsupported.insert(item_path);
+            continue;
+        }
+        if let Some((field, targets_beta, variable)) =
+            [("u_lose_var", false), ("npc_lose_var", true)]
+                .into_iter()
+                .find_map(|(field, targets_beta)| {
+                    object
+                        .get(field)
+                        .map(|variable| (field, targets_beta, variable))
+                })
+        {
             if object.len() != 1 {
                 unsupported.insert(item_path);
                 continue;
             }
             let Some(variable_id) = variable.as_str().filter(|id| valid_id(id)) else {
-                unsupported.insert(format!("{item_path}.u_lose_var"));
+                unsupported.insert(format!("{item_path}.{field}"));
                 continue;
             };
-            effects.push(EocEffectDefinition::RemoveActorVariable {
-                variable_id: variable_id.to_owned(),
+            effects.push(if targets_beta {
+                EocEffectDefinition::RemoveTargetVariable {
+                    variable_id: variable_id.to_owned(),
+                }
+            } else {
+                EocEffectDefinition::RemoveActorVariable {
+                    variable_id: variable_id.to_owned(),
+                }
             });
             continue;
         }
@@ -1070,11 +1227,21 @@ fn parse_string_value(value: &Value) -> Option<EocStringValueDefinition> {
         Value::String(value) if valid_variable_value(value) => {
             Some(EocStringValueDefinition::Literal(value.clone()))
         }
-        Value::Object(object) if object.len() == 1 => object
-            .get("u_val")
-            .and_then(Value::as_str)
-            .filter(|id| valid_id(id))
-            .map(|id| EocStringValueDefinition::ActorVariable(id.to_owned())),
+        Value::Object(object) if object.len() == 1 => [("u_val", false), ("npc_val", true)]
+            .into_iter()
+            .find_map(|(field, targets_beta)| {
+                object
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|id| valid_id(id))
+                    .map(|id| {
+                        if targets_beta {
+                            EocStringValueDefinition::TargetVariable(id.to_owned())
+                        } else {
+                            EocStringValueDefinition::ActorVariable(id.to_owned())
+                        }
+                    })
+            }),
         _ => None,
     }
 }

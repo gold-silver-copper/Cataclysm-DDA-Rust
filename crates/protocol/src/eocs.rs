@@ -42,6 +42,7 @@ pub enum EocEventTriggerV1 {
 pub enum EocStringValueV1 {
     Literal(String),
     ActorVariable(String),
+    TargetVariable(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,6 +54,16 @@ pub enum EocConditionV1 {
         minimum_intensity: u32,
     },
     HasAnyEffect {
+        effect_ids: Vec<String>,
+        body_part_id: Option<String>,
+        minimum_intensity: u32,
+    },
+    TargetHasEffect {
+        effect_id: String,
+        body_part_id: Option<String>,
+        minimum_intensity: u32,
+    },
+    TargetHasAnyEffect {
         effect_ids: Vec<String>,
         body_part_id: Option<String>,
         minimum_intensity: u32,
@@ -165,6 +176,25 @@ pub enum EocEffectV1 {
     RemoveActorVariable {
         variable_id: String,
     },
+    AddTargetEffect {
+        effect_id: String,
+        body_part_id: Option<String>,
+        duration_turns: u32,
+        permanent: bool,
+        intensity: u32,
+        intensity_is_explicit: bool,
+    },
+    RemoveTargetEffects {
+        effect_ids: Vec<String>,
+        body_part_id: Option<String>,
+    },
+    SetTargetVariable {
+        variable_id: String,
+        possible_values: Vec<String>,
+    },
+    RemoveTargetVariable {
+        variable_id: String,
+    },
     MathAssignment {
         target: EocMathAssignmentTargetV1,
         operation: EocMathAssignmentOperationV1,
@@ -210,6 +240,10 @@ impl EocEffectV1 {
             | Self::RemoveEffects { .. }
             | Self::SetActorVariable { .. }
             | Self::RemoveActorVariable { .. }
+            | Self::AddTargetEffect { .. }
+            | Self::RemoveTargetEffects { .. }
+            | Self::SetTargetVariable { .. }
+            | Self::RemoveTargetVariable { .. }
             | Self::MathAssignment { .. } => {}
         }
     }
@@ -285,6 +319,34 @@ pub fn eoc_catalog_is_valid(
     {
         return false;
     }
+    let mut target_context_ids = definitions
+        .iter()
+        .filter(|definition| eoc_definition_requires_target_context(definition))
+        .map(|definition| definition.eoc_id.as_str())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let inherited = definitions
+            .iter()
+            .filter(|definition| !target_context_ids.contains(definition.eoc_id.as_str()))
+            .filter(|definition| {
+                definition
+                    .referenced_eocs()
+                    .iter()
+                    .any(|reference| target_context_ids.contains(*reference))
+            })
+            .map(|definition| definition.eoc_id.as_str())
+            .collect::<Vec<_>>();
+        if inherited.is_empty() {
+            break;
+        }
+        target_context_ids.extend(inherited);
+    }
+    if definitions.iter().any(|definition| {
+        target_context_ids.contains(definition.eoc_id.as_str())
+            && (definition.recurrence.is_some() || definition.event_trigger.is_some())
+    }) {
+        return false;
+    }
     let activation_ids = definitions
         .iter()
         .filter(|definition| definition.recurrence.is_none() && definition.event_trigger.is_none())
@@ -294,10 +356,9 @@ pub fn eoc_catalog_is_valid(
         valid_id(&item.item_type_id)
             && !item.eoc_ids.is_empty()
             && item.eoc_ids.len() <= MAX_EOC_REFERENCES
-            && item
-                .eoc_ids
-                .iter()
-                .all(|id| activation_ids.contains(id.as_str()))
+            && item.eoc_ids.iter().all(|id| {
+                activation_ids.contains(id.as_str()) && !target_context_ids.contains(id.as_str())
+            })
     })
 }
 
@@ -338,8 +399,18 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
             effect_id,
             body_part_id,
             ..
+        }
+        | EocConditionV1::TargetHasEffect {
+            effect_id,
+            body_part_id,
+            ..
         } => valid_id(effect_id) && body_part_id.as_deref().is_none_or(valid_id),
         EocConditionV1::HasAnyEffect {
+            effect_ids,
+            body_part_id,
+            ..
+        }
+        | EocConditionV1::TargetHasAnyEffect {
             effect_ids,
             body_part_id,
             ..
@@ -380,6 +451,79 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
 pub fn eoc_condition_is_valid(condition: &EocConditionV1) -> bool {
     let mut nodes = 0;
     valid_condition(condition, 0, &mut nodes) && nodes <= MAX_EOC_TREE_NODES
+}
+
+/// Whether this definition directly reads or mutates the dialogue beta
+/// talker. Callers propagate the result through `referenced_eocs` before
+/// admitting roots that execute without a target.
+#[must_use]
+pub fn eoc_definition_requires_target_context(definition: &EocDefinitionV1) -> bool {
+    definition
+        .condition
+        .as_ref()
+        .is_some_and(condition_requires_target_context)
+        || definition
+            .deactivate_condition
+            .as_ref()
+            .is_some_and(condition_requires_target_context)
+        || effects_require_target_context(&definition.effects)
+        || effects_require_target_context(&definition.false_effects)
+}
+
+fn condition_requires_target_context(condition: &EocConditionV1) -> bool {
+    match condition {
+        EocConditionV1::TargetHasEffect { .. } | EocConditionV1::TargetHasAnyEffect { .. } => true,
+        EocConditionV1::CompareString(values) | EocConditionV1::CompareStringAll(values) => values
+            .iter()
+            .any(|value| matches!(value, EocStringValueV1::TargetVariable(_))),
+        EocConditionV1::Not(condition) => condition_requires_target_context(condition),
+        EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => {
+            conditions.iter().any(condition_requires_target_context)
+        }
+        EocConditionV1::Constant(_)
+        | EocConditionV1::HasEffect { .. }
+        | EocConditionV1::HasAnyEffect { .. }
+        | EocConditionV1::HasItem { .. }
+        | EocConditionV1::HasWeapon
+        | EocConditionV1::IsWearing { .. }
+        | EocConditionV1::HasProficiency { .. }
+        | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::StatAtLeast { .. }
+        | EocConditionV1::Math(_) => false,
+    }
+}
+
+fn effects_require_target_context(effects: &[EocEffectV1]) -> bool {
+    effects.iter().any(|effect| match effect {
+        EocEffectV1::AddTargetEffect { .. }
+        | EocEffectV1::RemoveTargetEffects { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. } => true,
+        EocEffectV1::Conditional {
+            condition,
+            then_effects,
+            else_effects,
+        } => {
+            condition_requires_target_context(condition)
+                || effects_require_target_context(then_effects)
+                || effects_require_target_context(else_effects)
+        }
+        EocEffectV1::Confirmation {
+            accept_effects,
+            decline_effects,
+            ..
+        } => {
+            effects_require_target_context(accept_effects)
+                || effects_require_target_context(decline_effects)
+        }
+        EocEffectV1::Message { .. }
+        | EocEffectV1::AddEffect { .. }
+        | EocEffectV1::RemoveEffects { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::MathAssignment { .. }
+        | EocEffectV1::RunEocs { .. } => false,
+    })
 }
 
 #[must_use]
@@ -426,6 +570,7 @@ pub fn creature_eoc_condition_is_supported(condition: &EocConditionV1) -> bool {
         EocConditionV1::Constant(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
         | EocConditionV1::HasAnyEffect { body_part_id, .. } => body_part_id.is_none(),
+        EocConditionV1::TargetHasEffect { .. } | EocConditionV1::TargetHasAnyEffect { .. } => true,
         EocConditionV1::CompareString(_) | EocConditionV1::CompareStringAll(_) => true,
         EocConditionV1::Math(expression) => creature_eoc_math_is_supported(expression),
         EocConditionV1::Not(condition) => creature_eoc_condition_is_supported(condition),
@@ -443,7 +588,12 @@ pub fn creature_eoc_condition_is_supported(condition: &EocConditionV1) -> bool {
 
 fn creature_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
     effects.iter().all(|effect| match effect {
-        EocEffectV1::SetActorVariable { .. } | EocEffectV1::RemoveActorVariable { .. } => true,
+        EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::AddTargetEffect { .. }
+        | EocEffectV1::RemoveTargetEffects { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. } => true,
         EocEffectV1::AddEffect { body_part_id, .. }
         | EocEffectV1::RemoveEffects { body_part_id, .. } => body_part_id.is_none(),
         EocEffectV1::MathAssignment { target, value, .. } => {
@@ -510,6 +660,14 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                 permanent,
                 intensity,
                 ..
+            }
+            | EocEffectV1::AddTargetEffect {
+                effect_id,
+                body_part_id,
+                duration_turns,
+                permanent,
+                intensity,
+                ..
             } => {
                 valid_id(effect_id)
                     && body_part_id.as_deref().is_none_or(valid_id)
@@ -518,6 +676,10 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                     && *intensity <= 1_000_000
             }
             EocEffectV1::RemoveEffects {
+                effect_ids,
+                body_part_id,
+            }
+            | EocEffectV1::RemoveTargetEffects {
                 effect_ids,
                 body_part_id,
             } => {
@@ -529,6 +691,10 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             EocEffectV1::SetActorVariable {
                 variable_id,
                 possible_values,
+            }
+            | EocEffectV1::SetTargetVariable {
+                variable_id,
+                possible_values,
             } => {
                 valid_id(variable_id)
                     && (1..=MAX_EOC_REFERENCES).contains(&possible_values.len())
@@ -536,7 +702,8 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                         .iter()
                         .all(|value| valid_variable_value(value))
             }
-            EocEffectV1::RemoveActorVariable { variable_id } => valid_id(variable_id),
+            EocEffectV1::RemoveActorVariable { variable_id }
+            | EocEffectV1::RemoveTargetVariable { variable_id } => valid_id(variable_id),
             EocEffectV1::MathAssignment { target, value, .. } => {
                 valid_math_assignment_target(target)
                     && valid_math_expression_tree(value, depth + 1, nodes)
@@ -644,7 +811,8 @@ fn valid_math_assignment_target(target: &EocMathAssignmentTargetV1) -> bool {
 fn valid_string_value(value: &EocStringValueV1) -> bool {
     match value {
         EocStringValueV1::Literal(value) => valid_variable_value(value),
-        EocStringValueV1::ActorVariable(variable_id) => valid_id(variable_id),
+        EocStringValueV1::ActorVariable(variable_id)
+        | EocStringValueV1::TargetVariable(variable_id) => valid_id(variable_id),
     }
 }
 
