@@ -15,6 +15,7 @@ mod missions;
 mod npc_dialogue;
 mod npc_faction;
 mod use_actions;
+mod vehicles;
 
 pub use anatomy::{
     ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1,
@@ -116,8 +117,24 @@ pub use use_actions::{
     ItemTransformTypeV1, MAX_ITEM_TRANSFORM_MOVES, MAX_ITEM_TRANSFORM_TYPES,
     item_transform_catalog_is_valid,
 };
+pub use vehicles::{
+    MAX_LIVE_VEHICLES, MAX_WORLDGEN_VEHICLE_GROUP_ENTRIES,
+    MAX_WORLDGEN_VEHICLE_GROUP_ENTRIES_TOTAL, MAX_WORLDGEN_VEHICLE_GROUPS,
+    MAX_WORLDGEN_VEHICLE_PART_AMMO_TYPES, MAX_WORLDGEN_VEHICLE_PART_FLAGS,
+    MAX_WORLDGEN_VEHICLE_PART_TOOLS, MAX_WORLDGEN_VEHICLE_PART_TYPES,
+    MAX_WORLDGEN_VEHICLE_PART_VARIANTS, MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE,
+    MAX_WORLDGEN_VEHICLE_PLACEMENTS, MAX_WORLDGEN_VEHICLE_PROTOTYPE_PARTS_TOTAL,
+    MAX_WORLDGEN_VEHICLE_PROTOTYPES, MAX_WORLDGEN_VEHICLE_REPEAT, MAX_WORLDGEN_VEHICLE_ROTATIONS,
+    MAX_WORLDGEN_VEHICLE_SYMBOL_BYTES, MAX_WORLDGEN_VEHICLE_TEXT_BYTES, VehiclePartSnapshotV1,
+    VehicleSnapshotV1, VehicleSpawnStatusV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1,
+    WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1, WorldgenVehiclePartTypeV1,
+    WorldgenVehiclePartVariantV1, WorldgenVehiclePlacementV1, WorldgenVehiclePrototypePartV1,
+    WorldgenVehiclePrototypeV1, insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
+    visible_vehicle_snapshots_are_valid, worldgen_vehicle_catalog_is_valid,
+    worldgen_vehicle_placement_is_valid,
+};
 
-pub const PROTOCOL_VERSION: u16 = 130;
+pub const PROTOCOL_VERSION: u16 = 131;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1728,6 +1745,16 @@ pub enum CommandKind {
     TalkToNpc {
         target: NpcId,
     },
+    BoardVehicle {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+    },
+    UnboardVehicle {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        dx: i8,
+        dy: i8,
+    },
     ShootActor {
         target: ActorId,
     },
@@ -1862,6 +1889,14 @@ pub enum CommandRejection {
     StaleInteraction,
     InvalidInteractionChoice,
     NpcRefusedDialogue,
+    VehicleMissing,
+    VehiclePartMissing,
+    VehiclePartBroken,
+    VehiclePartNotBoardable,
+    VehiclePartOccupied,
+    ActorAlreadyBoarded,
+    ActorNotBoarded,
+    InvalidUnboardDestination,
     ItemHasNoPower,
     PoweredToolActive,
     InvalidTerrainInteraction,
@@ -1971,6 +2006,25 @@ pub enum BashTargetKindV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum WorldEventKind {
+    VehicleSpawned {
+        vehicle_id: VehicleId,
+        prototype_id: String,
+        position: WorldPosition,
+        facing_degrees: i16,
+    },
+    ActorBoardedVehicle {
+        actor_id: ActorId,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        position: WorldPosition,
+    },
+    ActorUnboardedVehicle {
+        actor_id: ActorId,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        from: WorldPosition,
+        to: WorldPosition,
+    },
     ActorMoved {
         actor_id: ActorId,
         from: WorldPosition,
@@ -3289,6 +3343,7 @@ pub struct WorldgenTemplateV1 {
     pub nested: Vec<WorldgenNestedPlacementV1>,
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
     pub npc_placements: Vec<WorldgenNpcPlacementV1>,
+    pub vehicle_placements: Vec<WorldgenVehiclePlacementV1>,
     pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
     pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
@@ -3306,6 +3361,7 @@ pub struct WorldgenNestedTemplateV1 {
     pub nested: Vec<WorldgenNestedPlacementV1>,
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
     pub npc_placements: Vec<WorldgenNpcPlacementV1>,
+    pub vehicle_placements: Vec<WorldgenVehiclePlacementV1>,
     pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
     pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
@@ -3809,6 +3865,10 @@ pub struct WorldgenCatalogV1 {
     /// Monster-type-ID and group-ID sorted immutable spawn catalogs.
     pub monster_prototypes: Vec<WorldgenMonsterPrototypeV1>,
     pub monster_groups: Vec<WorldgenMonsterGroupV1>,
+    /// Part-type/prototype/group sorted immutable vehicle spawn catalogs.
+    pub vehicle_part_types: Vec<WorldgenVehiclePartTypeV1>,
+    pub vehicle_prototypes: Vec<WorldgenVehiclePrototypeV1>,
+    pub vehicle_groups: Vec<WorldgenVehicleGroupV1>,
     /// Regional-table-ID-sorted, unique catalogs referenced by compact indices.
     pub regional_terrain: Vec<WorldgenRegionalTerrainTableV1>,
     pub regional_furniture: Vec<WorldgenRegionalFurnitureTableV1>,
@@ -4020,6 +4080,8 @@ pub struct WorldSnapshotV1 {
     pub actors: Vec<ActorSnapshot>,
     pub npcs: Vec<NpcSnapshotV1>,
     pub creatures: Vec<CreatureSnapshot>,
+    /// Stable-ID-sorted canonical vehicles and exact ordered part state.
+    pub vehicles: Vec<VehicleSnapshotV1>,
     pub ground_items: Vec<GroundItemSnapshot>,
     pub chunks: Vec<ChunkSnapshot>,
 }
@@ -4059,6 +4121,7 @@ pub struct ReplicationSnapshotV1 {
     /// Immutable definitions needed to render the controlled actor's missions.
     pub mission_definitions: Vec<MissionDefinitionV1>,
     pub creatures: Vec<VisibleCreatureSnapshot>,
+    pub vehicles: Vec<VisibleVehicleSnapshotV1>,
     pub ground_items: Vec<GroundItemSnapshot>,
     pub chunks: Vec<VisibleChunkSnapshot>,
 }
@@ -4541,6 +4604,17 @@ fn valid_client_command(command: &ClientCommand) -> bool {
         }
         CommandKind::TalkToNpc { target } => {
             target.counter() > 0 && target.world_namespace() == command.actor_id.world_namespace()
+        }
+        CommandKind::BoardVehicle { vehicle_id, .. } => {
+            vehicle_id.counter() > 0
+                && vehicle_id.world_namespace() == command.actor_id.world_namespace()
+        }
+        CommandKind::UnboardVehicle {
+            vehicle_id, dx, dy, ..
+        } => {
+            vehicle_id.counter() > 0
+                && vehicle_id.world_namespace() == command.actor_id.world_namespace()
+                && HorizontalDirection { dx: *dx, dy: *dy }.is_valid()
         }
         CommandKind::RespondInteraction {
             interaction_id,
@@ -6493,6 +6567,11 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         || catalog.terrain_prototypes.len() > MAX_WORLDGEN_TERRAIN_PROTOTYPES
         || catalog.furniture_prototypes.len() > MAX_WORLDGEN_FURNITURE_PROTOTYPES
         || !valid_worldgen_monster_catalog(catalog)
+        || !worldgen_vehicle_catalog_is_valid(
+            &catalog.vehicle_part_types,
+            &catalog.vehicle_prototypes,
+            &catalog.vehicle_groups,
+        )
         || !valid_worldgen_npc_name_catalog(&catalog.npc_name_categories)
         || catalog.regional_terrain.len() > MAX_WORLDGEN_REGIONAL_TABLES
         || catalog.regional_furniture.len() > MAX_WORLDGEN_REGIONAL_TABLES
@@ -6570,6 +6649,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
     let mut template_count = 0_usize;
     let mut nested_template_count = 0_usize;
     let mut nested_placement_count = 0_usize;
+    let mut vehicle_placement_count = 0_usize;
     let mut cell_target_count = 0_usize;
     for generator in &catalog.omt_generators {
         if !valid_worldgen_id(&generator.omt_id)
@@ -6597,6 +6677,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         && template.nested.is_empty()
                         && template.area_items.is_empty()
                         && template.npc_placements.is_empty()
+                        && template.vehicle_placements.is_empty()
                         && template.monster_placements.is_empty()
                         && template.individual_monster_placements.is_empty()
                         && !template.erase_all_before_placing_terrain
@@ -6630,6 +6711,9 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                 || !template.npc_placements.iter().all(|placement| {
                     valid_worldgen_npc_placement(placement, &npc_name_category_ids)
                 })
+                || !template.vehicle_placements.iter().all(|placement| {
+                    worldgen_vehicle_placement_is_valid(placement, catalog.vehicle_groups.len())
+                })
                 || !template.monster_placements.iter().all(|placement| {
                     valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
                 })
@@ -6651,6 +6735,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                 .checked_add(template.nested.len())
                 .and_then(|total| total.checked_add(template.area_items.len()))
                 .and_then(|total| total.checked_add(template.npc_placements.len()))
+                .and_then(|total| total.checked_add(template.vehicle_placements.len()))
                 .and_then(|total| total.checked_add(template.monster_placements.len()))
                 .and_then(|total| total.checked_add(template.individual_monster_placements.len()))
             else {
@@ -6658,6 +6743,15 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
             };
             nested_placement_count = total;
             if nested_placement_count > MAX_WORLDGEN_NESTED_PLACEMENTS {
+                return false;
+            }
+            let Some(total) =
+                vehicle_placement_count.checked_add(template.vehicle_placements.len())
+            else {
+                return false;
+            };
+            vehicle_placement_count = total;
+            if vehicle_placement_count > MAX_WORLDGEN_VEHICLE_PLACEMENTS {
                 return false;
             }
             for cell in &template.cells {
@@ -6723,6 +6817,9 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                     || !template.npc_placements.iter().all(|placement| {
                         valid_worldgen_npc_placement(placement, &npc_name_category_ids)
                     })
+                    || !template.vehicle_placements.iter().all(|placement| {
+                        worldgen_vehicle_placement_is_valid(placement, catalog.vehicle_groups.len())
+                    })
                     || !template.monster_placements.iter().all(|placement| {
                         valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
                     })
@@ -6744,6 +6841,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                     .checked_add(template.nested.len())
                     .and_then(|total| total.checked_add(template.area_items.len()))
                     .and_then(|total| total.checked_add(template.npc_placements.len()))
+                    .and_then(|total| total.checked_add(template.vehicle_placements.len()))
                     .and_then(|total| total.checked_add(template.monster_placements.len()))
                     .and_then(|total| {
                         total.checked_add(template.individual_monster_placements.len())
@@ -6753,6 +6851,15 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                 };
                 nested_placement_count = total;
                 if nested_placement_count > MAX_WORLDGEN_NESTED_PLACEMENTS {
+                    return false;
+                }
+                let Some(total) =
+                    vehicle_placement_count.checked_add(template.vehicle_placements.len())
+                else {
+                    return false;
+                };
+                vehicle_placement_count = total;
+                if vehicle_placement_count > MAX_WORLDGEN_VEHICLE_PLACEMENTS {
                     return false;
                 }
                 for cell in &template.cells {
@@ -6831,6 +6938,117 @@ pub fn worldgen_catalog_is_valid(
 }
 
 impl WorldSnapshotV1 {
+    /// Validates the complete live vehicle family, passenger positions, owner
+    /// closure, and allocator-counter uniqueness across every stable object in
+    /// the canonical world. Stable ID wrapper types are distinct in Rust, but
+    /// the allocator namespace is intentionally shared across those types.
+    #[must_use]
+    pub fn vehicles_are_valid(&self) -> bool {
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return self.vehicles.is_empty();
+        };
+        let actors = self
+            .actors
+            .iter()
+            .map(|actor| (actor.id, actor.position))
+            .collect::<Vec<_>>();
+        if !vehicle_snapshots_are_valid(
+            self.world_namespace,
+            &catalog.vehicle_part_types,
+            &catalog.vehicle_prototypes,
+            &self.vehicles,
+            &actors,
+        ) || self.vehicles.iter().any(|vehicle| {
+            !vehicle.owner_faction_id.is_empty()
+                && !self
+                    .factions
+                    .iter()
+                    .any(|faction| faction.faction_id == vehicle.owner_faction_id)
+        }) {
+            return false;
+        }
+
+        let mut counters = BTreeSet::new();
+        let mut item_ids = BTreeSet::new();
+        for actor in &self.actors {
+            if actor.id.counter() == 0
+                || actor.id.world_namespace() != self.world_namespace
+                || !counters.insert(actor.id.counter())
+                || actor.missions.iter().any(|mission| {
+                    mission.mission_id.counter() == 0
+                        || mission.mission_id.world_namespace() != self.world_namespace
+                        || !counters.insert(mission.mission_id.counter())
+                })
+                || actor
+                    .pending_interaction
+                    .as_ref()
+                    .is_some_and(|interaction| {
+                        interaction.interaction_id.counter() == 0
+                            || interaction.interaction_id.world_namespace() != self.world_namespace
+                            || !counters.insert(interaction.interaction_id.counter())
+                    })
+                || !actor
+                    .inventory
+                    .iter()
+                    .all(|item| collect_stable_item_ids(item, self.world_namespace, &mut item_ids))
+                || actor.craft_activity.as_ref().is_some_and(|activity| {
+                    !activity.consumed_items.iter().all(|consumed| {
+                        collect_stable_item_ids(&consumed.item, self.world_namespace, &mut item_ids)
+                    }) || activity.reserved_output_items.iter().any(|item_id| {
+                        item_id.counter() == 0
+                            || item_id.world_namespace() != self.world_namespace
+                            || !item_ids.insert(*item_id)
+                    })
+                })
+                || actor.disassembly_activity.as_ref().is_some_and(|activity| {
+                    !collect_stable_item_ids(
+                        &activity.target_item,
+                        self.world_namespace,
+                        &mut item_ids,
+                    ) || activity.reserved_component_items.iter().any(|item_id| {
+                        item_id.counter() == 0
+                            || item_id.world_namespace() != self.world_namespace
+                            || !item_ids.insert(*item_id)
+                    })
+                })
+                || actor
+                    .construction_activity
+                    .as_ref()
+                    .is_some_and(|activity| {
+                        !activity.consumed_items.iter().all(|consumed| {
+                            collect_stable_item_ids(
+                                &consumed.item,
+                                self.world_namespace,
+                                &mut item_ids,
+                            )
+                        })
+                    })
+            {
+                return false;
+            }
+        }
+        if !self.ground_items.iter().all(|ground| {
+            collect_stable_item_ids(&ground.item, self.world_namespace, &mut item_ids)
+        }) || item_ids
+            .iter()
+            .any(|item_id| !counters.insert(item_id.counter()))
+        {
+            return false;
+        }
+        if self.npcs.iter().any(|npc| {
+            npc.id.counter() == 0
+                || npc.id.world_namespace() != self.world_namespace
+                || !counters.insert(npc.id.counter())
+        }) || self.creatures.iter().any(|creature| {
+            creature.id.counter() == 0
+                || creature.id.world_namespace() != self.world_namespace
+                || !counters.insert(creature.id.counter())
+        }) {
+            return false;
+        }
+        insert_vehicle_stable_counters(self.world_namespace, &self.vehicles, &mut counters)
+    }
+
     /// Validates the canonical item-group catalog and every terrain/furniture
     /// consumer in one pass. Full world restoration performs its other domain
     /// checks separately.
@@ -8133,6 +8351,7 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
         && snapshot.visible_actors.len() <= 65_536
         && snapshot.npcs.len() <= 65_536
         && snapshot.creatures.len() <= 65_536
+        && snapshot.vehicles.len() <= MAX_LIVE_VEHICLES
         && snapshot.ground_items.len() <= 65_536
         && snapshot.chunks.len() <= 16_384
         && snapshot.chunks.iter().all(|chunk| {
@@ -8256,6 +8475,14 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
             .ground_items
             .iter()
             .all(|item| valid_item_snapshot(&item.item))
+        && {
+            let mut actor_ids = BTreeSet::from([snapshot.controlled_actor.id]);
+            snapshot.visible_actors.iter().all(|actor| {
+                actor.id.counter() > 0
+                    && actor.id.world_namespace() == namespace
+                    && actor_ids.insert(actor.id)
+            }) && visible_vehicle_snapshots_are_valid(namespace, &snapshot.vehicles, &actor_ids)
+        }
         && snapshot.npcs.iter().all(|npc| {
             npc.id.counter() > 0
                 && npc.id.world_namespace() == namespace
