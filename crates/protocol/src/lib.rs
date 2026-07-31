@@ -2039,7 +2039,7 @@ pub enum WorldEventKind {
         source: CreatureId,
         target: ActorId,
         body_part_id: String,
-        amount: u16,
+        amount: u32,
         remaining_part_hp: i32,
         remaining_hp: i32,
     },
@@ -3248,6 +3248,9 @@ pub struct WorldgenU16RangeV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenMonsterPrototypeV1 {
     pub base: CreatureCorpsePrototypeV1,
+    /// Whether the complete inherited behavior is admitted for ordinary
+    /// runtime creation rather than retained only for fail-closed inspection.
+    pub runtime_spawnable: bool,
     pub leaves_corpse: bool,
     /// Final inherited concrete item-ID ammunition assigned to each new
     /// creature of this type.
@@ -5960,6 +5963,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             }
                         }
                 })
+                && prototype.runtime_spawnable == prototype.deferred_behavior_fields.is_empty()
                 && prototype.deferred_behavior_fields.len() <= 1_024
                 && prototype
                     .deferred_behavior_fields

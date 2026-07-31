@@ -539,6 +539,9 @@ fn runtime_monster_attack_effect(
     effect_types: &EffectTypeRegistry,
     requires_cut_or_stab_damage: bool,
 ) -> Option<WorldgenMonsterAttackEffectV1> {
+    if !effect.permanent && effect.duration_turns.0 == 0 {
+        return None;
+    }
     let count = effect
         .intensity
         .1
@@ -1846,6 +1849,7 @@ fn runtime_monster_catalog(
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
+                runtime_spawnable: deferred_behavior_fields.is_empty(),
                 starting_ammunition: monster.starting_ammunition.clone(),
                 armor_milli: monster.finalized_armor_milli(),
                 melee_dice_armor_penetration_milli: monster.melee_dice_armor_penetration_milli,

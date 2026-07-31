@@ -339,108 +339,141 @@ impl WorldState {
             if chance_roll >= effect.chance_millionths {
                 continue;
             }
-            let duration_turns = roll_inclusive_u32(
-                effect.duration_minimum_turns,
-                effect.duration_maximum_turns,
-                rng,
-            )?;
-            let intensity =
-                roll_inclusive_u32(effect.intensity_minimum, effect.intensity_maximum, rng)?;
-            if (duration_turns == 0 && !effect.permanent) || intensity == 0 {
+            self.apply_monster_attack_effect_after_chance(target, hit_body_part_id, effect, rng)?;
+        }
+        Ok(())
+    }
+
+    fn apply_monster_attack_effects_to_body_parts(
+        &mut self,
+        target: ActorId,
+        hit_body_part_ids: &[String],
+        dealt_cut_or_stab_damage: bool,
+        effects: &[WorldgenMonsterAttackEffectV1],
+        rng: &mut impl Rng,
+    ) -> Result<(), SimError> {
+        for effect in effects {
+            if effect.requires_cut_or_stab_damage && !dealt_cut_or_stab_damage {
                 continue;
             }
-            let application_index = intensity
-                .checked_sub(effect.intensity_minimum)
-                .and_then(|index| usize::try_from(index).ok())
-                .ok_or(SimError::InvalidCreature)?;
-            let application = effect
-                .intensity_applications
-                .get(application_index)
-                .ok_or(SimError::InvalidCreature)?;
-            let intensity = application.intensity;
-            let body_part_id = if effect.affect_hit_body_part {
-                Some(hit_body_part_id.to_owned())
-            } else {
-                effect.body_part_id.clone()
-            };
-            if body_part_id.as_ref().is_some_and(|body_part_id| {
-                !self
-                    .actor_anatomy
-                    .parts
-                    .iter()
-                    .any(|part| part.body_part_id == *body_part_id)
-            }) {
+            let chance_roll = rng.next_u32() % 1_000_000;
+            if chance_roll >= effect.chance_millionths {
                 continue;
             }
-            let blocked = self.actors.get(&target).is_some_and(|actor| {
-                actor.effects.iter().any(|active| {
-                    active.expires_at_tick > self.tick
-                        && effect
-                            .blocked_by_effect_ids
-                            .binary_search(&active.effect_id)
-                            .is_ok()
-                })
+            for hit_body_part_id in hit_body_part_ids {
+                self.apply_monster_attack_effect_after_chance(
+                    target,
+                    hit_body_part_id,
+                    effect,
+                    rng,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_monster_attack_effect_after_chance(
+        &mut self,
+        target: ActorId,
+        hit_body_part_id: &str,
+        effect: &WorldgenMonsterAttackEffectV1,
+        rng: &mut impl Rng,
+    ) -> Result<(), SimError> {
+        let duration_turns = roll_inclusive_u32(
+            effect.duration_minimum_turns,
+            effect.duration_maximum_turns,
+            rng,
+        )?;
+        let intensity =
+            roll_inclusive_u32(effect.intensity_minimum, effect.intensity_maximum, rng)?;
+        if (duration_turns == 0 && !effect.permanent) || intensity == 0 {
+            return Ok(());
+        }
+        let application_index = intensity
+            .checked_sub(effect.intensity_minimum)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or(SimError::InvalidCreature)?;
+        let application = effect
+            .intensity_applications
+            .get(application_index)
+            .ok_or(SimError::InvalidCreature)?;
+        let intensity = application.intensity;
+        let body_part_id = if effect.affect_hit_body_part {
+            Some(hit_body_part_id.to_owned())
+        } else {
+            effect.body_part_id.clone()
+        };
+        if body_part_id.as_ref().is_some_and(|body_part_id| {
+            !self
+                .actor_anatomy
+                .parts
+                .iter()
+                .any(|part| part.body_part_id == *body_part_id)
+        }) {
+            return Ok(());
+        }
+        let blocked = self.actors.get(&target).is_some_and(|actor| {
+            actor.effects.iter().any(|active| {
+                active.expires_at_tick > self.tick
+                    && effect
+                        .blocked_by_effect_ids
+                        .binary_search(&active.effect_id)
+                        .is_ok()
+            })
+        });
+        if blocked {
+            return Ok(());
+        }
+        let duration_ticks = u64::from(duration_turns.max(u32::from(effect.permanent)))
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let maximum_duration_ticks = u64::from(effect.maximum_accumulated_duration_turns)
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let current_tick = self.tick;
+        let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+        if let Some(existing) = actor.effects.iter_mut().find(|existing| {
+            existing.effect_id == effect.effect_id && existing.body_part_id == body_part_id
+        }) {
+            existing.intensity = intensity;
+            existing.modifiers = application.modifiers.clone();
+            if existing.expires_at_tick != SimTick(u64::MAX) {
+                let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
+                let added_turns = u128::from(duration_turns)
+                    .checked_mul(u128::from(effect.duration_add_percent))
+                    .and_then(|value| value.checked_div(100))
+                    .and_then(|value| u64::try_from(value).ok())
+                    .ok_or(SimError::NumericOverflow)?;
+                let added = added_turns
+                    .checked_mul(SimTick::HZ)
+                    .ok_or(SimError::NumericOverflow)?;
+                existing.expires_at_tick = SimTick(
+                    current_tick
+                        .0
+                        .saturating_add(remaining.saturating_add(added).min(maximum_duration_ticks))
+                        .min(u64::MAX - 1),
+                );
+            }
+        } else if actor.effects.len() < 1_024 {
+            actor.effects.push(ActorEffectSnapshotV1 {
+                effect_id: effect.effect_id.clone(),
+                body_part_id,
+                intensity,
+                expires_at_tick: if effect.permanent {
+                    SimTick(u64::MAX)
+                } else {
+                    SimTick(
+                        current_tick
+                            .0
+                            .saturating_add(duration_ticks.min(maximum_duration_ticks))
+                            .min(u64::MAX - 1),
+                    )
+                },
+                modifiers: application.modifiers.clone(),
             });
-            if blocked {
-                continue;
-            }
-            let duration_ticks = u64::from(duration_turns.max(u32::from(effect.permanent)))
-                .checked_mul(SimTick::HZ)
-                .ok_or(SimError::NumericOverflow)?;
-            let maximum_duration_ticks = u64::from(effect.maximum_accumulated_duration_turns)
-                .checked_mul(SimTick::HZ)
-                .ok_or(SimError::NumericOverflow)?;
-            let current_tick = self.tick;
-            let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
-            if let Some(existing) = actor.effects.iter_mut().find(|existing| {
-                existing.effect_id == effect.effect_id && existing.body_part_id == body_part_id
-            }) {
-                existing.intensity = intensity;
-                existing.modifiers = application.modifiers.clone();
-                existing.expires_at_tick =
-                    if effect.permanent || existing.expires_at_tick == SimTick(u64::MAX) {
-                        SimTick(u64::MAX)
-                    } else {
-                        let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
-                        let added_turns = u128::from(duration_turns)
-                            .checked_mul(u128::from(effect.duration_add_percent))
-                            .and_then(|value| value.checked_div(100))
-                            .and_then(|value| u64::try_from(value).ok())
-                            .ok_or(SimError::NumericOverflow)?;
-                        let added = added_turns
-                            .checked_mul(SimTick::HZ)
-                            .ok_or(SimError::NumericOverflow)?;
-                        SimTick(
-                            current_tick
-                                .0
-                                .saturating_add(
-                                    remaining.saturating_add(added).min(maximum_duration_ticks),
-                                )
-                                .min(u64::MAX - 1),
-                        )
-                    };
-            } else if actor.effects.len() < 1_024 {
-                actor.effects.push(ActorEffectSnapshotV1 {
-                    effect_id: effect.effect_id.clone(),
-                    body_part_id,
-                    intensity,
-                    expires_at_tick: if effect.permanent {
-                        SimTick(u64::MAX)
-                    } else {
-                        SimTick(
-                            current_tick
-                                .0
-                                .saturating_add(duration_ticks.min(maximum_duration_ticks))
-                                .min(u64::MAX - 1),
-                        )
-                    },
-                    modifiers: application.modifiers.clone(),
-                });
-                actor.effects.sort_by(|left, right| {
-                    (&left.effect_id, &left.body_part_id)
-                        .cmp(&(&right.effect_id, &right.body_part_id))
-                });
-            }
+            actor.effects.sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
         }
         Ok(())
     }
@@ -795,7 +828,7 @@ impl WorldState {
                 source,
                 target,
                 body_part_id: outcome.body_part_id,
-                amount: outcome.amount,
+                amount: u32::from(outcome.amount),
                 remaining_part_hp: outcome.remaining_part_hp,
                 remaining_hp: outcome.remaining_hp,
             })?);
@@ -900,6 +933,9 @@ impl WorldState {
             })
             .cloned()
             .ok_or(SimError::InvalidCreature)?;
+        if !prototype.runtime_spawnable {
+            return Ok(false);
+        }
         let radius = i32::from(profile.spell_aoe);
         let mut candidates = Vec::new();
         for dy in -radius..=radius {
@@ -977,6 +1013,9 @@ impl WorldState {
             })
             .cloned()
             .ok_or(SimError::InvalidCreature)?;
+        if !target.runtime_spawnable {
+            return Ok(());
+        }
         let (from_type_id, old_hp, old_max_hp, old_speed, old_aggression, position) = {
             let creature = self
                 .creatures
@@ -1268,7 +1307,7 @@ impl WorldState {
                 source,
                 target,
                 body_part_id: outcome.body_part_id,
-                amount: outcome.amount,
+                amount: u32::from(outcome.amount),
                 remaining_part_hp: outcome.remaining_part_hp,
                 remaining_hp: outcome.remaining_hp,
             })?);
@@ -1419,6 +1458,9 @@ impl WorldState {
                 }) {
                     effect.intensity = on_hit.intensity;
                     effect.modifiers = on_hit.modifiers.clone();
+                    if effect.expires_at_tick == SimTick(u64::MAX) {
+                        continue;
+                    }
                     let remaining = effect.expires_at_tick.0.saturating_sub(current_tick.0);
                     let added_seconds = u128::from(on_hit.duration_seconds)
                         .checked_mul(u128::from(on_hit.duration_add_percent))
@@ -1678,7 +1720,13 @@ impl WorldState {
             &mut rng,
         )?;
         let selected_parts = if profile.spread_damage {
-            (0..self.actor_anatomy.parts.len()).collect()
+            let mut selected = (0..self.actor_anatomy.parts.len()).collect::<Vec<_>>();
+            selected.sort_by(|left, right| {
+                self.actor_anatomy.parts[*left]
+                    .body_part_id
+                    .cmp(&self.actor_anatomy.parts[*right].body_part_id)
+            });
+            selected
         } else {
             (0..attack_amount)
                 .map(|_| crate::anatomy::select_body_part_index(&self.actor_anatomy, &mut rng))
@@ -1722,13 +1770,17 @@ impl WorldState {
             dealt_cut_or_stab_damage |= hit_cut_or_stab_damage > 0;
             outcomes.push(outcome);
         }
-        let mut outcome = outcomes.pop().ok_or(SimError::InvalidCreature)?;
-        outcome.amount = outcomes.iter().try_fold(outcome.amount, |total, hit| {
+        let aggregate_amount = outcomes.iter().try_fold(0_u32, |total, hit| {
             total
-                .checked_add(hit.amount)
+                .checked_add(u32::from(hit.amount))
                 .ok_or(SimError::NumericOverflow)
         })?;
-        if outcome.amount > 0 || !profile.effects_require_damage {
+        let selected_body_part_ids = outcomes
+            .iter()
+            .map(|outcome| outcome.body_part_id.clone())
+            .collect::<Vec<_>>();
+        let outcome = outcomes.pop().ok_or(SimError::InvalidCreature)?;
+        if aggregate_amount > 0 {
             self.apply_monster_attack_effects(
                 target,
                 &outcome.body_part_id,
@@ -1736,8 +1788,17 @@ impl WorldState {
                 &profile.effects,
                 &mut rng,
             )?;
+        } else if !profile.effects_require_damage {
+            self.apply_monster_attack_effects_to_body_parts(
+                target,
+                &selected_body_part_ids,
+                dealt_cut_or_stab_damage,
+                &profile.effects,
+                &mut rng,
+            )?;
         }
-        if outcome.amount > 0 && matches!(profile.kind, WorldgenMonsterSpecialAttackKindV1::Bite) {
+        if aggregate_amount > 0 && matches!(profile.kind, WorldgenMonsterSpecialAttackKindV1::Bite)
+        {
             self.apply_bite_infection(
                 target,
                 &outcome.body_part_id,
@@ -1749,11 +1810,11 @@ impl WorldState {
             source,
             target,
             body_part_id: outcome.body_part_id,
-            amount: outcome.amount,
+            amount: aggregate_amount,
             remaining_part_hp: outcome.remaining_part_hp,
             remaining_hp: outcome.remaining_hp,
         })?);
-        if outcome.amount > 0 {
+        if aggregate_amount > 0 {
             self.interrupt_craft(target, events)?;
             self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
             self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;

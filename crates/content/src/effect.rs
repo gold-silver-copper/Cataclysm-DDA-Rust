@@ -12,6 +12,20 @@ use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
 
 const DEFAULT_MAX_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 const MODIFIER_SCALE: i64 = 1_000_000;
+// Pinned `effect.cpp` routes these IDs through bespoke movement-escape
+// behavior rather than the generic effect modifier data.
+const HARDCODED_MOVEMENT_IMPAIRING_EFFECT_IDS: [&str; 10] = [
+    "beartrap",
+    "crushed",
+    "downed",
+    "grabbed",
+    "heavysnare",
+    "in_pit",
+    "lightsnare",
+    "tied",
+    "webbed",
+    "worked_on",
+];
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct ScaledModifier {
@@ -185,7 +199,8 @@ fn collect_effect(
 }
 
 fn parse_effect_type(id: &str, object: &Map<String, Value>, source: &str) -> EffectTypeDefinition {
-    let mut supported = !object.contains_key("copy-from");
+    let mut supported =
+        !object.contains_key("copy-from") && !HARDCODED_MOVEMENT_IMPAIRING_EFFECT_IDS.contains(&id);
     let maximum_duration_seconds = object
         .get("max_duration")
         .map_or(Some(DEFAULT_MAX_DURATION_SECONDS), parse_duration_seconds);

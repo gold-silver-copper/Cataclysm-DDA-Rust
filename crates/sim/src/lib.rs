@@ -7782,32 +7782,54 @@ impl WorldState {
             .ok_or(SimError::NumericOverflow)?;
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
         const LIMB_SCORE_SCALE: u128 = 1_000_000;
-        const MAXIMUM_INVERSE_LIMB_SCORE: u128 = 100 * LIMB_SCORE_SCALE;
-        let inverse_limb_score = |score: u64| -> Result<u128, SimError> {
-            if score == 0 {
-                return Ok(MAXIMUM_INVERSE_LIMB_SCORE);
+        const MAXIMUM_INVERSE_LIMB_SCORE: u128 = 100;
+        let greatest_common_divisor = |mut left: u128, mut right: u128| {
+            while right != 0 {
+                (left, right) = (right, left % right);
             }
-            LIMB_SCORE_SCALE
-                .checked_mul(LIMB_SCORE_SCALE)
-                .and_then(|numerator| numerator.checked_div(u128::from(score)))
-                .map(|inverse| inverse.min(MAXIMUM_INVERSE_LIMB_SCORE))
-                .ok_or(SimError::NumericOverflow)
+            left
         };
-        let footing_inverse =
+        let inverse_limb_score = |score: u64| -> Result<(u128, u128), SimError> {
+            let score = u128::from(score);
+            if score == 0
+                || LIMB_SCORE_SCALE
+                    > MAXIMUM_INVERSE_LIMB_SCORE
+                        .checked_mul(score)
+                        .ok_or(SimError::NumericOverflow)?
+            {
+                return Ok((MAXIMUM_INVERSE_LIMB_SCORE, 1));
+            }
+            let divisor = greatest_common_divisor(LIMB_SCORE_SCALE, score);
+            Ok((LIMB_SCORE_SCALE / divisor, score / divisor))
+        };
+        let (footing_numerator, footing_denominator) =
             inverse_limb_score(actor_limb_score_multiplier_millionths(actor, "footing"))?;
-        let move_speed_inverse =
+        let (move_speed_numerator, move_speed_denominator) =
             inverse_limb_score(actor_limb_score_multiplier_millionths(actor, "move_speed"))?;
-        let limb_run_cost_multiplier = move_speed_inverse
-            .checked_mul(2)
-            .and_then(|move_speed| move_speed.checked_add(footing_inverse))
-            .and_then(|combined| combined.checked_div(3))
+        let denominator_divisor =
+            greatest_common_divisor(footing_denominator, move_speed_denominator);
+        let footing_denominator_factor = footing_denominator / denominator_divisor;
+        let move_speed_denominator_factor = move_speed_denominator / denominator_divisor;
+        let combined_denominator = footing_denominator_factor
+            .checked_mul(move_speed_denominator)
+            .ok_or(SimError::NumericOverflow)?;
+        let combined_numerator = footing_numerator
+            .checked_mul(move_speed_denominator_factor)
+            .and_then(|footing| {
+                move_speed_numerator
+                    .checked_mul(2)
+                    .and_then(|move_speed| move_speed.checked_mul(footing_denominator_factor))
+                    .and_then(|move_speed| footing.checked_add(move_speed))
+            })
             .ok_or(SimError::NumericOverflow)?;
         let modified_cost_moves = u128::try_from(base_cost_moves)
             .ok()
-            .and_then(|cost| cost.checked_mul(limb_run_cost_multiplier))
-            .and_then(|cost| cost.checked_div(LIMB_SCORE_SCALE))
+            .and_then(|cost| cost.checked_mul(combined_numerator))
+            .and_then(|cost| cost.checked_div(3))
+            .and_then(|cost| cost.checked_div(combined_denominator))
             .and_then(|cost| i64::try_from(cost).ok())
-            .ok_or(SimError::NumericOverflow)?;
+            .ok_or(SimError::NumericOverflow)?
+            .max(1);
         modified_cost_moves
             .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
             .ok_or(SimError::NumericOverflow)
@@ -11387,7 +11409,7 @@ impl WorldState {
             source,
             target,
             body_part_id: outcome.body_part_id,
-            amount: outcome.amount,
+            amount: u32::from(outcome.amount),
             remaining_part_hp: outcome.remaining_part_hp,
             remaining_hp: outcome.remaining_hp,
         })?);

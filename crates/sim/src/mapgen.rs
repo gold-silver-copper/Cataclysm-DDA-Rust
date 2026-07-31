@@ -339,6 +339,9 @@ fn plan_omt_cell(
             .monster_prototypes
             .get(usize::from(prototype_index))
             .ok_or(SimError::InvalidCreature)?;
+        if !prototype.runtime_spawnable {
+            continue;
+        }
         creatures.push(creature_spawn_from_worldgen(prototype, position));
     }
     Ok(PlannedBubble {
@@ -1094,7 +1097,13 @@ fn materialize_monster_placements(
             let mut prototypes = Vec::new();
             match request.placement.target {
                 WorldgenIndividualMonsterTargetV1::Monster { prototype_index } => {
-                    prototypes.push(prototype_index);
+                    let prototype = catalog
+                        .monster_prototypes
+                        .get(usize::from(prototype_index))
+                        .ok_or(SimError::InvalidCreature)?;
+                    if prototype.runtime_spawnable {
+                        prototypes.push(prototype_index);
+                    }
                 }
                 WorldgenIndividualMonsterTargetV1::Group { group_index } => {
                     let mut quantity = 1_i64;
@@ -1408,7 +1417,13 @@ fn select_monster_group(
                     .saturating_mul(i64::from(pack_size))
                     .max(1);
                 *quantity = quantity.saturating_sub(cost);
-                output.push((prototype_index, pack_size));
+                let prototype = catalog
+                    .monster_prototypes
+                    .get(usize::from(prototype_index))
+                    .ok_or(SimError::InvalidCreature)?;
+                if prototype.runtime_spawnable {
+                    output.push((prototype_index, pack_size));
+                }
                 found = true;
             }
             WorldgenMonsterGroupTargetV1::Group { group_index } => {
@@ -1432,7 +1447,13 @@ fn select_monster_group(
     }
     if !recursive && !found {
         if let Some(prototype_index) = group.default_prototype_index {
-            output.push((prototype_index, 1));
+            let prototype = catalog
+                .monster_prototypes
+                .get(usize::from(prototype_index))
+                .ok_or(SimError::InvalidCreature)?;
+            if prototype.runtime_spawnable {
+                output.push((prototype_index, 1));
+            }
         }
         *quantity = quantity.saturating_sub(1);
     }
