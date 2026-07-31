@@ -4245,6 +4245,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         monster_groups: Vec::new(),
         regional_terrain: Vec::new(),
         regional_furniture: Vec::new(),
+        npc_name_categories: Vec::new(),
         omt_generators: vec![WorldgenOmtGeneratorV1 {
             omt_id: identity.generator_id,
             templates: vec![WorldgenTemplateV1 {
@@ -4780,6 +4781,7 @@ fn rust_static_template_snapshot(
         monster_groups: Vec::new(),
         regional_terrain: Vec::new(),
         regional_furniture: Vec::new(),
+        npc_name_categories: Vec::new(),
         omt_generators: vec![WorldgenOmtGeneratorV1 {
             omt_id: identity.generator_id.clone(),
             templates: vec![WorldgenTemplateV1 {

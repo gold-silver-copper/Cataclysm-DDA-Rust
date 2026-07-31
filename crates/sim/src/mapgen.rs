@@ -76,7 +76,24 @@ pub(super) fn catalog_npc_placements_are_supported(
     let placement_is_supported = |placement: &WorldgenNpcPlacementV1| {
         templates
             .get(&placement.template_id)
-            .is_some_and(|template| template.name_unique.is_some())
+            .is_some_and(|template| {
+                let expected: &[&str] = if template.name_unique.is_some() {
+                    &[]
+                } else {
+                    match template.gender.as_deref() {
+                        Some("male") => &["<male_full_name>"],
+                        Some("female") => &["<female_full_name>"],
+                        None => &["<male_full_name>", "<female_full_name>"],
+                        Some(_) => return false,
+                    }
+                };
+                placement.generated_name_category_ids.len() == expected.len()
+                    && placement
+                        .generated_name_category_ids
+                        .iter()
+                        .map(String::as_str)
+                        .eq(expected.iter().copied())
+            })
     };
     catalog.omt_generators.iter().all(|generator| {
         generator
@@ -102,6 +119,7 @@ pub(super) struct PlannedBubble {
 
 pub(super) struct PlannedNpcSpawn {
     pub template_id: String,
+    pub generated_name: Option<String>,
     pub position: WorldPosition,
 }
 
@@ -356,7 +374,7 @@ fn plan_omt_cell(
         ));
     }
     let mut npcs = Vec::with_capacity(plan.npcs.len());
-    for (index, template_id) in plan.npcs {
+    for (index, template_id, generated_name) in plan.npcs {
         if terrain[index].move_cost <= 0
             || furniture[index]
                 .as_ref()
@@ -370,6 +388,7 @@ fn plan_omt_cell(
         }
         npcs.push(PlannedNpcSpawn {
             template_id,
+            generated_name,
             position,
         });
     }
@@ -459,7 +478,7 @@ struct OmtMapgenPlan {
     nested_expansions: usize,
     monster_placements: Vec<PlannedMonsterPlacement>,
     individual_monster_placements: Vec<PlannedIndividualMonsterPlacement>,
-    npcs: Vec<(usize, String)>,
+    npcs: Vec<(usize, String, Option<String>)>,
     monsters: Vec<(usize, u16)>,
 }
 
@@ -933,7 +952,7 @@ fn rotate_mapgen_plan(plan: &mut OmtMapgenPlan, rotation: u8) -> Result<(), SimE
         }
         request.candidates.sort_unstable();
     }
-    for (index, _) in &mut plan.npcs {
+    for (index, _, _) in &mut plan.npcs {
         let (target_x, target_y) =
             rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
         *index = target_y * OMT_TILE_WIDTH + target_x;
@@ -1024,7 +1043,7 @@ fn apply_template_body(
     // objects and before the later nested-mapgen phase. Repeat is sampled once;
     // each application then samples x and y.
     for placement in npc_placements {
-        plan_npc_placement(placement, offset_x, offset_y, rng, plan)?;
+        plan_npc_placement(catalog, placement, offset_x, offset_y, rng, plan)?;
     }
 
     for placement in nested {
@@ -1066,6 +1085,7 @@ fn apply_template_body(
 }
 
 fn plan_npc_placement(
+    catalog: &WorldgenCatalogV1,
     placement: &WorldgenNpcPlacementV1,
     offset_x: i32,
     offset_y: i32,
@@ -1098,9 +1118,91 @@ fn plan_npc_placement(
         if plan.npcs.len() >= MAX_PLANNED_NPCS_PER_OMT {
             return Err(SimError::InvalidNpcDialogue);
         }
-        plan.npcs.push((index, placement.template_id.clone()));
+        let generated_name = match placement.generated_name_category_ids.as_slice() {
+            [] => None,
+            [category_id] => Some(expand_npc_name(catalog, category_id, rng)?),
+            [male_category_id, female_category_id] => {
+                let category_id = if inclusive_rng_u64(rng, 0, 1) == 0 {
+                    male_category_id
+                } else {
+                    female_category_id
+                };
+                Some(expand_npc_name(catalog, category_id, rng)?)
+            }
+            _ => return Err(SimError::InvalidNpcDialogue),
+        };
+        plan.npcs
+            .push((index, placement.template_id.clone(), generated_name));
     }
     Ok(())
+}
+
+fn expand_npc_name(
+    catalog: &WorldgenCatalogV1,
+    category_id: &str,
+    rng: &mut ChaCha8Rng,
+) -> Result<String, SimError> {
+    fn expand_category(
+        catalog: &WorldgenCatalogV1,
+        category_id: &str,
+        rng: &mut ChaCha8Rng,
+        output: &mut String,
+        depth: usize,
+    ) -> Result<(), SimError> {
+        if depth > cdda_protocol::MAX_WORLDGEN_NPC_NAME_EXPANSION_DEPTH {
+            return Err(SimError::InvalidNpcDialogue);
+        }
+        let category = catalog
+            .npc_name_categories
+            .binary_search_by(|category| category.category_id.as_str().cmp(category_id))
+            .ok()
+            .and_then(|index| catalog.npc_name_categories.get(index))
+            .ok_or(SimError::InvalidNpcDialogue)?;
+        let total = category
+            .choices
+            .iter()
+            .try_fold(0_u64, |total, choice| total.checked_add(choice.weight))
+            .ok_or(SimError::NumericOverflow)?;
+        let index = choose_weighted_index(
+            category.choices.len(),
+            total,
+            rng,
+            |index| category.choices[index].weight,
+            true,
+        )?;
+        let text = category
+            .choices
+            .get(index)
+            .ok_or(SimError::InvalidNpcDialogue)?
+            .text
+            .clone();
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find(['<', '>']) {
+            if rest.as_bytes()[start] == b'>' {
+                return Err(SimError::InvalidNpcDialogue);
+            }
+            output.push_str(&rest[..start]);
+            let suffix = &rest[start..];
+            let end = suffix.find('>').ok_or(SimError::InvalidNpcDialogue)?;
+            expand_category(catalog, &suffix[..=end], rng, output, depth + 1)?;
+            if output.len() > cdda_protocol::MAX_NPC_NAME_BYTES {
+                return Err(SimError::InvalidNpcDialogue);
+            }
+            rest = &suffix[end + 1..];
+        }
+        output.push_str(rest);
+        if output.len() > cdda_protocol::MAX_NPC_NAME_BYTES {
+            return Err(SimError::InvalidNpcDialogue);
+        }
+        Ok(())
+    }
+
+    let mut output = String::new();
+    expand_category(catalog, category_id, rng, &mut output, 0)?;
+    if output.is_empty() || output.chars().any(char::is_control) {
+        return Err(SimError::InvalidNpcDialogue);
+    }
+    Ok(output)
 }
 
 fn plan_monster_placement_request(
@@ -2481,6 +2583,7 @@ mod tests {
                 }],
             }],
             regional_furniture: Vec::new(),
+            npc_name_categories: Vec::new(),
             omt_generators: vec![
                 generator("base", template(None, base_cells)),
                 generator("middle", template(Some("base"), overlay_cells)),

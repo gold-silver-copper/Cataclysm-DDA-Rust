@@ -9948,7 +9948,11 @@ impl WorldState {
             }
         }
         for npc in planned.npcs {
-            self.spawn_npc(&npc.template_id, None, npc.position)?;
+            self.spawn_npc(
+                &npc.template_id,
+                npc.generated_name.as_deref(),
+                npc.position,
+            )?;
         }
         for creature in planned.creatures {
             self.spawn_creature(creature)?;
@@ -15326,6 +15330,7 @@ mod tests {
             monster_groups: Vec::new(),
             regional_terrain: Vec::new(),
             regional_furniture: Vec::new(),
+            npc_name_categories: Vec::new(),
             omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
                 omt_id: String::from("field_test"),
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {

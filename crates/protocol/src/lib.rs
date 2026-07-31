@@ -235,6 +235,10 @@ pub const MAX_WORLDGEN_MONSTER_GROUP_ENTRIES: usize = 65_536;
 pub const MAX_WORLDGEN_MONSTER_GROUP_DEPTH: usize = 32;
 pub const MAX_WORLDGEN_MONSTER_PLACEMENTS: usize = 65_536;
 pub const MAX_WORLDGEN_MONSTER_REPEAT: u16 = 1_024;
+pub const MAX_WORLDGEN_NPC_NAME_CATEGORIES: usize = 64;
+pub const MAX_WORLDGEN_NPC_NAME_CHOICES: usize = 32_768;
+pub const MAX_WORLDGEN_NPC_NAME_TEXT_BYTES: usize = 256;
+pub const MAX_WORLDGEN_NPC_NAME_EXPANSION_DEPTH: usize = 16;
 pub const MAX_WORLDGEN_MONSTER_PACK_SIZE: u16 = 1_024;
 pub const MAX_WORLDGEN_MONSTER_DENSITY_MILLIONTHS: u32 = 81_920_000;
 /// Pinned overmaps own 180x180 overmap-terrain coordinates per z-level.
@@ -3164,10 +3168,27 @@ pub struct WorldgenAreaItemPlacementV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenNpcPlacementV1 {
     pub template_id: String,
+    /// Empty for a template with a unique name, one category for a fixed
+    /// gender, or male/female categories in draw order for random gender.
+    pub generated_name_category_ids: Vec<String>,
     /// One pinned repeat interval is sampled before applying the placement.
     pub repeat: WorldgenU16RangeV1,
     pub x: WorldgenCoordinateRangeV1,
     pub y: WorldgenCoordinateRangeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNpcNameChoiceV1 {
+    pub text: String,
+    pub weight: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNpcNameCategoryV1 {
+    pub category_id: String,
+    /// Pinned identified choices followed by anonymous choices, preserving
+    /// the weighted snippet library's selection order.
+    pub choices: Vec<WorldgenNpcNameChoiceV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3774,6 +3795,8 @@ pub struct WorldgenCatalogV1 {
     /// Regional-table-ID-sorted, unique catalogs referenced by compact indices.
     pub regional_terrain: Vec<WorldgenRegionalTerrainTableV1>,
     pub regional_furniture: Vec<WorldgenRegionalFurnitureTableV1>,
+    /// Reachable pinned full-name snippet graph used by mapgen NPCs.
+    pub npc_name_categories: Vec<WorldgenNpcNameCategoryV1>,
     /// OMT-ID-sorted, unique generators.
     pub omt_generators: Vec<WorldgenOmtGeneratorV1>,
 }
@@ -5574,8 +5597,147 @@ fn valid_worldgen_area_item_placement(placement: &WorldgenAreaItemPlacementV1) -
         && valid_worldgen_coordinate_range(placement.y)
 }
 
-fn valid_worldgen_npc_placement(placement: &WorldgenNpcPlacementV1) -> bool {
+fn valid_worldgen_npc_name_category_id(id: &str) -> bool {
+    id.len() >= 3
+        && id.len() <= 128
+        && id.starts_with('<')
+        && id.ends_with('>')
+        && id[1..id.len() - 1]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn worldgen_npc_name_references(text: &str) -> Option<Vec<&str>> {
+    if text.is_empty()
+        || text.len() > MAX_WORLDGEN_NPC_NAME_TEXT_BYTES
+        || text.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let mut references = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(['<', '>']) {
+        if rest.as_bytes()[start] == b'>' {
+            return None;
+        }
+        let suffix = &rest[start..];
+        let end = suffix.find('>')?;
+        let category = &suffix[..=end];
+        if !valid_worldgen_npc_name_category_id(category) {
+            return None;
+        }
+        references.push(category);
+        rest = &suffix[end + 1..];
+    }
+    Some(references)
+}
+
+fn valid_worldgen_npc_name_catalog(categories: &[WorldgenNpcNameCategoryV1]) -> bool {
+    if categories.is_empty() {
+        return true;
+    }
+    if categories.len() > MAX_WORLDGEN_NPC_NAME_CATEGORIES
+        || !categories
+            .windows(2)
+            .all(|pair| pair[0].category_id < pair[1].category_id)
+    {
+        return false;
+    }
+    let mut total_choices = 0_usize;
+    let ids = categories
+        .iter()
+        .map(|category| category.category_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if !ids.contains("<male_full_name>") || !ids.contains("<female_full_name>") {
+        return false;
+    }
+    for category in categories {
+        if !valid_worldgen_npc_name_category_id(&category.category_id)
+            || category.choices.is_empty()
+        {
+            return false;
+        }
+        let Some(next_total) = total_choices.checked_add(category.choices.len()) else {
+            return false;
+        };
+        total_choices = next_total;
+        if total_choices > MAX_WORLDGEN_NPC_NAME_CHOICES
+            || category
+                .choices
+                .iter()
+                .try_fold(0_u64, |total, choice| {
+                    (choice.weight > 0)
+                        .then_some(())
+                        .and_then(|()| total.checked_add(choice.weight))
+                })
+                .is_none()
+            || category.choices.iter().any(|choice| {
+                worldgen_npc_name_references(&choice.text)
+                    .is_none_or(|references| references.iter().any(|id| !ids.contains(id)))
+            })
+        {
+            return false;
+        }
+    }
+    fn visit(
+        id: &str,
+        categories: &[WorldgenNpcNameCategoryV1],
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > MAX_WORLDGEN_NPC_NAME_EXPANSION_DEPTH {
+            return false;
+        }
+        if visited.contains(id) {
+            return true;
+        }
+        if !visiting.insert(id.to_owned()) {
+            return false;
+        }
+        let Some(category) = categories
+            .binary_search_by(|candidate| candidate.category_id.as_str().cmp(id))
+            .ok()
+            .and_then(|index| categories.get(index))
+        else {
+            return false;
+        };
+        for reference in category.choices.iter().flat_map(|choice| {
+            worldgen_npc_name_references(&choice.text)
+                .unwrap_or_default()
+                .into_iter()
+        }) {
+            if !visit(reference, categories, visiting, visited, depth + 1) {
+                return false;
+            }
+        }
+        visiting.remove(id);
+        visited.insert(id.to_owned());
+        true
+    }
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    categories.iter().all(|category| {
+        visit(
+            &category.category_id,
+            categories,
+            &mut visiting,
+            &mut visited,
+            0,
+        )
+    })
+}
+
+fn valid_worldgen_npc_placement(
+    placement: &WorldgenNpcPlacementV1,
+    name_categories: &BTreeSet<&str>,
+) -> bool {
     valid_worldgen_id(&placement.template_id)
+        && placement.generated_name_category_ids.len() <= 2
+        && placement
+            .generated_name_category_ids
+            .iter()
+            .all(|id| name_categories.contains(id.as_str()))
         && valid_worldgen_u16_range(placement.repeat, 0, MAX_WORLDGEN_MONSTER_REPEAT)
         && valid_worldgen_coordinate_range(placement.x)
         && valid_worldgen_coordinate_range(placement.y)
@@ -6316,6 +6478,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         || catalog.terrain_prototypes.len() > MAX_WORLDGEN_TERRAIN_PROTOTYPES
         || catalog.furniture_prototypes.len() > MAX_WORLDGEN_FURNITURE_PROTOTYPES
         || !valid_worldgen_monster_catalog(catalog)
+        || !valid_worldgen_npc_name_catalog(&catalog.npc_name_categories)
         || catalog.regional_terrain.len() > MAX_WORLDGEN_REGIONAL_TABLES
         || catalog.regional_furniture.len() > MAX_WORLDGEN_REGIONAL_TABLES
         || catalog.omt_generators.is_empty()
@@ -6384,6 +6547,11 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         .iter()
         .map(|identity| identity.full_id.as_str())
         .collect::<BTreeSet<_>>();
+    let npc_name_category_ids = catalog
+        .npc_name_categories
+        .iter()
+        .map(|category| category.category_id.as_str())
+        .collect::<BTreeSet<_>>();
     let mut template_count = 0_usize;
     let mut nested_template_count = 0_usize;
     let mut nested_placement_count = 0_usize;
@@ -6444,10 +6612,9 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                     .area_items
                     .iter()
                     .all(valid_worldgen_area_item_placement)
-                || !template
-                    .npc_placements
-                    .iter()
-                    .all(valid_worldgen_npc_placement)
+                || !template.npc_placements.iter().all(|placement| {
+                    valid_worldgen_npc_placement(placement, &npc_name_category_ids)
+                })
                 || !template.monster_placements.iter().all(|placement| {
                     valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
                 })
@@ -6538,10 +6705,9 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         .area_items
                         .iter()
                         .all(valid_worldgen_area_item_placement)
-                    || !template
-                        .npc_placements
-                        .iter()
-                        .all(valid_worldgen_npc_placement)
+                    || !template.npc_placements.iter().all(|placement| {
+                        valid_worldgen_npc_placement(placement, &npc_name_category_ids)
+                    })
                     || !template.monster_placements.iter().all(|placement| {
                         valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
                     })
@@ -8711,6 +8877,7 @@ mod tests {
                     },
                 ],
             }],
+            npc_name_categories: Vec::new(),
             omt_generators: vec![WorldgenOmtGeneratorV1 {
                 omt_id: String::from("field"),
                 templates: vec![WorldgenTemplateV1 {

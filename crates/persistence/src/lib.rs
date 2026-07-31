@@ -6801,6 +6801,7 @@ mod tests {
             monster_groups: Vec::new(),
             regional_terrain: Vec::new(),
             regional_furniture: Vec::new(),
+            npc_name_categories: Vec::new(),
             omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
                 omt_id: String::from("sqlite_field"),
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {

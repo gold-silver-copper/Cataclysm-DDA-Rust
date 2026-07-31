@@ -103,7 +103,7 @@ use npc_faction::runtime_npc_factions;
 use use_actions::runtime_item_transform_types;
 use worldgen::{
     RuntimeMapgenContent, bootstrap_regional_special_overmap, runtime_mapgen_item_group_roots,
-    runtime_mapgen_worldgen,
+    runtime_mapgen_npc_template_ids, runtime_mapgen_worldgen,
 };
 #[cfg(test)]
 use worldgen::{
@@ -899,14 +899,10 @@ fn open_world(
         content.recipes,
         &mission_ids,
     )?;
-    let mapgen_npc_template_ids = npc_templates
-        .iter()
-        .filter(|template| template.name_unique.is_some())
-        .map(|template| template.template_id.clone())
-        .collect::<BTreeSet<_>>();
+    let mapgen_npc_template_ids = runtime_mapgen_npc_template_ids(&npc_templates, content.snippets);
     initial.register_npc_faction_catalog(faction_templates, factions)?;
     initial.register_mission_catalog(mission_catalog)?;
-    initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
+    initial.register_npc_dialogue_catalog(npc_templates.clone(), dialogue_topics)?;
     initial.register_actor_anatomy(actor_anatomy)?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
     for field_type_id in [
@@ -990,6 +986,8 @@ fn open_world(
             terrain,
             furniture,
             item_groups: &item_group_catalog,
+            snippets: content.snippets,
+            npc_templates: &npc_templates,
             items,
             ammunition_effects: content.ammunition_effects,
             effect_types: effects,
@@ -5772,6 +5770,8 @@ mod tests {
                 terrain: &terrain,
                 furniture: &furniture,
                 item_groups: &wall_catalog,
+                snippets: &DescriptionSnippetRegistry::default(),
+                npc_templates: &[],
                 items: &items,
                 ammunition_effects: &AmmunitionEffectRegistry::default(),
                 effect_types: &EffectTypeRegistry::default(),
@@ -5810,6 +5810,8 @@ mod tests {
                     terrain: &terrain,
                     furniture: &furniture,
                     item_groups: &wall_catalog,
+                    snippets: &DescriptionSnippetRegistry::default(),
+                    npc_templates: &[],
                     items: &items,
                     ammunition_effects: &AmmunitionEffectRegistry::default(),
                     effect_types: &EffectTypeRegistry::default(),

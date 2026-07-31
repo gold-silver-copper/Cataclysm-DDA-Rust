@@ -2,20 +2,21 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cdda_content::{
     AmmunitionEffectRegistry, CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry,
-    EffectTypeRegistry, FieldTypeRegistry, FurnitureRegistry, ItemRegistry, MapgenCoordinateRange,
-    MapgenIdChoice, MapgenRegistry, MonsterAttackEffectDefinition, MonsterGroupRegistry,
-    MonsterGroupTarget, MonsterRegistry, MonsterSpecialAttackKind, OvermapSpecialDefinition,
-    OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
-    RiverSettingsDefinition, SpellRegistry, StartLocationDefinition, StrictMapgenAreaItemPlacement,
-    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
+    DescriptionSnippetRegistry, EffectTypeRegistry, FieldTypeRegistry, FurnitureRegistry,
+    ItemRegistry, MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry,
+    MonsterAttackEffectDefinition, MonsterGroupRegistry, MonsterGroupTarget, MonsterRegistry,
+    MonsterSpecialAttackKind, OvermapSpecialDefinition, OvermapSpecialRegistry,
+    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition, SpellRegistry,
+    StartLocationDefinition, StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice,
+    StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictMapgenNpcPlacement,
     StrictNestedMapgenDefinition, TerrainRegistry,
 };
 use cdda_protocol::{
     ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1, EocDefinitionV1, ItemGroupDefinitionV1,
-    WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1, WorldgenCellV1,
-    WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
+    NpcTemplateV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
+    WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
     WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
     WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
     WorldgenMonsterEffectIntensityApplicationV1, WorldgenMonsterGroupEntryV1,
@@ -26,15 +27,15 @@ use cdda_protocol::{
     WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
     WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
     WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
-    WorldgenNpcPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1,
-    WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
-    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1,
-    WorldgenSpecialPlacementV1, WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
-    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenU16RangeV1, WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
-    worldgen_omt_matches,
+    WorldgenNpcNameCategoryV1, WorldgenNpcNameChoiceV1, WorldgenNpcPlacementV1,
+    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
+    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
+    WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1, WorldgenSpecialPlacementV1,
+    WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1, WorldgenStartLocationV1,
+    WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenU16RangeV1,
+    WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -176,6 +177,44 @@ type RegionalSpecialOvermap = (
     Vec<OvermapRoadExit>,
     Vec<WorldgenSpecialPlacementV1>,
 );
+
+const MALE_FULL_NAME_CATEGORY: &str = "<male_full_name>";
+const FEMALE_FULL_NAME_CATEGORY: &str = "<female_full_name>";
+
+fn runtime_npc_generated_name_categories(template: &NpcTemplateV1) -> Option<Vec<String>> {
+    if template.name_unique.is_some() {
+        return Some(Vec::new());
+    }
+    match template.gender.as_deref() {
+        Some("male") => Some(vec![MALE_FULL_NAME_CATEGORY.to_owned()]),
+        Some("female") => Some(vec![FEMALE_FULL_NAME_CATEGORY.to_owned()]),
+        None => Some(vec![
+            MALE_FULL_NAME_CATEGORY.to_owned(),
+            FEMALE_FULL_NAME_CATEGORY.to_owned(),
+        ]),
+        Some(_) => None,
+    }
+}
+
+pub(super) fn runtime_mapgen_npc_template_ids(
+    templates: &[NpcTemplateV1],
+    snippets: &DescriptionSnippetRegistry,
+) -> BTreeSet<String> {
+    if snippets.get(MALE_FULL_NAME_CATEGORY).is_none()
+        || snippets.get(FEMALE_FULL_NAME_CATEGORY).is_none()
+    {
+        return templates
+            .iter()
+            .filter(|template| template.name_unique.is_some())
+            .map(|template| template.template_id.clone())
+            .collect();
+    }
+    templates
+        .iter()
+        .filter(|template| runtime_npc_generated_name_categories(template).is_some())
+        .map(|template| template.template_id.clone())
+        .collect()
+}
 
 pub(super) fn bootstrap_regional_special_overmap(
     terrain: &OvermapTerrainRegistry,
@@ -534,6 +573,8 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub terrain: &'a TerrainRegistry,
     pub furniture: &'a FurnitureRegistry,
     pub item_groups: &'a [ItemGroupDefinitionV1],
+    pub snippets: &'a DescriptionSnippetRegistry,
+    pub npc_templates: &'a [NpcTemplateV1],
     pub items: &'a ItemRegistry,
     pub ammunition_effects: &'a AmmunitionEffectRegistry,
     pub effect_types: &'a EffectTypeRegistry,
@@ -2255,6 +2296,78 @@ pub(super) fn runtime_mapgen_item_group_roots(
     Ok(roots)
 }
 
+fn npc_name_references(text: &str) -> Result<Vec<&str>, Box<dyn std::error::Error>> {
+    let mut references = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(['<', '>']) {
+        if rest.as_bytes()[start] == b'>' {
+            return Err(format!("malformed NPC name snippet {text:?}").into());
+        }
+        let suffix = &rest[start..];
+        let end = suffix
+            .find('>')
+            .ok_or_else(|| format!("unterminated NPC name snippet {text:?}"))?;
+        references.push(&suffix[..=end]);
+        rest = &suffix[end + 1..];
+    }
+    Ok(references)
+}
+
+fn runtime_npc_name_categories(
+    snippets: &DescriptionSnippetRegistry,
+) -> Result<Vec<WorldgenNpcNameCategoryV1>, Box<dyn std::error::Error>> {
+    let mut pending = VecDeque::from([
+        MALE_FULL_NAME_CATEGORY.to_owned(),
+        FEMALE_FULL_NAME_CATEGORY.to_owned(),
+    ]);
+    let mut categories = BTreeMap::new();
+    while let Some(category_id) = pending.pop_front() {
+        if categories.contains_key(&category_id) {
+            continue;
+        }
+        let category = snippets
+            .get(&category_id)
+            .ok_or_else(|| format!("missing reachable NPC name category {category_id}"))?;
+        let choices = category
+            .choices()
+            .map(|choice| {
+                for reference in npc_name_references(&choice.text)? {
+                    if !categories.contains_key(reference)
+                        && !pending.iter().any(|pending| pending == reference)
+                    {
+                        pending.push_back(reference.to_owned());
+                    }
+                }
+                Ok(WorldgenNpcNameChoiceV1 {
+                    text: choice.text.clone(),
+                    weight: choice.weight,
+                })
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        categories.insert(
+            category_id.clone(),
+            WorldgenNpcNameCategoryV1 {
+                category_id,
+                choices,
+            },
+        );
+        if categories.len() > cdda_protocol::MAX_WORLDGEN_NPC_NAME_CATEGORIES {
+            return Err("NPC name snippet closure exceeds its canonical category bound".into());
+        }
+    }
+    let categories = categories.into_values().collect::<Vec<_>>();
+    let choice_count = categories
+        .iter()
+        .try_fold(0_usize, |total, category| {
+            total.checked_add(category.choices.len())
+        })
+        .ok_or("NPC name snippet choice count overflow")?;
+    if choice_count > cdda_protocol::MAX_WORLDGEN_NPC_NAME_CHOICES {
+        return Err("NPC name snippet closure exceeds its canonical choice bound".into());
+    }
+    Ok(categories)
+}
+
 pub(super) fn runtime_mapgen_worldgen(
     overmap: WorldgenOvermapLayoutV1,
     cities: Vec<WorldgenCityV1>,
@@ -2270,6 +2383,8 @@ pub(super) fn runtime_mapgen_worldgen(
         terrain,
         furniture,
         item_groups,
+        snippets,
+        npc_templates,
         items,
         ammunition_effects,
         effect_types,
@@ -2651,6 +2766,7 @@ pub(super) fn runtime_mapgen_worldgen(
                             &regional_furniture_indices,
                             &monster_group_indices,
                             &monster_indices,
+                            npc_templates,
                             &overmap,
                             overmap_terrain,
                         )
@@ -2677,6 +2793,7 @@ pub(super) fn runtime_mapgen_worldgen(
                                         &regional_furniture_indices,
                                         &monster_group_indices,
                                         &monster_indices,
+                                        npc_templates,
                                         &overmap,
                                         overmap_terrain,
                                     )
@@ -2700,6 +2817,11 @@ pub(super) fn runtime_mapgen_worldgen(
             .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
     );
     omt_generators.sort_by(|left, right| left.omt_id.cmp(&right.omt_id));
+    let npc_name_categories = if npc_templates.is_empty() {
+        Vec::new()
+    } else {
+        runtime_npc_name_categories(snippets)?
+    };
     let catalog = WorldgenCatalogV1 {
         generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
         overmap,
@@ -2713,6 +2835,7 @@ pub(super) fn runtime_mapgen_worldgen(
         monster_groups: runtime_monster_groups,
         regional_terrain,
         regional_furniture,
+        npc_name_categories,
         omt_generators,
     };
     if !worldgen_catalog_shape_is_valid(&catalog) {
@@ -2986,6 +3109,7 @@ fn runtime_mapgen_template(
     regional_furniture: &BTreeMap<String, u16>,
     monster_groups: &BTreeMap<String, u16>,
     monsters: &BTreeMap<String, u16>,
+    npc_templates: &[NpcTemplateV1],
     overmap: &WorldgenOvermapLayoutV1,
     overmap_terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenTemplateV1, Box<dyn std::error::Error>> {
@@ -3019,8 +3143,8 @@ fn runtime_mapgen_template(
         npc_placements: definition
             .npc_placements
             .iter()
-            .map(runtime_npc_placement)
-            .collect(),
+            .map(|placement| runtime_npc_placement(placement, npc_templates))
+            .collect::<Result<Vec<_>, _>>()?,
         monster_placements: definition
             .monster_placements
             .iter()
@@ -3046,6 +3170,7 @@ fn runtime_nested_mapgen_template(
     regional_furniture: &BTreeMap<String, u16>,
     monster_groups: &BTreeMap<String, u16>,
     monsters: &BTreeMap<String, u16>,
+    npc_templates: &[NpcTemplateV1],
     overmap: &WorldgenOvermapLayoutV1,
     overmap_terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenNestedTemplateV1, Box<dyn std::error::Error>> {
@@ -3079,8 +3204,8 @@ fn runtime_nested_mapgen_template(
         npc_placements: definition
             .npc_placements
             .iter()
-            .map(runtime_npc_placement)
-            .collect(),
+            .map(|placement| runtime_npc_placement(placement, npc_templates))
+            .collect::<Result<Vec<_>, _>>()?,
         monster_placements: definition
             .monster_placements
             .iter()
@@ -3175,16 +3300,37 @@ fn runtime_area_item_placement(
     }
 }
 
-fn runtime_npc_placement(placement: &StrictMapgenNpcPlacement) -> WorldgenNpcPlacementV1 {
-    WorldgenNpcPlacementV1 {
+fn runtime_npc_placement(
+    placement: &StrictMapgenNpcPlacement,
+    templates: &[NpcTemplateV1],
+) -> Result<WorldgenNpcPlacementV1, Box<dyn std::error::Error>> {
+    let template = templates
+        .binary_search_by(|template| template.template_id.as_str().cmp(&placement.template_id))
+        .ok()
+        .and_then(|index| templates.get(index))
+        .ok_or_else(|| {
+            format!(
+                "mapgen NPC placement references unsupported template {}",
+                placement.template_id
+            )
+        })?;
+    let generated_name_category_ids =
+        runtime_npc_generated_name_categories(template).ok_or_else(|| {
+            format!(
+                "NPC template {} has unsupported gender",
+                template.template_id
+            )
+        })?;
+    Ok(WorldgenNpcPlacementV1 {
         template_id: placement.template_id.clone(),
+        generated_name_category_ids,
         repeat: WorldgenU16RangeV1 {
             minimum: placement.repeat.minimum,
             maximum: placement.repeat.maximum,
         },
         x: runtime_coordinate_range(placement.x),
         y: runtime_coordinate_range(placement.y),
-    }
+    })
 }
 
 const fn runtime_coordinate_range(range: MapgenCoordinateRange) -> WorldgenCoordinateRangeV1 {
@@ -3413,10 +3559,11 @@ mod tests {
 
     use cdda_content::{
         AmmunitionEffectRegistry, CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
-        DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry, FieldTypeRegistry,
-        FurnitureRegistry, ItemGroupRegistry, ItemRegistry, MapgenRegistry, ModCatalog,
-        MonsterGroupRegistry, MonsterRegistry, OvermapTerrainRegistry, RiverSettingsRegistry,
-        SpellRegistry, StartLocationRegistry, TerrainRegistry,
+        DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry,
+        DescriptionSnippetRegistry, FieldTypeRegistry, FurnitureRegistry, ItemGroupRegistry,
+        ItemRegistry, MapgenRegistry, ModCatalog, MonsterGroupRegistry, MonsterRegistry,
+        OvermapTerrainRegistry, RiverSettingsRegistry, SpellRegistry, StartLocationRegistry,
+        TerrainRegistry,
     };
     use cdda_protocol::{
         ItemGroupDefinitionV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupNodeV1, WorldPosition,
@@ -3549,6 +3696,8 @@ mod tests {
                 terrain: &terrain,
                 furniture: &furniture,
                 item_groups: &runtime_groups,
+                snippets: &DescriptionSnippetRegistry::default(),
+                npc_templates: &[],
                 items: &items,
                 ammunition_effects: &AmmunitionEffectRegistry::default(),
                 effect_types: &EffectTypeRegistry::default(),
