@@ -8,8 +8,9 @@ use cdda_protocol::{
     EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathAssignmentTargetV1, EocMathExpressionV1,
     EocStringValueV1, InteractionId, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
     MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, NpcId, ScheduledEocV1, SimTick,
-    WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid, eoc_effects_are_valid,
-    eoc_effects_contain_confirmation, eoc_effects_require_target_context,
+    WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid, eoc_condition_is_valid,
+    eoc_condition_requires_target_context, eoc_effects_are_valid, eoc_effects_contain_confirmation,
+    eoc_effects_require_target_context,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -26,6 +27,27 @@ const MAX_RECURRING_EOC_REACTIVATION_CHECKS_PER_TICK: usize = 256;
 const MAX_EVENT_EOC_ACTIVATIONS_PER_TICK: usize = 256;
 
 impl WorldState {
+    pub(super) fn dialogue_condition_matches(
+        &self,
+        actor_id: ActorId,
+        condition: &EocConditionV1,
+    ) -> Result<bool, SimError> {
+        if !eoc_condition_is_valid(condition) || eoc_condition_requires_target_context(condition) {
+            return Err(SimError::InvalidNpcDialogue);
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        evaluate_condition(
+            condition,
+            &eoc_actor_context(actor),
+            &actor.effects,
+            &actor.eoc_variables,
+            None,
+            None,
+            &mut 0,
+        )
+        .map_err(|_error| SimError::InvalidNpcDialogue)
+    }
+
     pub fn register_eoc_catalog(
         &mut self,
         definitions: Vec<EocDefinitionV1>,

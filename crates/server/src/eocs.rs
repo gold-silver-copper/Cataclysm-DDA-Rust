@@ -367,6 +367,27 @@ pub(super) fn runtime_dialogue_effects_are_supported(
         && runtime_effect_body_parts_are_supported(&runtime, &valid_part)
 }
 
+pub(super) fn runtime_dialogue_condition_is_supported(
+    condition: &EocConditionDefinition,
+    items: &ItemRegistry,
+    anatomy: &AnatomyDefinitionV1,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
+) -> bool {
+    let runtime = runtime_condition(condition);
+    let valid_part = |body_part_id: &Option<String>| {
+        body_part_id.as_ref().is_none_or(|body_part_id| {
+            anatomy
+                .parts
+                .iter()
+                .any(|part| part.body_part_id == *body_part_id)
+        })
+    };
+    cdda_protocol::eoc_condition_is_valid(&runtime)
+        && runtime_condition_body_parts_are_supported(&runtime, &valid_part)
+        && condition_references_are_supported(condition, items, proficiencies, recipes)
+}
+
 fn runtime_eoc_definition(definition: &EffectOnConditionDefinition) -> EocDefinitionV1 {
     EocDefinitionV1 {
         eoc_id: definition.id.clone(),

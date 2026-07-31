@@ -5,7 +5,9 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::eoc::{EocEffectDefinition, parse_inline_effect_list};
+use crate::eoc::{
+    EocConditionDefinition, EocEffectDefinition, parse_inline_condition, parse_inline_effect_list,
+};
 use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
 
 const NPC_FIELDS: &[&str] = &[
@@ -21,7 +23,7 @@ const NPC_FIELDS: &[&str] = &[
     "chat",
 ];
 const TOPIC_FIELDS: &[&str] = &["type", "id", "dynamic_line", "responses"];
-const RESPONSE_FIELDS: &[&str] = &["text", "topic", "opinion", "effect"];
+const RESPONSE_FIELDS: &[&str] = &["text", "topic", "opinion", "effect", "condition"];
 const OPINION_FIELDS: &[&str] = &["trust", "fear", "value", "anger", "owed"];
 
 pub(crate) fn npc_field_is_implemented(field: &str) -> bool {
@@ -47,6 +49,7 @@ pub struct DialogueResponseDefinition {
     pub next_topic_id: String,
     pub opinion: DialogueOpinionDefinition,
     pub effects: Vec<EocEffectDefinition>,
+    pub condition: Option<EocConditionDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -280,6 +283,9 @@ fn response_shapes_are_supported(value: &Value) -> bool {
                         && response.get("effect").is_none_or(|effect| {
                             parse_inline_effect_list(effect, "effect").is_some()
                         })
+                        && response.get("condition").is_none_or(|condition| {
+                            parse_inline_condition(condition, "condition").is_some()
+                        })
                 })
             })
     })
@@ -346,6 +352,13 @@ fn responses(
                     })
                     .transpose()?
                     .unwrap_or_default(),
+                condition: response
+                    .get("condition")
+                    .map(|condition| {
+                        parse_inline_condition(condition, "condition")
+                            .ok_or_else(|| invalid(file, "condition"))
+                    })
+                    .transpose()?,
             })
         })
         .collect()

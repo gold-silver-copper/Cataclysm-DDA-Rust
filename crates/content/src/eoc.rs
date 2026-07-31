@@ -1219,6 +1219,12 @@ pub(crate) fn parse_inline_effect_list(
     unsupported.is_empty().then_some(effects)
 }
 
+pub(crate) fn parse_inline_condition(value: &Value, path: &str) -> Option<EocConditionDefinition> {
+    let mut unsupported = BTreeSet::new();
+    let condition = parse_condition(value, path, 0, &mut unsupported);
+    unsupported.is_empty().then_some(condition).flatten()
+}
+
 fn translated_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) if !text.is_empty() => Some(text.clone()),

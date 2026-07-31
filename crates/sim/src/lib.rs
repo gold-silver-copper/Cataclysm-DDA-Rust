@@ -14780,14 +14780,18 @@ impl WorldState {
                         let Some(topic) = dialogue_topics.get(topic_id) else {
                             return true;
                         };
-                        interaction.prompt != format!("{}: {}", npc.name, topic.dynamic_line)
-                            || interaction.choices.len() != topic.responses.len()
-                            || interaction.choices.iter().zip(&topic.responses).any(
-                                |(choice, response)| {
-                                    choice.choice_id != response.response_id
-                                        || choice.label != response.text
-                                },
-                            )
+                        if interaction.prompt != format!("{}: {}", npc.name, topic.dynamic_line)
+                            || interaction.choices.is_empty()
+                        {
+                            return true;
+                        }
+                        let mut responses = topic.responses.iter();
+                        interaction.choices.iter().any(|choice| {
+                            !responses.any(|response| {
+                                choice.choice_id == response.response_id
+                                    && choice.label == response.text
+                            })
+                        })
                     } else {
                         false
                     }
@@ -14905,7 +14909,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV106");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV107");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

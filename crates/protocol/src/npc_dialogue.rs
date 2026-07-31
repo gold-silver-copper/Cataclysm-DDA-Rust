@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActorId, EocEffectV1, MAX_INTERACTION_CHOICE_LABEL_BYTES, NpcId, WorldPosition,
-    eoc_effects_are_valid,
+    ActorId, EocConditionV1, EocEffectV1, MAX_INTERACTION_CHOICE_LABEL_BYTES, NpcId, WorldPosition,
+    eoc_condition_is_valid, eoc_effects_are_valid,
 };
 
 pub const MAX_NPC_TEMPLATES: usize = 4_096;
@@ -46,6 +46,7 @@ pub struct DialogueResponseV1 {
     pub next_topic_id: String,
     pub opinion_delta: NpcOpinionV1,
     pub effects: Vec<EocEffectV1>,
+    pub condition: Option<EocConditionV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -132,6 +133,10 @@ pub fn npc_dialogue_catalog_is_valid(
                     && topic_ids.contains(response.next_topic_id.as_str())
                     && opinion_is_valid(&response.opinion_delta)
                     && eoc_effects_are_valid(&response.effects)
+                    && response
+                        .condition
+                        .as_ref()
+                        .is_none_or(eoc_condition_is_valid)
             })
     })
 }

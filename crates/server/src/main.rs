@@ -80,7 +80,10 @@ mod use_actions;
 mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
-use eocs::{runtime_dialogue_effects_are_supported, runtime_effect, runtime_eoc_catalog};
+use eocs::{
+    runtime_condition, runtime_dialogue_condition_is_supported,
+    runtime_dialogue_effects_are_supported, runtime_effect, runtime_eoc_catalog,
+};
 use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
     runtime_bash_item_group_catalog, runtime_bash_item_group_source,
@@ -862,8 +865,14 @@ fn open_world(
     };
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
-    let (npc_templates, dialogue_topics) =
-        runtime_npc_dialogue(content.dialogue, &eoc_catalog.0, &actor_anatomy)?;
+    let (npc_templates, dialogue_topics) = runtime_npc_dialogue(
+        content.dialogue,
+        &eoc_catalog.0,
+        &actor_anatomy,
+        items,
+        content.proficiencies,
+        content.recipes,
+    )?;
     initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
     initial.register_actor_anatomy(actor_anatomy)?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
@@ -1694,6 +1703,9 @@ fn runtime_npc_dialogue(
     registry: &DialogueRegistry,
     eoc_definitions: &[cdda_protocol::EocDefinitionV1],
     anatomy: &cdda_protocol::AnatomyDefinitionV1,
+    items: &ItemRegistry,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
 ) -> Result<
     (
         Vec<cdda_protocol::NpcTemplateV1>,
@@ -1742,6 +1754,7 @@ fn runtime_npc_dialogue(
             next_topic_id: String::from("TALK_DONE"),
             opinion_delta: cdda_protocol::NpcOpinionV1::default(),
             effects: Vec::new(),
+            condition: None,
         }],
     };
     let mut topics = registry
@@ -1751,6 +1764,10 @@ fn runtime_npc_dialogue(
                 && !topic.dynamic_line.is_empty()
                 && !contains_unresolved_dialogue_tag(&topic.dynamic_line)
                 && (1..=cdda_protocol::MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())
+                && topic
+                    .responses
+                    .iter()
+                    .any(|response| response.condition.is_none())
                 && topic.responses.iter().all(|response| {
                     !contains_unresolved_dialogue_tag(&response.text)
                         && cdda_protocol::opinion_is_valid(&cdda_protocol::NpcOpinionV1 {
@@ -1776,6 +1793,17 @@ fn runtime_npc_dialogue(
                                             && !unavailable_dialogue_eocs.contains(*id)
                                     })
                         }
+                        && response.condition.as_ref().is_none_or(|condition| {
+                            runtime_dialogue_condition_is_supported(
+                                condition,
+                                items,
+                                anatomy,
+                                proficiencies,
+                                recipes,
+                            ) && !cdda_protocol::eoc_condition_requires_target_context(
+                                &runtime_condition(condition),
+                            )
+                        })
                 })
         })
         .map(|(topic_id, topic)| {
@@ -1800,6 +1828,7 @@ fn runtime_npc_dialogue(
                                 owed: response.opinion.owed,
                             },
                             effects: response.effects.iter().map(runtime_effect).collect(),
+                            condition: response.condition.as_ref().map(runtime_condition),
                         })
                         .collect(),
                 },

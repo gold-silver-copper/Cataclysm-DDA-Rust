@@ -253,17 +253,26 @@ impl WorldState {
                 reason: InteractionCancellationReasonV1::Replaced,
             })?);
         }
+        let choices = topic
+            .responses
+            .iter()
+            .map(|response| {
+                let matches = response.condition.as_ref().map_or(Ok(true), |condition| {
+                    self.dialogue_condition_matches(actor_id, condition)
+                })?;
+                Ok(matches.then(|| InteractionChoiceV1 {
+                    choice_id: response.response_id.clone(),
+                    label: response.text.clone(),
+                }))
+            })
+            .collect::<Result<Vec<Option<_>>, SimError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         let interaction = PendingInteractionV1 {
             interaction_id: InteractionId::new(self.world_namespace, self.next_event_counter),
             prompt: format!("{npc_name}: {}", topic.dynamic_line),
-            choices: topic
-                .responses
-                .iter()
-                .map(|response| InteractionChoiceV1 {
-                    choice_id: response.response_id.clone(),
-                    label: response.text.clone(),
-                })
-                .collect(),
+            choices,
             created_at_tick: self.tick,
             expires_at_tick: SimTick(
                 self.tick
