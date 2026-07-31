@@ -6149,6 +6149,7 @@ mod tests {
                 priority: 0,
                 half_life_seconds: 172_800,
                 linear_half_life: false,
+                contact_damage: None,
                 is_splattering: true,
                 display_field: true,
             })

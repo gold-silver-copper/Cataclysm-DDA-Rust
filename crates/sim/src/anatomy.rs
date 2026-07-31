@@ -41,6 +41,7 @@ pub(super) fn default_actor_anatomy() -> AnatomyDefinitionV1 {
             vital: true,
             hit_size_millionths: 1_000_000,
             hit_difficulty_millionths: 1_000_000,
+            limb_types: vec![String::from("torso")],
             base_hp: crate::DEFAULT_ACTOR_HP,
             hp_modifiers: BodyPartHpModifiersV1 {
                 strength_millionths: 0,

@@ -2951,6 +2951,22 @@ fn runtime_field_type(
         priority: definition.priority,
         half_life_seconds: definition.half_life_seconds,
         linear_half_life: definition.linear_half_life,
+        contact_damage: definition
+            .has_acid
+            .then(|| cdda_protocol::FieldContactDamageV1 {
+                body_part_type_id: String::from("foot"),
+                damage_type_id: String::from("acid"),
+                minimum_damage: 1,
+                maximum_damage_base: 2,
+                maximum_damage_per_intensity: 1,
+                maximum_damage_divisor: 2,
+                status_effect_id: String::from("corroding"),
+                status_intensity_base: 2,
+                status_intensity_per_field_intensity: 1,
+                status_duration_minimum_turns: 2,
+                status_duration_maximum_base_turns: 1,
+                status_duration_maximum_per_field_intensity: 1,
+            }),
         is_splattering: definition.is_splattering,
         display_field: definition.display_field,
     })

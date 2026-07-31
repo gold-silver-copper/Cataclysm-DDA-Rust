@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 107,
-  "persistence_schema_version": 85,
+  "protocol_version": 108,
+  "persistence_schema_version": 86,
   "replay_format_version": 3,
-  "active_milestone": "interaction-interface",
+  "active_milestone": "environment",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -507,11 +507,15 @@
     {
       "id": "environment",
       "title": "Weather, fields, needs, agriculture, and environmental processing",
-      "state": "pending",
+      "state": "in_progress",
+      "submilestones": [
+        { "id": "persistent-field-decay-and-typed-contact-damage", "state": "implementation_complete_verification_deferred" },
+        { "id": "weather-exposure-spread-agriculture-and-catch-up", "state": "planned" }
+      ],
       "priority": 28,
       "depends_on": ["regional-terrain-base", "anatomy-combat", "eoc-use-actions"],
       "upstream_sources": ["../Cataclysm-DDA/src/weather.cpp", "../Cataclysm-DDA/src/field.cpp", "../Cataclysm-DDA/src/character.cpp"],
-      "rust_paths": ["crates/content/src/lib.rs", "crates/sim/src/lib.rs"],
+      "rust_paths": ["crates/content/src/field.rs", "crates/content/src/anatomy.rs", "crates/protocol/src/lib.rs", "crates/protocol/src/anatomy.rs", "crates/server/src/main.rs", "crates/sim/src/fields.rs", "crates/sim/src/combat.rs"],
       "scenario_families": ["weather-and-exposure", "field-processing", "needs-and-long-duration-time"],
       "differential_oracle": "planned",
       "multiplayer_adaptation": "World processes continue under a bounded persistent scheduler when nobody is connected; catch-up work is deterministic and budgeted.",

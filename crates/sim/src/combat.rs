@@ -137,6 +137,39 @@ impl WorldState {
         rng: &mut impl Rng,
     ) -> Result<(anatomy::ActorDamageOutcome, bool, u16), SimError> {
         let selected = anatomy::select_body_part_index(&self.actor_anatomy, rng)?;
+        self.damage_actor_components_at(target, selected, units, rng)
+    }
+
+    pub(super) fn damage_actor_part(
+        &mut self,
+        target: ActorId,
+        body_part_id: &str,
+        damage_type: &str,
+        damage: u16,
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool), SimError> {
+        let selected = self
+            .actor_anatomy
+            .parts
+            .iter()
+            .position(|part| part.body_part_id == body_part_id)
+            .ok_or(SimError::InvalidActorAnatomy)?;
+        self.damage_actor_components_at(
+            target,
+            selected,
+            &[ActorDamageUnit::ordinary(damage_type, damage)],
+            rng,
+        )
+        .map(|(outcome, was_sleeping, _)| (outcome, was_sleeping))
+    }
+
+    fn damage_actor_components_at(
+        &mut self,
+        target: ActorId,
+        selected: usize,
+        units: &[ActorDamageUnit],
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool, u16), SimError> {
         let body_part_id = self
             .actor_anatomy
             .parts
@@ -239,6 +272,7 @@ impl WorldState {
             actor.sleeping = false;
             actor.sleep_intervals = 0;
             actor.dodge_attempts_remaining = 0;
+            actor.held_movement = None;
             actor.queued_actions.clear();
         }
         Ok((

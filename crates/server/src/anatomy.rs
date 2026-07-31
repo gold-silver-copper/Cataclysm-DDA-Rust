@@ -168,6 +168,7 @@ fn runtime_body_part(definition: &BodyPartDefinition) -> Result<BodyPartPrototyp
         vital: definition.vital,
         hit_size_millionths: definition.hit_size_millionths,
         hit_difficulty_millionths: definition.hit_difficulty_millionths,
+        limb_types: definition.limb_types.iter().cloned().collect(),
         base_hp: definition.base_hp,
         hp_modifiers: BodyPartHpModifiersV1 {
             strength_millionths: definition.hp_modifiers.strength_millionths,

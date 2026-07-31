@@ -83,7 +83,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 107;
+pub const PROTOCOL_VERSION: u16 = 108;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2850,6 +2850,24 @@ pub struct FieldIntensityLevelV1 {
     pub transparent: bool,
 }
 
+/// Data-normalized damage and status behavior applied to every matching body
+/// part while a character occupies a field tile.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FieldContactDamageV1 {
+    pub body_part_type_id: String,
+    pub damage_type_id: String,
+    pub minimum_damage: u16,
+    pub maximum_damage_base: u16,
+    pub maximum_damage_per_intensity: u16,
+    pub maximum_damage_divisor: u16,
+    pub status_effect_id: String,
+    pub status_intensity_base: u16,
+    pub status_intensity_per_field_intensity: u16,
+    pub status_duration_minimum_turns: u16,
+    pub status_duration_maximum_base_turns: u16,
+    pub status_duration_maximum_per_field_intensity: u16,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FieldTypeSnapshotV1 {
     pub field_type_id: String,
@@ -2857,6 +2875,7 @@ pub struct FieldTypeSnapshotV1 {
     pub priority: i32,
     pub half_life_seconds: u64,
     pub linear_half_life: bool,
+    pub contact_damage: Option<FieldContactDamageV1>,
     pub is_splattering: bool,
     pub display_field: bool,
 }

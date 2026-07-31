@@ -22,6 +22,7 @@ const BODY_PART_CORE_FIELDS: &[&str] = &[
     "is_vital",
     "hit_size",
     "hit_difficulty",
+    "limb_types",
     "base_hp",
     "stat_hp_mods",
     "effects_on_hit",
@@ -57,6 +58,8 @@ pub struct BodyPartDefinition {
     pub vital: bool,
     pub hit_size_millionths: u64,
     pub hit_difficulty_millionths: i64,
+    /// Sorted semantic limb categories such as `foot`, `hand`, or `torso`.
+    pub limb_types: BTreeSet<String>,
     pub base_hp: i32,
     pub hp_modifiers: BodyPartStatHpModifiers,
     pub effects_on_hit: Vec<BodyPartOnHitEffectDefinition>,
@@ -255,6 +258,7 @@ fn resolve_body_part(
             vital: false,
             hit_size_millionths: 0,
             hit_difficulty_millionths: 0,
+            limb_types: BTreeSet::new(),
             base_hp: 60,
             hp_modifiers: BodyPartStatHpModifiers::default(),
             effects_on_hit: Vec::new(),
@@ -285,6 +289,9 @@ fn resolve_body_part(
         &mut part.hit_difficulty_millionths,
         raw,
     )?;
+    if let Some(value) = raw.object.get("limb_types") {
+        part.limb_types = parse_limb_types(value, raw)?;
+    }
     apply_i32(&raw.object, "base_hp", &mut part.base_hp, raw)?;
     if let Some(value) = raw.object.get("stat_hp_mods") {
         apply_hp_modifiers(value, &mut part.hp_modifiers, raw)?;
@@ -313,12 +320,39 @@ fn resolve_body_part(
         || part.connected_to.is_empty()
         || part.opposite_part.is_empty()
         || part.hit_size_millionths == 0
+        || part.limb_types.is_empty()
         || part.base_hp <= 0
         || part.hit_difficulty_millionths < 0
     {
         return Err(invalid(raw, "finalized body part"));
     }
     Ok(Some(part))
+}
+
+fn parse_limb_types(
+    value: &Value,
+    raw: &RawDefinition,
+) -> Result<BTreeSet<String>, AnatomyRegistryError> {
+    let values = match value {
+        Value::String(value) => vec![value.as_str()],
+        Value::Array(values) if !values.is_empty() && values.len() <= 32 => values
+            .iter()
+            .map(|value| value.as_str().ok_or_else(|| invalid(raw, "limb_types")))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(invalid(raw, "limb_types")),
+    };
+    if values.iter().any(|value| !valid_id(value)) {
+        return Err(invalid(raw, "limb_types"));
+    }
+    let value_count = values.len();
+    let limb_types = values
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if limb_types.len() != value_count {
+        return Err(invalid(raw, "limb_types"));
+    }
+    Ok(limb_types)
 }
 
 fn parse_on_hit_effects(

@@ -15,6 +15,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "priority",
     "half_life",
     "linear_half_life",
+    "has_acid",
     "is_splattering",
     "display_field",
 ];
@@ -39,6 +40,7 @@ pub struct FieldTypeDefinition {
     pub priority: i32,
     pub half_life_seconds: u64,
     pub linear_half_life: bool,
+    pub has_acid: bool,
     pub is_splattering: bool,
     pub display_field: bool,
     pub unsupported_fields: BTreeSet<String>,
@@ -242,6 +244,9 @@ fn apply_fields(
     }
     if let Some(value) = optional_bool(object, "linear_half_life", source)? {
         field.linear_half_life = value;
+    }
+    if let Some(value) = optional_bool(object, "has_acid", source)? {
+        field.has_acid = value;
     }
     if let Some(value) = optional_bool(object, "is_splattering", source)? {
         field.is_splattering = value;

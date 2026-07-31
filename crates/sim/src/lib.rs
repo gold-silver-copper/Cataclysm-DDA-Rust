@@ -4,6 +4,7 @@ mod anatomy;
 mod cities;
 mod combat;
 mod eocs;
+mod fields;
 mod interactions;
 mod items;
 mod mapgen;
@@ -13,6 +14,9 @@ mod rivers;
 mod roads;
 mod specials;
 mod use_actions;
+
+#[cfg(test)]
+use fields::exponential_decay_threshold;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -519,6 +523,48 @@ fn validate_furniture_tile(furniture: &FurnitureTileSnapshot) -> Result<(), SimE
 
 fn validate_field_type(field_type: &FieldTypeSnapshotV1) -> Result<(), SimError> {
     validate_item_type_id(&field_type.field_type_id).map_err(|_| SimError::InvalidField)?;
+    if let Some(contact) = &field_type.contact_damage {
+        validate_item_type_id(&contact.body_part_type_id).map_err(|_| SimError::InvalidField)?;
+        validate_item_type_id(&contact.damage_type_id).map_err(|_| SimError::InvalidField)?;
+        validate_item_type_id(&contact.status_effect_id).map_err(|_| SimError::InvalidField)?;
+        let maximum_intensity =
+            u32::try_from(field_type.intensity_levels.len()).map_err(|_| SimError::InvalidField)?;
+        let maximum_damage = u32::from(contact.maximum_damage_base)
+            .checked_add(
+                u32::from(contact.maximum_damage_per_intensity)
+                    .checked_mul(maximum_intensity)
+                    .ok_or(SimError::InvalidField)?,
+            )
+            .and_then(|value| value.checked_div(u32::from(contact.maximum_damage_divisor)))
+            .ok_or(SimError::InvalidField)?;
+        let minimum_field_damage = u32::from(contact.maximum_damage_base)
+            .checked_add(u32::from(contact.maximum_damage_per_intensity))
+            .and_then(|value| value.checked_div(u32::from(contact.maximum_damage_divisor)))
+            .ok_or(SimError::InvalidField)?;
+        let maximum_duration = u32::from(contact.status_duration_maximum_base_turns)
+            .checked_add(
+                u32::from(contact.status_duration_maximum_per_field_intensity)
+                    .checked_mul(maximum_intensity)
+                    .ok_or(SimError::InvalidField)?,
+            )
+            .ok_or(SimError::InvalidField)?;
+        let minimum_field_duration = u32::from(contact.status_duration_maximum_base_turns)
+            .checked_add(u32::from(
+                contact.status_duration_maximum_per_field_intensity,
+            ))
+            .ok_or(SimError::InvalidField)?;
+        if contact.minimum_damage == 0
+            || contact.maximum_damage_divisor == 0
+            || minimum_field_damage < u32::from(contact.minimum_damage)
+            || maximum_damage < u32::from(contact.minimum_damage)
+            || contact.status_intensity_base == 0
+            || contact.status_duration_minimum_turns == 0
+            || minimum_field_duration < u32::from(contact.status_duration_minimum_turns)
+            || maximum_duration < u32::from(contact.status_duration_minimum_turns)
+        {
+            return Err(SimError::InvalidField);
+        }
+    }
     if field_type.intensity_levels.is_empty()
         || field_type.intensity_levels.len() > 16
         || field_type.intensity_levels.iter().any(|level| {
@@ -536,6 +582,14 @@ fn validate_field_type(field_type: &FieldTypeSnapshotV1) -> Result<(), SimError>
         return Err(SimError::InvalidField);
     }
     Ok(())
+}
+
+fn anatomy_has_limb_type(anatomy: &AnatomyDefinitionV1, limb_type_id: &str) -> bool {
+    anatomy.parts.iter().any(|part| {
+        part.limb_types
+            .binary_search_by(|kind| kind.as_str().cmp(limb_type_id))
+            .is_ok()
+    })
 }
 
 fn validate_terrain_tile(tile: &TerrainTileSnapshot) -> Result<(), SimError> {
@@ -613,25 +667,6 @@ fn world_position_for_tile_index(
 /// Q0.64 probability for `1 - exp(-ln(2) / half_life)`. This keeps the
 /// upstream exponential half-life model while avoiding platform libm in the
 /// canonical simulation.
-fn exponential_decay_threshold(half_life_seconds: u64) -> u64 {
-    const LN_2_Q64: u64 = 0xb172_17f7_d1cf_79ab;
-    let x = LN_2_Q64 / half_life_seconds.max(1);
-    let mut term = x;
-    let mut result = x;
-    for divisor in 2_u64..=32 {
-        term = (((u128::from(term) * u128::from(x)) >> 64) as u64) / divisor;
-        if term == 0 {
-            break;
-        }
-        if divisor.is_multiple_of(2) {
-            result = result.saturating_sub(term);
-        } else {
-            result = result.saturating_add(term);
-        }
-    }
-    result
-}
-
 fn is_passable_in_chunks(chunks: &BTreeMap<ChunkCoord, Chunk>, position: WorldPosition) -> bool {
     let (coord, local) = position.chunk_and_local();
     chunks
@@ -4721,6 +4756,11 @@ impl WorldState {
 
     pub fn register_field_type(&mut self, definition: FieldTypeSnapshotV1) -> Result<(), SimError> {
         validate_field_type(&definition)?;
+        if definition.contact_damage.as_ref().is_some_and(|contact| {
+            !anatomy_has_limb_type(&self.actor_anatomy, &contact.body_part_type_id)
+        }) {
+            return Err(SimError::InvalidField);
+        }
         if self.tick != SimTick(0) {
             return Err(SimError::InvalidField);
         }
@@ -4739,6 +4779,11 @@ impl WorldState {
         if !cdda_protocol::anatomy_definition_is_valid(&anatomy)
             || self.tick != SimTick(0)
             || !self.actors.is_empty()
+            || self.field_types.values().any(|field_type| {
+                field_type.contact_damage.as_ref().is_some_and(|contact| {
+                    !anatomy_has_limb_type(&anatomy, &contact.body_part_type_id)
+                })
+            })
         {
             return Err(SimError::InvalidActorAnatomy);
         }
@@ -13209,84 +13254,6 @@ impl WorldState {
         Ok(())
     }
 
-    fn advance_fields(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
-        if !self.tick.0.is_multiple_of(SimTick::HZ) {
-            return Ok(());
-        }
-        let mut fields = Vec::new();
-        for (coord, chunk) in &self.chunks {
-            for (index, tile_fields) in chunk.fields.iter().enumerate() {
-                let position = world_position_for_tile_index(*coord, index)?;
-                fields.extend(tile_fields.iter().map(|field| {
-                    (
-                        position,
-                        field.field_type_id.clone(),
-                        field.display_sequence,
-                        field.age_seconds,
-                    )
-                }));
-            }
-        }
-        for (position, field_type_id, display_sequence, previous_age) in fields {
-            let field_type = self
-                .field_types
-                .get(&field_type_id)
-                .ok_or(SimError::InvalidField)?;
-            let age_seconds = previous_age
-                .checked_add(1)
-                .ok_or(SimError::NumericOverflow)?;
-            let decays = if field_type.half_life_seconds == 0 {
-                false
-            } else if field_type.linear_half_life {
-                age_seconds >= field_type.half_life_seconds
-            } else {
-                let threshold = exponential_decay_threshold(field_type.half_life_seconds);
-                let mut hasher = blake3::Hasher::new_derive_key("cdda-rust FieldDecayV1");
-                hasher.update(&self.world_seed);
-                hasher.update(&self.tick.0.to_be_bytes());
-                hasher.update(&position.x.to_be_bytes());
-                hasher.update(&position.y.to_be_bytes());
-                hasher.update(&position.z.to_be_bytes());
-                hasher.update(&display_sequence.to_be_bytes());
-                hasher.update(&(field_type_id.len() as u64).to_be_bytes());
-                hasher.update(field_type_id.as_bytes());
-                let mut rng = ChaCha8Rng::from_seed(*hasher.finalize().as_bytes());
-                rng.next_u64() < threshold
-            };
-            let (coord, local) = position.chunk_and_local();
-            let chunk = self.chunks.get_mut(&coord).ok_or(SimError::InvalidField)?;
-            let index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
-            let tile_fields = chunk
-                .fields
-                .get_mut(index)
-                .ok_or(SimError::InvalidLocalCoordinate)?;
-            let field_index = tile_fields
-                .binary_search_by(|field| field.field_type_id.cmp(&field_type_id))
-                .map_err(|_| SimError::InvalidField)?;
-            if !decays {
-                tile_fields[field_index].age_seconds = age_seconds;
-                continue;
-            }
-            let intensity = tile_fields[field_index].intensity.saturating_sub(1);
-            if intensity == 0 {
-                tile_fields.remove(field_index);
-            } else {
-                tile_fields[field_index].intensity = intensity;
-                tile_fields[field_index].age_seconds = 0;
-            }
-            chunk.revision = chunk
-                .revision
-                .checked_add(1)
-                .ok_or(SimError::NumericOverflow)?;
-            events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
-                position,
-                field_type_id,
-                intensity,
-            })?);
-        }
-        Ok(())
-    }
-
     fn advance_creature_corpses(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
         if !self.tick.0.is_multiple_of(SimTick::HZ) {
             return Ok(());
@@ -13917,6 +13884,13 @@ impl WorldState {
         {
             return Err(SimError::InvalidSnapshot);
         }
+        if field_types.values().any(|field_type| {
+            field_type.contact_damage.as_ref().is_some_and(|contact| {
+                !anatomy_has_limb_type(&snapshot.actor_anatomy, &contact.body_part_type_id)
+            })
+        }) {
+            return Err(SimError::InvalidSnapshot);
+        }
         let mut terrain_bash_types = BTreeMap::new();
         for bash in &snapshot.terrain_bash_types {
             validate_terrain_bash_type(bash, &field_types, &snapshot.item_groups)?;
@@ -14383,7 +14357,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV83");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV84");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -14661,6 +14635,7 @@ mod tests {
             priority: 0,
             half_life_seconds,
             linear_half_life,
+            contact_damage: None,
             is_splattering: true,
             display_field: true,
         }

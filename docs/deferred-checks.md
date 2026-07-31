@@ -35,6 +35,10 @@ Run only when the user explicitly requests a verification checkpoint.
   admission, canonical persistence/replay, hostile recursive-program cases,
   two-client item activation, and generic medical-choice request, reconnect,
   expiry, stale-response, canonical-event-V19, and recovery coverage.
+- Environment field-contact checkpoint: run pinned limb-category, acid damage,
+  armor absorption, corrosion duration/intensity, stationary/disconnected
+  exposure, death/activity-interruption, CanonicalStateV84, SQLite, and portable
+  replay coverage for protocol 108/schema 86.
 - Content test-target cleanup: `cargo check -p cdda-content --tests` currently
   fails in untouched `material.rs` because one test-only
   `MaterialThermalDefinition` literal lacks `damage_resistance_milli`; the

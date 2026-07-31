@@ -8,6 +8,7 @@ pub const ANATOMY_SCALE: i64 = 1_000_000;
 pub const MAX_ANATOMY_PARTS: usize = 256;
 pub const MAX_BODY_PART_ID_BYTES: usize = 512;
 pub const MAX_BODY_PART_DEFERRED_FIELDS: usize = 128;
+pub const MAX_BODY_PART_LIMB_TYPES: usize = 32;
 pub const MAX_WEARABLE_ARMOR_TYPES: usize = 16_384;
 pub const MAX_ARMOR_PORTIONS: usize = 256;
 pub const MAX_ARMOR_DAMAGE_TYPES: usize = 64;
@@ -30,6 +31,8 @@ pub struct BodyPartPrototypeV1 {
     pub vital: bool,
     pub hit_size_millionths: u64,
     pub hit_difficulty_millionths: i64,
+    /// Sorted semantic categories used by generalized anatomy consumers.
+    pub limb_types: Vec<String>,
     pub base_hp: i32,
     pub hp_modifiers: BodyPartHpModifiersV1,
     pub effects_on_hit: Vec<BodyPartOnHitEffectV1>,
@@ -169,6 +172,8 @@ pub fn body_part_prototype_is_valid(part: &BodyPartPrototypeV1) -> bool {
         && valid_id(&part.opposite_part_id)
         && part.hit_size_millionths > 0
         && part.hit_difficulty_millionths >= 0
+        && !part.limb_types.is_empty()
+        && sorted_unique_ids(&part.limb_types, MAX_BODY_PART_LIMB_TYPES)
         && part.base_hp > 0
         && part.effects_on_hit.len() <= 256
         && part.effects_on_hit.iter().all(|effect| {
