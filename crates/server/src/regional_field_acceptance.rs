@@ -1,3 +1,10 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
 use cdda_conformance::{
     ScenarioActorSpawnV1, ScenarioActorV1, ScenarioCommandV1, ScenarioExpectationV1,
     ScenarioGeneratedItemSelectorV1, ScenarioGeneratedItemV1, ScenarioMode, ScenarioStepV1,
@@ -7,13 +14,630 @@ use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, MapgenRegistry,
     OvermapTerrainRegistry, StartLocationRegistry, StrictItemGroupGraph, TerrainRegistry,
 };
-use cdda_protocol::SimTick;
+use cdda_persistence::{ReplayBundleV1, WorldStore};
+use cdda_protocol::{
+    AccountId, AccountRole, ActorId, CharacterRequest, ClientCommand, ClientHello, CommandKind,
+    CommandSequence, ContentIdentity, ControlMessage, EndpointIdentity, GAME_ALPN,
+    ReplicationSnapshotV1, SimTick, WorldPosition,
+};
+use cdda_server::{
+    AuthorizationChangeHub, ChatHub, CommittedEventHub, PersistenceHandle, PersistenceHost,
+    SessionRegistry, SimulationHost, character_creation_channel,
+    handle_game_connection_with_sessions, read_control_frame, read_snapshot_stream,
+    write_control_frame,
+};
 use cdda_sim::WorldState;
+use iroh::{Endpoint, EndpointAddr, SecretKey, endpoint::presets};
 
 use super::item_groups::{RuntimeItemGroupContent, runtime_named_item_group_catalog};
 use super::worldgen::{
     RuntimeMapgenContent, bootstrap_regional_field_overmap, runtime_mapgen_worldgen,
 };
+use super::{PendingJournal, flush_journal, record_simulation_output, utc_now_seconds};
+
+static NEXT_FIELD_DATABASE: AtomicU64 = AtomicU64::new(1);
+
+struct TemporaryFieldDatabase(PathBuf);
+
+impl TemporaryFieldDatabase {
+    fn new() -> Self {
+        let sequence = NEXT_FIELD_DATABASE.fetch_add(1, Ordering::Relaxed);
+        Self(std::env::temp_dir().join(format!(
+            "cdda-regional-field-{}-{sequence}.db",
+            std::process::id()
+        )))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TemporaryFieldDatabase {
+    fn drop(&mut self) {
+        for suffix in ["", "-shm", "-wal"] {
+            let path = PathBuf::from(format!("{}{suffix}", self.0.display()));
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                panic!("failed to remove regional-field database: {error}");
+            }
+        }
+    }
+}
+
+struct ConnectedFieldClient {
+    endpoint: Endpoint,
+    connection: iroh::endpoint::Connection,
+    send: iroh::endpoint::SendStream,
+    _control_receive: iroh::endpoint::RecvStream,
+    _event_receive: iroh::endpoint::RecvStream,
+    snapshot: ReplicationSnapshotV1,
+}
+
+async fn connect_field_client(
+    secret: SecretKey,
+    server_address: EndpointAddr,
+    content: ContentIdentity,
+    actor_id: ActorId,
+) -> ConnectedFieldClient {
+    let endpoint = Endpoint::builder(presets::N0DisableRelay)
+        .secret_key(secret)
+        .bind()
+        .await
+        .expect("field client endpoint should bind");
+    let connection = endpoint
+        .connect(server_address, GAME_ALPN)
+        .await
+        .expect("field client should connect");
+    let (mut send, mut control_receive) = connection
+        .open_bi()
+        .await
+        .expect("field client control stream should open");
+    write_control_frame(
+        &mut send,
+        &ControlMessage::ClientHello(ClientHello {
+            protocol_version: cdda_protocol::PROTOCOL_VERSION,
+            content,
+        }),
+    )
+    .await
+    .expect("field client hello should send");
+    assert!(matches!(
+        read_control_frame(&mut control_receive)
+            .await
+            .expect("field server hello should decode"),
+        ControlMessage::ServerHello(_)
+    ));
+    let ControlMessage::CharacterList(characters) = read_control_frame(&mut control_receive)
+        .await
+        .expect("field character list should decode")
+    else {
+        panic!("field server must send a character list");
+    };
+    assert_eq!(characters.len(), 1);
+    assert_eq!(characters[0].actor_id, actor_id);
+    write_control_frame(
+        &mut send,
+        &ControlMessage::CharacterRequest(CharacterRequest::Select { actor_id }),
+    )
+    .await
+    .expect("field character selection should send");
+    assert_eq!(
+        read_control_frame(&mut control_receive)
+            .await
+            .expect("field character should become ready"),
+        ControlMessage::CharacterReady { actor_id }
+    );
+    let mut event_receive = connection
+        .accept_uni()
+        .await
+        .expect("field event stream should open");
+    assert_eq!(
+        read_control_frame(&mut event_receive)
+            .await
+            .expect("field event stream header should decode"),
+        ControlMessage::EventStreamReady { actor_id }
+    );
+    let mut snapshot_receive = connection
+        .accept_uni()
+        .await
+        .expect("field snapshot stream should open");
+    let (snapshot_actor, snapshot_sequence, snapshot) = read_snapshot_stream(&mut snapshot_receive)
+        .await
+        .expect("field snapshot should decode");
+    assert_eq!(snapshot_actor, actor_id);
+    assert_eq!(snapshot_sequence, 0);
+    assert_eq!(snapshot.controlled_actor.id, actor_id);
+    ConnectedFieldClient {
+        endpoint,
+        connection,
+        send,
+        _control_receive: control_receive,
+        _event_receive: event_receive,
+        snapshot,
+    }
+}
+
+async fn read_field_snapshot_until(
+    connection: &iroh::endpoint::Connection,
+    actor_id: ActorId,
+    sequence: CommandSequence,
+    predicate: impl Fn(&ReplicationSnapshotV1) -> bool,
+) -> ReplicationSnapshotV1 {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let mut receive = connection
+                .accept_uni()
+                .await
+                .expect("field snapshot update should arrive");
+            let (stream_actor, _snapshot_sequence, snapshot) = read_snapshot_stream(&mut receive)
+                .await
+                .expect("field snapshot update should decode");
+            if stream_actor == actor_id
+                && snapshot.controlled_actor.id == actor_id
+                && snapshot.controlled_actor.last_command_sequence >= sequence
+                && predicate(&snapshot)
+            {
+                break snapshot;
+            }
+        }
+    })
+    .await
+    .expect("field snapshot predicate should become true")
+}
+
+fn start_field_persistence_pump(
+    host: SimulationHost,
+    persistence: PersistenceHandle,
+    event_hub: CommittedEventHub,
+) -> (SyncSender<()>, JoinHandle<(SimulationHost, u64)>) {
+    let (stop, stop_receiver) = mpsc::sync_channel(1);
+    let pump = thread::spawn(move || {
+        let mut pending = PendingJournal {
+            event_hub,
+            ..PendingJournal::default()
+        };
+        let mut journal_sequence = 0;
+        loop {
+            if stop_receiver.try_recv().is_ok() {
+                break;
+            }
+            match host.recv_timeout(Duration::from_millis(20)) {
+                Ok(output) => {
+                    record_simulation_output(
+                        output,
+                        &persistence,
+                        &mut pending,
+                        &mut journal_sequence,
+                    )
+                    .expect("field simulation output should persist");
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("field simulation stopped before its checkpoint")
+                }
+            }
+        }
+        loop {
+            match host.try_recv() {
+                Ok(output) => {
+                    record_simulation_output(
+                        output,
+                        &persistence,
+                        &mut pending,
+                        &mut journal_sequence,
+                    )
+                    .expect("remaining field simulation output should persist");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("field simulation stopped while draining")
+                }
+            }
+        }
+        flush_journal(&persistence, &mut pending, &mut journal_sequence)
+            .expect("field journal tail should persist");
+        (host, journal_sequence)
+    });
+    (stop, pump)
+}
+
+fn assert_two_client_field_path(
+    item_groups: &[cdda_protocol::ItemGroupDefinitionV1],
+    worldgen: &cdda_protocol::WorldgenCatalogV1,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("field network runtime should build");
+    runtime.block_on(async {
+        let database = TemporaryFieldDatabase::new();
+        let world_namespace = 911;
+        let world_seed = [31; 32];
+        let content = ContentIdentity {
+            baseline_commit: String::from(cdda_protocol::BASELINE_COMMIT),
+            manifest_hash: [33; 32],
+            enabled_mods: vec![String::from("dda")],
+        };
+        let alpha_secret = SecretKey::generate();
+        let beta_secret = SecretKey::generate();
+        let alpha_endpoint = EndpointIdentity(*alpha_secret.public().as_bytes());
+        let beta_endpoint = EndpointIdentity(*beta_secret.public().as_bytes());
+
+        let mut store = WorldStore::open(database.path()).expect("field store should open");
+        store
+            .initialize_world(world_namespace, world_seed)
+            .expect("field world should initialize");
+        let account_block = store
+            .reserve_id_block()
+            .expect("field account IDs should reserve");
+        let alpha_account = AccountId::new(world_namespace, account_block.start);
+        let beta_account = AccountId::new(world_namespace, account_block.start + 1);
+        let now = utc_now_seconds().expect("field acceptance clock should work");
+        for (account_id, display_name, endpoint) in [
+            (alpha_account, "Field Alpha", alpha_endpoint),
+            (beta_account, "Field Beta", beta_endpoint),
+        ] {
+            store
+                .create_pending_account(
+                    account_id,
+                    display_name,
+                    AccountRole::Player,
+                    endpoint,
+                    now,
+                )
+                .expect("field account should be created");
+            store
+                .enroll_endpoint(endpoint, now)
+                .expect("field endpoint should enroll");
+        }
+        let simulation_block = store
+            .reserve_id_block()
+            .expect("field simulation IDs should reserve");
+
+        let mut world = WorldState::new(world_namespace, world_seed);
+        world
+            .advance_allocator_high_water(simulation_block.start - 1)
+            .expect("field account reservation should remain burned");
+        world
+            .install_reserved_block(simulation_block)
+            .expect("field simulation IDs should install");
+        world
+            .register_item_group_catalog(item_groups.to_vec())
+            .expect("field item groups should register for network play");
+        world
+            .configure_worldgen(worldgen.clone())
+            .expect("field worldgen should configure for network play");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("field bubble should generate for network play");
+        let initial_snapshot = world.snapshot();
+        let corpse = initial_snapshot
+            .ground_items
+            .iter()
+            .find(|ground| ground.item.type_id == "corpse_generic_male")
+            .expect("production field should contain its characterized corpse");
+        let corpse_id = corpse.item.id;
+        let corpse_position = corpse.position;
+        let nested_loot = corpse.item.ammunition_containers[0].contents[0].id;
+        let alpha_actor = world
+            .spawn_actor(corpse_position, false)
+            .expect("alpha should spawn on the field corpse");
+        let beta_actor = world
+            .spawn_actor_first_available(false)
+            .expect("beta should spawn at the field start");
+        let beta_initial_position = world
+            .actor_snapshot(beta_actor)
+            .expect("beta should exist")
+            .position;
+        store
+            .create_character(
+                alpha_account,
+                "Alpha",
+                SimTick(0),
+                0,
+                &world
+                    .actor_snapshot(alpha_actor)
+                    .expect("alpha should have a spawn snapshot"),
+            )
+            .expect("alpha character should persist");
+        store
+            .create_character(
+                beta_account,
+                "Beta",
+                SimTick(0),
+                0,
+                &world
+                    .actor_snapshot(beta_actor)
+                    .expect("beta should have a spawn snapshot"),
+            )
+            .expect("beta character should persist");
+        store
+            .write_snapshot(0, &world)
+            .expect("initial field snapshot should persist");
+        store
+            .begin_runtime(now)
+            .expect("field runtime should begin");
+
+        let persistence_host =
+            PersistenceHost::start(store).expect("field persistence worker should start");
+        let persistence = persistence_host.handle();
+        let host = SimulationHost::start(world).expect("field simulation should start");
+        let simulation = host.handle();
+        let committed_events = CommittedEventHub::default();
+        let (stop_pump, pump) =
+            start_field_persistence_pump(host, persistence.clone(), committed_events.clone());
+        let (character_creator, _character_requests) = character_creation_channel();
+        let server = Endpoint::builder(presets::N0DisableRelay)
+            .secret_key(SecretKey::generate())
+            .alpns(vec![GAME_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("field server endpoint should bind");
+        let server_address = server.addr();
+        let serving_endpoint = server.clone();
+        let serving_persistence = persistence.clone();
+        let serving_simulation = simulation.clone();
+        let serving_content = content.clone();
+        let serving_character_creator = character_creator.clone();
+        let serving_events = committed_events.clone();
+        let serving_sessions = SessionRegistry::default();
+        let server_task = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let incoming = serving_endpoint
+                    .accept()
+                    .await
+                    .expect("field server should accept both clients");
+                let connection = incoming.await.expect("field handshake should complete");
+                let persistence = serving_persistence.clone();
+                let simulation = serving_simulation.clone();
+                let content = serving_content.clone();
+                let character_creator = serving_character_creator.clone();
+                let events = serving_events.clone();
+                let sessions = serving_sessions.clone();
+                handlers.spawn(async move {
+                    handle_game_connection_with_sessions(
+                        &connection,
+                        persistence,
+                        simulation,
+                        content,
+                        sessions,
+                        AuthorizationChangeHub::default(),
+                        character_creator,
+                        events,
+                        ChatHub::default(),
+                    )
+                    .await
+                });
+            }
+            let mut results = Vec::new();
+            while let Some(result) = handlers.join_next().await {
+                results.push(result.expect("field session task should join"));
+            }
+            results
+        });
+
+        let mut alpha = connect_field_client(
+            alpha_secret,
+            server_address.clone(),
+            content.clone(),
+            alpha_actor,
+        )
+        .await;
+        let mut beta =
+            connect_field_client(beta_secret, server_address, content.clone(), beta_actor).await;
+        assert!(
+            alpha
+                .snapshot
+                .ground_items
+                .iter()
+                .any(|ground| ground.item.id == corpse_id),
+            "alpha should receive the production corpse through normal replication"
+        );
+        assert!(
+            beta.snapshot.controlled_actor.position == beta_initial_position,
+            "beta should enter at the production field start"
+        );
+
+        write_control_frame(
+            &mut alpha.send,
+            &ControlMessage::Command(ClientCommand {
+                actor_id: alpha_actor,
+                sequence: CommandSequence(1),
+                client_tick: alpha.snapshot.tick,
+                kind: CommandKind::PickUp { item_id: corpse_id },
+            }),
+        )
+        .await
+        .expect("alpha corpse pickup should send");
+        let picked_up = read_field_snapshot_until(
+            &alpha.connection,
+            alpha_actor,
+            CommandSequence(1),
+            |snapshot| {
+                snapshot
+                    .controlled_actor
+                    .inventory
+                    .iter()
+                    .any(|item| item.id == corpse_id)
+            },
+        )
+        .await;
+        let removal_tick = SimTick(
+            picked_up
+                .tick
+                .0
+                .checked_add(25)
+                .expect("field wait tick should fit"),
+        );
+        let ready_to_remove = read_field_snapshot_until(
+            &alpha.connection,
+            alpha_actor,
+            CommandSequence(1),
+            |snapshot| snapshot.tick >= removal_tick,
+        )
+        .await;
+        write_control_frame(
+            &mut alpha.send,
+            &ControlMessage::Command(ClientCommand {
+                actor_id: alpha_actor,
+                sequence: CommandSequence(2),
+                client_tick: ready_to_remove.tick,
+                kind: CommandKind::RemovePocketItem {
+                    owner_item: corpse_id,
+                    pocket_index: 0,
+                    contained_item: nested_loot,
+                },
+            }),
+        )
+        .await
+        .expect("alpha nested-loot removal should send");
+        let nested_removed = read_field_snapshot_until(
+            &alpha.connection,
+            alpha_actor,
+            CommandSequence(2),
+            |snapshot| {
+                snapshot
+                    .controlled_actor
+                    .inventory
+                    .iter()
+                    .any(|item| item.id == nested_loot)
+            },
+        )
+        .await;
+
+        write_control_frame(
+            &mut beta.send,
+            &ControlMessage::Command(ClientCommand {
+                actor_id: beta_actor,
+                sequence: CommandSequence(1),
+                client_tick: beta.snapshot.tick,
+                kind: CommandKind::Move {
+                    dx: 0,
+                    dy: 1,
+                    dz: 0,
+                },
+            }),
+        )
+        .await
+        .expect("beta exploration move should send");
+        let explored = read_field_snapshot_until(
+            &beta.connection,
+            beta_actor,
+            CommandSequence(1),
+            |snapshot| snapshot.controlled_actor.position != beta_initial_position,
+        )
+        .await;
+        assert_ne!(explored.controlled_actor.position, beta_initial_position);
+        assert!(
+            nested_removed
+                .controlled_actor
+                .inventory
+                .iter()
+                .any(|item| item.id == corpse_id)
+        );
+
+        alpha
+            .send
+            .finish()
+            .expect("alpha control stream should finish cleanly");
+        beta.send
+            .finish()
+            .expect("beta control stream should finish cleanly");
+        let results = tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("field sessions should stop after disconnect")
+            .expect("field server task should join");
+        assert!(
+            results.iter().all(Result::is_ok),
+            "field session results were {results:?}"
+        );
+        alpha
+            .connection
+            .close(0_u32.into(), b"field acceptance complete");
+        beta.connection
+            .close(0_u32.into(), b"field acceptance complete");
+        let disconnected = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = simulation
+                    .snapshot(Duration::from_secs(1))
+                    .expect("field simulation snapshot should respond");
+                if snapshot.actors.iter().all(|actor| !actor.connected) {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both field actors should become disconnected");
+        assert_eq!(disconnected.actors.len(), 2);
+        alpha.endpoint.close().await;
+        beta.endpoint.close().await;
+        server.close().await;
+
+        let checkpoint = simulation
+            .begin_checkpoint(Duration::from_secs(1))
+            .expect("field simulation should pause for its audited checkpoint");
+        stop_pump
+            .send(())
+            .expect("field persistence pump should still be running");
+        let (host, journal_sequence) = pump.join().expect("field persistence pump should join");
+        persistence
+            .write_snapshot(journal_sequence, checkpoint.clone())
+            .expect("final field snapshot should persist");
+        simulation
+            .complete_checkpoint(Duration::from_secs(1))
+            .expect("field simulation should resume for shutdown");
+        assert_eq!(
+            host.shutdown(),
+            cdda_server::SimulationExit::Requested,
+            "field simulation should stop cleanly"
+        );
+        persistence
+            .finish_runtime(utc_now_seconds().expect("field shutdown clock should work"))
+            .expect("field runtime should finish cleanly");
+        persistence
+            .checkpoint()
+            .expect("field SQLite WAL should checkpoint");
+        persistence_host.shutdown();
+
+        let recovered_store =
+            WorldStore::open(database.path()).expect("field store should reopen after restart");
+        let (_sequence, recovered) = recovered_store
+            .recover_latest(WorldState::new(world_namespace, world_seed))
+            .expect("field SQLite state should recover");
+        assert_eq!(
+            recovered
+                .canonical_hash()
+                .expect("recovered field should hash"),
+            WorldState::from_snapshot(&checkpoint)
+                .expect("checkpoint should remain canonical")
+                .canonical_hash()
+                .expect("checkpoint should hash")
+        );
+        let encoded = postcard::to_stdvec(
+            &recovered_store
+                .export_replay(content.clone())
+                .expect("field portable replay should export"),
+        )
+        .expect("field portable replay should encode");
+        let replayed = postcard::from_bytes::<ReplayBundleV1>(&encoded)
+            .expect("field portable replay should decode")
+            .verify(&content)
+            .expect("field portable replay should verify");
+        assert_eq!(
+            replayed
+                .canonical_hash()
+                .expect("replayed field should hash"),
+            recovered
+                .canonical_hash()
+                .expect("recovered field should hash again")
+        );
+    });
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn assert_production_regional_field_gameplay(
@@ -287,4 +911,11 @@ pub(super) fn assert_production_regional_field_gameplay(
             "{mode} must preserve the complete production field gameplay trace"
         );
     }
+    assert_two_client_field_path(
+        &production_field_scenario.item_groups,
+        production_field_scenario
+            .worldgen
+            .as_ref()
+            .expect("production field scenario should retain worldgen"),
+    );
 }

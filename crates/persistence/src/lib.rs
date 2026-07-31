@@ -26,7 +26,10 @@ pub const SCHEMA_VERSION: i64 = 73;
 /// Metadata-only databases may still migrate.
 pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 73;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
-const MAX_CHARACTER_SPAWN_DECODED: usize = 4 * 1024;
+// A newly created character retains the same bounded 60-tile terrain memory
+// that enters canonical snapshots. Production regional terrain exceeds the
+// former 4 KiB fixture-era cap, so use the existing canonical snapshot bound.
+const MAX_CHARACTER_SPAWN_DECODED: usize = 32 * 1024 * 1024;
 const PRE_MIGRATION_BACKUP_FORMAT_VERSION: u16 = 1;
 const PRE_MIGRATION_MANIFEST_FILE: &str = "manifest.postcard";
 const PRE_MIGRATION_DATABASE_FILE: &str = "world.db";

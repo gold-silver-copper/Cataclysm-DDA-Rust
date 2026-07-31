@@ -53,6 +53,7 @@ pub const CHAT_MESSAGE_CAPACITY: usize = 128;
 pub const PERSISTENCE_QUEUE_CAPACITY: usize = 64;
 pub const PERSISTENCE_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
 pub const PERSISTENCE_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+pub const PERSISTENCE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CURRENT_INTEREST_RADIUS_SUBMAPS: u32 = 5;
 pub const CURRENT_VISION_RADIUS_TILES: u32 = cdda_sim::TERRAIN_MEMORY_RADIUS_TILES;
 pub const INBOUND_TRAFFIC_TIMEOUT: Duration = Duration::from_secs(15);
@@ -728,7 +729,7 @@ impl SnapshotReceipt {
 
     pub fn wait(self) -> Result<SnapshotWriteOutcome, StoreError> {
         self.response
-            .recv_timeout(PERSISTENCE_CALL_TIMEOUT)
+            .recv_timeout(PERSISTENCE_SNAPSHOT_TIMEOUT)
             .map_err(|error| match error {
                 RecvTimeoutError::Timeout => StoreError::PersistenceTimeout,
                 RecvTimeoutError::Disconnected => StoreError::PersistenceUnavailable,
@@ -1392,10 +1393,12 @@ impl PersistenceHandle {
         sequence: u64,
         snapshot: WorldSnapshotV1,
     ) -> Result<(), StoreError> {
-        self.request(|response| PersistenceRequest::WriteSnapshot {
-            sequence,
-            snapshot: Box::new(snapshot),
-            response,
+        self.request_with_timeout(PERSISTENCE_SNAPSHOT_TIMEOUT, |response| {
+            PersistenceRequest::WriteSnapshot {
+                sequence,
+                snapshot: Box::new(snapshot),
+                response,
+            }
         })
     }
 
