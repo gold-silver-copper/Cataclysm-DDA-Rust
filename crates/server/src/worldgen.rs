@@ -538,6 +538,9 @@ struct RuntimeMonsterSpellProfile {
     damage_type_id: String,
     minimum_damage: u16,
     maximum_damage: u16,
+    status_effect_id: String,
+    minimum_duration_turns: u32,
+    maximum_duration_turns: u32,
     target_self: bool,
     minimum_summons: u16,
     maximum_summons: u16,
@@ -971,7 +974,8 @@ fn runtime_monster_spell_profile(
     })?;
     let summon = spell.supports_hostile_permanent_summoning();
     let typed_damage = spell.supports_hostile_typed_damage();
-    if (!summon && !typed_damage)
+    let status_effect = spell.supports_hostile_status_effect();
+    if (!summon && !typed_damage && !status_effect)
         || attack.spell_min_level > 1_000
         || attack
             .spell_max_level
@@ -1022,11 +1026,20 @@ fn runtime_monster_spell_profile(
         spell.casting_time_increment_millionths,
         level,
     );
-    let Some((leveled_damage, range, aoe, casting_time)) = leveled_damage
+    let leveled_duration = finalized_spell_stat(
+        spell.minimum_duration_moves,
+        spell.maximum_duration_moves,
+        spell.duration_increment_millionths,
+        level,
+    );
+    let Some((leveled_damage, range, aoe, casting_time, leveled_duration)) = leveled_damage
         .zip(range)
         .zip(aoe)
         .zip(casting_time)
-        .map(|(((damage, range), aoe), casting_time)| (damage, range, aoe, casting_time))
+        .zip(leveled_duration)
+        .map(|((((damage, range), aoe), casting_time), duration)| {
+            (damage, range, aoe, casting_time, duration)
+        })
     else {
         return Ok(None);
     };
@@ -1041,24 +1054,43 @@ fn runtime_monster_spell_profile(
     };
     let amount_is_bounded = if summon {
         (1..=64).contains(&minimum_damage) && (minimum_damage..=64).contains(&maximum_damage)
-    } else {
+    } else if typed_damage {
         (1..=1_000).contains(&minimum_damage) && (minimum_damage..=1_000).contains(&maximum_damage)
+    } else {
+        minimum_damage == 0 && maximum_damage == 0
+    };
+    let random_duration = spell.flags.contains("RANDOM_DURATION");
+    let (minimum_duration_moves, maximum_duration_moves) = if random_duration {
+        (
+            leveled_duration.min(spell.maximum_duration_moves),
+            leveled_duration.max(spell.maximum_duration_moves),
+        )
+    } else {
+        (leveled_duration, leveled_duration)
+    };
+    let duration_is_bounded = if status_effect {
+        (1..=1_000_000_000).contains(&minimum_duration_moves)
+            && (minimum_duration_moves..=1_000_000_000).contains(&maximum_duration_moves)
+            && minimum_duration_moves % 100 == 0
+            && maximum_duration_moves % 100 == 0
+            && (!random_duration || minimum_duration_moves == maximum_duration_moves)
+    } else {
+        minimum_duration_moves == 0 && maximum_duration_moves == 0
     };
     if !amount_is_bounded
+        || !duration_is_bounded
         || !(0..=1_000).contains(&range)
         || !(0..=32).contains(&aoe)
         || !(0..=1_000_000_000).contains(&casting_time)
         || (target_self && range != 0)
         || (!target_self && range == 0)
         || (summon && aoe == 0)
-        || (typed_damage && target_self)
+        || ((typed_damage || status_effect) && target_self)
     {
         return Ok(None);
     }
     Ok(Some(RuntimeMonsterSpellProfile {
-        summoned_monster_type_id: summon
-            .then(|| spell.summoned_monster_type_id.clone())
-            .unwrap_or_default(),
+        summoned_monster_type_id: summon.then(|| spell.effect_str.clone()).unwrap_or_default(),
         damage_type_id: typed_damage
             .then(|| spell.damage_type_id.clone())
             .unwrap_or_default(),
@@ -1068,6 +1100,17 @@ fn runtime_monster_spell_profile(
             .unwrap_or(0),
         maximum_damage: typed_damage
             .then(|| u16::try_from(maximum_damage))
+            .transpose()?
+            .unwrap_or(0),
+        status_effect_id: status_effect
+            .then(|| spell.effect_str.clone())
+            .unwrap_or_default(),
+        minimum_duration_turns: status_effect
+            .then(|| u32::try_from(minimum_duration_moves).map(|moves| moves.div_ceil(100)))
+            .transpose()?
+            .unwrap_or(0),
+        maximum_duration_turns: status_effect
+            .then(|| u32::try_from(maximum_duration_moves).map(|moves| moves.div_ceil(100)))
             .transpose()?
             .unwrap_or(0),
         target_self,
@@ -1448,22 +1491,44 @@ fn runtime_monster_catalog(
                                 }
                             },
                         ),
-                        effects: attack
-                            .effects
-                            .iter()
-                            .map(|effect| WorldgenMonsterAttackEffectV1 {
-                                effect_id: effect.effect_id.clone(),
-                                chance_millionths: effect.chance_millionths,
-                                permanent: effect.permanent,
-                                affect_hit_body_part: effect.affect_hit_body_part,
-                                requires_cut_or_stab_damage: false,
-                                body_part_id: effect.body_part_id.clone(),
-                                duration_minimum_turns: effect.duration_turns.0,
-                                duration_maximum_turns: effect.duration_turns.1,
-                                intensity_minimum: effect.intensity.0,
-                                intensity_maximum: effect.intensity.1,
-                            })
-                            .collect(),
+                        effects: spell_profile.map_or_else(
+                            || {
+                                attack
+                                    .effects
+                                    .iter()
+                                    .map(|effect| WorldgenMonsterAttackEffectV1 {
+                                        effect_id: effect.effect_id.clone(),
+                                        chance_millionths: effect.chance_millionths,
+                                        permanent: effect.permanent,
+                                        affect_hit_body_part: effect.affect_hit_body_part,
+                                        requires_cut_or_stab_damage: false,
+                                        body_part_id: effect.body_part_id.clone(),
+                                        duration_minimum_turns: effect.duration_turns.0,
+                                        duration_maximum_turns: effect.duration_turns.1,
+                                        intensity_minimum: effect.intensity.0,
+                                        intensity_maximum: effect.intensity.1,
+                                    })
+                                    .collect()
+                            },
+                            |profile| {
+                                if profile.status_effect_id.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    vec![WorldgenMonsterAttackEffectV1 {
+                                        effect_id: profile.status_effect_id.clone(),
+                                        chance_millionths: 1_000_000,
+                                        permanent: false,
+                                        affect_hit_body_part: false,
+                                        requires_cut_or_stab_damage: false,
+                                        body_part_id: None,
+                                        duration_minimum_turns: profile.minimum_duration_turns,
+                                        duration_maximum_turns: profile.maximum_duration_turns,
+                                        intensity_minimum: 1,
+                                        intensity_maximum: 1,
+                                    }]
+                                }
+                            },
+                        ),
                         effects_require_damage: attack.effects_require_damage,
                         infection_chance_millionths: attack.infection_chance_millionths,
                         leap_minimum_range_milli: attack.leap_minimum_range_milli,

@@ -591,7 +591,7 @@ impl WorldState {
                 }
                 WorldgenMonsterSpecialAttackKindV1::Spell => {
                     if profile.spell_summoned_monster_type_id.is_empty() {
-                        self.execute_creature_damage_spell(
+                        self.execute_creature_spell_attack(
                             source,
                             visible_target,
                             profile,
@@ -635,7 +635,7 @@ impl WorldState {
         Ok(total_cost)
     }
 
-    fn execute_creature_damage_spell(
+    fn execute_creature_spell_attack(
         &mut self,
         source: CreatureId,
         visible_target: Option<(ActorId, WorldPosition)>,
@@ -673,10 +673,14 @@ impl WorldState {
             .collect::<Vec<_>>();
         for target in targets {
             let mut rng = self.named_rng(
-                b"creature-special-spell-damage",
+                b"creature-special-spell-attack",
                 &[source.as_u128(), target.as_u128()],
                 sequence,
             );
+            if profile.damage.is_empty() {
+                self.apply_monster_attack_effects(target, "", false, &profile.effects, &mut rng)?;
+                continue;
+            }
             let damage_points = roll_inclusive_i32(
                 profile.minimum_damage_multiplier_millionths / 1_000_000,
                 profile.maximum_damage_multiplier_millionths / 1_000_000,
@@ -708,6 +712,15 @@ impl WorldState {
                 .collect::<Result<Vec<_>, SimError>>()?;
             let (outcome, was_sleeping, _cut_or_stab_damage) =
                 self.damage_actor_components(target, &damage, &mut rng)?;
+            if !profile.effects.is_empty() {
+                self.apply_monster_attack_effects(
+                    target,
+                    &outcome.body_part_id,
+                    false,
+                    &profile.effects,
+                    &mut rng,
+                )?;
+            }
             events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
                 source,
                 target,

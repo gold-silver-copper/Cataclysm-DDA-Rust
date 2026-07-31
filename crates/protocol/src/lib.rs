@@ -5548,7 +5548,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && (1..=32).contains(&attack.spell_aoe)
                                 && attack.minimum_damage_multiplier_millionths == 0
                                 && attack.maximum_damage_multiplier_millionths == 0
-                                && attack.damage.is_empty();
+                                && attack.damage.is_empty()
+                                && attack.effects.is_empty();
                             let typed_damage = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -5566,8 +5567,26 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.damage[0].constant_armor_multiplier_millionths
                                     == 1_000_000
                                 && attack.damage[0].constant_damage_multiplier_millionths
-                                    == 1_000_000;
-                            common && (summon || typed_damage)
+                                    == 1_000_000
+                                && attack.effects.is_empty();
+                            let status_effect = attack.spell_summoned_monster_type_id.is_empty()
+                                && !attack.spell_target_self
+                                && attack.spell_minimum_summons == 0
+                                && attack.spell_maximum_summons == 0
+                                && !attack.spell_random_summons
+                                && attack.minimum_damage_multiplier_millionths == 0
+                                && attack.maximum_damage_multiplier_millionths == 0
+                                && attack.damage.is_empty()
+                                && attack.effects.len() == 1
+                                && attack.effects[0].chance_millionths == 1_000_000
+                                && !attack.effects[0].permanent
+                                && !attack.effects[0].affect_hit_body_part
+                                && !attack.effects[0].requires_cut_or_stab_damage
+                                && attack.effects[0].body_part_id.is_none()
+                                && attack.effects[0].duration_minimum_turns > 0
+                                && attack.effects[0].intensity_minimum == 1
+                                && attack.effects[0].intensity_maximum == 1;
+                            common && (summon || typed_damage || status_effect)
                         } else {
                             attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
@@ -5782,7 +5801,6 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 attack.accuracy.is_none()
                                     && !attack.no_adjacent
                                     && !attack.dodgeable
-                                    && attack.effects.is_empty()
                                     && !attack.effects_require_damage
                                     && attack.infection_chance_millionths == 0
                                     && attack.leap_minimum_range_milli == 0

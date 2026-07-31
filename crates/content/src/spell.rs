@@ -32,6 +32,9 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "base_casting_time",
     "final_casting_time",
     "casting_time_increment",
+    "min_duration",
+    "max_duration",
+    "duration_increment",
     "message",
     "sound_description",
     "sound_type",
@@ -57,7 +60,7 @@ pub enum SpellEffectKind {
 pub struct SpellDefinition {
     pub id: String,
     pub effect: SpellEffectKind,
-    pub summoned_monster_type_id: String,
+    pub effect_str: String,
     pub shape: String,
     pub valid_targets: BTreeSet<String>,
     pub flags: BTreeSet<String>,
@@ -75,6 +78,9 @@ pub struct SpellDefinition {
     pub base_casting_time_moves: i32,
     pub final_casting_time_moves: i32,
     pub casting_time_increment_millionths: i64,
+    pub minimum_duration_moves: i32,
+    pub maximum_duration_moves: i32,
+    pub duration_increment_millionths: i64,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -84,7 +90,7 @@ impl Default for SpellDefinition {
         Self {
             id: String::new(),
             effect: SpellEffectKind::Unsupported,
-            summoned_monster_type_id: String::new(),
+            effect_str: String::new(),
             shape: String::new(),
             valid_targets: BTreeSet::new(),
             flags: BTreeSet::new(),
@@ -102,6 +108,9 @@ impl Default for SpellDefinition {
             base_casting_time_moves: 0,
             final_casting_time_moves: 0,
             casting_time_increment_millionths: 0,
+            minimum_duration_moves: 0,
+            maximum_duration_moves: 0,
+            duration_increment_millionths: 0,
             unsupported_fields: BTreeSet::new(),
             source: String::new(),
         }
@@ -123,7 +132,7 @@ impl SpellDefinition {
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Summon
             && self.shape == "blast"
-            && !self.summoned_monster_type_id.is_empty()
+            && !self.effect_str.is_empty()
             && self.flags.contains("HOSTILE_SUMMON")
             && self.flags.contains("PERMANENT")
             && self
@@ -144,6 +153,8 @@ impl SpellDefinition {
             && self.maximum_aoe >= 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
+            && self.minimum_duration_moves == 0
+            && self.maximum_duration_moves == 0
     }
 
     #[must_use]
@@ -158,7 +169,7 @@ impl SpellDefinition {
             && self.effect == SpellEffectKind::Attack
             && self.shape == "blast"
             && !self.damage_type_id.is_empty()
-            && self.summoned_monster_type_id.is_empty()
+            && self.effect_str.is_empty()
             && self
                 .flags
                 .iter()
@@ -181,6 +192,50 @@ impl SpellDefinition {
             && self.maximum_aoe >= 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
+            && self.minimum_duration_moves == 0
+            && self.maximum_duration_moves == 0
+    }
+
+    #[must_use]
+    pub fn supports_hostile_status_effect(&self) -> bool {
+        const ALLOWED_FLAGS: &[&str] = &[
+            "RANDOM_DURATION",
+            "NO_PROJECTILE",
+            "NO_EXPLOSION_SFX",
+            "SILENT",
+        ];
+        self.unsupported_fields.is_empty()
+            && self.effect == SpellEffectKind::Attack
+            && self.shape == "blast"
+            && self.damage_type_id.is_empty()
+            && !self.effect_str.is_empty()
+            && self.minimum_damage == 0
+            && self.maximum_damage == 0
+            && self
+                .flags
+                .iter()
+                .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
+            && self
+                .valid_targets
+                .iter()
+                .all(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self
+                .valid_targets
+                .iter()
+                .any(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self.maximum_level >= 0
+            && self.minimum_range > 0
+            && self.maximum_range > 0
+            && self.minimum_aoe >= 0
+            && self.maximum_aoe >= 0
+            && self.base_casting_time_moves >= 0
+            && self.final_casting_time_moves >= 0
+            && self.minimum_duration_moves > 0
+            && self.maximum_duration_moves > 0
+            && self.minimum_duration_moves % 100 == 0
+            && self.maximum_duration_moves % 100 == 0
+            && (!self.flags.contains("RANDOM_DURATION")
+                || self.minimum_duration_moves == self.maximum_duration_moves)
     }
 }
 
@@ -321,23 +376,53 @@ fn apply_fields(
             Some("attack") => SpellEffectKind::Attack,
             Some("summon") => SpellEffectKind::Summon,
             Some(_) => SpellEffectKind::Unsupported,
-            None => return Err(invalid(&source, "effect")),
+            None => {
+                spell.unsupported_fields.insert(String::from("effect"));
+                SpellEffectKind::Unsupported
+            }
         };
     }
     if let Some(value) = object.get("effect_str") {
-        spell.summoned_monster_type_id = parse_id(Some(value), &source, "effect_str")?;
+        match parse_id(Some(value), &source, "effect_str") {
+            Ok(value) => spell.effect_str = value,
+            Err(_) => {
+                spell.unsupported_fields.insert(String::from("effect_str"));
+            }
+        }
     }
     if let Some(value) = object.get("damage_type") {
-        spell.damage_type_id = parse_id(Some(value), &source, "damage_type")?;
+        match parse_id(Some(value), &source, "damage_type") {
+            Ok(value) => spell.damage_type_id = value,
+            Err(_) => {
+                spell.unsupported_fields.insert(String::from("damage_type"));
+            }
+        }
     }
     if let Some(value) = object.get("shape") {
-        spell.shape = parse_id(Some(value), &source, "shape")?;
+        match parse_id(Some(value), &source, "shape") {
+            Ok(value) => spell.shape = value,
+            Err(_) => {
+                spell.unsupported_fields.insert(String::from("shape"));
+            }
+        }
     }
     if let Some(value) = object.get("valid_targets") {
-        spell.valid_targets = parse_string_set(value, &source, "valid_targets")?;
+        match parse_string_set(value, &source, "valid_targets") {
+            Ok(value) => spell.valid_targets = value,
+            Err(_) => {
+                spell
+                    .unsupported_fields
+                    .insert(String::from("valid_targets"));
+            }
+        }
     }
     if let Some(value) = object.get("flags") {
-        spell.flags = parse_string_set(value, &source, "flags")?;
+        match parse_string_set(value, &source, "flags") {
+            Ok(value) => spell.flags = value,
+            Err(_) => {
+                spell.unsupported_fields.insert(String::from("flags"));
+            }
+        }
     }
     for (field, target) in [
         ("min_damage", &mut spell.minimum_damage),
@@ -349,9 +434,16 @@ fn apply_fields(
         ("max_aoe", &mut spell.maximum_aoe),
         ("base_casting_time", &mut spell.base_casting_time_moves),
         ("final_casting_time", &mut spell.final_casting_time_moves),
+        ("min_duration", &mut spell.minimum_duration_moves),
+        ("max_duration", &mut spell.maximum_duration_moves),
     ] {
         if let Some(value) = object.get(field) {
-            *target = parse_i32(value, &source, field)?;
+            match parse_i32(value, &source, field) {
+                Ok(value) => *target = value,
+                Err(_) => {
+                    spell.unsupported_fields.insert(field.to_owned());
+                }
+            }
         }
     }
     for (field, target) in [
@@ -362,10 +454,25 @@ fn apply_fields(
             "casting_time_increment",
             &mut spell.casting_time_increment_millionths,
         ),
+        (
+            "duration_increment",
+            &mut spell.duration_increment_millionths,
+        ),
     ] {
         if let Some(value) = object.get(field) {
-            *target = parse_millionths(value, &source, field)?;
+            match parse_millionths(value, &source, field) {
+                Ok(value) => *target = value,
+                Err(_) => {
+                    spell.unsupported_fields.insert(field.to_owned());
+                }
+            }
         }
+    }
+    if object
+        .get("copy-from")
+        .is_some_and(|value| !value.is_string())
+    {
+        spell.unsupported_fields.insert(String::from("copy-from"));
     }
     for field in object.keys() {
         if !field.starts_with("//") && !IMPLEMENTED_FIELDS.contains(&field.as_str()) {
