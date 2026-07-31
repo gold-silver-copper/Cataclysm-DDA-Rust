@@ -4896,6 +4896,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::ActorDiedFromNeeds {
             actor_id: event_actor,
         }
+        | WorldEventKind::ActorAffectedByField {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::ActorDamagedByEffect {
             actor_id: event_actor,
             ..
@@ -6149,6 +6153,8 @@ mod tests {
                     color: String::from("red"),
                     dangerous: false,
                     transparent: true,
+                    contact_effects: Vec::new(),
+                    contact_effects_supported: true,
                 }],
                 priority: 0,
                 half_life_seconds: 172_800,
@@ -6156,6 +6162,7 @@ mod tests {
                 contact_damage: None,
                 is_splattering: true,
                 display_field: true,
+                decrease_intensity_on_contact: false,
             })
             .expect("blood field type should register");
         world

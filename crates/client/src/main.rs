@@ -4556,6 +4556,18 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::ActorDiedFromNeeds { .. } => {
             String::from("Your character died from unmet needs.")
         }
+        WorldEventKind::ActorAffectedByField {
+            field_type_id,
+            effect_id,
+            message,
+            ..
+        } => {
+            if message.is_empty() {
+                format!("The {field_type_id} field applied {effect_id}.")
+            } else {
+                message.clone()
+            }
+        }
         WorldEventKind::ActorDamagedByEffect {
             effect_id,
             body_part_id,

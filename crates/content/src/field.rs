@@ -18,6 +18,34 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "has_acid",
     "is_splattering",
     "display_field",
+    "decrease_intensity_on_contact",
+];
+
+const IMPLEMENTED_INTENSITY_FIELDS: &[&str] = &[
+    "name",
+    "sym",
+    "color",
+    "dangerous",
+    "transparent",
+    "effects",
+];
+
+const IMPLEMENTED_EFFECT_FIELDS: &[&str] = &[
+    "effect_id",
+    "min_duration",
+    "max_duration",
+    "intensity",
+    "body_part",
+    "is_environmental",
+    "immune_in_vehicle",
+    "immune_inside_vehicle",
+    "immune_outside_vehicle",
+    "chance_in_vehicle",
+    "chance_inside_vehicle",
+    "chance_outside_vehicle",
+    "message",
+    "message_npc",
+    "message_type",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -31,6 +59,68 @@ pub struct FieldIntensityDefinition {
     pub color: String,
     pub dangerous: bool,
     pub transparent: bool,
+    pub effects: Vec<FieldContactEffectDefinition>,
+    pub unsupported_fields: BTreeSet<String>,
+}
+
+impl FieldIntensityDefinition {
+    #[must_use]
+    pub fn contact_effects_are_supported(&self) -> bool {
+        !self.unsupported_fields.contains("effects")
+            && self
+                .effects
+                .iter()
+                .all(FieldContactEffectDefinition::is_fully_supported)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldContactEffectDefinition {
+    pub effect_id: String,
+    pub minimum_duration_seconds: u64,
+    pub maximum_duration_seconds: u64,
+    pub intensity: u32,
+    pub body_part_id: Option<String>,
+    pub environmental: bool,
+    pub immune_in_vehicle: bool,
+    pub immune_inside_vehicle: bool,
+    pub immune_outside_vehicle: bool,
+    pub chance_in_vehicle: u32,
+    pub chance_inside_vehicle: u32,
+    pub chance_outside_vehicle: u32,
+    pub message: String,
+    pub message_npc: String,
+    pub message_type: String,
+    pub unsupported_fields: BTreeSet<String>,
+}
+
+impl FieldContactEffectDefinition {
+    #[must_use]
+    pub fn is_fully_supported(&self) -> bool {
+        !self.effect_id.is_empty()
+            && self.effect_id.len() <= 256
+            && !self.effect_id.chars().any(char::is_control)
+            && !self.environmental
+            && self.intensity > 0
+            && self.minimum_duration_seconds <= u64::from(u32::MAX)
+            && self.maximum_duration_seconds <= u64::from(u32::MAX)
+            && self.body_part_id.as_ref().is_none_or(|body_part_id| {
+                !body_part_id.is_empty()
+                    && body_part_id.len() <= 256
+                    && !body_part_id.chars().any(char::is_control)
+            })
+            && self.chance_in_vehicle <= 1_000_000
+            && self.chance_inside_vehicle <= 1_000_000
+            && self.chance_outside_vehicle <= 1_000_000
+            && self.message.len() <= 4_096
+            && !self.message.chars().any(char::is_control)
+            && self.message_npc.len() <= 4_096
+            && !self.message_npc.chars().any(char::is_control)
+            && !self.message_type.is_empty()
+            && self.message_type.len() <= 64
+            && !self.message_type.chars().any(char::is_control)
+            && self.unsupported_fields.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -43,8 +133,20 @@ pub struct FieldTypeDefinition {
     pub has_acid: bool,
     pub is_splattering: bool,
     pub display_field: bool,
+    pub decrease_intensity_on_contact: bool,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
+}
+
+impl FieldTypeDefinition {
+    #[must_use]
+    pub fn contact_effects_supported_at(&self, intensity: u8) -> bool {
+        intensity > 0
+            && usize::from(intensity) <= self.intensity_levels.len()
+            && self.intensity_levels[..usize::from(intensity)]
+                .iter()
+                .all(FieldIntensityDefinition::contact_effects_are_supported)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -216,7 +318,40 @@ fn apply_fields(
                         color: String::from("white"),
                         dangerous: false,
                         transparent: true,
+                        effects: Vec::new(),
+                        unsupported_fields: BTreeSet::new(),
                     });
+            let mut unsupported_fields = object
+                .keys()
+                .filter(|key| {
+                    !key.starts_with("//") && !IMPLEMENTED_INTENSITY_FIELDS.contains(&key.as_str())
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !object.contains_key("effects") && fallback.unsupported_fields.contains("effects") {
+                unsupported_fields.insert(String::from("effects"));
+            }
+            let effects = match object.get("effects") {
+                None => fallback.effects.clone(),
+                Some(value) => match value.as_array() {
+                    Some(values) => match values
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| parse_contact_effect(value, source, index))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(effects) => effects,
+                        Err(_) => {
+                            unsupported_fields.insert(String::from("effects"));
+                            Vec::new()
+                        }
+                    },
+                    None => {
+                        unsupported_fields.insert(String::from("effects"));
+                        Vec::new()
+                    }
+                },
+            };
             field.intensity_levels.push(FieldIntensityDefinition {
                 name: object
                     .get("name")
@@ -229,6 +364,8 @@ fn apply_fields(
                     .unwrap_or(fallback.dangerous),
                 transparent: optional_bool(object, "transparent", source)?
                     .unwrap_or(fallback.transparent),
+                effects,
+                unsupported_fields,
             });
         }
     }
@@ -254,12 +391,103 @@ fn apply_fields(
     if let Some(value) = optional_bool(object, "display_field", source)? {
         field.display_field = value;
     }
+    if let Some(value) = optional_bool(object, "decrease_intensity_on_contact", source)? {
+        field.decrease_intensity_on_contact = value;
+    }
     for key in object.keys() {
         if !key.starts_with("//") && !IMPLEMENTED_FIELDS.contains(&key.as_str()) {
             field.unsupported_fields.insert(key.clone());
         }
     }
     Ok(())
+}
+
+fn parse_contact_effect(
+    value: &Value,
+    source: &str,
+    index: usize,
+) -> Result<FieldContactEffectDefinition, FieldTypeRegistryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid(source, "intensity_levels.effects"))?;
+    let context = format!("intensity_levels.effects[{index}]");
+    let effect_id = object
+        .get("effect_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid(source, &format!("{context}.effect_id")))?
+        .to_owned();
+    let duration = |field: &str| -> Result<u64, FieldTypeRegistryError> {
+        object.get(field).map_or(Ok(0), |value| {
+            parse_duration_seconds(
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid(source, &format!("{context}.{field}")))?,
+                source,
+            )
+        })
+    };
+    let bounded_u32 = |field: &str| -> Result<u32, FieldTypeRegistryError> {
+        object.get(field).map_or(Ok(0), |value| {
+            u32::try_from(
+                value
+                    .as_u64()
+                    .ok_or_else(|| invalid(source, &format!("{context}.{field}")))?,
+            )
+            .map_err(|_| invalid(source, &format!("{context}.{field}")))
+        })
+    };
+    let text = |field: &str| -> Result<String, FieldTypeRegistryError> {
+        object
+            .get(field)
+            .map(|value| parse_text(value, source, &format!("{context}.{field}")))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    Ok(FieldContactEffectDefinition {
+        effect_id,
+        minimum_duration_seconds: duration("min_duration")?,
+        maximum_duration_seconds: duration("max_duration")?,
+        intensity: bounded_u32("intensity")?,
+        body_part_id: object
+            .get("body_part")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid(source, &format!("{context}.body_part")))
+            })
+            .transpose()?,
+        environmental: optional_bool(object, "is_environmental", source)?.unwrap_or(true),
+        immune_in_vehicle: optional_bool(object, "immune_in_vehicle", source)?.unwrap_or(false),
+        immune_inside_vehicle: optional_bool(object, "immune_inside_vehicle", source)?
+            .unwrap_or(false),
+        immune_outside_vehicle: optional_bool(object, "immune_outside_vehicle", source)?
+            .unwrap_or(false),
+        chance_in_vehicle: bounded_u32("chance_in_vehicle")?,
+        chance_inside_vehicle: bounded_u32("chance_inside_vehicle")?,
+        chance_outside_vehicle: bounded_u32("chance_outside_vehicle")?,
+        message: text("message")?,
+        message_npc: text("message_npc")?,
+        message_type: object
+            .get("message_type")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid(source, &format!("{context}.message_type")))
+            })
+            .transpose()?
+            .unwrap_or_else(|| String::from("neutral")),
+        unsupported_fields: object
+            .keys()
+            .filter(|key| {
+                !key.starts_with("//") && !IMPLEMENTED_EFFECT_FIELDS.contains(&key.as_str())
+            })
+            .cloned()
+            .collect(),
+    })
 }
 
 fn parse_duration_seconds(value: &str, source: &str) -> Result<u64, FieldTypeRegistryError> {

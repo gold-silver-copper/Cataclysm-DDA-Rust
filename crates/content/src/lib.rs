@@ -58,7 +58,8 @@ pub use eoc_math::{
     MAX_EOC_MATH_SOURCE_BYTES, MAX_EOC_SAFE_INTEGER,
 };
 pub use field::{
-    FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry, FieldTypeRegistryError,
+    FieldContactEffectDefinition, FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry,
+    FieldTypeRegistryError,
 };
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
 pub use item::{

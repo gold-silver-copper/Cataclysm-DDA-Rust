@@ -50,9 +50,9 @@ Run only when the user explicitly requests a verification checkpoint.
   interruption, wake and death handling; deterministic whole-body status spell
   durations, stacking and expiry including production wraith darkness;
   supported creature-alpha/survivor-beta EOC spell closure and multi-target
-  activation; and combat scenarios at protocol 125/schema 103,
-  CanonicalStateV101,
-  canonical-event-V25.
+  activation; and combat scenarios at protocol 126/schema 104,
+  CanonicalStateV102,
+  canonical-event-V26.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
   possible-value selection traces, strict
@@ -75,13 +75,16 @@ Run only when the user explicitly requests a verification checkpoint.
   creature effect expiry and unsafe target-context/delayed graph rejection,
   two-client item activation, target/beta effect and variable reads and writes,
   target-context reference closure, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 125/schema 103, CanonicalStateV101,
-  canonical-event-V25, and
+  expiry, stale-response, protocol 126/schema 104, CanonicalStateV102,
+  canonical-event-V26, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
-  armor absorption, corrosion duration/intensity, stationary/disconnected
-  exposure, death/activity-interruption, CanonicalStateV84, SQLite, and portable
-  replay coverage for protocol 108/schema 86.
+  armor absorption, corrosion duration/intensity, intensity-level inherited
+  non-environmental effects, reversed duration bounds, outside-vehicle chance,
+  consume-on-contact, stationary/disconnected exposure, unsupported
+  environmental/immunity fail-closed admission, death/activity-interruption,
+  CanonicalStateV102, canonical-event-V26, SQLite, portable replay, and
+  client-visible actor state/event coverage for protocol 126/schema 104.
 - Content test-target cleanup: `cargo check -p cdda-content --tests` currently
   fails in untouched `material.rs` because one test-only
   `MaterialThermalDefinition` literal lacks `damage_resistance_milli`; the

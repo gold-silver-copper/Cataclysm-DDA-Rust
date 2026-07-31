@@ -39,13 +39,13 @@ use cdda_protocol::{
     CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
     CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
     CraftSkillRequirementV1, CraftToolRequirementV1, CreaturePathSettingsV1, CreatureSizeV1,
-    DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1,
-    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN, HealingItemTypeV1,
-    IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
-    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
-    MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
-    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
-    adjusted_book_study_time_moves,
+    DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldContactEffectV1,
+    FieldIntensityLevelV1, FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot,
+    GAME_ALPN, HealingItemTypeV1, IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT,
+    MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES,
+    MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION,
+    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1,
+    TerrainTileSnapshot, adjusted_book_study_time_moves,
 };
 #[cfg(test)]
 use cdda_protocol::{
@@ -2982,14 +2982,52 @@ fn runtime_field_type(
         intensity_levels: definition
             .intensity_levels
             .iter()
-            .map(|level| FieldIntensityLevelV1 {
-                name: level.name.clone(),
-                symbol: level.symbol.clone(),
-                color: level.color.clone(),
-                dangerous: level.dangerous,
-                transparent: level.transparent,
+            .map(|level| {
+                let contact_effects_supported = level.contact_effects_are_supported();
+                let contact_effects = if contact_effects_supported {
+                    level
+                        .effects
+                        .iter()
+                        .map(|effect| {
+                            Ok(FieldContactEffectV1 {
+                                effect_id: effect.effect_id.clone(),
+                                minimum_duration_turns: u32::try_from(
+                                    effect.minimum_duration_seconds,
+                                )?,
+                                maximum_duration_turns: u32::try_from(
+                                    effect.maximum_duration_seconds,
+                                )?,
+                                maximum_accumulated_duration_turns: 365 * 24 * 60 * 60,
+                                duration_add_percent: 100,
+                                intensity: effect.intensity,
+                                body_part_id: effect.body_part_id.clone(),
+                                environmental: effect.environmental,
+                                immune_in_vehicle: effect.immune_in_vehicle,
+                                immune_inside_vehicle: effect.immune_inside_vehicle,
+                                immune_outside_vehicle: effect.immune_outside_vehicle,
+                                chance_in_vehicle: effect.chance_in_vehicle,
+                                chance_inside_vehicle: effect.chance_inside_vehicle,
+                                chance_outside_vehicle: effect.chance_outside_vehicle,
+                                message: effect.message.clone(),
+                                message_npc: effect.message_npc.clone(),
+                                message_type: effect.message_type.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?
+                } else {
+                    Vec::new()
+                };
+                Ok(FieldIntensityLevelV1 {
+                    name: level.name.clone(),
+                    symbol: level.symbol.clone(),
+                    color: level.color.clone(),
+                    dangerous: level.dangerous,
+                    transparent: level.transparent,
+                    contact_effects,
+                    contact_effects_supported,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?,
         priority: definition.priority,
         half_life_seconds: definition.half_life_seconds,
         linear_half_life: definition.linear_half_life,
@@ -3011,6 +3049,7 @@ fn runtime_field_type(
             }),
         is_splattering: definition.is_splattering,
         display_field: definition.display_field,
+        decrease_intensity_on_contact: definition.decrease_intensity_on_contact,
     })
 }
 

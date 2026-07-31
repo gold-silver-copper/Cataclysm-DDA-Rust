@@ -847,7 +847,13 @@ fn runtime_monster_projectile_effects(
             .chain(&definition.trail_fields)
         {
             let field_type = fields.get(&field.field_type_id)?;
-            if field_type.intensity_levels.is_empty() || field_type.intensity_levels.len() > 16 {
+            if field_type.intensity_levels.is_empty()
+                || field_type.intensity_levels.len() > 16
+                || field.intensity_minimum == 0
+                || field.intensity_minimum > field.intensity_maximum
+                || (field.intensity_minimum..=field.intensity_maximum)
+                    .any(|intensity| !field_type.contact_effects_supported_at(intensity))
+            {
                 return None;
             }
         }

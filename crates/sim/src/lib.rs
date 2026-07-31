@@ -577,6 +577,29 @@ fn validate_field_type(field_type: &FieldTypeSnapshotV1) -> Result<(), SimError>
                 || level.color.is_empty()
                 || level.color.len() > 64
                 || level.color.chars().any(char::is_control)
+                || level.contact_effects.len() > 64
+                || (!level.contact_effects_supported && !level.contact_effects.is_empty())
+                || level.contact_effects.iter().any(|effect| {
+                    validate_item_type_id(&effect.effect_id).is_err()
+                        || effect.body_part_id.as_deref().is_some_and(|body_part_id| {
+                            validate_item_type_id(body_part_id).is_err()
+                        })
+                        || effect.environmental
+                        || effect.maximum_accumulated_duration_turns == 0
+                        || effect.duration_add_percent > 1_000
+                        || effect.intensity == 0
+                        || effect.intensity > 1_000_000
+                        || effect.chance_in_vehicle > 1_000_000
+                        || effect.chance_inside_vehicle > 1_000_000
+                        || effect.chance_outside_vehicle > 1_000_000
+                        || effect.message.len() > 4_096
+                        || effect.message.chars().any(char::is_control)
+                        || effect.message_npc.len() > 4_096
+                        || effect.message_npc.chars().any(char::is_control)
+                        || effect.message_type.is_empty()
+                        || effect.message_type.len() > 64
+                        || effect.message_type.chars().any(char::is_control)
+                })
         })
     {
         return Err(SimError::InvalidField);
@@ -4703,7 +4726,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV25");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV26");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4801,6 +4824,19 @@ impl WorldState {
         }) {
             return Err(SimError::InvalidField);
         }
+        if definition.intensity_levels.iter().any(|level| {
+            level.contact_effects.iter().any(|effect| {
+                effect.body_part_id.as_ref().is_some_and(|body_part_id| {
+                    !self
+                        .actor_anatomy
+                        .parts
+                        .iter()
+                        .any(|part| part.body_part_id == *body_part_id)
+                })
+            })
+        }) {
+            return Err(SimError::InvalidField);
+        }
         if self.tick != SimTick(0) {
             return Err(SimError::InvalidField);
         }
@@ -4822,6 +4858,15 @@ impl WorldState {
             || self.field_types.values().any(|field_type| {
                 field_type.contact_damage.as_ref().is_some_and(|contact| {
                     !anatomy_has_limb_type(&anatomy, &contact.body_part_type_id)
+                }) || field_type.intensity_levels.iter().any(|level| {
+                    level.contact_effects.iter().any(|effect| {
+                        effect.body_part_id.as_ref().is_some_and(|body_part_id| {
+                            !anatomy
+                                .parts
+                                .iter()
+                                .any(|part| part.body_part_id == *body_part_id)
+                        })
+                    })
                 })
             })
         {
@@ -5003,13 +5048,17 @@ impl WorldState {
         if intensity == 0 {
             return Err(SimError::InvalidField);
         }
-        let maximum = self
+        let field_type = self
             .field_types
             .get(field_type_id)
-            .ok_or(SimError::InvalidField)?
-            .intensity_levels
-            .len();
+            .ok_or(SimError::InvalidField)?;
+        let maximum = field_type.intensity_levels.len();
         let maximum = u8::try_from(maximum).map_err(|_| SimError::InvalidField)?;
+        let supported_levels = field_type
+            .intensity_levels
+            .iter()
+            .map(|level| level.contact_effects_supported)
+            .collect::<Vec<_>>();
         let (coord, local) = position.chunk_and_local();
         let chunk = self.chunks.get_mut(&coord).ok_or(SimError::InvalidField)?;
         let tile_index = tile_index(local).ok_or(SimError::InvalidLocalCoordinate)?;
@@ -5021,6 +5070,12 @@ impl WorldState {
             Ok(index) => {
                 let field = &mut entries[index];
                 let next = field.intensity.saturating_add(intensity).min(maximum);
+                if !supported_levels[..usize::from(next)]
+                    .iter()
+                    .all(|supported| *supported)
+                {
+                    return Err(SimError::InvalidField);
+                }
                 if next != field.intensity {
                     field.intensity = next;
                     chunk.revision = chunk
@@ -5031,12 +5086,18 @@ impl WorldState {
                 Ok(field.intensity)
             }
             Err(index) => {
+                let intensity = intensity.min(maximum);
+                if !supported_levels[..usize::from(intensity)]
+                    .iter()
+                    .all(|supported| *supported)
+                {
+                    return Err(SimError::InvalidField);
+                }
                 let display_sequence = self.next_field_sequence;
                 self.next_field_sequence = self
                     .next_field_sequence
                     .checked_add(1)
                     .ok_or(SimError::NumericOverflow)?;
-                let intensity = intensity.min(maximum);
                 entries.insert(
                     index,
                     FieldSnapshotV1 {
@@ -14366,6 +14427,9 @@ impl WorldState {
                     };
                     if field.intensity == 0
                         || usize::from(field.intensity) > field_type.intensity_levels.len()
+                        || !field_type.intensity_levels[..usize::from(field.intensity)]
+                            .iter()
+                            .all(|level| level.contact_effects_supported)
                         || field.display_sequence == 0
                         || !field_sequences.insert(field.display_sequence)
                     {
@@ -14533,7 +14597,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV101");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV102");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -14807,6 +14871,8 @@ mod tests {
                 color: String::from("red"),
                 dangerous: false,
                 transparent: true,
+                contact_effects: Vec::new(),
+                contact_effects_supported: true,
             }],
             priority: 0,
             half_life_seconds,
@@ -14814,6 +14880,7 @@ mod tests {
             contact_damage: None,
             is_splattering: true,
             display_field: true,
+            decrease_intensity_on_contact: false,
         }
     }
 

@@ -90,7 +90,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 125;
+pub const PROTOCOL_VERSION: u16 = 126;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2134,6 +2134,16 @@ pub enum WorldEventKind {
     ActorDiedFromNeeds {
         actor_id: ActorId,
     },
+    ActorAffectedByField {
+        actor_id: ActorId,
+        field_type_id: String,
+        effect_id: String,
+        body_part_id: Option<String>,
+        intensity: u32,
+        duration_turns: u32,
+        message: String,
+        message_type: String,
+    },
     ActorDamagedByEffect {
         actor_id: ActorId,
         effect_id: String,
@@ -2903,6 +2913,37 @@ pub struct FieldIntensityLevelV1 {
     pub color: String,
     pub dangerous: bool,
     pub transparent: bool,
+    /// Strict, source-ordered effects for this intensity. Empty when the
+    /// source level has no effects or when `contact_effects_supported` is
+    /// false.
+    pub contact_effects: Vec<FieldContactEffectV1>,
+    pub contact_effects_supported: bool,
+}
+
+/// A field effect applied once per simulation turn while a character occupies
+/// the tile. Vehicle predicates are retained even before vehicle actors are
+/// admitted so the contract does not silently lose source semantics.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FieldContactEffectV1 {
+    pub effect_id: String,
+    pub minimum_duration_turns: u32,
+    pub maximum_duration_turns: u32,
+    /// Effect-type application defaults. The content compiler can replace
+    /// these with source-specific values without another wire change.
+    pub maximum_accumulated_duration_turns: u32,
+    pub duration_add_percent: u16,
+    pub intensity: u32,
+    pub body_part_id: Option<String>,
+    pub environmental: bool,
+    pub immune_in_vehicle: bool,
+    pub immune_inside_vehicle: bool,
+    pub immune_outside_vehicle: bool,
+    pub chance_in_vehicle: u32,
+    pub chance_inside_vehicle: u32,
+    pub chance_outside_vehicle: u32,
+    pub message: String,
+    pub message_npc: String,
+    pub message_type: String,
 }
 
 /// Data-normalized damage and status behavior applied to every matching body
@@ -2933,6 +2974,7 @@ pub struct FieldTypeSnapshotV1 {
     pub contact_damage: Option<FieldContactDamageV1>,
     pub is_splattering: bool,
     pub display_field: bool,
+    pub decrease_intensity_on_contact: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

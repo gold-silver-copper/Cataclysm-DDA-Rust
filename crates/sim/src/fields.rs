@@ -1,9 +1,9 @@
 //! Persistent field decay and authoritative character contact processing.
 
 use cdda_protocol::{
-    ActorId, BookStudyInterruptionReason, ConstructionInterruptionReason,
-    DisassemblyInterruptionReason, FieldContactDamageV1, SimTick, WakeReason, WorldEvent,
-    WorldEventKind,
+    ActorEffectSnapshotV1, ActorId, BookStudyInterruptionReason, ConstructionInterruptionReason,
+    DisassemblyInterruptionReason, FieldContactDamageV1, FieldContactEffectV1, SimTick, WakeReason,
+    WorldEvent, WorldEventKind,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -40,15 +40,31 @@ impl WorldState {
                 .get(&field_type_id)
                 .cloned()
                 .ok_or(SimError::InvalidField)?;
-            if let Some(actor_id) = self.actor_at(position)
-                && let Some(contact) = field_type.contact_damage.as_ref()
-            {
-                self.apply_field_contact_damage(
+            let actor_id = self.actor_at(position);
+            if let Some(actor_id) = actor_id {
+                if let Some(contact) = field_type.contact_damage.as_ref() {
+                    self.apply_field_contact_damage(
+                        actor_id,
+                        &field_type_id,
+                        previous_intensity,
+                        display_sequence,
+                        contact,
+                        events,
+                    )?;
+                }
+                let level = field_type
+                    .intensity_levels
+                    .get(usize::from(previous_intensity - 1))
+                    .ok_or(SimError::InvalidField)?;
+                if !level.contact_effects_supported {
+                    return Err(SimError::InvalidField);
+                }
+                self.apply_field_contact_effects(
                     actor_id,
                     &field_type_id,
-                    previous_intensity,
                     display_sequence,
-                    contact,
+                    previous_intensity,
+                    &level.contact_effects,
                     events,
                 )?;
             }
@@ -83,16 +99,21 @@ impl WorldState {
             let field_index = tile_fields
                 .binary_search_by(|field| field.field_type_id.cmp(&field_type_id))
                 .map_err(|_| SimError::InvalidField)?;
-            if !decays {
+            let decreases_on_contact =
+                actor_id.is_some() && field_type.decrease_intensity_on_contact;
+            if !decays && !decreases_on_contact {
                 tile_fields[field_index].age_seconds = age_seconds;
                 continue;
             }
-            let intensity = tile_fields[field_index].intensity.saturating_sub(1);
+            let reductions = u8::from(decays) + u8::from(decreases_on_contact);
+            let intensity = tile_fields[field_index]
+                .intensity
+                .saturating_sub(reductions);
             if intensity == 0 {
                 tile_fields.remove(field_index);
             } else {
                 tile_fields[field_index].intensity = intensity;
-                tile_fields[field_index].age_seconds = 0;
+                tile_fields[field_index].age_seconds = if decays { 0 } else { age_seconds };
             }
             chunk.revision = chunk
                 .revision
@@ -104,6 +125,105 @@ impl WorldState {
                 intensity,
             })?);
         }
+        Ok(())
+    }
+
+    fn apply_field_contact_effects(
+        &mut self,
+        actor_id: ActorId,
+        field_type_id: &str,
+        display_sequence: u64,
+        field_intensity: u8,
+        effects: &[FieldContactEffectV1],
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if effects.is_empty() || self.actors.get(&actor_id).is_none_or(|actor| actor.hp <= 0) {
+            return Ok(());
+        }
+        let mut rng = self.named_rng(
+            b"field-contact-effects",
+            &[actor_id.as_u128(), u128::from(display_sequence)],
+            u64::from(field_intensity),
+        );
+        let current_tick = self.tick;
+        for effect in effects {
+            // Player characters cannot occupy vehicles until the vehicle
+            // subsystem lands. Preserve every predicate in the contract and
+            // execute the exact outside-vehicle branch in the meantime.
+            if effect.environmental || effect.immune_outside_vehicle {
+                continue;
+            }
+            if effect.chance_outside_vehicle > 1
+                && rng.next_u32() % effect.chance_outside_vehicle != 0
+            {
+                continue;
+            }
+            let duration_turns = roll_inclusive_unordered(
+                effect.minimum_duration_turns,
+                effect.maximum_duration_turns,
+                &mut rng,
+            )?;
+            let duration_ticks = u64::from(duration_turns)
+                .checked_mul(SimTick::HZ)
+                .ok_or(SimError::NumericOverflow)?;
+            let maximum_duration_ticks = u64::from(effect.maximum_accumulated_duration_turns)
+                .checked_mul(SimTick::HZ)
+                .ok_or(SimError::NumericOverflow)?;
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            if let Some(existing) = actor.effects.iter_mut().find(|existing| {
+                existing.effect_id == effect.effect_id
+                    && existing.body_part_id == effect.body_part_id
+            }) {
+                existing.intensity = effect.intensity;
+                let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
+                let added = u128::from(duration_ticks)
+                    .checked_mul(u128::from(effect.duration_add_percent))
+                    .and_then(|value| value.checked_div(100))
+                    .and_then(|value| u64::try_from(value).ok())
+                    .ok_or(SimError::NumericOverflow)?;
+                existing.expires_at_tick = SimTick(
+                    current_tick
+                        .0
+                        .saturating_add(remaining.saturating_add(added).min(maximum_duration_ticks))
+                        .min(u64::MAX - 1),
+                );
+            } else {
+                if actor.effects.len() >= 1_024 {
+                    return Err(SimError::InvalidField);
+                }
+                actor.effects.push(ActorEffectSnapshotV1 {
+                    effect_id: effect.effect_id.clone(),
+                    body_part_id: effect.body_part_id.clone(),
+                    intensity: effect.intensity,
+                    expires_at_tick: SimTick(
+                        current_tick
+                            .0
+                            .checked_add(duration_ticks.min(maximum_duration_ticks))
+                            .ok_or(SimError::NumericOverflow)?,
+                    ),
+                });
+            }
+            events.push(self.make_event(WorldEventKind::ActorAffectedByField {
+                actor_id,
+                field_type_id: field_type_id.to_owned(),
+                effect_id: effect.effect_id.clone(),
+                body_part_id: effect.body_part_id.clone(),
+                intensity: effect.intensity,
+                duration_turns,
+                message: effect.message.clone(),
+                message_type: effect.message_type.clone(),
+            })?);
+        }
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        actor.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
         Ok(())
     }
 
@@ -226,6 +346,10 @@ fn roll_inclusive(minimum: u32, maximum: u32, rng: &mut impl Rng) -> Result<u32,
         .and_then(|width| width.checked_add(1))
         .ok_or(SimError::InvalidField)?;
     Ok(minimum + rng.next_u32() % width)
+}
+
+fn roll_inclusive_unordered(first: u32, second: u32, rng: &mut impl Rng) -> Result<u32, SimError> {
+    roll_inclusive(first.min(second), first.max(second), rng)
 }
 
 /// Q0.64 probability for `1 - exp(-ln(2) / half_life)`. This keeps the

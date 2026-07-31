@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 125,
-  "persistence_schema_version": 103,
+  "protocol_version": 126,
+  "persistence_schema_version": 104,
   "replay_format_version": 3,
-  "active_milestone": "monsters",
+  "active_milestone": "environment",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -528,6 +528,7 @@
       "state": "in_progress",
       "submilestones": [
         { "id": "persistent-field-decay-and-typed-contact-damage", "state": "implementation_complete_verification_deferred" },
+        { "id": "intensity-specific-contact-effects-and-consume-on-contact", "state": "implementation_complete_verification_deferred" },
         { "id": "weather-exposure-spread-agriculture-and-catch-up", "state": "planned" }
       ],
       "priority": 28,
