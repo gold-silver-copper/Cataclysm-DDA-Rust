@@ -13,11 +13,12 @@ use cdda_content::{
     BashFieldEffectDefinition, CitySettingsRegistry, ConstructionRegistry, ContentManifest,
     DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID,
     DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, EffectOnConditionRegistry,
-    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
-    ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
-    MonsterDefinition, MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry,
-    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
-    SkillRegistry, SpellRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    EffectTypeRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
+    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry,
+    MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry, MonsterRegistry,
+    OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry,
+    RiverSettingsRegistry, SkillRegistry, SpellRegistry, StartLocationRegistry, TerrainDefinition,
+    TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -34,8 +35,9 @@ use cdda_protocol::ChunkCoord;
 #[cfg(test)]
 use cdda_protocol::worldgen_catalog_is_valid;
 use cdda_protocol::{
-    ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1, BASELINE_COMMIT,
-    BashFieldEffectV1, BookStudyV1, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
+    ACTION_POINTS_PER_UPSTREAM_MOVE, ADMIN_ALPN, ActorConnectionUpdateV1,
+    ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1, BASELINE_COMMIT, BashFieldEffectV1,
+    BookStudyV1, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
     CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
     CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
     CraftSkillRequirementV1, CraftToolRequirementV1, CreaturePathSettingsV1, CreatureSizeV1,
@@ -131,6 +133,7 @@ struct RuntimeWorldContent<'a> {
     spells: &'a SpellRegistry,
     monster_groups: &'a MonsterGroupRegistry,
     fields: &'a FieldTypeRegistry,
+    effects: &'a EffectTypeRegistry,
     bash_profiles: &'a BashDamageProfileRegistry,
     terrain: &'a TerrainRegistry,
     furniture: &'a FurnitureRegistry,
@@ -327,6 +330,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let effects = EffectTypeRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let bash_profiles = BashDamageProfileRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -472,6 +481,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             spells: &spells,
             monster_groups: &monster_groups,
             fields: &fields,
+            effects: &effects,
             bash_profiles: &bash_profiles,
             terrain: &terrain,
             furniture: &furniture,
@@ -820,6 +830,7 @@ fn open_world(
     let spells = content.spells;
     let monster_groups = content.monster_groups;
     let fields = content.fields;
+    let effects = content.effects;
     let bash_profiles = content.bash_profiles;
     let terrain = content.terrain;
     let furniture = content.furniture;
@@ -858,7 +869,7 @@ fn open_world(
         let definition = fields
             .get(field_type_id)
             .ok_or("pinned default content is missing a creature blood field")?;
-        initial.register_field_type(runtime_field_type(definition)?)?;
+        initial.register_field_type(runtime_field_type(definition, effects)?)?;
     }
     let terrain_bash_definitions = ["t_wall", "t_door_b", "t_door_c", "t_door_frame"]
         .into_iter()
@@ -946,7 +957,7 @@ fn open_world(
         let definition = fields.get(&field_type_id).ok_or_else(|| {
             format!("monster projectile references unknown field type {field_type_id}")
         })?;
-        initial.register_field_type(runtime_field_type(definition)?)?;
+        initial.register_field_type(runtime_field_type(definition, effects)?)?;
     }
     initial.register_item_group_catalog(item_group_catalog)?;
     for definition in terrain_bash_definitions {
@@ -2969,6 +2980,7 @@ fn runtime_bash_field(
 
 fn runtime_field_type(
     definition: &FieldTypeDefinition,
+    effects: &EffectTypeRegistry,
 ) -> Result<FieldTypeSnapshotV1, Box<dyn std::error::Error>> {
     if definition.intensity_levels.is_empty() || definition.intensity_levels.len() > 16 {
         return Err(format!(
@@ -2983,40 +2995,91 @@ fn runtime_field_type(
             .intensity_levels
             .iter()
             .map(|level| {
-                let contact_effects_supported = level.contact_effects_are_supported();
-                let contact_effects = if contact_effects_supported {
-                    level
-                        .effects
-                        .iter()
-                        .map(|effect| {
-                            Ok(FieldContactEffectV1 {
-                                effect_id: effect.effect_id.clone(),
-                                minimum_duration_turns: u32::try_from(
-                                    effect.minimum_duration_seconds,
-                                )?,
-                                maximum_duration_turns: u32::try_from(
-                                    effect.maximum_duration_seconds,
-                                )?,
-                                maximum_accumulated_duration_turns: 365 * 24 * 60 * 60,
-                                duration_add_percent: 100,
-                                intensity: effect.intensity,
-                                body_part_id: effect.body_part_id.clone(),
-                                environmental: effect.environmental,
-                                immune_in_vehicle: effect.immune_in_vehicle,
-                                immune_inside_vehicle: effect.immune_inside_vehicle,
-                                immune_outside_vehicle: effect.immune_outside_vehicle,
-                                chance_in_vehicle: effect.chance_in_vehicle,
-                                chance_inside_vehicle: effect.chance_inside_vehicle,
-                                chance_outside_vehicle: effect.chance_outside_vehicle,
-                                message: effect.message.clone(),
-                                message_npc: effect.message_npc.clone(),
-                                message_type: effect.message_type.clone(),
+                let mut contact_effects_supported = level.contact_effects_are_supported();
+                let mut contact_effects = Vec::new();
+                if contact_effects_supported {
+                    for effect in &level.effects {
+                        let Some(resolved) =
+                            effects.resolve_application(&effect.effect_id, effect.intensity)
+                        else {
+                            contact_effects_supported = false;
+                            contact_effects.clear();
+                            break;
+                        };
+                        let duration_bounds = u32::try_from(effect.minimum_duration_seconds)
+                            .ok()
+                            .zip(u32::try_from(effect.maximum_duration_seconds).ok());
+                        let maximum_accumulated_duration_turns =
+                            u32::try_from(resolved.maximum_duration_seconds).ok();
+                        let Some((
+                            (minimum_duration_turns, maximum_duration_turns),
+                            maximum_accumulated_duration_turns,
+                        )) = duration_bounds.zip(maximum_accumulated_duration_turns)
+                        else {
+                            contact_effects_supported = false;
+                            contact_effects.clear();
+                            break;
+                        };
+                        let modifiers = ActorEffectModifiersV1 {
+                            strength: resolved.strength_modifier,
+                            dexterity: resolved.dexterity_modifier,
+                            intelligence: resolved.intelligence_modifier,
+                            perception: resolved.perception_modifier,
+                            speed: resolved.speed_modifier,
+                            limb_scores: resolved
+                                .limb_score_multipliers
+                                .into_iter()
+                                .map(|(score_id, multiplier_millionths)| {
+                                    ActorEffectLimbScoreModifierV1 {
+                                        score_id,
+                                        multiplier_millionths,
+                                    }
+                                })
+                                .collect(),
+                        };
+                        if maximum_accumulated_duration_turns == 0
+                            || resolved.duration_add_percent > 1_000
+                            || resolved.intensity == 0
+                            || resolved.intensity > 1_000_000
+                            || resolved.blocked_by_effect_ids.len() > 64
+                            || resolved
+                                .blocked_by_effect_ids
+                                .windows(2)
+                                .any(|pair| pair[0] >= pair[1])
+                            || resolved.blocked_by_effect_ids.iter().any(|effect_id| {
+                                effect_id.is_empty()
+                                    || effect_id.len() > 512
+                                    || effect_id.chars().any(char::is_control)
                             })
-                        })
-                        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?
-                } else {
-                    Vec::new()
-                };
+                            || !cdda_protocol::actor_effect_modifiers_are_valid(&modifiers)
+                        {
+                            contact_effects_supported = false;
+                            contact_effects.clear();
+                            break;
+                        }
+                        contact_effects.push(FieldContactEffectV1 {
+                            effect_id: effect.effect_id.clone(),
+                            minimum_duration_turns,
+                            maximum_duration_turns,
+                            maximum_accumulated_duration_turns,
+                            duration_add_percent: resolved.duration_add_percent,
+                            intensity: resolved.intensity,
+                            body_part_id: effect.body_part_id.clone(),
+                            environmental: effect.environmental,
+                            immune_in_vehicle: effect.immune_in_vehicle,
+                            immune_inside_vehicle: effect.immune_inside_vehicle,
+                            immune_outside_vehicle: effect.immune_outside_vehicle,
+                            chance_in_vehicle: effect.chance_in_vehicle,
+                            chance_inside_vehicle: effect.chance_inside_vehicle,
+                            chance_outside_vehicle: effect.chance_outside_vehicle,
+                            message: effect.message.clone(),
+                            message_npc: effect.message_npc.clone(),
+                            message_type: effect.message_type.clone(),
+                            blocked_by_effect_ids: resolved.blocked_by_effect_ids,
+                            modifiers,
+                        });
+                    }
+                }
                 Ok(FieldIntensityLevelV1 {
                     name: level.name.clone(),
                     symbol: level.symbol.clone(),
@@ -3027,7 +3090,7 @@ fn runtime_field_type(
                     contact_effects_supported,
                 })
             })
-            .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?,
+            .collect::<Result<Vec<_>, std::convert::Infallible>>()?,
         priority: definition.priority,
         half_life_seconds: definition.half_life_seconds,
         linear_half_life: definition.linear_half_life,

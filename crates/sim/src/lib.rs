@@ -599,6 +599,16 @@ fn validate_field_type(field_type: &FieldTypeSnapshotV1) -> Result<(), SimError>
                         || effect.message_type.is_empty()
                         || effect.message_type.len() > 64
                         || effect.message_type.chars().any(char::is_control)
+                        || effect.blocked_by_effect_ids.len() > 64
+                        || effect
+                            .blocked_by_effect_ids
+                            .windows(2)
+                            .any(|pair| pair[0] >= pair[1])
+                        || effect
+                            .blocked_by_effect_ids
+                            .iter()
+                            .any(|effect_id| validate_item_type_id(effect_id).is_err())
+                        || !cdda_protocol::actor_effect_modifiers_are_valid(&effect.modifiers)
                 })
         })
     {
@@ -2815,6 +2825,7 @@ fn apply_actor_effect_applications(
                         .checked_add(duration_ticks.min(maximum_duration_ticks))
                         .ok_or(SimError::NumericOverflow)?,
                 ),
+                modifiers: Default::default(),
             });
         }
     }
@@ -3731,6 +3742,77 @@ fn actor_skill_level(actor: &Actor, skill_id: &str, theoretical: bool) -> u8 {
 
 fn effective_base_stat(stat: u16) -> u16 {
     stat.min(MAX_CHARACTER_CREATION_STAT)
+}
+
+fn actor_effective_stat(
+    actor: &Actor,
+    base: u16,
+    modifier: fn(&ActorEffectSnapshotV1) -> i16,
+) -> u16 {
+    let value = actor
+        .effects
+        .iter()
+        .fold(i64::from(effective_base_stat(base)), |value, effect| {
+            value.saturating_add(i64::from(modifier(effect)))
+        });
+    u16::try_from(value.clamp(0, i64::from(MAX_CHARACTER_CREATION_STAT)))
+        .expect("clamped actor stat fits u16")
+}
+
+fn actor_effective_strength(actor: &Actor) -> u16 {
+    actor_effective_stat(actor, actor.base_strength, |effect| {
+        effect.modifiers.strength
+    })
+}
+
+fn actor_effective_dexterity(actor: &Actor) -> u16 {
+    actor_effective_stat(actor, actor.base_dexterity, |effect| {
+        effect.modifiers.dexterity
+    })
+}
+
+fn actor_effective_intelligence(actor: &Actor) -> u16 {
+    actor_effective_stat(actor, actor.base_intelligence, |effect| {
+        effect.modifiers.intelligence
+    })
+}
+
+fn actor_effective_perception(actor: &Actor) -> u16 {
+    actor_effective_stat(actor, actor.base_perception, |effect| {
+        effect.modifiers.perception
+    })
+}
+
+fn actor_effective_speed(actor: &Actor) -> u16 {
+    let speed = actor
+        .effects
+        .iter()
+        .fold(i64::from(actor.speed), |speed, effect| {
+            speed.saturating_add(i64::from(effect.modifiers.speed))
+        });
+    u16::try_from(speed.clamp(1, i64::from(ACTOR_ACTION_THRESHOLD)))
+        .expect("clamped actor speed fits u16")
+}
+
+fn actor_limb_score_multiplier_millionths(actor: &Actor, score_id: &str) -> u32 {
+    const SCALE: u128 = 1_000_000;
+    const MAXIMUM: u128 = 10_000_000;
+    let multiplier = actor.effects.iter().fold(SCALE, |combined, effect| {
+        let factor = effect
+            .modifiers
+            .limb_scores
+            .binary_search_by(|modifier| modifier.score_id.as_str().cmp(score_id))
+            .ok()
+            .map_or(SCALE, |index| {
+                u128::from(effect.modifiers.limb_scores[index].multiplier_millionths)
+            });
+        combined
+            .saturating_mul(factor)
+            .checked_div(SCALE)
+            .unwrap_or(MAXIMUM)
+            .min(MAXIMUM)
+    });
+    u32::try_from(multiplier).expect("bounded limb-score multiplier fits u32")
 }
 
 fn pinned_melee_attack_speed_moves(
@@ -6577,6 +6659,7 @@ impl WorldState {
                     .actors
                     .get_mut(&actor_id)
                     .ok_or(SimError::UnknownActor)?;
+                let actor_speed = actor_effective_speed(actor);
                 if actor.hp <= 0 {
                     actor.queued_actions.clear();
                     actor.held_movement = None;
@@ -6621,7 +6704,7 @@ impl WorldState {
                     } else {
                         let accrued = actor
                             .action_points
-                            .checked_add(i64::from(actor.speed))
+                            .checked_add(i64::from(actor_speed))
                             .ok_or(SimError::NumericOverflow)?;
                         actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
                         (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
@@ -6654,7 +6737,7 @@ impl WorldState {
                     } else {
                         let accrued = actor
                             .action_points
-                            .checked_add(i64::from(actor.speed))
+                            .checked_add(i64::from(actor_speed))
                             .ok_or(SimError::NumericOverflow)?;
                         actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
                         (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
@@ -6687,7 +6770,7 @@ impl WorldState {
                     } else {
                         let accrued = actor
                             .action_points
-                            .checked_add(i64::from(actor.speed))
+                            .checked_add(i64::from(actor_speed))
                             .ok_or(SimError::NumericOverflow)?;
                         actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
                         (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
@@ -6720,7 +6803,7 @@ impl WorldState {
                     } else {
                         let accrued = actor
                             .action_points
-                            .checked_add(i64::from(actor.speed))
+                            .checked_add(i64::from(actor_speed))
                             .ok_or(SimError::NumericOverflow)?;
                         actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
                         (actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD))
@@ -6764,7 +6847,7 @@ impl WorldState {
                     } else {
                         activity.remaining_action_points = activity
                             .remaining_action_points
-                            .saturating_sub(u64::from(actor.speed));
+                            .saturating_sub(u64::from(actor_speed));
                         (
                             (activity.remaining_action_points == 0)
                                 .then_some(ScheduledActorAction::ReadCompleted),
@@ -6807,7 +6890,7 @@ impl WorldState {
                     } else {
                         activity.remaining_action_points = activity
                             .remaining_action_points
-                            .saturating_sub(u64::from(actor.speed));
+                            .saturating_sub(u64::from(actor_speed));
                         (
                             (activity.remaining_action_points == 0)
                                 .then_some(ScheduledActorAction::DisassemblyCompleted),
@@ -6883,7 +6966,7 @@ impl WorldState {
                     } else {
                         activity.remaining_action_points = activity
                             .remaining_action_points
-                            .saturating_sub(u64::from(actor.speed));
+                            .saturating_sub(u64::from(actor_speed));
                         (
                             (activity.remaining_action_points == 0)
                                 .then_some(ScheduledActorAction::ConstructionCompleted),
@@ -6911,14 +6994,14 @@ impl WorldState {
                     } else {
                         let (progress, progress_remainder_millionths) =
                             if activity.recipe.proficiencies.is_empty() {
-                                (u64::from(actor.speed), 0)
+                                (u64::from(actor_speed), 0)
                             } else {
                                 let malus = craft_proficiency_time_malus_millionths(
                                     &actor.proficiencies,
                                     &activity.recipe,
                                 )?;
                                 craft_progress_for_tick(
-                                    actor.speed,
+                                    actor_speed,
                                     malus,
                                     activity.proficiency_progress_millionths,
                                 )?
@@ -7005,7 +7088,7 @@ impl WorldState {
                 } else {
                     let accrued = actor
                         .action_points
-                        .checked_add(i64::from(actor.speed))
+                        .checked_add(i64::from(actor_speed))
                         .ok_or(SimError::NumericOverflow)?;
                     actor.action_points = accrued.min(i64::from(ACTOR_ACTION_THRESHOLD));
                     let action = if actor.action_points == i64::from(ACTOR_ACTION_THRESHOLD) {
@@ -7207,8 +7290,8 @@ impl WorldState {
                 .actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
-            let intelligence = u64::from(effective_base_stat(actor.base_intelligence));
-            let perception = u64::from(effective_base_stat(actor.base_perception));
+            let intelligence = u64::from(actor_effective_intelligence(actor));
+            let perception = u64::from(actor_effective_perception(actor));
             let catchup_numerator = 24_u64
                 .checked_add(
                     intelligence
@@ -7676,11 +7759,25 @@ impl WorldState {
         let Some(to_cost) = self.tile_movement_cost(to) else {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         };
-        from_cost
+        let base_cost = from_cost
             .checked_add(to_cost)
             .and_then(|cost| cost.checked_mul(axis_multiplier))
             .map(|cost| cost / 2)
             .and_then(|cost| cost.checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE))
+            .ok_or(SimError::NumericOverflow)?;
+        let move_speed = self
+            .actors
+            .get(&actor_id)
+            .map(|actor| actor_limb_score_multiplier_millionths(actor, "move_speed"))
+            .ok_or(SimError::UnknownActor)?;
+        if move_speed == 0 {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        }
+        i128::from(base_cost)
+            .checked_mul(1_000_000)
+            .and_then(|cost| cost.checked_add(i128::from(move_speed) - 1))
+            .and_then(|cost| cost.checked_div(i128::from(move_speed)))
+            .and_then(|cost| i64::try_from(cost.max(1)).ok())
             .ok_or(SimError::NumericOverflow)
     }
 
@@ -9477,7 +9574,7 @@ impl WorldState {
         if weapon.melee_damage_milli.get("bash") != Some(&expected_bash_milli) {
             return Ok(None);
         }
-        u64::from(effective_base_stat(actor.base_strength))
+        u64::from(actor_effective_strength(actor))
             .checked_add(u64::from(profile.bash_damage))
             .map(Some)
             .ok_or(SimError::NumericOverflow)
@@ -9518,7 +9615,7 @@ impl WorldState {
         let melee_skill = actor_skill_level(actor, "melee", false);
         i64::from(pinned_melee_attack_speed_moves(
             attack_time_moves,
-            actor.base_dexterity,
+            actor_effective_dexterity(actor),
             melee_skill,
         )?)
         .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
@@ -13201,7 +13298,7 @@ impl WorldState {
         let total_action_points = adjusted_book_study_time_moves(
             study.time_moves,
             study.intelligence_requirement,
-            effective_base_stat(actor.base_intelligence),
+            actor_effective_intelligence(actor),
         )
         .ok_or(SimError::InvalidBookStudy)?
         .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE as u64)

@@ -32,6 +32,7 @@ fn insert_whole_creature_effect(
             body_part_id: None,
             intensity: 1,
             expires_at_tick,
+            modifiers: Default::default(),
         });
         effects.sort_by(|left, right| {
             (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
@@ -392,6 +393,7 @@ impl WorldState {
                     } else {
                         SimTick(self.tick.0.saturating_add(duration_ticks).min(u64::MAX - 1))
                     },
+                    modifiers: Default::default(),
                 });
                 actor.effects.sort_by(|left, right| {
                     (&left.effect_id, &left.body_part_id)
@@ -1326,6 +1328,7 @@ impl WorldState {
                                 .saturating_add(duration_ticks)
                                 .min(u64::MAX - 1),
                         ),
+                        modifiers: Default::default(),
                     });
                 }
             }
@@ -1385,6 +1388,7 @@ impl WorldState {
                 body_part_id: Some(body_part_id),
                 intensity: 5,
                 expires_at_tick,
+                modifiers: Default::default(),
             });
             actor.effects.sort_by(|left, right| {
                 (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
@@ -1643,6 +1647,7 @@ impl WorldState {
                 body_part_id: Some(body_part_id.to_owned()),
                 intensity: 1,
                 expires_at_tick: SimTick(u64::MAX),
+                modifiers: Default::default(),
             });
             actor.effects.sort_by(|left, right| {
                 (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))

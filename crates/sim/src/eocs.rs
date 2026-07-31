@@ -1624,6 +1624,7 @@ fn add_effect_to(
                         .ok_or(SimError::NumericOverflow)?,
                 )
             },
+            modifiers: Default::default(),
         });
     }
     Ok(())

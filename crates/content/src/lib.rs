@@ -5,6 +5,7 @@ mod anatomy;
 mod bash;
 mod city;
 mod construction;
+mod effect;
 mod eoc;
 mod eoc_math;
 mod field;
@@ -47,6 +48,7 @@ pub use construction::{
     ConstructionDefinition, ConstructionGroupDefinition, ConstructionRegistry,
     ConstructionRegistryError,
 };
+pub use effect::{EffectTypeRegistry, EffectTypeRegistryError, ResolvedEffectApplication};
 pub use eoc::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EffectOnConditionRegistryError,
     EocActorStatDefinition, EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,

@@ -529,6 +529,7 @@
       "submilestones": [
         { "id": "persistent-field-decay-and-typed-contact-damage", "state": "implementation_complete_verification_deferred" },
         { "id": "intensity-specific-contact-effects-and-consume-on-contact", "state": "implementation_complete_verification_deferred" },
+        { "id": "field-effect-type-stat-speed-and-limb-score-modifiers", "state": "implementation_complete_verification_deferred" },
         { "id": "weather-exposure-spread-agriculture-and-catch-up", "state": "planned" }
       ],
       "priority": 28,

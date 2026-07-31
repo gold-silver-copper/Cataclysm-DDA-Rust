@@ -81,7 +81,9 @@ Run only when the user explicitly requests a verification checkpoint.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, intensity-level inherited
   non-environmental effects, reversed duration bounds, outside-vehicle chance,
-  consume-on-contact, stationary/disconnected exposure, unsupported
+  consume-on-contact, effect-type duration/intensity caps, blocking effects,
+  stat/speed/limb-score modifier truncation and scaling, affected movement,
+  melee, dodge, reading and disassembly, stationary/disconnected exposure, unsupported
   environmental/immunity fail-closed admission, death/activity-interruption,
   CanonicalStateV102, canonical-event-V26, SQLite, portable replay, and
   client-visible actor state/event coverage for protocol 126/schema 104.

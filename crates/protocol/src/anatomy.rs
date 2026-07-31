@@ -111,6 +111,26 @@ pub struct ActorEffectSnapshotV1 {
     pub body_part_id: Option<String>,
     pub intensity: u32,
     pub expires_at_tick: crate::SimTick,
+    /// Resolved source modifiers retained with the effect so recovery never
+    /// rereads mutable content.
+    pub modifiers: ActorEffectModifiersV1,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct ActorEffectModifiersV1 {
+    pub strength: i16,
+    pub dexterity: i16,
+    pub intelligence: i16,
+    pub perception: i16,
+    pub speed: i16,
+    /// ID-sorted multiplicative limb-score factors in millionths.
+    pub limb_scores: Vec<ActorEffectLimbScoreModifierV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct ActorEffectLimbScoreModifierV1 {
+    pub score_id: String,
+    pub multiplier_millionths: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -221,6 +241,19 @@ pub fn actor_effects_are_valid(
                         .iter()
                         .any(|part| part.body_part_id == *part_id)
                 })
+                && actor_effect_modifiers_are_valid(&effect.modifiers)
+        })
+}
+
+#[must_use]
+pub fn actor_effect_modifiers_are_valid(modifiers: &ActorEffectModifiersV1) -> bool {
+    modifiers.limb_scores.len() <= 64
+        && modifiers
+            .limb_scores
+            .windows(2)
+            .all(|pair| pair[0].score_id < pair[1].score_id)
+        && modifiers.limb_scores.iter().all(|modifier| {
+            valid_id(&modifier.score_id) && modifier.multiplier_millionths <= 10_000_000
         })
 }
 

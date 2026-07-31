@@ -400,6 +400,7 @@ impl WorldState {
                     body_part_id: None,
                     intensity: 1,
                     expires_at_tick,
+                    modifiers: Default::default(),
                 });
             }
         }
@@ -427,6 +428,7 @@ impl WorldState {
                         .checked_add(duration)
                         .ok_or(SimError::NumericOverflow)?,
                 ),
+                modifiers: Default::default(),
             });
         }
         actor.effects.sort_by(|left, right| {

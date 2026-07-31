@@ -14,13 +14,14 @@ mod item_groups;
 mod use_actions;
 
 pub use anatomy::{
-    ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectSnapshotV1, AnatomyDefinitionV1,
-    ArmorMaterialProtectionV1, BodyPartHpModifiersV1, BodyPartOnHitEffectV1, BodyPartPrototypeV1,
-    MAX_ANATOMY_PARTS, MAX_ARMOR_DAMAGE_TYPES, MAX_ARMOR_PORTIONS, MAX_BODY_PART_DEFERRED_FIELDS,
-    MAX_BODY_PART_ID_BYTES, MAX_WEARABLE_ARMOR_TYPES, WearableArmorPortionV1, WearableArmorTypeV1,
-    actor_body_part_summary_hp, actor_body_parts_are_valid, actor_effects_are_valid,
-    anatomy_definition_is_valid, body_part_prototype_is_valid, wearable_armor_catalog_is_valid,
-    wearable_armor_type_is_valid,
+    ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1,
+    ActorEffectSnapshotV1, AnatomyDefinitionV1, ArmorMaterialProtectionV1, BodyPartHpModifiersV1,
+    BodyPartOnHitEffectV1, BodyPartPrototypeV1, MAX_ANATOMY_PARTS, MAX_ARMOR_DAMAGE_TYPES,
+    MAX_ARMOR_PORTIONS, MAX_BODY_PART_DEFERRED_FIELDS, MAX_BODY_PART_ID_BYTES,
+    MAX_WEARABLE_ARMOR_TYPES, WearableArmorPortionV1, WearableArmorTypeV1,
+    actor_body_part_summary_hp, actor_body_parts_are_valid, actor_effect_modifiers_are_valid,
+    actor_effects_are_valid, anatomy_definition_is_valid, body_part_prototype_is_valid,
+    wearable_armor_catalog_is_valid, wearable_armor_type_is_valid,
 };
 pub use eocs::{
     EocActorStatV1, EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
@@ -2944,6 +2945,8 @@ pub struct FieldContactEffectV1 {
     pub message: String,
     pub message_npc: String,
     pub message_type: String,
+    pub blocked_by_effect_ids: Vec<String>,
+    pub modifiers: ActorEffectModifiersV1,
 }
 
 /// Data-normalized damage and status behavior applied to every matching body

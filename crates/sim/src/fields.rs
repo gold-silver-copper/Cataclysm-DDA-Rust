@@ -158,11 +158,27 @@ impl WorldState {
             {
                 continue;
             }
+            let blocked = self.actors.get(&actor_id).is_some_and(|actor| {
+                actor.effects.iter().any(|active| {
+                    active.expires_at_tick > current_tick
+                        && effect
+                            .blocked_by_effect_ids
+                            .binary_search(&active.effect_id)
+                            .is_ok()
+                })
+            });
+            if blocked {
+                continue;
+            }
+            // Upstream accepts zero-duration field definitions, but a newly
+            // applied effect must survive until at least the next action tick
+            // to be observable and to remain a valid canonical snapshot.
             let duration_turns = roll_inclusive_unordered(
                 effect.minimum_duration_turns,
                 effect.maximum_duration_turns,
                 &mut rng,
-            )?;
+            )?
+            .max(1);
             let duration_ticks = u64::from(duration_turns)
                 .checked_mul(SimTick::HZ)
                 .ok_or(SimError::NumericOverflow)?;
@@ -178,6 +194,7 @@ impl WorldState {
                     && existing.body_part_id == effect.body_part_id
             }) {
                 existing.intensity = effect.intensity;
+                existing.modifiers = effect.modifiers.clone();
                 let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
                 let added = u128::from(duration_ticks)
                     .checked_mul(u128::from(effect.duration_add_percent))
@@ -204,6 +221,7 @@ impl WorldState {
                             .checked_add(duration_ticks.min(maximum_duration_ticks))
                             .ok_or(SimError::NumericOverflow)?,
                     ),
+                    modifiers: effect.modifiers.clone(),
                 });
             }
             events.push(self.make_event(WorldEventKind::ActorAffectedByField {

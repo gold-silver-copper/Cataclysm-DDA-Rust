@@ -4,9 +4,9 @@ use cdda_protocol::{ActorId, CreatureId};
 use rand_core::Rng;
 
 use super::{
-    SimError, WorldState, actor_skill_level, anatomy, apply_actor_effect_applications,
-    effective_base_stat, pinned_bash_weapon_melee_accuracy_twelfths, pinned_melee_hit_roll,
-    pinned_unarmed_melee_accuracy_quarters, runtime_armor_is_supported,
+    SimError, WorldState, actor_effective_dexterity, actor_effective_speed, actor_skill_level,
+    anatomy, apply_actor_effect_applications, pinned_bash_weapon_melee_accuracy_twelfths,
+    pinned_melee_hit_roll, pinned_unarmed_melee_accuracy_quarters, runtime_armor_is_supported,
 };
 
 pub(super) const DEFAULT_MAXIMUM_STAMINA: u32 = 8_500;
@@ -290,7 +290,10 @@ impl WorldState {
         let melee_skill = actor_skill_level(actor, "melee", false);
         match actor.wielded {
             None => Ok(Some((
-                pinned_unarmed_melee_accuracy_quarters(actor.base_dexterity, melee_skill),
+                pinned_unarmed_melee_accuracy_quarters(
+                    actor_effective_dexterity(actor),
+                    melee_skill,
+                ),
                 4,
             ))),
             Some(item_id) => {
@@ -303,7 +306,7 @@ impl WorldState {
                 };
                 Ok(Some((
                     pinned_bash_weapon_melee_accuracy_twelfths(
-                        actor.base_dexterity,
+                        actor_effective_dexterity(actor),
                         actor_skill_level(actor, "bashing", false),
                         melee_skill,
                         profile.melee_to_hit,
@@ -374,9 +377,9 @@ impl WorldState {
         }
         Ok((
             dodge_roll(
-                effective_base_stat(actor.base_dexterity),
+                actor_effective_dexterity(actor),
                 actor_skill_level(actor, "dodge", false),
-                actor.speed,
+                actor_effective_speed(actor),
                 actor.stamina,
                 actor.maximum_stamina,
             ),
