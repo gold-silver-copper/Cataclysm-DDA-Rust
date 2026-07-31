@@ -1573,6 +1573,7 @@ fn runtime_monster_catalog(
                 speed: u16::try_from(monster.speed)?,
                 attack_cost_moves: monster_attack_cost(monster)?,
                 aggression: i16::try_from(monster.aggression)?,
+                morale: monster.morale,
                 melee_skill: u16::try_from(monster.melee_skill)?,
                 dodge: u16::try_from(monster.dodge)?,
                 size: monster_size(monster),
@@ -2083,6 +2084,42 @@ fn runtime_monster_catalog(
             prototype.deferred_behavior_fields.push(field);
             prototype.deferred_behavior_fields.sort();
             prototype.deferred_behavior_fields.dedup();
+        }
+    }
+    let spawnability = monster_prototypes
+        .iter()
+        .map(|prototype| {
+            (
+                prototype.base.monster_type_id.as_str(),
+                prototype.runtime_spawnable,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for group_id in &group_ids {
+        let group = groups
+            .get(group_id)
+            .ok_or("resolved monster group disappeared")?;
+        if let Some(default_monster) = group
+            .default_monster
+            .as_deref()
+            .filter(|id| *id != "mon_null")
+            && spawnability.get(default_monster) != Some(&true)
+        {
+            return Err(format!(
+                "reachable monster group {group_id} defaults to runtime-blocked MONSTER {default_monster}"
+            )
+            .into());
+        }
+        for entry in &group.entries {
+            let MonsterGroupTarget::Monster(monster_id) = &entry.target else {
+                continue;
+            };
+            if spawnability.get(monster_id.as_str()) != Some(&true) {
+                return Err(format!(
+                    "reachable monster group {group_id} contains runtime-blocked MONSTER {monster_id}"
+                )
+                .into());
+            }
         }
     }
     let group_indices = group_ids

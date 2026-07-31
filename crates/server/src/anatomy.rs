@@ -20,18 +20,22 @@ pub(super) fn runtime_actor_anatomy(
         )
         .into());
     }
+    let mut parts = anatomy
+        .parts
+        .iter()
+        .map(|id| {
+            registry
+                .body_part(id)
+                .ok_or_else(|| format!("human_anatomy references missing body part {id}"))
+                .and_then(runtime_body_part)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Creature::get_all_body_parts iterates the live body's
+    // std::map<bodypart_str_id, bodypart>, not the anatomy JSON vector.
+    parts.sort_by(|left, right| left.body_part_id.cmp(&right.body_part_id));
     let runtime = AnatomyDefinitionV1 {
         anatomy_id: anatomy.id.clone(),
-        parts: anatomy
-            .parts
-            .iter()
-            .map(|id| {
-                registry
-                    .body_part(id)
-                    .ok_or_else(|| format!("human_anatomy references missing body part {id}"))
-                    .and_then(runtime_body_part)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        parts,
         deferred_fields: anatomy.deferred_fields.iter().cloned().collect(),
     };
     if !anatomy_definition_is_valid(&runtime) {

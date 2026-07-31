@@ -93,8 +93,8 @@ impl BodyPartPrototypeV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AnatomyDefinitionV1 {
     pub anatomy_id: String,
-    /// Source-ordered body parts. Hit selection observes this order at exact
-    /// cumulative-weight boundaries.
+    /// Body-part-ID order from the pinned character body's `std::map`.
+    /// Hit selection and spread damage observe this order.
     pub parts: Vec<BodyPartPrototypeV1>,
     pub deferred_fields: Vec<String>,
 }
@@ -168,6 +168,10 @@ pub fn anatomy_definition_is_valid(anatomy: &AnatomyDefinitionV1) -> bool {
     valid_id(&anatomy.anatomy_id)
         && !anatomy.parts.is_empty()
         && anatomy.parts.len() <= MAX_ANATOMY_PARTS
+        && anatomy
+            .parts
+            .windows(2)
+            .all(|pair| pair[0].body_part_id < pair[1].body_part_id)
         && sorted_unique_ids(&anatomy.deferred_fields, MAX_BODY_PART_DEFERRED_FIELDS)
         && anatomy.parts.iter().all(body_part_prototype_is_valid)
         && {

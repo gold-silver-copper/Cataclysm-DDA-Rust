@@ -1775,7 +1775,7 @@ fn parse_special_attack(
     } else {
         attack.unsupported_fields.remove("firearm_ballistics");
     }
-    if attack.range == 0
+    if (kind != MonsterSpecialAttackKind::Polymorph && attack.range == 0)
         || attack.maximum_damage_multiplier_millionths < attack.minimum_damage_multiplier_millionths
         || attack.minimum_damage_multiplier_millionths < 0
         || (kind == MonsterSpecialAttackKind::Leap

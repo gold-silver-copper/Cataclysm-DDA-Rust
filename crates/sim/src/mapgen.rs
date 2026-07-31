@@ -540,6 +540,7 @@ pub(super) fn creature_spawn_from_worldgen(
         speed: base.speed,
         attack_cost_moves: base.attack_cost_moves,
         aggression: base.aggression,
+        morale: base.morale,
         melee_skill: base.melee_skill,
         dodge: base.dodge,
         size: base.size,

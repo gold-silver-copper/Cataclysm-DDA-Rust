@@ -119,9 +119,6 @@ pub(super) fn select_body_part_index_for_hit(
     hit_spread: i32,
     rng: &mut impl Rng,
 ) -> Result<usize, SimError> {
-    if hit_spread <= 0 {
-        return select_body_part_index(anatomy, rng);
-    }
     if !anatomy_definition_is_valid(anatomy) {
         return Err(SimError::InvalidActorAnatomy);
     }
@@ -131,7 +128,11 @@ pub(super) fn select_body_part_index_for_hit(
         let hit_size = part.hit_size_millionths as f32 / cdda_protocol::ANATOMY_SCALE as f32;
         let hit_difficulty =
             part.hit_difficulty_millionths as f32 / cdda_protocol::ANATOMY_SCALE as f32;
-        let weight = hit_size * libm::powf(hit_spread as f32, hit_difficulty);
+        let weight = if hit_spread > 0 {
+            hit_size * libm::powf(hit_spread as f32, hit_difficulty)
+        } else {
+            hit_size
+        };
         if !weight.is_finite() || weight <= 0.0 {
             return Err(SimError::InvalidActorAnatomy);
         }

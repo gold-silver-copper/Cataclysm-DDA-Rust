@@ -16,6 +16,40 @@ use crate::{
     ranged_sound_description,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CreatureAttitude {
+    Flee,
+    Ignore,
+    Follow,
+    Attack,
+}
+
+pub(super) fn creature_attitude(
+    morale: i32,
+    aggression: i16,
+    hp: i32,
+    max_hp: i32,
+) -> CreatureAttitude {
+    let aggression = i32::from(aggression);
+    if morale < 0 {
+        if i64::from(morale) + i64::from(aggression) > 0 && hp > max_hp / 3 {
+            CreatureAttitude::Follow
+        } else {
+            CreatureAttitude::Flee
+        }
+    } else if aggression <= 0 {
+        if i64::from(hp) * 5 <= i64::from(max_hp) * 3 {
+            CreatureAttitude::Flee
+        } else {
+            CreatureAttitude::Ignore
+        }
+    } else if aggression < 10 {
+        CreatureAttitude::Follow
+    } else {
+        CreatureAttitude::Attack
+    }
+}
+
 fn insert_whole_creature_effect(
     effects: &mut Vec<ActorEffectSnapshotV1>,
     effect_id: &str,
@@ -72,23 +106,40 @@ fn projectile_line(origin: WorldPosition, endpoint: WorldPosition) -> Vec<WorldP
         return Vec::new();
     }
     let (mut x, mut y) = (origin.x, origin.y);
-    let dx = (i64::from(endpoint.x) - i64::from(x)).abs();
-    let step_x = if x < endpoint.x { 1 } else { -1 };
-    let dy = -(i64::from(endpoint.y) - i64::from(y)).abs();
-    let step_y = if y < endpoint.y { 1 } else { -1 };
-    let mut error = dx + dy;
+    let delta_x = i64::from(endpoint.x) - i64::from(x);
+    let delta_y = i64::from(endpoint.y) - i64::from(y);
+    let step_x = delta_x.signum() as i32;
+    let step_y = delta_y.signum() as i32;
+    let doubled_x = delta_x.abs() * 2;
+    let doubled_y = delta_y.abs() * 2;
+    let mut tie = 0_i64;
     let mut positions = Vec::new();
-    while x != endpoint.x || y != endpoint.y {
-        let doubled = error * 2;
-        if doubled >= dy {
-            error += dy;
-            x += step_x;
-        }
-        if doubled <= dx {
-            error += dx;
+    if doubled_x == doubled_y {
+        while x != endpoint.x {
             y += step_y;
+            x += step_x;
+            positions.push(WorldPosition { x, y, z: origin.z });
         }
-        positions.push(WorldPosition { x, y, z: origin.z });
+    } else if doubled_x > doubled_y {
+        while x != endpoint.x {
+            if tie > 0 {
+                y += step_y;
+                tie -= doubled_x;
+            }
+            x += step_x;
+            tie += doubled_y;
+            positions.push(WorldPosition { x, y, z: origin.z });
+        }
+    } else {
+        while y != endpoint.y {
+            if tie > 0 {
+                x += step_x;
+                tie -= doubled_y;
+            }
+            y += step_y;
+            tie += doubled_x;
+            positions.push(WorldPosition { x, y, z: origin.z });
+        }
     }
     positions
 }
@@ -277,6 +328,7 @@ pub(super) fn special_state_matches_catalog(
         && hp_matches
         && speed_matches
         && aggression_matches
+        && snapshot.morale == base.morale
         && downed_matches
         && snapshot.max_hp == base.max_hp
         && snapshot.attack_cost_moves == base.attack_cost_moves
@@ -896,7 +948,7 @@ impl WorldState {
             .actors
             .get(&primary_target)
             .is_none_or(|actor| actor.hp <= 0)
-            || ranged_distance(origin, intended_target) > profile.range
+            || horizontal_euclidean_distance_floor(origin, intended_target)? > profile.range
         {
             return Ok(false);
         }
@@ -921,7 +973,8 @@ impl WorldState {
                     continue;
                 };
                 let position = WorldPosition { x, y, z: center.z };
-                if ranged_distance(center, position) > u32::from(profile.spell_aoe)
+                if horizontal_euclidean_distance_floor(center, position)?
+                    > u32::from(profile.spell_aoe)
                     || (!profile.spell_ignore_walls
                         && !self.spell_blast_line_is_passable(center, position))
                     || !self.chunks.contains_key(&position.chunk_and_local().0)
@@ -1029,33 +1082,9 @@ impl WorldState {
         if origin.z != target.z {
             return false;
         }
-        if origin == target {
-            return true;
-        }
-        let (mut x, mut y) = (origin.x, origin.y);
-        let dx = (i64::from(target.x) - i64::from(x)).abs();
-        let step_x = if x < target.x { 1 } else { -1 };
-        let dy = -(i64::from(target.y) - i64::from(y)).abs();
-        let step_y = if y < target.y { 1 } else { -1 };
-        let mut error = dx + dy;
-        loop {
-            let doubled = error * 2;
-            if doubled >= dy {
-                error += dy;
-                x += step_x;
-            }
-            if doubled <= dx {
-                error += dx;
-                y += step_y;
-            }
-            let position = WorldPosition { x, y, z: origin.z };
-            if !self.is_passable(position) {
-                return false;
-            }
-            if position == target {
-                return true;
-            }
-        }
+        projectile_line(origin, target)
+            .into_iter()
+            .all(|position| self.is_passable(position))
     }
 
     fn spell_area_position_is_valid(
@@ -1130,24 +1159,8 @@ impl WorldState {
         if no_projectile || origin == target {
             return Some(target);
         }
-        let (mut x, mut y) = (origin.x, origin.y);
-        let dx = (i64::from(target.x) - i64::from(x)).abs();
-        let step_x = if x < target.x { 1 } else { -1 };
-        let dy = -(i64::from(target.y) - i64::from(y)).abs();
-        let step_y = if y < target.y { 1 } else { -1 };
-        let mut error = dx + dy;
         let mut previous = None;
-        loop {
-            let doubled = error * 2;
-            if doubled >= dy {
-                error += dy;
-                x += step_x;
-            }
-            if doubled <= dx {
-                error += dx;
-                y += step_y;
-            }
-            let position = WorldPosition { x, y, z: origin.z };
+        for position in projectile_line(origin, target) {
             if !self.is_passable(position) {
                 return Some(previous.unwrap_or(position));
             }
@@ -1156,6 +1169,7 @@ impl WorldState {
             }
             previous = Some(position);
         }
+        Some(target)
     }
 
     fn apply_creature_spell_field(
@@ -1217,7 +1231,7 @@ impl WorldState {
                 return Ok(false);
             };
             if self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
-                || ranged_distance(origin, target_position) > profile.range
+                || horizontal_euclidean_distance_floor(origin, target_position)? > profile.range
             {
                 return Ok(false);
             }
@@ -1266,7 +1280,8 @@ impl WorldState {
                     continue;
                 };
                 let position = WorldPosition { x, y, z: center.z };
-                if ranged_distance(center, position) <= u32::from(profile.spell_aoe)
+                if horizontal_euclidean_distance_floor(center, position)?
+                    <= u32::from(profile.spell_aoe)
                     && (profile.spell_ignore_walls
                         || self.spell_blast_line_is_passable(center, position))
                     && self.chunks.contains_key(&position.chunk_and_local().0)
@@ -1380,6 +1395,7 @@ impl WorldState {
         } else {
             target.base.aggression
         };
+        creature.morale = target.base.morale;
         creature.melee_skill = target.base.melee_skill;
         creature.dodge = target.base.dodge;
         creature.size = target.base.size;
@@ -1416,6 +1432,14 @@ impl WorldState {
             to_type_id: target.base.monster_type_id,
             position,
         })?);
+        let remaining_hp = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?
+            .hp;
+        if remaining_hp <= 0 {
+            self.finish_creature_death(source, remaining_hp, events)?;
+        }
         Ok(())
     }
 
@@ -2036,13 +2060,7 @@ impl WorldState {
             &mut rng,
         )?;
         let selected_parts = if profile.spread_damage {
-            let mut selected = (0..self.actor_anatomy.parts.len()).collect::<Vec<_>>();
-            selected.sort_by(|left, right| {
-                self.actor_anatomy.parts[*left]
-                    .body_part_id
-                    .cmp(&self.actor_anatomy.parts[*right].body_part_id)
-            });
-            selected
+            (0..self.actor_anatomy.parts.len()).collect::<Vec<_>>()
         } else {
             let hit_spread = i32::try_from(spread).map_err(|_| SimError::NumericOverflow)?;
             (0..attack_amount)

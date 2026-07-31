@@ -144,6 +144,18 @@ impl WorldState {
         self.damage_actor_components_at(target, selected, units, rng)
     }
 
+    pub(super) fn damage_actor_components_for_hit(
+        &mut self,
+        target: ActorId,
+        units: &[ActorDamageUnit],
+        hit_spread: i32,
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool, u16), SimError> {
+        let selected =
+            anatomy::select_body_part_index_for_hit(&self.actor_anatomy, hit_spread, rng)?;
+        self.damage_actor_components_at(target, selected, units, rng)
+    }
+
     pub(super) fn damage_actor_part(
         &mut self,
         target: ActorId,

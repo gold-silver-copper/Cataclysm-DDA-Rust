@@ -138,7 +138,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 131;
+pub const PROTOCOL_VERSION: u16 = 132;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2599,6 +2599,9 @@ pub struct CreatureCorpsePrototypeV1 {
     #[serde(default = "default_creature_attack_cost_moves")]
     pub attack_cost_moves: u16,
     pub aggression: i16,
+    /// Final inherited base morale restored by construction, polymorph, and revival.
+    #[serde(default)]
+    pub morale: i32,
     /// Final inherited monster accuracy stat from pinned content.
     #[serde(default)]
     pub melee_skill: u16,
@@ -2963,6 +2966,9 @@ pub struct CreatureSnapshot {
     #[serde(default = "default_creature_attack_cost_moves")]
     pub attack_cost_moves: u16,
     pub aggression: i16,
+    /// Private authoritative live morale used by pinned attitude selection.
+    #[serde(default)]
+    pub morale: i32,
     /// Private authoritative monster accuracy; omitted from visible DTOs.
     #[serde(default)]
     pub melee_skill: u16,

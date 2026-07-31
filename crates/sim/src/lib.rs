@@ -3048,6 +3048,7 @@ pub struct CreatureSpawn {
     pub speed: u16,
     pub attack_cost_moves: u16,
     pub aggression: i16,
+    pub morale: i32,
     pub melee_skill: u16,
     pub dodge: u16,
     pub size: CreatureSizeV1,
@@ -3082,6 +3083,7 @@ struct Creature {
     speed: u16,
     attack_cost_moves: u16,
     aggression: i16,
+    morale: i32,
     melee_skill: u16,
     dodge: u16,
     size: CreatureSizeV1,
@@ -3243,6 +3245,7 @@ impl Creature {
             speed: self.speed,
             attack_cost_moves: self.attack_cost_moves,
             aggression: self.aggression,
+            morale: self.morale,
             melee_skill: self.melee_skill,
             dodge: self.dodge,
             size: self.size,
@@ -3285,6 +3288,7 @@ impl Creature {
             speed: snapshot.speed,
             attack_cost_moves: snapshot.attack_cost_moves,
             aggression: snapshot.aggression,
+            morale: snapshot.morale,
             melee_skill: snapshot.melee_skill,
             dodge: snapshot.dodge,
             size: snapshot.size,
@@ -3321,7 +3325,7 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
     validate_item_type_id(&snapshot.type_id)?;
     if snapshot.id.counter() == 0
         || snapshot.max_hp <= 0
-        || snapshot.hp < 0
+        || snapshot.hp <= 0
         || snapshot.speed == 0
         || snapshot.attack_cost_moves == 0
         || snapshot.melee_dice_sides == 0
@@ -3390,6 +3394,7 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
                 || corpse.monster_type_id != snapshot.type_id
                 || corpse.max_hp != snapshot.max_hp
                 || corpse.attack_cost_moves != snapshot.attack_cost_moves
+                || corpse.morale != snapshot.morale
                 || corpse.melee_skill != snapshot.melee_skill
                 || corpse.dodge != snapshot.dodge
                 || corpse.size != snapshot.size
@@ -5737,6 +5742,7 @@ impl WorldState {
                 || corpse.speed != speed
                 || corpse.attack_cost_moves != attack_cost_moves
                 || corpse.aggression != aggression
+                || corpse.morale != spawn.morale
                 || corpse.melee_skill != melee_skill
                 || corpse.dodge != dodge
                 || corpse.size != size
@@ -5791,6 +5797,7 @@ impl WorldState {
                 speed,
                 attack_cost_moves,
                 aggression,
+                morale: spawn.morale,
                 melee_skill,
                 dodge,
                 size,
@@ -11118,7 +11125,7 @@ impl WorldState {
             let Some(creature) = self.creatures.get_mut(&creature_id) else {
                 continue;
             };
-            if creature.hp <= 0 || creature.aggression <= 0 {
+            if creature.hp <= 0 {
                 continue;
             }
             if let Some(until) = creature.downed_until_tick {
@@ -11142,10 +11149,9 @@ impl WorldState {
                 turn_sequence = turn_sequence
                     .checked_add(1)
                     .ok_or(SimError::NumericOverflow)?;
-                let creature = self
-                    .creatures
-                    .get_mut(&creature_id)
-                    .ok_or(SimError::UnknownCreature)?;
+                let Some(creature) = self.creatures.get_mut(&creature_id) else {
+                    break;
+                };
                 creature.action_points = creature
                     .action_points
                     .checked_sub(action_cost)
@@ -11202,11 +11208,46 @@ impl WorldState {
             }
         }
         let mut visible_target = target.map(|(_key, actor_id, position)| (actor_id, position));
+        let attitude = {
+            let creature = self
+                .creatures
+                .get(&creature_id)
+                .ok_or(SimError::UnknownCreature)?;
+            monsters::creature_attitude(
+                creature.morale,
+                creature.aggression,
+                creature.hp,
+                creature.max_hp,
+            )
+        };
         if let Some((_target_id, target_position)) = visible_target {
-            self.creatures
-                .get_mut(&creature_id)
-                .ok_or(SimError::UnknownCreature)?
-                .goal = Some(target_position);
+            let goal = match attitude {
+                monsters::CreatureAttitude::Attack => Some(target_position),
+                monsters::CreatureAttitude::Flee => {
+                    let x = i64::from(creature_position.x)
+                        .checked_mul(2)
+                        .and_then(|x| x.checked_sub(i64::from(target_position.x)))
+                        .and_then(|x| i32::try_from(x).ok())
+                        .ok_or(SimError::NumericOverflow)?;
+                    let y = i64::from(creature_position.y)
+                        .checked_mul(2)
+                        .and_then(|y| y.checked_sub(i64::from(target_position.y)))
+                        .and_then(|y| i32::try_from(y).ok())
+                        .ok_or(SimError::NumericOverflow)?;
+                    Some(WorldPosition {
+                        x,
+                        y,
+                        z: creature_position.z,
+                    })
+                }
+                monsters::CreatureAttitude::Follow | monsters::CreatureAttitude::Ignore => None,
+            };
+            if let Some(goal) = goal {
+                self.creatures
+                    .get_mut(&creature_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .goal = Some(goal);
+            }
         }
         let special_destination = visible_target.map(|(_id, position)| position).or_else(|| {
             self.creatures.get(&creature_id).and_then(|creature| {
@@ -11231,14 +11272,22 @@ impl WorldState {
                 events,
             )?
         };
-        if self
+        let Some(current_action_points) = self
             .creatures
             .get(&creature_id)
-            .ok_or(SimError::UnknownCreature)?
-            .action_points
-            < i64::from(CREATURE_ACTION_THRESHOLD)
+            .map(|creature| creature.action_points)
+        else {
+            return Ok(special_cost);
+        };
+        if current_action_points < i64::from(CREATURE_ACTION_THRESHOLD) {
+            return Ok(special_cost);
+        }
+        if current_action_points
+            .checked_sub(special_cost)
+            .ok_or(SimError::NumericOverflow)?
+            < 0
         {
-            return Ok(0);
+            return Ok(special_cost);
         }
         if visible_target.is_some_and(|(target_id, _position)| {
             self.actors
@@ -11267,8 +11316,11 @@ impl WorldState {
                 .ok_or(SimError::UnknownCreature)?
                 .action_points);
         }
+        let movement_target = (attitude == monsters::CreatureAttitude::Attack)
+            .then_some(visible_target)
+            .flatten();
         let (destination, following_sound) =
-            if let Some((_target_id, target_position)) = visible_target {
+            if let Some((_target_id, target_position)) = movement_target {
                 (target_position, false)
             } else if let Some(goal) = self
                 .creatures
@@ -11305,6 +11357,7 @@ impl WorldState {
         }
         if let Some((target_id, target_position)) = visible_target
             && horizontally_adjacent(creature_position, target_position)
+            && attitude == monsters::CreatureAttitude::Attack
             && !self
                 .creatures
                 .get(&creature_id)
@@ -11706,8 +11759,9 @@ impl WorldState {
             return Ok(());
         }
         let damage_units = self.creature_melee_damage_units(source, damage)?;
+        let hit_spread = i32::try_from(spread).map_err(|_| SimError::NumericOverflow)?;
         let (outcome, was_sleeping, cut_or_stab_damage) =
-            self.damage_actor_components(target, &damage_units, &mut rng)?;
+            self.damage_actor_components_for_hit(target, &damage_units, hit_spread, &mut rng)?;
         if outcome.amount > 0 {
             self.apply_creature_attack_effects(
                 source,
@@ -14114,6 +14168,7 @@ impl WorldState {
                     speed: u16::try_from(speed).map_err(|_| SimError::NumericOverflow)?,
                     attack_cost_moves: corpse.prototype.attack_cost_moves,
                     aggression: corpse.prototype.aggression,
+                    morale: corpse.prototype.morale,
                     melee_skill: corpse.prototype.melee_skill,
                     dodge: corpse.prototype.dodge,
                     size: corpse.prototype.size,
@@ -15351,7 +15406,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV107");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV108");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
