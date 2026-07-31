@@ -29,8 +29,9 @@ pub use eocs::{
     MAX_EOC_DEFINITIONS, MAX_EOC_EFFECTS, MAX_EOC_ITEM_USE_TYPES, MAX_EOC_MATH_NODES,
     MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES, MAX_EOC_SAFE_INTEGER, MAX_EOC_TREE_DEPTH,
     MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES, ScheduledEocV1, actor_eoc_schedule_is_valid,
-    actor_eoc_variables_are_valid, actor_inactive_recurring_eocs_are_valid, eoc_catalog_is_valid,
-    eoc_confirmation_branches_are_valid,
+    actor_eoc_variables_are_valid, actor_inactive_recurring_eocs_are_valid,
+    creature_eoc_condition_is_supported, creature_eoc_supported_ids, eoc_catalog_is_valid,
+    eoc_condition_is_valid, eoc_confirmation_branches_are_valid,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -88,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 116;
+pub const PROTOCOL_VERSION: u16 = 117;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2830,6 +2831,13 @@ pub struct CreatureSnapshot {
     /// ID-sorted private runtime state for immutable special-attack profiles.
     #[serde(default)]
     pub special_attacks: Vec<CreatureSpecialAttackStateV1>,
+    /// Private authoritative monster-alpha EOC effects. Monster effects are
+    /// whole-creature state and therefore never carry body-part IDs.
+    #[serde(default)]
+    pub effects: Vec<ActorEffectSnapshotV1>,
+    /// Private bounded monster-alpha EOC variables.
+    #[serde(default)]
+    pub eoc_variables: BTreeMap<String, String>,
     /// Empty means this creature leaves no splatter on ordinary death.
     pub blood_field_type_id: String,
     /// `None` means this runtime creature has no modeled ordinary corpse.
@@ -3184,6 +3192,7 @@ pub enum WorldgenMonsterSpecialAttackKindV1 {
     Melee,
     Bite,
     Leap,
+    Eoc,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3212,6 +3221,11 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub leap_prefer: bool,
     pub leap_random: bool,
     pub leap_ignore_destination_danger: bool,
+    /// Monster-alpha condition. Runtime admission permits only semantics
+    /// represented by canonical creature state.
+    pub condition: Option<EocConditionV1>,
+    /// Source-ordered immediate monster-alpha EOC activations.
+    pub eoc_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -5376,6 +5390,12 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         && attack.maximum_damage_multiplier_millionths <= 1_000_000_000
                         && valid_worldgen_monster_damage(&attack.damage)
                         && valid_worldgen_monster_effects(&attack.effects)
+                        && attack.condition.as_ref().is_none_or(eoc_condition_is_valid)
+                        && attack.eoc_ids.len() <= MAX_EOC_REFERENCES
+                        && attack
+                            .eoc_ids
+                            .iter()
+                            .all(|eoc_id| valid_worldgen_id(eoc_id))
                         && attack.infection_chance_millionths <= 1_000_000
                         && (matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Bite)
                             || attack.infection_chance_millionths == 0)
@@ -5383,6 +5403,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             WorldgenMonsterSpecialAttackKindV1::Leap => {
                                 attack.damage.is_empty()
                                     && attack.effects.is_empty()
+                                    && attack.condition.is_none()
+                                    && attack.eoc_ids.is_empty()
                                     && attack.leap_maximum_range_milli > 0
                                     && attack.leap_maximum_range_milli <= 100_000
                                     && attack.leap_minimum_range_milli
@@ -5400,6 +5422,26 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_prefer
                                     && !attack.leap_random
                                     && !attack.leap_ignore_destination_danger
+                            }
+                            WorldgenMonsterSpecialAttackKindV1::Eoc => {
+                                attack.move_cost_moves == 0
+                                    && attack.accuracy.is_none()
+                                    && !attack.no_adjacent
+                                    && !attack.dodgeable
+                                    && attack.minimum_damage_multiplier_millionths == 0
+                                    && attack.maximum_damage_multiplier_millionths == 0
+                                    && attack.damage.is_empty()
+                                    && attack.effects.is_empty()
+                                    && attack.infection_chance_millionths == 0
+                                    && attack.leap_minimum_range_milli == 0
+                                    && attack.leap_maximum_range_milli == 0
+                                    && attack.leap_minimum_consider_range_milli == 0
+                                    && attack.leap_maximum_consider_range_milli == 0
+                                    && !attack.leap_allow_no_target
+                                    && !attack.leap_prefer
+                                    && !attack.leap_random
+                                    && !attack.leap_ignore_destination_danger
+                                    && !attack.eoc_ids.is_empty()
                             }
                         }
                 })

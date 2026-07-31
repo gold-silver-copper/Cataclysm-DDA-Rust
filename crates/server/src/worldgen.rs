@@ -12,23 +12,24 @@ use cdda_content::{
     TerrainRegistry,
 };
 use cdda_protocol::{
-    ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
-    WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
-    WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
-    WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
-    WorldgenMonsterGroupEntryV1, WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1,
-    WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1,
-    WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
-    WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
-    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
-    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
-    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
-    WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1, WorldgenSpecialPlacementV1,
-    WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1, WorldgenStartLocationV1,
-    WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenU16RangeV1,
-    WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
-    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
+    EocDefinitionV1, ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1,
+    WorldgenCatalogV1, WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1,
+    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
+    WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
+    WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1, WorldgenMonsterGroupEntryV1,
+    WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterMeleeDamageUnitV1,
+    WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1,
+    WorldgenMonsterSpecialAttackV1, WorldgenNeighborConditionV1, WorldgenNestedChoiceV1,
+    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
+    WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
+    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
+    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1,
+    WorldgenSpecialPlacementV1, WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
+    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenU16RangeV1, WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
+    worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -500,6 +501,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub item_groups: &'a [ItemGroupDefinitionV1],
     pub monsters: &'a MonsterRegistry,
     pub monster_groups: &'a MonsterGroupRegistry,
+    pub eoc_definitions: &'a [EocDefinitionV1],
 }
 
 fn runtime_monster_catalog(
@@ -507,6 +509,7 @@ fn runtime_monster_catalog(
     mut monster_ids: BTreeSet<String>,
     groups: &MonsterGroupRegistry,
     monsters: &MonsterRegistry,
+    creature_eoc_ids: &BTreeSet<String>,
 ) -> Result<
     (
         Vec<WorldgenMonsterPrototypeV1>,
@@ -661,10 +664,32 @@ fn runtime_monster_catalog(
                     });
                 }
             }
+            let creature_eoc_context_is_supported =
+                |attack: &cdda_content::MonsterSpecialAttackDefinition| {
+                    attack
+                        .eoc_ids
+                        .iter()
+                        .all(|eoc_id| creature_eoc_ids.contains(eoc_id))
+                        && attack.condition.as_ref().is_none_or(|condition| {
+                            cdda_protocol::creature_eoc_condition_is_supported(
+                                &crate::eocs::runtime_condition(condition),
+                            )
+                        })
+                };
+            for attack in monster.special_attacks.values().filter(|attack| {
+                attack.is_fully_supported() && !creature_eoc_context_is_supported(attack)
+            }) {
+                deferred_behavior_fields.insert(format!(
+                    "special_attacks.{}.creature_eoc_context",
+                    attack.id
+                ));
+            }
             let special_attacks = monster
                 .special_attacks
                 .values()
-                .filter(|attack| attack.is_fully_supported())
+                .filter(|attack| {
+                    attack.is_fully_supported() && creature_eoc_context_is_supported(attack)
+                })
                 .map(|attack| {
                     let kind = match attack.kind {
                         MonsterSpecialAttackKind::Melee => {
@@ -672,6 +697,7 @@ fn runtime_monster_catalog(
                         }
                         MonsterSpecialAttackKind::Bite => WorldgenMonsterSpecialAttackKindV1::Bite,
                         MonsterSpecialAttackKind::Leap => WorldgenMonsterSpecialAttackKindV1::Leap,
+                        MonsterSpecialAttackKind::Eoc => WorldgenMonsterSpecialAttackKindV1::Eoc,
                         MonsterSpecialAttackKind::Unsupported => {
                             return Err(
                                 "unsupported special attack reached runtime admission".into()
@@ -732,6 +758,11 @@ fn runtime_monster_catalog(
                         leap_prefer: attack.leap_prefer,
                         leap_random: attack.leap_random,
                         leap_ignore_destination_danger: attack.leap_ignore_destination_danger,
+                        condition: attack
+                            .condition
+                            .as_ref()
+                            .map(crate::eocs::runtime_condition),
+                        eoc_ids: attack.eoc_ids.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
@@ -1043,6 +1074,7 @@ pub(super) fn runtime_mapgen_worldgen(
         item_groups,
         monsters,
         monster_groups,
+        eoc_definitions,
     } = content;
     if !start_location.is_runtime_selectable_with_cities() {
         return Err(format!(
@@ -1197,6 +1229,7 @@ pub(super) fn runtime_mapgen_worldgen(
             individual_monster_roots,
             monster_groups,
             monsters,
+            &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
         )?;
 
     let mut terrain_ids = BTreeSet::new();

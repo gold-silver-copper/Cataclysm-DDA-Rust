@@ -47,8 +47,11 @@ Run only when the user explicitly requests a verification checkpoint.
   actors, tail-continuation rejection, nested confirmation, cancellation,
   authoritative base-stat/stamina/thirst/sleepiness math reads and bounded
   assignments across direct, scheduled, event, and resumed-confirmation paths,
+  monster-alpha effect/variable persistence, effect-intensity conditions,
+  immediate EOC chains, melee EOC hooks, dedicated EOC special actors,
+  creature effect expiry and unsafe target-context/delayed graph rejection,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 116/schema 94, CanonicalStateV92,
+  expiry, stale-response, protocol 117/schema 95, CanonicalStateV93,
   canonical-event-V21, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,

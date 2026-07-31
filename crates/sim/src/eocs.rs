@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
-    ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocActorStatV1,
+    ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, CreatureId, EocActorStatV1,
     EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1,
     EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathAssignmentTargetV1, EocMathExpressionV1,
     EocStringValueV1, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
@@ -48,6 +48,82 @@ impl WorldState {
             .map(|profile| (profile.item_type_id.clone(), profile))
             .collect();
         Ok(())
+    }
+
+    pub(super) fn creature_eoc_condition_matches(
+        &self,
+        creature_id: CreatureId,
+        condition: &EocConditionV1,
+    ) -> Result<bool, SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        evaluate_condition(
+            condition,
+            &EocActorContext::default(),
+            &creature.effects,
+            &creature.eoc_variables,
+            &mut 0,
+        )
+    }
+
+    pub(super) fn apply_creature_eocs(
+        &mut self,
+        creature_id: CreatureId,
+        target: ActorId,
+        eoc_ids: &[String],
+        activation_sequence: u64,
+    ) -> Result<bool, SimError> {
+        if !self.actors.contains_key(&target) {
+            return Err(SimError::UnknownActor);
+        }
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        let mut execution = EocExecution {
+            actor: EocActorContext::default(),
+            effects: creature.effects.clone(),
+            variables: creature.eoc_variables.clone(),
+            next_schedule_sequence: 0,
+            scheduled_eocs: Vec::new(),
+            inactive_recurring_eocs: Vec::new(),
+            messages: Vec::new(),
+            interactive: false,
+            confirmation: None,
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(
+                b"creature-eoc-activation",
+                &[creature_id.as_u128(), target.as_u128()],
+                activation_sequence,
+            ),
+        };
+        for eoc_id in eoc_ids {
+            if execute_eoc(&self.eoc_definitions, eoc_id, &mut execution, 0).is_err() {
+                return Ok(false);
+            }
+        }
+        if execution.effects.len() > 1_024
+            || !execution.messages.is_empty()
+            || execution.confirmation.is_some()
+            || !execution.scheduled_eocs.is_empty()
+            || !execution.inactive_recurring_eocs.is_empty()
+        {
+            return Ok(false);
+        }
+        execution.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        let creature = self
+            .creatures
+            .get_mut(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        creature.effects = execution.effects;
+        creature.eoc_variables = execution.variables;
+        Ok(true)
     }
 
     pub(super) fn apply_eoc_item_use(
@@ -870,7 +946,7 @@ fn evaluate_condition(
             actual >= *minimum
         }
         EocConditionV1::Math(expression) => {
-            evaluate_math_expression(expression, actor, variables, operations)? != 0
+            evaluate_math_expression(expression, actor, effects, variables, operations)? != 0
         }
         EocConditionV1::Not(condition) => {
             !evaluate_condition(condition, actor, effects, variables, operations)?
@@ -901,6 +977,7 @@ fn evaluate_condition(
 fn evaluate_math_expression(
     expression: &EocMathExpressionV1,
     actor: &EocActorContext,
+    effects: &[ActorEffectSnapshotV1],
     variables: &BTreeMap<String, String>,
     operations: &mut usize,
 ) -> Result<i64, SimError> {
@@ -913,8 +990,8 @@ fn evaluate_math_expression(
                   operations: &mut usize|
      -> Result<(i64, i64), SimError> {
         Ok((
-            evaluate_math_expression(left, actor, variables, operations)?,
-            evaluate_math_expression(right, actor, variables, operations)?,
+            evaluate_math_expression(left, actor, effects, variables, operations)?,
+            evaluate_math_expression(right, actor, effects, variables, operations)?,
         ))
     };
     match expression {
@@ -925,6 +1002,14 @@ fn evaluate_math_expression(
         EocMathExpressionV1::HasActorVariable(variable_id) => {
             Ok(i64::from(variables.contains_key(variable_id)))
         }
+        EocMathExpressionV1::EffectIntensity(effect_id) => Ok(i64::from(
+            effects
+                .iter()
+                .filter(|effect| effect.effect_id == *effect_id)
+                .map(|effect| effect.intensity)
+                .max()
+                .unwrap_or(0),
+        )),
         EocMathExpressionV1::ActorStat(stat) => Ok(i64::from(match stat {
             EocActorStatV1::Strength => actor.base_strength,
             EocActorStatV1::Dexterity => actor.base_dexterity,
@@ -933,10 +1018,10 @@ fn evaluate_math_expression(
         })),
         EocMathExpressionV1::ActorValue(value) => Ok(actor_value(actor, *value)),
         EocMathExpressionV1::Negate(value) => safe_math_result(
-            evaluate_math_expression(value, actor, variables, operations)?.checked_neg(),
+            evaluate_math_expression(value, actor, effects, variables, operations)?.checked_neg(),
         ),
         EocMathExpressionV1::Not(value) => Ok(i64::from(
-            evaluate_math_expression(value, actor, variables, operations)? == 0,
+            evaluate_math_expression(value, actor, effects, variables, operations)? == 0,
         )),
         EocMathExpressionV1::Add(left, right) => {
             let (left, right) = binary(left, right, operations)?;
@@ -975,20 +1060,20 @@ fn evaluate_math_expression(
             Ok(i64::from(left >= right))
         }
         EocMathExpressionV1::And(left, right) => {
-            if evaluate_math_expression(left, actor, variables, operations)? == 0 {
+            if evaluate_math_expression(left, actor, effects, variables, operations)? == 0 {
                 Ok(0)
             } else {
                 Ok(i64::from(
-                    evaluate_math_expression(right, actor, variables, operations)? != 0,
+                    evaluate_math_expression(right, actor, effects, variables, operations)? != 0,
                 ))
             }
         }
         EocMathExpressionV1::Or(left, right) => {
-            if evaluate_math_expression(left, actor, variables, operations)? != 0 {
+            if evaluate_math_expression(left, actor, effects, variables, operations)? != 0 {
                 Ok(1)
             } else {
                 Ok(i64::from(
-                    evaluate_math_expression(right, actor, variables, operations)? != 0,
+                    evaluate_math_expression(right, actor, effects, variables, operations)? != 0,
                 ))
             }
         }
@@ -1109,6 +1194,7 @@ fn execute_effects(
                 duration_turns,
                 permanent,
                 intensity,
+                intensity_is_explicit,
             } => add_effect(
                 execution,
                 effect_id,
@@ -1116,6 +1202,7 @@ fn execute_effects(
                 *duration_turns,
                 *permanent,
                 *intensity,
+                *intensity_is_explicit,
             )?,
             EocEffectV1::RemoveEffects {
                 effect_ids,
@@ -1153,6 +1240,7 @@ fn execute_effects(
                 let value = evaluate_math_expression(
                     value,
                     &execution.actor,
+                    &execution.effects,
                     &execution.variables,
                     &mut execution.operations,
                 )?;
@@ -1290,6 +1378,7 @@ fn add_effect(
     duration_turns: u32,
     permanent: bool,
     intensity: u32,
+    intensity_is_explicit: bool,
 ) -> Result<(), SimError> {
     let duration_ticks = u64::from(duration_turns)
         .checked_mul(SimTick::HZ)
@@ -1299,7 +1388,15 @@ fn add_effect(
         .iter_mut()
         .find(|effect| effect.effect_id == effect_id && effect.body_part_id == body_part_id)
     {
-        existing.intensity = intensity;
+        existing.intensity = if intensity_is_explicit {
+            intensity
+        } else {
+            existing
+                .intensity
+                .checked_add(intensity)
+                .filter(|intensity| *intensity <= 1_000_000)
+                .ok_or(SimError::NumericOverflow)?
+        };
         existing.expires_at_tick = if permanent || existing.expires_at_tick == SimTick(u64::MAX) {
             SimTick(u64::MAX)
         } else {

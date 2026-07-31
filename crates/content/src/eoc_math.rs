@@ -11,6 +11,7 @@ pub enum EocMathExpressionDefinition {
     Constant(i64),
     ActorVariable(String),
     HasActorVariable(String),
+    EffectIntensity(String),
     ActorStat(EocActorStatDefinition),
     ActorValue(EocActorValueDefinition),
     Negate(Box<Self>),
@@ -431,6 +432,16 @@ impl Parser {
             "has_var" => {
                 let variable_id = self.take_actor_variable()?;
                 EocMathExpressionDefinition::HasActorVariable(variable_id)
+            }
+            "u_effect_intensity" => {
+                let effect_id = match self.take()? {
+                    Token::Text(effect_id) | Token::Identifier(effect_id) => effect_id,
+                    _ => return None,
+                };
+                if effect_id.is_empty() || effect_id.len() > 512 {
+                    return None;
+                }
+                EocMathExpressionDefinition::EffectIntensity(effect_id)
             }
             "u_val" => {
                 let value = match self.take()? {

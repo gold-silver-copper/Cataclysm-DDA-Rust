@@ -3039,6 +3039,8 @@ struct Creature {
     action_points: i64,
     downed_until_tick: Option<SimTick>,
     special_attacks: Vec<CreatureSpecialAttackStateV1>,
+    effects: Vec<ActorEffectSnapshotV1>,
+    eoc_variables: BTreeMap<String, String>,
     blood_field_type_id: String,
     corpse: Option<CreatureCorpsePrototypeV1>,
 }
@@ -3197,6 +3199,8 @@ impl Creature {
             action_points: self.action_points,
             downed_until_tick: self.downed_until_tick,
             special_attacks: self.special_attacks.clone(),
+            effects: self.effects.clone(),
+            eoc_variables: self.eoc_variables.clone(),
             blood_field_type_id: self.blood_field_type_id.clone(),
             corpse: self.corpse.clone(),
         }
@@ -3236,6 +3240,8 @@ impl Creature {
             action_points: snapshot.action_points,
             downed_until_tick: snapshot.downed_until_tick,
             special_attacks: snapshot.special_attacks.clone(),
+            effects: snapshot.effects.clone(),
+            eoc_variables: snapshot.eoc_variables.clone(),
             blood_field_type_id: snapshot.blood_field_type_id.clone(),
             corpse: snapshot.corpse.clone(),
         })
@@ -3276,6 +3282,19 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
             validate_item_type_id(&attack.attack_id).is_err()
                 || attack.cooldown_turns > 1_000_000_000
         })
+        || snapshot.effects.len() > 1_024
+        || !snapshot.effects.windows(2).all(|pair| {
+            (&pair[0].effect_id, &pair[0].body_part_id)
+                < (&pair[1].effect_id, &pair[1].body_part_id)
+        })
+        || snapshot.effects.iter().any(|effect| {
+            effect.body_part_id.is_some()
+                || validate_item_type_id(&effect.effect_id).is_err()
+                || effect.intensity == 0
+                || effect.intensity > 1_000_000
+                || effect.expires_at_tick == SimTick(0)
+        })
+        || !cdda_protocol::actor_eoc_variables_are_valid(&snapshot.eoc_variables)
         || (!snapshot.blood_field_type_id.is_empty()
             && validate_item_type_id(&snapshot.blood_field_type_id).is_err())
         || snapshot.corpse.as_ref().is_some_and(|corpse| {
@@ -5039,10 +5058,22 @@ impl WorldState {
 
     pub fn configure_worldgen(&mut self, catalog: WorldgenCatalogV1) -> Result<(), SimError> {
         let item_groups = self.item_groups.values().cloned().collect::<Vec<_>>();
+        let eoc_definitions = self.eoc_definitions.values().cloned().collect::<Vec<_>>();
+        let creature_eoc_ids = cdda_protocol::creature_eoc_supported_ids(&eoc_definitions);
         if self.tick != SimTick(0)
             || !self.chunks.is_empty()
             || self.worldgen.is_some()
             || !worldgen_catalog_is_valid(&catalog, &item_groups)
+            || catalog.monster_prototypes.iter().any(|prototype| {
+                prototype.special_attacks.iter().any(|attack| {
+                    attack.condition.as_ref().is_some_and(|condition| {
+                        !cdda_protocol::creature_eoc_condition_is_supported(condition)
+                    }) || attack
+                        .eoc_ids
+                        .iter()
+                        .any(|eoc_id| !creature_eoc_ids.contains(eoc_id))
+                })
+            })
             || !mapgen::catalog_fits_one_id_reservation(
                 &catalog,
                 &item_groups,
@@ -5542,6 +5573,8 @@ impl WorldState {
                 action_points: 0,
                 downed_until_tick: None,
                 special_attacks,
+                effects: Vec::new(),
+                eoc_variables: BTreeMap::new(),
                 blood_field_type_id: spawn.blood_field_type_id,
                 corpse: spawn.corpse,
             },
@@ -6045,6 +6078,11 @@ impl WorldState {
     fn advance_actor_effects(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
         for actor in self.actors.values_mut() {
             actor
+                .effects
+                .retain(|effect| effect.expires_at_tick > self.tick);
+        }
+        for creature in self.creatures.values_mut() {
+            creature
                 .effects
                 .retain(|effect| effect.expires_at_tick > self.tick);
         }
@@ -13504,6 +13542,8 @@ impl WorldState {
                             .ok_or(SimError::NumericOverflow)?,
                     )),
                     special_attacks: revived_special_attacks,
+                    effects: Vec::new(),
+                    eoc_variables: BTreeMap::new(),
                     blood_field_type_id: corpse.prototype.blood_field_type_id.clone(),
                     corpse: Some(corpse.prototype),
                 },
@@ -14349,6 +14389,10 @@ impl WorldState {
         let mut creatures = BTreeMap::new();
         for creature_snapshot in &snapshot.creatures {
             if creature_snapshot.id.world_namespace() != snapshot.world_namespace
+                || creature_snapshot
+                    .effects
+                    .iter()
+                    .any(|effect| effect.expires_at_tick <= snapshot.tick)
                 || !monsters::special_state_matches_catalog(
                     snapshot.worldgen.as_ref(),
                     creature_snapshot,
@@ -14449,7 +14493,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV92");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV93");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

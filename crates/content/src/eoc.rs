@@ -96,6 +96,7 @@ pub enum EocEffectDefinition {
         duration_turns: u32,
         permanent: bool,
         intensity: u32,
+        intensity_is_explicit: bool,
     },
     RemoveEffects {
         effect_ids: Vec<String>,
@@ -496,7 +497,7 @@ fn parse_event_trigger(value: &str) -> Option<EocEventTriggerDefinition> {
     })
 }
 
-fn parse_condition(
+pub(crate) fn parse_condition(
     value: &Value,
     path: &str,
     depth: usize,
@@ -931,6 +932,7 @@ fn parse_effects(
                 duration_turns,
                 permanent,
                 intensity,
+                intensity_is_explicit: object.contains_key("intensity"),
             });
             continue;
         }

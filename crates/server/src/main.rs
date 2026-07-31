@@ -914,6 +914,7 @@ fn open_world(
             item_groups: &item_group_catalog,
             monsters,
             monster_groups,
+            eoc_definitions: &eoc_catalog.0,
         },
     )?;
     initial.register_item_group_catalog(item_group_catalog)?;

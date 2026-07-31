@@ -308,6 +308,13 @@ impl WorldState {
             if !state.enabled || state.cooldown_turns > 0 {
                 continue;
             }
+            if profile.condition.as_ref().is_some_and(|condition| {
+                !self
+                    .creature_eoc_condition_matches(source, condition)
+                    .unwrap_or(false)
+            }) {
+                continue;
+            }
             let sequence = turn_sequence
                 .checked_mul(64)
                 .and_then(|sequence| sequence.checked_add(index as u64))
@@ -337,6 +344,10 @@ impl WorldState {
                     self.execute_creature_special_attack(
                         source, target, profile, sequence, events,
                     )?;
+                    if !profile.eoc_ids.is_empty() {
+                        let _ =
+                            self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
+                    }
                     true
                 }
                 WorldgenMonsterSpecialAttackKindV1::Leap => {
@@ -350,6 +361,29 @@ impl WorldState {
                         continue;
                     }
                     self.execute_creature_leap(source, destination, profile, sequence, events)?
+                }
+                WorldgenMonsterSpecialAttackKindV1::Eoc => {
+                    let Some((target, target_position)) = visible_target else {
+                        continue;
+                    };
+                    let source_position = self
+                        .creatures
+                        .get(&source)
+                        .ok_or(SimError::UnknownCreature)?
+                        .position;
+                    let distance = ranged_distance(source_position, target_position);
+                    if distance == 0
+                        || distance > profile.range
+                        || (profile.range == 1
+                            && !horizontally_adjacent(source_position, target_position))
+                        || (profile.range > 1
+                            && !self.has_clear_shot(source_position, target_position))
+                        || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
+                    {
+                        continue;
+                    }
+                    let _ = self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
+                    true
                 }
             };
             if !used {

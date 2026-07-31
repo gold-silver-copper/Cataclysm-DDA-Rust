@@ -321,7 +321,7 @@ fn runtime_eoc_definition(definition: &EffectOnConditionDefinition) -> EocDefini
     }
 }
 
-fn runtime_condition(condition: &EocConditionDefinition) -> EocConditionV1 {
+pub(super) fn runtime_condition(condition: &EocConditionDefinition) -> EocConditionV1 {
     match condition {
         EocConditionDefinition::Constant(value) => EocConditionV1::Constant(*value),
         EocConditionDefinition::HasEffect {
@@ -422,12 +422,14 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
             duration_turns,
             permanent,
             intensity,
+            intensity_is_explicit,
         } => EocEffectV1::AddEffect {
             effect_id: effect_id.clone(),
             body_part_id: body_part_id.clone(),
             duration_turns: *duration_turns,
             permanent: *permanent,
             intensity: *intensity,
+            intensity_is_explicit: *intensity_is_explicit,
         },
         EocEffectDefinition::RemoveEffects {
             effect_ids,
@@ -521,6 +523,9 @@ fn runtime_math_expression(expression: &EocMathExpressionDefinition) -> EocMathE
         }
         EocMathExpressionDefinition::HasActorVariable(variable_id) => {
             EocMathExpressionV1::HasActorVariable(variable_id.clone())
+        }
+        EocMathExpressionDefinition::EffectIntensity(effect_id) => {
+            EocMathExpressionV1::EffectIntensity(effect_id.clone())
         }
         EocMathExpressionDefinition::ActorStat(stat) => {
             EocMathExpressionV1::ActorStat(runtime_actor_stat(*stat))

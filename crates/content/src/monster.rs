@@ -5,7 +5,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
+use crate::{
+    ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile,
+    eoc::{EocConditionDefinition, parse_condition},
+};
 
 const IMPLEMENTED_FIELDS: &[&str] = &[
     "type",
@@ -86,6 +89,7 @@ pub enum MonsterSpecialAttackKind {
     Melee,
     Bite,
     Leap,
+    Eoc,
     Unsupported,
 }
 
@@ -116,6 +120,8 @@ pub struct MonsterSpecialAttackDefinition {
     pub leap_prefer: bool,
     pub leap_random: bool,
     pub leap_ignore_destination_danger: bool,
+    pub condition: Option<EocConditionDefinition>,
+    pub eoc_ids: Vec<String>,
     pub unsupported_fields: BTreeSet<String>,
 }
 
@@ -672,6 +678,8 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         leap_prefer: false,
         leap_random: false,
         leap_ignore_destination_danger: false,
+        condition: None,
+        eoc_ids: Vec::new(),
         unsupported_fields: BTreeSet::from([field.to_owned()]),
     }
 }
@@ -696,6 +704,7 @@ fn parse_special_attack(
         "melee" => MonsterSpecialAttackKind::Melee,
         "bite" => MonsterSpecialAttackKind::Bite,
         "leap" => MonsterSpecialAttackKind::Leap,
+        "eoc" => MonsterSpecialAttackKind::Eoc,
         "monster_attack" => base
             .map(|base| base.kind)
             .unwrap_or(MonsterSpecialAttackKind::Unsupported),
@@ -709,7 +718,9 @@ fn parse_special_attack(
     if kind != MonsterSpecialAttackKind::Unsupported {
         attack.unsupported_fields.remove("missing_actor_type");
     }
-    if declared_type != "monster_attack" && !matches!(declared_type, "melee" | "bite" | "leap") {
+    if declared_type != "monster_attack"
+        && !matches!(declared_type, "melee" | "bite" | "leap" | "eoc")
+    {
         attack
             .unsupported_fields
             .insert(format!("attack_type.{declared_type}"));
@@ -728,6 +739,16 @@ fn parse_special_attack(
         attack.maximum_damage_multiplier_millionths = 0;
         attack.leap_minimum_range_milli = 1_000;
         attack.leap_maximum_consider_range_milli = 200_000;
+    }
+    if kind == MonsterSpecialAttackKind::Eoc && base.is_none() {
+        attack.move_cost_moves = 0;
+        attack.accuracy = None;
+        attack.no_adjacent = false;
+        attack.dodgeable = false;
+        attack.minimum_damage_multiplier_millionths = 0;
+        attack.maximum_damage_multiplier_millionths = 0;
+        attack.damage.clear();
+        attack.effects.clear();
     }
     if let Some(value) = fields.get("move_cost") {
         attack.move_cost_moves = parse_u32(value, source, "special_attacks.move_cost")?;
@@ -771,6 +792,37 @@ fn parse_special_attack(
         let (effects, deferred) = parse_monster_effects(value, source, "special_attacks.effects")?;
         attack.effects = effects;
         attack.unsupported_fields.extend(deferred);
+    }
+    if let Some(value) = fields.get("condition") {
+        attack.unsupported_fields.remove("condition");
+        let mut unsupported = BTreeSet::new();
+        attack.condition = parse_condition(value, "special_attacks.condition", 0, &mut unsupported);
+        attack.unsupported_fields.extend(unsupported);
+        if attack.condition.is_none() {
+            attack.unsupported_fields.insert(String::from("condition"));
+        }
+    }
+    if let Some(value) = fields.get("eoc") {
+        attack.unsupported_fields.remove("eoc");
+        let values = value
+            .as_array()
+            .map_or_else(|| vec![value], |values| values.iter().collect());
+        let mut eoc_ids = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(eoc_id) = value.as_str().filter(|id| {
+                !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+            }) else {
+                attack.unsupported_fields.insert(String::from("eoc"));
+                eoc_ids.clear();
+                break;
+            };
+            eoc_ids.push(eoc_id.to_owned());
+        }
+        if eoc_ids.is_empty() {
+            attack.unsupported_fields.insert(String::from("eoc"));
+        } else {
+            attack.eoc_ids = eoc_ids;
+        }
     }
     if kind == MonsterSpecialAttackKind::Bite {
         if let Some(value) = fields.get("infection_chance") {
@@ -864,6 +916,8 @@ fn parse_special_attack(
         "spread_damage",
         "throw_strength",
         "effects",
+        "condition",
+        "eoc",
         "infection_chance",
         "max_range",
         "min_range",
@@ -885,8 +939,6 @@ fn parse_special_attack(
                 field.as_str(),
                 "grab"
                     | "grab_data"
-                    | "condition"
-                    | "eoc"
                     | "body_part_types"
                     | "self_effects_always"
                     | "self_effects_onhit"
@@ -901,7 +953,6 @@ fn parse_special_attack(
         "accuracy",
         "min_mul",
         "max_mul",
-        "range",
         "no_adjacent",
         "dodgeable",
         "uncanny_dodgeable",
@@ -928,6 +979,7 @@ fn parse_special_attack(
     let inapplicable = match kind {
         MonsterSpecialAttackKind::Leap => MELEE_ONLY_FIELDS,
         MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite => LEAP_ONLY_FIELDS,
+        MonsterSpecialAttackKind::Eoc => &[],
         MonsterSpecialAttackKind::Unsupported => &[],
     };
     attack.unsupported_fields.extend(
@@ -936,6 +988,37 @@ fn parse_special_attack(
             .filter(|field| fields.contains_key(**field))
             .map(|field| (*field).to_owned()),
     );
+    if kind == MonsterSpecialAttackKind::Leap && fields.contains_key("range") {
+        attack.unsupported_fields.insert(String::from("range"));
+    }
+    if kind == MonsterSpecialAttackKind::Leap {
+        for field in ["condition", "eoc"] {
+            if fields.contains_key(field) {
+                attack.unsupported_fields.insert(field.to_owned());
+            }
+        }
+    }
+    if kind == MonsterSpecialAttackKind::Eoc {
+        attack.unsupported_fields.extend(
+            MELEE_ONLY_FIELDS
+                .iter()
+                .chain(LEAP_ONLY_FIELDS)
+                .filter(|field| !matches!(**field, "allow_no_target"))
+                .filter(|field| fields.contains_key(**field))
+                .map(|field| (*field).to_owned()),
+        );
+        if attack.eoc_ids.is_empty() {
+            attack.unsupported_fields.insert(String::from("eoc"));
+        }
+        if fields
+            .get("allow_no_target")
+            .is_some_and(|value| value.as_bool() != Some(false))
+        {
+            attack
+                .unsupported_fields
+                .insert(String::from("allow_no_target"));
+        }
+    }
     if kind != MonsterSpecialAttackKind::Bite && fields.contains_key("infection_chance") {
         attack
             .unsupported_fields

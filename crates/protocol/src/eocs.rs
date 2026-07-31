@@ -107,6 +107,7 @@ pub enum EocMathExpressionV1 {
     Constant(i64),
     ActorVariable(String),
     HasActorVariable(String),
+    EffectIntensity(String),
     ActorStat(EocActorStatV1),
     ActorValue(EocActorValueV1),
     Negate(Box<Self>),
@@ -150,6 +151,7 @@ pub enum EocEffectV1 {
         duration_turns: u32,
         permanent: bool,
         intensity: u32,
+        intensity_is_explicit: bool,
     },
     RemoveEffects {
         effect_ids: Vec<String>,
@@ -374,6 +376,120 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
     }
 }
 
+#[must_use]
+pub fn eoc_condition_is_valid(condition: &EocConditionV1) -> bool {
+    let mut nodes = 0;
+    valid_condition(condition, 0, &mut nodes) && nodes <= MAX_EOC_TREE_NODES
+}
+
+#[must_use]
+pub fn creature_eoc_supported_ids(definitions: &[EocDefinitionV1]) -> BTreeSet<String> {
+    let mut supported = definitions
+        .iter()
+        .filter(|definition| {
+            definition.recurrence.is_none()
+                && definition.deactivate_condition.is_none()
+                && definition.event_trigger.is_none()
+                && definition
+                    .condition
+                    .as_ref()
+                    .is_none_or(creature_eoc_condition_is_supported)
+                && creature_eoc_effects_are_supported(&definition.effects)
+                && creature_eoc_effects_are_supported(&definition.false_effects)
+        })
+        .map(|definition| definition.eoc_id.clone())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let unavailable = definitions
+            .iter()
+            .filter(|definition| supported.contains(&definition.eoc_id))
+            .filter(|definition| {
+                definition
+                    .referenced_eocs()
+                    .iter()
+                    .any(|reference| !supported.contains(*reference))
+            })
+            .map(|definition| definition.eoc_id.clone())
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            return supported;
+        }
+        for eoc_id in unavailable {
+            supported.remove(&eoc_id);
+        }
+    }
+}
+
+#[must_use]
+pub fn creature_eoc_condition_is_supported(condition: &EocConditionV1) -> bool {
+    match condition {
+        EocConditionV1::Constant(_) => true,
+        EocConditionV1::HasEffect { body_part_id, .. }
+        | EocConditionV1::HasAnyEffect { body_part_id, .. } => body_part_id.is_none(),
+        EocConditionV1::CompareString(_) | EocConditionV1::CompareStringAll(_) => true,
+        EocConditionV1::Math(expression) => creature_eoc_math_is_supported(expression),
+        EocConditionV1::Not(condition) => creature_eoc_condition_is_supported(condition),
+        EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => {
+            conditions.iter().all(creature_eoc_condition_is_supported)
+        }
+        EocConditionV1::HasItem { .. }
+        | EocConditionV1::HasWeapon
+        | EocConditionV1::IsWearing { .. }
+        | EocConditionV1::HasProficiency { .. }
+        | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::StatAtLeast { .. } => false,
+    }
+}
+
+fn creature_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectV1::SetActorVariable { .. } | EocEffectV1::RemoveActorVariable { .. } => true,
+        EocEffectV1::AddEffect { body_part_id, .. }
+        | EocEffectV1::RemoveEffects { body_part_id, .. } => body_part_id.is_none(),
+        EocEffectV1::MathAssignment { target, value, .. } => {
+            matches!(target, EocMathAssignmentTargetV1::ActorVariable(_))
+                && creature_eoc_math_is_supported(value)
+        }
+        EocEffectV1::RunEocs { delay, .. } => delay.is_none(),
+        EocEffectV1::Conditional {
+            condition,
+            then_effects,
+            else_effects,
+        } => {
+            creature_eoc_condition_is_supported(condition)
+                && creature_eoc_effects_are_supported(then_effects)
+                && creature_eoc_effects_are_supported(else_effects)
+        }
+        EocEffectV1::Message { .. } | EocEffectV1::Confirmation { .. } => false,
+    })
+}
+
+fn creature_eoc_math_is_supported(expression: &EocMathExpressionV1) -> bool {
+    match expression {
+        EocMathExpressionV1::Constant(_)
+        | EocMathExpressionV1::ActorVariable(_)
+        | EocMathExpressionV1::HasActorVariable(_)
+        | EocMathExpressionV1::EffectIntensity(_) => true,
+        EocMathExpressionV1::Negate(value) | EocMathExpressionV1::Not(value) => {
+            creature_eoc_math_is_supported(value)
+        }
+        EocMathExpressionV1::Add(left, right)
+        | EocMathExpressionV1::Subtract(left, right)
+        | EocMathExpressionV1::Multiply(left, right)
+        | EocMathExpressionV1::Equal(left, right)
+        | EocMathExpressionV1::NotEqual(left, right)
+        | EocMathExpressionV1::Less(left, right)
+        | EocMathExpressionV1::LessOrEqual(left, right)
+        | EocMathExpressionV1::Greater(left, right)
+        | EocMathExpressionV1::GreaterOrEqual(left, right)
+        | EocMathExpressionV1::And(left, right)
+        | EocMathExpressionV1::Or(left, right) => {
+            creature_eoc_math_is_supported(left) && creature_eoc_math_is_supported(right)
+        }
+        EocMathExpressionV1::ActorStat(_) | EocMathExpressionV1::ActorValue(_) => false,
+    }
+}
+
 fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bool {
     if depth >= MAX_EOC_TREE_DEPTH || effects.len() > MAX_EOC_EFFECTS {
         return false;
@@ -393,6 +509,7 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                 duration_turns,
                 permanent,
                 intensity,
+                ..
             } => {
                 valid_id(effect_id)
                     && body_part_id.as_deref().is_none_or(valid_id)
@@ -493,7 +610,8 @@ fn valid_math_expression(
     match expression {
         EocMathExpressionV1::Constant(value) => value.unsigned_abs() <= MAX_EOC_SAFE_INTEGER as u64,
         EocMathExpressionV1::ActorVariable(variable_id)
-        | EocMathExpressionV1::HasActorVariable(variable_id) => valid_id(variable_id),
+        | EocMathExpressionV1::HasActorVariable(variable_id)
+        | EocMathExpressionV1::EffectIntensity(variable_id) => valid_id(variable_id),
         EocMathExpressionV1::ActorStat(_) | EocMathExpressionV1::ActorValue(_) => true,
         EocMathExpressionV1::Negate(value) | EocMathExpressionV1::Not(value) => {
             valid_math_expression(value, depth + 1, nodes)
