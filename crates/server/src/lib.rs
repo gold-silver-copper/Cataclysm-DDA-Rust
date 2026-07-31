@@ -4725,8 +4725,22 @@ fn vehicle_part_symbol(symbols: &str, facing_degrees: i16) -> Result<String, Net
         0
     } else if symbols.len() == 8 {
         let display_degrees = (270_i16 - facing_degrees).rem_euclid(360);
-        usize::try_from((display_degrees + 22).rem_euclid(360) / 45)
-            .expect("normalized vehicle direction fits usize")
+        // Pinned `angle_to_dir8` snaps to 15-degree notches: cardinals own
+        // five notches (75 degrees), diagonals one (15 degrees). Integer
+        // doubled degrees reproduce its half-notch bump without floating
+        // point boundary drift.
+        let snap = ((i32::from(display_degrees) * 2 - 15).rem_euclid(720) / 30) + 1;
+        match snap {
+            22..=24 | 1..=2 => 0,
+            3 => 1,
+            4..=8 => 2,
+            9 => 3,
+            10..=14 => 4,
+            15 => 5,
+            16..=20 => 6,
+            21 => 7,
+            _ => 0,
+        }
     } else {
         return Err(NetworkError::Simulation(String::from(
             "vehicle directional symbol count is unsupported",
@@ -4919,10 +4933,63 @@ fn has_clear_line(
             .get(index)
             .and_then(Option::as_ref)
             .is_none_or(|furniture| furniture.transparent);
-        if !tile.transparent || !furniture_transparent {
+        if !tile.transparent || !furniture_transparent || vehicle_is_opaque_at(snapshot, position) {
             return false;
         }
     }
+}
+
+fn vehicle_is_opaque_at(snapshot: &WorldSnapshotV1, position: WorldPosition) -> bool {
+    let Some(catalog) = snapshot.worldgen.as_ref() else {
+        return false;
+    };
+    snapshot.vehicles.iter().any(|vehicle| {
+        let Some(prototype) = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+        else {
+            return true;
+        };
+        vehicle.parts.iter().enumerate().any(|(index, part)| {
+            let Some(prototype_part) = prototype.parts.get(index) else {
+                return true;
+            };
+            let Some(part_type) = catalog
+                .vehicle_part_types
+                .get(usize::from(prototype_part.part_type_index))
+            else {
+                return true;
+            };
+            if part.position != position
+                || part.hp == 0
+                || part_type
+                    .flags
+                    .binary_search_by(|flag| flag.as_str().cmp("OPAQUE"))
+                    .is_err()
+            {
+                return false;
+            }
+            !vehicle.parts.iter().enumerate().any(|(door_index, door)| {
+                let Some(door_prototype) = prototype.parts.get(door_index) else {
+                    return false;
+                };
+                let Some(door_type) = catalog
+                    .vehicle_part_types
+                    .get(usize::from(door_prototype.part_type_index))
+                else {
+                    return false;
+                };
+                door.hp > 0
+                    && door.open
+                    && door_prototype.mount_x == prototype_part.mount_x
+                    && door_prototype.mount_y == prototype_part.mount_y
+                    && door_type
+                        .flags
+                        .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
+                        .is_ok()
+            })
+        })
+    })
 }
 
 fn map_gameplay_rejection(error: &StoreError) -> GameplayRejection {

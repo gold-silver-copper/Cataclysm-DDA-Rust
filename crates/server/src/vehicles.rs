@@ -31,6 +31,19 @@ fn ensure_static_prototype_is_supported(
         .into());
     }
     for part in &prototype.parts {
+        if !part.fuel_item_id.is_empty()
+            || part.with_ammo_percent != 0
+            || !part.ammo_type_ids.is_empty()
+            || part.ammo_quantity_minimum != -1
+            || part.ammo_quantity_maximum != -1
+            || !part.tool_item_ids.is_empty()
+        {
+            return Err(format!(
+                "reachable vehicle {} part {} requires unrepresented fuel, turret ammunition, or tool state",
+                prototype.id, part.part_id
+            )
+            .into());
+        }
         let definition = vehicles.part(&part.part_id).ok_or_else(|| {
             format!(
                 "reachable vehicle {} references missing part {}",
@@ -56,6 +69,37 @@ fn ensure_static_prototype_is_supported(
             return Err(format!(
                 "reachable vehicle {} selects missing variant {:?} for part {}",
                 prototype.id, part.variant_id, definition.id
+            )
+            .into());
+        }
+        const UNREPRESENTED_INITIAL_STATE_FLAGS: [&str; 19] = [
+            "AISLE_LIGHT",
+            "ATOMIC_LIGHT",
+            "BATTERY",
+            "CIRCLE_LIGHT",
+            "CONE_LIGHT",
+            "DOME_LIGHT",
+            "ENGINE",
+            "FREEZER",
+            "FRIDGE",
+            "FUEL_STORE",
+            "FUEL_TANK",
+            "HALF_CIRCLE_LIGHT",
+            "REACTOR",
+            "SECURITY",
+            "TURRET",
+            "WATER_PURIFIER",
+            "WIDE_CONE_LIGHT",
+            "WHEEL",
+            "WIND_TURBINE",
+        ];
+        if let Some(flag) = UNREPRESENTED_INITIAL_STATE_FLAGS
+            .into_iter()
+            .find(|flag| definition.flags.contains(*flag))
+        {
+            return Err(format!(
+                "reachable vehicle {} part {} requires unrepresented {flag} initialization state",
+                prototype.id, definition.id
             )
             .into());
         }

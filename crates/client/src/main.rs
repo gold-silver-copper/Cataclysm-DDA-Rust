@@ -4425,12 +4425,7 @@ fn handle_movement_input(
                         .map(|part_index| (vehicle, tile, part_index))
                 })
             })
-            .filter(|(_, tile, _)| {
-                tile.position.z == actor.position.z
-                    && tile.position.x.abs_diff(actor.position.x) <= 1
-                    && tile.position.y.abs_diff(actor.position.y) <= 1
-                    && tile.position != actor.position
-            })
+            .filter(|(_, tile, _)| tile.position == actor.position)
             .min_by_key(|(vehicle, _tile, part_index)| (vehicle.id, *part_index))
         {
             let _send_result = game.actions.try_send(ClientAction::BoardVehicle {

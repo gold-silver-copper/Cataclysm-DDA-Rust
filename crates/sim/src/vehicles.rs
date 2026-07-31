@@ -8,99 +8,10 @@ use super::{
     construction_reserved_inventory_slots, craft_reserved_inventory_slots, roll_dice,
 };
 
-// Pinned `tileray` rounds `sin(angle) * 100` before stepping. Keeping the
-// quarter-wave as integer canonical data avoids platform libm differences for
-// arbitrary mapgen angles while reproducing the C++ 100-unit raster ray.
-const SIN_DEGREES_TIMES_100: [i16; 91] = [
-    0, 2, 3, 5, 7, 9, 10, 12, 14, 16, 17, 19, 21, 22, 24, 26, 28, 29, 31, 33, 34, 36, 37, 39, 41,
-    42, 44, 45, 47, 48, 50, 52, 53, 54, 56, 57, 59, 60, 62, 63, 64, 66, 67, 68, 69, 71, 72, 73, 74,
-    75, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 87, 88, 89, 90, 91, 91, 92, 93, 93, 94, 95, 95,
-    96, 96, 97, 97, 97, 98, 98, 98, 99, 99, 99, 99, 100, 100, 100, 100, 100, 100,
-];
-
-fn sin_degrees_times_100(degrees: i16) -> i16 {
-    let normalized = degrees.rem_euclid(360);
-    let quadrant = normalized / 90;
-    let within = usize::try_from(normalized % 90).expect("normalized degree index fits usize");
-    match quadrant {
-        0 => SIN_DEGREES_TIMES_100[within],
-        1 => SIN_DEGREES_TIMES_100[90 - within],
-        2 => -SIN_DEGREES_TIMES_100[within],
-        _ => -SIN_DEGREES_TIMES_100[90 - within],
-    }
-}
-
-/// Mechanical port of `vehicle::coord_translate` with a zero pivot. The C++
-/// ray is cleared for each distinct mount, so the closed-form quotient is the
-/// same as its repeated leftover accumulator without state crossing parts.
-pub(crate) fn rotate_vehicle_mount(
-    mount_x: i16,
-    mount_y: i16,
-    facing_degrees: i16,
-) -> Result<(i32, i32), SimError> {
-    let facing = facing_degrees.rem_euclid(360);
-    let delta_x = i32::from(sin_degrees_times_100((90_i16 + facing).rem_euclid(360)));
-    let delta_y = i32::from(sin_degrees_times_100(facing));
-    let abs_x = delta_x.abs();
-    let abs_y = delta_y.abs();
-    let mostly_vertical = abs_x <= abs_y;
-    let advance = i32::from(mount_x).unsigned_abs();
-    let advance = i32::try_from(advance).map_err(|_| SimError::NumericOverflow)?;
-    let (mut x, mut y) = if abs_x != 0 && abs_y != 0 {
-        if mostly_vertical {
-            (
-                advance
-                    .checked_mul(abs_x)
-                    .and_then(|value| value.checked_div(abs_y))
-                    .ok_or(SimError::NumericOverflow)?,
-                advance,
-            )
-        } else {
-            (
-                advance,
-                advance
-                    .checked_mul(abs_y)
-                    .and_then(|value| value.checked_div(abs_x))
-                    .ok_or(SimError::NumericOverflow)?,
-            )
-        }
-    } else if mostly_vertical {
-        (0, advance)
-    } else {
-        (advance, 0)
-    };
-    const SX: [i32; 4] = [1, -1, -1, 1];
-    const SY: [i32; 4] = [1, 1, -1, -1];
-    let quadrant = usize::try_from(facing / 90).map_err(|_| SimError::NumericOverflow)?;
-    x = x
-        .checked_mul(SX[quadrant])
-        .ok_or(SimError::NumericOverflow)?;
-    y = y
-        .checked_mul(SY[quadrant])
-        .ok_or(SimError::NumericOverflow)?;
-    if mount_x < 0 {
-        x = x.checked_neg().ok_or(SimError::NumericOverflow)?;
-        y = y.checked_neg().ok_or(SimError::NumericOverflow)?;
-    }
-    let orthogonal = i32::from(mount_y);
-    if mostly_vertical {
-        x = x
-            .checked_add(
-                orthogonal
-                    .checked_mul(-SY[quadrant])
-                    .ok_or(SimError::NumericOverflow)?,
-            )
-            .ok_or(SimError::NumericOverflow)?;
-    } else {
-        y = y
-            .checked_add(
-                orthogonal
-                    .checked_mul(SX[quadrant])
-                    .ok_or(SimError::NumericOverflow)?,
-            )
-            .ok_or(SimError::NumericOverflow)?;
-    }
-    Ok((x, y))
+fn vehicle_part_has_flag(part: &cdda_protocol::WorldgenVehiclePartTypeV1, flag: &str) -> bool {
+    part.flags
+        .binary_search_by(|candidate| candidate.as_str().cmp(flag))
+        .is_ok()
 }
 
 pub(crate) fn vehicle_part_position(
@@ -109,12 +20,8 @@ pub(crate) fn vehicle_part_position(
     mount_y: i16,
     facing_degrees: i16,
 ) -> Result<WorldPosition, SimError> {
-    let (dx, dy) = rotate_vehicle_mount(mount_x, mount_y, facing_degrees)?;
-    Ok(WorldPosition {
-        x: origin.x.checked_add(dx).ok_or(SimError::NumericOverflow)?,
-        y: origin.y.checked_add(dy).ok_or(SimError::NumericOverflow)?,
-        z: origin.z,
-    })
+    cdda_protocol::expected_vehicle_part_position(origin, mount_x, mount_y, facing_degrees)
+        .ok_or(SimError::NumericOverflow)
 }
 
 /// Pinned light-damage part HP branch from `vehicle::init_state`. Disabled
@@ -133,10 +40,9 @@ pub(crate) fn initial_vehicle_part_hp(
     let roll = roll_dice(rng, 4, 8)?;
     match roll {
         0..=8 => Ok(0),
-        9..=19 => roll
-            .checked_sub(8)
-            .and_then(|numerator| numerator.checked_mul(durability))
-            .map(|value| value / 12)
+        9..=19 => u64::from(roll.checked_sub(8).ok_or(SimError::NumericOverflow)?)
+            .checked_mul(u64::from(durability))
+            .and_then(|value| u32::try_from(value / 12).ok())
             .ok_or(SimError::NumericOverflow),
         _ => Ok(durability),
     }
@@ -166,9 +72,10 @@ fn contiguous_vehicle_axis(candidates: &mut [(usize, i16)], target_index: usize)
         .collect()
 }
 
-fn connected_openable_vehicle_parts(
+pub(crate) fn connected_openable_vehicle_parts(
     prototype: &cdda_protocol::WorldgenVehiclePrototypeV1,
     part_types: &[cdda_protocol::WorldgenVehiclePartTypeV1],
+    live_parts: Option<&[cdda_protocol::VehiclePartSnapshotV1]>,
     target_index: usize,
 ) -> Result<Vec<usize>, SimError> {
     let target = prototype
@@ -189,6 +96,9 @@ fn connected_openable_vehicle_parts(
     let mut same_x = Vec::new();
     let mut same_y = Vec::new();
     for (index, candidate) in prototype.parts.iter().enumerate() {
+        if live_parts.is_some_and(|parts| parts.get(index).is_none_or(|part| part.hp == 0)) {
+            continue;
+        }
         if candidate.part_type_index != target.part_type_index {
             continue;
         }
@@ -228,13 +138,206 @@ impl WorldState {
         })
     }
 
+    fn vehicle_allows_player_use(vehicle: &cdda_protocol::VehicleSnapshotV1) -> bool {
+        vehicle.owner_faction_id == cdda_protocol::PLAYER_FACTION_ID
+            || (vehicle.owner_faction_id.is_empty() && !vehicle.security_locked)
+    }
+
+    pub(super) fn clear_actor_passenger(&mut self, actor_id: ActorId) {
+        for vehicle in self.vehicles.values_mut() {
+            for part in &mut vehicle.parts {
+                if part.passenger == Some(actor_id) {
+                    part.passenger = None;
+                }
+            }
+        }
+    }
+
+    /// Returns whether a live vehicle occupies the tile and its pinned vehicle
+    /// movement cost. A live closed OBSTACLE is impassable, an AISLE costs 2,
+    /// and another non-obstacle vehicle tile costs 8.
+    pub(super) fn vehicle_movement_at(&self, position: WorldPosition) -> (bool, Option<i64>) {
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return (false, None);
+        };
+        let mut occupied = false;
+        let mut aisle = false;
+        for vehicle in self.vehicles.values() {
+            let Some(prototype) = catalog
+                .vehicle_prototypes
+                .get(usize::from(vehicle.prototype_index))
+            else {
+                return (true, None);
+            };
+            for (index, part) in vehicle.parts.iter().enumerate() {
+                if part.hp == 0 || part.position != position {
+                    continue;
+                }
+                occupied = true;
+                let Some(prototype_part) = prototype.parts.get(index) else {
+                    return (true, None);
+                };
+                let Some(part_type) = catalog
+                    .vehicle_part_types
+                    .get(usize::from(prototype_part.part_type_index))
+                else {
+                    return (true, None);
+                };
+                let obstacle = vehicle_part_has_flag(part_type, "OBSTACLE")
+                    && !(vehicle_part_has_flag(part_type, "OPENABLE") && part.open);
+                if obstacle {
+                    return (true, None);
+                }
+                aisle |= vehicle_part_has_flag(part_type, "AISLE");
+            }
+        }
+        (occupied, occupied.then_some(if aisle { 2 } else { 8 }))
+    }
+
     pub(super) fn vehicle_blocks_actor_at(&self, position: WorldPosition) -> bool {
+        matches!(self.vehicle_movement_at(position), (true, None))
+    }
+
+    pub(super) fn vehicle_is_opaque_at(&self, position: WorldPosition) -> bool {
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return false;
+        };
         self.vehicles.values().any(|vehicle| {
-            vehicle
+            let Some(prototype) = catalog
+                .vehicle_prototypes
+                .get(usize::from(vehicle.prototype_index))
+            else {
+                return true;
+            };
+            vehicle.parts.iter().enumerate().any(|(index, part)| {
+                let Some(prototype_part) = prototype.parts.get(index) else {
+                    return true;
+                };
+                let Some(part_type) = catalog
+                    .vehicle_part_types
+                    .get(usize::from(prototype_part.part_type_index))
+                else {
+                    return true;
+                };
+                if part.position != position
+                    || part.hp == 0
+                    || !vehicle_part_has_flag(part_type, "OPAQUE")
+                {
+                    return false;
+                }
+                !vehicle.parts.iter().enumerate().any(|(door_index, door)| {
+                    let Some(door_prototype) = prototype.parts.get(door_index) else {
+                        return false;
+                    };
+                    let Some(door_type) = catalog
+                        .vehicle_part_types
+                        .get(usize::from(door_prototype.part_type_index))
+                    else {
+                        return false;
+                    };
+                    door.hp > 0
+                        && door.open
+                        && door_prototype.mount_x == prototype_part.mount_x
+                        && door_prototype.mount_y == prototype_part.mount_y
+                        && vehicle_part_has_flag(door_type, "OPENABLE")
+                })
+            })
+        })
+    }
+
+    /// Pinned field-contact vehicle predicates for the actor's exact tile.
+    pub(super) fn actor_vehicle_context(&self, actor_id: ActorId) -> (bool, bool) {
+        let Some(actor) = self.actors.get(&actor_id) else {
+            return (false, false);
+        };
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return (false, false);
+        };
+        for vehicle in self.vehicles.values() {
+            let Some(prototype) = catalog
+                .vehicle_prototypes
+                .get(usize::from(vehicle.prototype_index))
+            else {
+                continue;
+            };
+            let selected = vehicle
                 .parts
                 .iter()
-                .any(|part| part.hp > 0 && part.position == position)
-        })
+                .position(|part| part.passenger == Some(actor_id))
+                .or_else(|| {
+                    vehicle
+                        .parts
+                        .iter()
+                        .position(|part| part.hp > 0 && part.position == actor.position)
+                })
+                .or_else(|| {
+                    vehicle
+                        .parts
+                        .iter()
+                        .position(|part| part.position == actor.position)
+                });
+            let Some(selected) = selected else {
+                continue;
+            };
+            let Some(selected_part) = vehicle.parts.get(selected) else {
+                return (true, false);
+            };
+            let Some(selected_prototype) = prototype.parts.get(selected) else {
+                return (true, false);
+            };
+            if selected_part.hp == 0 {
+                return (true, false);
+            }
+            let mount = (selected_prototype.mount_x, selected_prototype.mount_y);
+            let live_part_with_flag = |target: (i16, i16), flag: &str| {
+                vehicle.parts.iter().enumerate().any(|(index, part)| {
+                    let Some(prototype_part) = prototype.parts.get(index) else {
+                        return false;
+                    };
+                    let Some(part_type) = catalog
+                        .vehicle_part_types
+                        .get(usize::from(prototype_part.part_type_index))
+                    else {
+                        return false;
+                    };
+                    part.hp > 0
+                        && (prototype_part.mount_x, prototype_part.mount_y) == target
+                        && vehicle_part_has_flag(part_type, flag)
+                })
+            };
+            if !live_part_with_flag(mount, "ROOF") {
+                return (true, false);
+            }
+            let inside = [(0_i16, -1_i16), (1, 0), (0, 1), (-1, 0)]
+                .into_iter()
+                .all(|(dx, dy)| {
+                    let Some(target_x) = mount.0.checked_add(dx) else {
+                        return false;
+                    };
+                    let Some(target_y) = mount.1.checked_add(dy) else {
+                        return false;
+                    };
+                    let target = (target_x, target_y);
+                    live_part_with_flag(target, "ROOF")
+                        || vehicle.parts.iter().enumerate().any(|(index, part)| {
+                            let Some(prototype_part) = prototype.parts.get(index) else {
+                                return false;
+                            };
+                            let Some(part_type) = catalog
+                                .vehicle_part_types
+                                .get(usize::from(prototype_part.part_type_index))
+                            else {
+                                return false;
+                            };
+                            part.hp > 0
+                                && (prototype_part.mount_x, prototype_part.mount_y) == target
+                                && vehicle_part_has_flag(part_type, "OBSTACLE")
+                                && !(vehicle_part_has_flag(part_type, "OPENABLE") && part.open)
+                        })
+                });
+            return (true, inside);
+        }
+        (false, false)
     }
 
     pub(super) fn vehicle_board_action_cost(&self) -> i64 {
@@ -259,6 +362,10 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
             return Ok(());
         };
+        if !Self::vehicle_allows_player_use(vehicle) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         let target_index = usize::from(prototype_part_index);
         let Some(target_part) = vehicle.parts.get(target_index) else {
             events.push(self.rejection(
@@ -292,6 +399,10 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::VehiclePartBroken)?);
             return Ok(());
         }
+        if open && target_part.locked {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         if target_type
             .flags
             .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
@@ -304,8 +415,16 @@ impl WorldState {
             )?);
             return Ok(());
         }
-        let connected =
-            connected_openable_vehicle_parts(prototype, &catalog.vehicle_part_types, target_index)?;
+        let connected = connected_openable_vehicle_parts(
+            prototype,
+            &catalog.vehicle_part_types,
+            Some(&vehicle.parts),
+            target_index,
+        )?;
+        if open && connected.iter().any(|index| vehicle.parts[*index].locked) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         if !open
             && connected.iter().any(|index| {
                 let position = vehicle.parts[*index].position;
@@ -367,7 +486,7 @@ impl WorldState {
             return Ok(false);
         };
         let target = self.vehicles.iter().find_map(|(vehicle_id, vehicle)| {
-            if !vehicle.owner_faction_id.is_empty() {
+            if !Self::vehicle_allows_player_use(vehicle) {
                 return None;
             }
             let prototype = catalog
@@ -381,6 +500,7 @@ impl WorldState {
                 (part.position == position
                     && part.hp > 0
                     && !part.open
+                    && !part.locked
                     && part_type
                         .flags
                         .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
@@ -399,8 +519,12 @@ impl WorldState {
             .vehicle_prototypes
             .get(usize::from(vehicle.prototype_index))
             .ok_or(SimError::InvalidTerrain)?;
-        let connected =
-            connected_openable_vehicle_parts(prototype, &catalog.vehicle_part_types, target_index)?;
+        let connected = connected_openable_vehicle_parts(
+            prototype,
+            &catalog.vehicle_part_types,
+            Some(&vehicle.parts),
+            target_index,
+        )?;
         let mut changed = Vec::new();
         let vehicle = self
             .vehicles
@@ -450,6 +574,10 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
             return Ok(());
         };
+        if !Self::vehicle_allows_player_use(vehicle) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         let Some(part) = vehicle.parts.get(usize::from(prototype_part_index)) else {
             events.push(self.rejection(
                 actor_id,
@@ -503,10 +631,10 @@ impl WorldState {
             .ok_or(SimError::UnknownActor)?
             .position;
         let to = part.position;
-        if from.z != to.z
-            || from.x.abs_diff(to.x) > 1
-            || from.y.abs_diff(to.y) > 1
-            || (from == to)
+        // Pinned boarding attaches a character already standing on the
+        // boardable tile; it is not a second movement/teleport primitive.
+        if from != to
+            || self.vehicle_blocks_actor_at(to)
             || self
                 .actors
                 .iter()
@@ -520,10 +648,6 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
         }
-        self.actors
-            .get_mut(&actor_id)
-            .ok_or(SimError::UnknownActor)?
-            .position = to;
         self.vehicles
             .get_mut(&vehicle_id)
             .and_then(|vehicle| vehicle.parts.get_mut(usize::from(prototype_part_index)))
@@ -645,6 +769,10 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
             return Ok(());
         };
+        if !Self::vehicle_allows_player_use(vehicle) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         let Some(part) = vehicle.parts.get(usize::from(prototype_part_index)) else {
             events.push(self.rejection(
                 actor_id,
@@ -754,6 +882,10 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
             return Ok(());
         };
+        if !Self::vehicle_allows_player_use(vehicle) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
         let Some(part) = vehicle.parts.get(usize::from(prototype_part_index)) else {
             events.push(self.rejection(
                 actor_id,

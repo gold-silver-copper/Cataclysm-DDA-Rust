@@ -147,15 +147,24 @@ impl WorldState {
             u64::from(field_intensity),
         );
         let current_tick = self.tick;
+        let (in_vehicle, inside_vehicle) = self.actor_vehicle_context(actor_id);
         for effect in effects {
-            // Player characters cannot occupy vehicles until the vehicle
-            // subsystem lands. Preserve every predicate in the contract and
-            // execute the exact outside-vehicle branch in the meantime.
-            if effect.environmental || effect.immune_outside_vehicle {
+            if effect.environmental
+                || (in_vehicle && effect.immune_in_vehicle)
+                || (inside_vehicle && effect.immune_inside_vehicle)
+                || (!inside_vehicle && effect.immune_outside_vehicle)
+            {
                 continue;
             }
-            if effect.chance_outside_vehicle > 1
-                && rng.next_u32() % effect.chance_outside_vehicle != 0
+            if (in_vehicle
+                && effect.chance_in_vehicle > 1
+                && rng.next_u32() % effect.chance_in_vehicle != 0)
+                || (inside_vehicle
+                    && effect.chance_inside_vehicle > 1
+                    && rng.next_u32() % effect.chance_inside_vehicle != 0)
+                || (!inside_vehicle
+                    && effect.chance_outside_vehicle > 1
+                    && rng.next_u32() % effect.chance_outside_vehicle != 0)
             {
                 continue;
             }

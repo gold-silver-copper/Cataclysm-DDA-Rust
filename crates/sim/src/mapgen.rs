@@ -153,6 +153,8 @@ pub(super) struct PlannedVehicleSpawn {
     pub origin: WorldPosition,
     pub facing_degrees: i16,
     pub owner_faction_id: String,
+    pub engine_on: bool,
+    pub security_locked: bool,
     pub parts: Vec<VehiclePartSnapshotV1>,
     pub cargo: Vec<Vec<PlannedItemSpawn>>,
 }
@@ -446,6 +448,7 @@ fn plan_omt_cell(
             cargo.push(std::mem::take(&mut state.cargo));
         }
         let mut structure_positions = std::collections::BTreeSet::new();
+        let mut placement_valid = true;
         for (index, part) in parts.iter().enumerate() {
             let prototype_part = prototype.parts.get(index).ok_or(SimError::InvalidTerrain)?;
             let part_type = catalog
@@ -473,28 +476,39 @@ fn plan_omt_cell(
                         .ok_or(SimError::NumericOverflow)?,
                 )
                 .ok_or(SimError::NumericOverflow)?;
-            let local_index =
-                absolute_tile_index(local_x, local_y).ok_or(SimError::InvalidTerrain)?;
+            let Some(local_index) = absolute_tile_index(local_x, local_y) else {
+                placement_valid = false;
+                break;
+            };
             if terrain[local_index].move_cost <= 0
                 || furniture[local_index]
                     .as_ref()
                     .is_some_and(|furniture| furniture.move_cost_mod < 0)
                 || !structure_positions.insert(part.position)
             {
-                return Err(SimError::InvalidTerrain);
+                placement_valid = false;
+                break;
             }
         }
-        if structure_positions
-            .iter()
-            .any(|position| !occupied.insert(*position))
+        if !placement_valid
+            || structure_positions
+                .iter()
+                .any(|position| occupied.contains(position))
         {
-            return Err(SimError::InvalidTerrain);
+            // Pinned `add_vehicle` failure is local to this placement. A bad
+            // collision must not roll back the rest of the overmap tile, and
+            // this version has no smash/merge request that could authorize a
+            // destructive fallback.
+            continue;
         }
+        occupied.extend(structure_positions);
         vehicles.push(PlannedVehicleSpawn {
             prototype_index: vehicle.prototype_index,
             origin,
             facing_degrees: vehicle.facing_degrees,
             owner_faction_id: vehicle.owner_faction_id,
+            engine_on: vehicle.engine_on,
+            security_locked: vehicle.security_locked,
             parts,
             cargo,
         });
@@ -626,6 +640,8 @@ struct PlannedMapgenVehicle {
     origin_index: usize,
     facing_degrees: i16,
     owner_faction_id: String,
+    engine_on: bool,
+    security_locked: bool,
     parts: Vec<PlannedVehiclePartState>,
 }
 
@@ -973,6 +989,12 @@ fn clay_or_sand(
 
 fn one_in_mapgen(rng: &mut ChaCha8Rng, denominator: u64) -> bool {
     inclusive_rng_u64(rng, 1, denominator) == 1
+}
+
+fn x_in_y_percent_mapgen(rng: &mut ChaCha8Rng, chance_percent: u8) -> bool {
+    let roll = rng.next_u64();
+    u128::from(roll).saturating_mul(100)
+        <= u128::from(chance_percent).saturating_mul(u128::from(u64::MAX))
 }
 
 fn builtin_terrain(
@@ -1344,10 +1366,7 @@ fn plan_vehicle_placement(
         choose_worldgen_u16_range(placement.repeat, rng)?
     };
     for _ in 0..repeat {
-        // Pinned `x_in_y` always evaluates its random distribution, including
-        // the 0% and 100% boundaries.
-        let chance_roll = inclusive_rng_u64(rng, 0, 99);
-        if chance_roll >= u64::from(placement.chance_percent) {
+        if !x_in_y_percent_mapgen(rng, placement.chance_percent) {
             continue;
         }
         let group = catalog
@@ -1357,13 +1376,20 @@ fn plan_vehicle_placement(
         let total_weight = group.entries.iter().try_fold(0_u64, |total, entry| {
             total.checked_add(u64::from(entry.weight))
         });
-        let entry_index = choose_weighted_index(
-            group.entries.len(),
-            total_weight.ok_or(SimError::NumericOverflow)?,
-            rng,
-            |index| u64::from(group.entries[index].weight),
-            true,
-        )?;
+        let total_weight = total_weight.ok_or(SimError::NumericOverflow)?;
+        // `VehicleGroup::pick` is the weighted-int raw-bits path, including a
+        // consumed 32-bit draw for singleton groups.
+        let mut ticket = u64::from(rng.next_u32()) % total_weight + 1;
+        let mut entry_index = None;
+        for (index, entry) in group.entries.iter().enumerate() {
+            let weight = u64::from(entry.weight);
+            if ticket <= weight {
+                entry_index = Some(index);
+                break;
+            }
+            ticket -= weight;
+        }
+        let entry_index = entry_index.ok_or(SimError::InvalidTerrain)?;
         let prototype_index = group
             .entries
             .get(entry_index)
@@ -1390,27 +1416,25 @@ fn plan_vehicle_placement(
         let Some(origin_index) = absolute_tile_index(x, y) else {
             continue;
         };
-        let rotation_index = if placement.rotations_degrees.len() == 1 {
-            0
-        } else {
-            usize::try_from(inclusive_rng_u64(
-                rng,
-                0,
-                u64::try_from(placement.rotations_degrees.len() - 1)
-                    .map_err(|_| SimError::NumericOverflow)?,
-            ))
-            .map_err(|_| SimError::NumericOverflow)?
-        };
+        let rotation_index = usize::try_from(inclusive_rng_u64(
+            rng,
+            0,
+            u64::try_from(placement.rotations_degrees.len() - 1)
+                .map_err(|_| SimError::NumericOverflow)?,
+        ))
+        .map_err(|_| SimError::NumericOverflow)?;
         let facing_degrees = *placement
             .rotations_degrees
             .get(rotation_index)
             .ok_or(SimError::InvalidTerrain)?;
-        let mut parts = initial_vehicle_parts(
+        let (mut parts, engine_on, security_locked) = initial_vehicle_parts(
             catalog,
             prototype,
             placement.status,
             placement.fuel_percent,
-            placement.faction_id.is_empty(),
+            // Pinned mapgen assigns faction ownership only after
+            // `vehicle::init_state` and spawn-item placement complete.
+            true,
             rng,
         )?;
         plan_vehicle_cargo(catalog, prototype, &mut parts, item_groups, rng)?;
@@ -1432,6 +1456,8 @@ fn plan_vehicle_placement(
             origin_index,
             facing_degrees,
             owner_faction_id: placement.faction_id.clone(),
+            engine_on,
+            security_locked,
             parts,
         });
     }
@@ -1445,7 +1471,7 @@ fn initial_vehicle_parts(
     fuel_percent: i16,
     unowned: bool,
     rng: &mut ChaCha8Rng,
-) -> Result<Vec<PlannedVehiclePartState>, SimError> {
+) -> Result<(Vec<PlannedVehiclePartState>, bool, bool), SimError> {
     let disabled_failure = if status == VehicleSpawnStatusV1::Disabled {
         u8::try_from(inclusive_rng_u64(rng, 1, 5)).map_err(|_| SimError::NumericOverflow)?
     } else {
@@ -1469,24 +1495,58 @@ fn initial_vehicle_parts(
             .get(usize::from(part.part_type_index))
             .is_some_and(|part_type| vehicle_part_has_flag(part_type, "ENGINE"))
     });
+    let has_non_muscle_engine = prototype.parts.iter().any(|part| {
+        catalog
+            .vehicle_part_types
+            .get(usize::from(part.part_type_index))
+            .is_some_and(|part_type| {
+                vehicle_part_has_flag(part_type, "ENGINE")
+                    && !vehicle_part_has_flag(part_type, "MUSCLE")
+            })
+    });
+    let mut engine_on = false;
+    let mut light_head = false;
+    let mut light_wide_head = false;
+    let mut light_dome = false;
+    let mut light_aisle = false;
+    let mut light_half_circle = false;
+    let mut light_circle = false;
+    let mut light_atomic = false;
     if !undamaged {
         if fuel_percent != 0 && has_engine {
-            let _ = one_in_mapgen(rng, 4);
+            engine_on =
+                one_in_mapgen(rng, 4) && !destroy_engine && !has_no_key && has_non_muscle_engine;
         }
-        for denominator in [20_u64, 20, 16, 8, 4, 4, 2] {
-            let _ = one_in_mapgen(rng, denominator);
-        }
+        light_head = one_in_mapgen(rng, 20);
+        light_wide_head = one_in_mapgen(rng, 20);
+        light_dome = one_in_mapgen(rng, 16);
+        light_aisle = one_in_mapgen(rng, 8);
+        light_half_circle = one_in_mapgen(rng, 4);
+        light_circle = one_in_mapgen(rng, 4);
+        light_atomic = one_in_mapgen(rng, 2);
     }
     let blood_covered = !undamaged && one_in_mapgen(rng, 10);
     let blood_inside = !undamaged && one_in_mapgen(rng, 8);
     let mut blood_inside_mount = None::<(i16, i16)>;
     let mut output = Vec::with_capacity(prototype.parts.len());
-    for part in &prototype.parts {
+    let mut opened_multisquare = std::collections::BTreeSet::new();
+    let mut security_locked = false;
+    for (part_index, part) in prototype.parts.iter().enumerate() {
         let part_type = catalog
             .vehicle_part_types
             .get(usize::from(part.part_type_index))
             .ok_or(SimError::InvalidTerrain)?;
-        let mut open = vehicle_part_has_flag(part_type, "OPENABLE") && one_in_mapgen(rng, 4);
+        let mut open = opened_multisquare.contains(&part_index);
+        if !open && vehicle_part_has_flag(part_type, "OPENABLE") && one_in_mapgen(rng, 4) {
+            let connected = super::vehicles::connected_openable_vehicle_parts(
+                prototype,
+                &catalog.vehicle_part_types,
+                None,
+                part_index,
+            )?;
+            opened_multisquare.extend(connected);
+            open = true;
+        }
         let mut hp =
             super::vehicles::initial_vehicle_part_hp(part_type.durability, undamaged, rng)?;
         if !undamaged {
@@ -1527,19 +1587,47 @@ fn initial_vehicle_parts(
                 }
             }
         }
-        let locked = has_no_key
-            && hp > 0
-            && (vehicle_part_has_flag(part_type, "LOCKABLE_DOOR")
-                || vehicle_part_has_flag(part_type, "LOCKABLE_CARGO"));
-        if locked {
-            open = false;
+        if has_no_key && hp > 0 && vehicle_part_has_flag(part_type, "SECURITY") {
+            security_locked = true;
+            // The immobilizer fault is not yet represented, but its pinned
+            // per-security-part RNG position is retained. Admission rejects
+            // parts whose fault state would otherwise be observable.
             let _ = one_in_mapgen(rng, 2);
+        }
+        let mut enabled = unowned && vehicle_part_has_flag(part_type, "ENGINE");
+        if !undamaged {
+            enabled = if vehicle_part_has_flag(part_type, "CONE_LIGHT") {
+                light_head
+            } else if vehicle_part_has_flag(part_type, "WIDE_CONE_LIGHT") {
+                light_wide_head
+            } else if vehicle_part_has_flag(part_type, "DOME_LIGHT") {
+                light_dome
+            } else if vehicle_part_has_flag(part_type, "AISLE_LIGHT") {
+                light_aisle
+            } else if vehicle_part_has_flag(part_type, "HALF_CIRCLE_LIGHT") {
+                light_half_circle
+            } else if vehicle_part_has_flag(part_type, "CIRCLE_LIGHT") {
+                light_circle
+            } else if vehicle_part_has_flag(part_type, "ATOMIC_LIGHT") {
+                light_atomic
+            } else {
+                enabled
+            };
+            if ["FRIDGE", "FREEZER", "WATER_PURIFIER"]
+                .into_iter()
+                .any(|flag| vehicle_part_has_flag(part_type, flag))
+            {
+                enabled = true;
+            }
+        }
+        if vehicle_part_has_flag(part_type, "REACTOR") {
+            enabled = true;
         }
         output.push(PlannedVehiclePartState {
             hp,
-            enabled: unowned && vehicle_part_has_flag(part_type, "ENGINE"),
+            enabled,
             open,
-            locked,
+            locked: false,
             cargo: Vec::new(),
         });
     }
@@ -1562,7 +1650,7 @@ fn initial_vehicle_parts(
             }
         }
     }
-    Ok(output)
+    Ok((output, engine_on, security_locked))
 }
 
 fn plan_vehicle_cargo(
@@ -1590,11 +1678,7 @@ fn plan_vehicle_cargo(
         let Some(mut stored_volume) = stored_volume.take() else {
             return Err(SimError::InvalidItem);
         };
-        let spawn_count = match spawn.chance_percent {
-            0 => 0,
-            100 => 1,
-            chance => usize::from(rng.next_u64() % 100 < u64::from(chance)),
-        };
+        let spawn_count = usize::from(x_in_y_percent_mapgen(rng, spawn.chance_percent));
         for _ in 0..spawn_count {
             let broken = cargo_part.hp == 0;
             if broken && one_in_mapgen(rng, 2) {

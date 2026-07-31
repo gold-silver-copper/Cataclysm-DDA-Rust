@@ -168,6 +168,10 @@ pub struct VehicleSnapshotV1 {
     pub facing_degrees: i16,
     /// Empty means no faction owner.
     pub owner_faction_id: String,
+    /// Pinned global ignition state, distinct from per-part enablement.
+    pub engine_on: bool,
+    /// Pinned global security state set by an available SECURITY part.
+    pub security_locked: bool,
     /// Exact prototype order. Removed-part compaction is outside this version;
     /// broken parts remain present with zero HP.
     pub parts: Vec<VehiclePartSnapshotV1>,
@@ -218,14 +222,84 @@ fn valid_optional_id(value: &str) -> bool {
     valid_text(value, true, MAX_WORLDGEN_VEHICLE_TEXT_BYTES)
 }
 
+const SIN_DEGREES_TIMES_100: [i16; 91] = [
+    0, 2, 3, 5, 7, 9, 10, 12, 14, 16, 17, 19, 21, 22, 24, 26, 28, 29, 31, 33, 34, 36, 37, 39, 41,
+    42, 44, 45, 47, 48, 50, 52, 53, 54, 56, 57, 59, 60, 62, 63, 64, 66, 67, 68, 69, 71, 72, 73, 74,
+    75, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 87, 88, 89, 90, 91, 91, 92, 93, 93, 94, 95, 95,
+    96, 96, 97, 97, 97, 98, 98, 98, 99, 99, 99, 99, 100, 100, 100, 100, 100, 100,
+];
+
+fn sin_degrees_times_100(degrees: i16) -> i16 {
+    let normalized = degrees.rem_euclid(360);
+    let quadrant = normalized / 90;
+    let within = usize::try_from(normalized % 90).expect("normalized degree index fits usize");
+    match quadrant {
+        0 => SIN_DEGREES_TIMES_100[within],
+        1 => SIN_DEGREES_TIMES_100[90 - within],
+        2 => -SIN_DEGREES_TIMES_100[within],
+        _ => -SIN_DEGREES_TIMES_100[90 - within],
+    }
+}
+
+/// Canonical zero-pivot `vehicle::coord_translate` used both while creating a
+/// vehicle and while validating recovered authoritative geometry.
+#[must_use]
+pub fn expected_vehicle_part_position(
+    origin: WorldPosition,
+    mount_x: i16,
+    mount_y: i16,
+    facing_degrees: i16,
+) -> Option<WorldPosition> {
+    let facing = facing_degrees.rem_euclid(360);
+    let delta_x = i32::from(sin_degrees_times_100((90_i16 + facing).rem_euclid(360)));
+    let delta_y = i32::from(sin_degrees_times_100(facing));
+    let (abs_x, abs_y) = (delta_x.abs(), delta_y.abs());
+    let mostly_vertical = abs_x <= abs_y;
+    let advance = i32::from(mount_x).unsigned_abs();
+    let advance = i32::try_from(advance).ok()?;
+    let (mut x, mut y) = if abs_x != 0 && abs_y != 0 {
+        if mostly_vertical {
+            (advance.checked_mul(abs_x)?.checked_div(abs_y)?, advance)
+        } else {
+            (advance, advance.checked_mul(abs_y)?.checked_div(abs_x)?)
+        }
+    } else if mostly_vertical {
+        (0, advance)
+    } else {
+        (advance, 0)
+    };
+    const SX: [i32; 4] = [1, -1, -1, 1];
+    const SY: [i32; 4] = [1, 1, -1, -1];
+    let quadrant = usize::try_from(facing / 90).ok()?;
+    x = x.checked_mul(SX[quadrant])?;
+    y = y.checked_mul(SY[quadrant])?;
+    if mount_x < 0 {
+        x = x.checked_neg()?;
+        y = y.checked_neg()?;
+    }
+    let orthogonal = i32::from(mount_y);
+    if mostly_vertical {
+        x = x.checked_add(orthogonal.checked_mul(-SY[quadrant])?)?;
+    } else {
+        y = y.checked_add(orthogonal.checked_mul(SX[quadrant])?)?;
+    }
+    Some(WorldPosition {
+        x: origin.x.checked_add(x)?,
+        y: origin.y.checked_add(y)?,
+        z: origin.z,
+    })
+}
+
 fn valid_variant(variant: &WorldgenVehiclePartVariantV1) -> bool {
     valid_optional_id(&variant.variant_id)
         && valid_text(&variant.symbols, false, MAX_WORLDGEN_VEHICLE_SYMBOL_BYTES)
+        && matches!(variant.symbols.chars().count(), 1 | 8)
         && valid_text(
             &variant.broken_symbols,
             false,
             MAX_WORLDGEN_VEHICLE_SYMBOL_BYTES,
         )
+        && matches!(variant.broken_symbols.chars().count(), 1 | 8)
 }
 
 fn valid_part_type(part: &WorldgenVehiclePartTypeV1) -> bool {
@@ -463,9 +537,29 @@ fn valid_live_part(
     };
     usize::from(part.prototype_part_index) == expected_index
         && part.position.z == origin.z
-        && part.position.x.abs_diff(origin.x) <= u32::from(u16::MAX)
-        && part.position.y.abs_diff(origin.y) <= u32::from(u16::MAX)
         && part.hp <= part_type.durability
+        && (!part.enabled
+            || [
+                "ENGINE",
+                "CONE_LIGHT",
+                "WIDE_CONE_LIGHT",
+                "DOME_LIGHT",
+                "AISLE_LIGHT",
+                "HALF_CIRCLE_LIGHT",
+                "CIRCLE_LIGHT",
+                "ATOMIC_LIGHT",
+                "FRIDGE",
+                "FREEZER",
+                "WATER_PURIFIER",
+                "REACTOR",
+            ]
+            .into_iter()
+            .any(|flag| {
+                part_type
+                    .flags
+                    .binary_search_by(|candidate| candidate.as_str().cmp(flag))
+                    .is_ok()
+            }))
         && (!part.open
             || part_type
                 .flags
@@ -511,7 +605,7 @@ pub fn vehicle_snapshots_are_valid(
     part_types: &[WorldgenVehiclePartTypeV1],
     prototypes: &[WorldgenVehiclePrototypeV1],
     vehicles: &[VehicleSnapshotV1],
-    actors: &[(ActorId, WorldPosition)],
+    actors: &[(ActorId, WorldPosition, bool)],
 ) -> bool {
     if vehicles.len() > MAX_LIVE_VEHICLES
         || !vehicles.windows(2).all(|pair| pair[0].id < pair[1].id)
@@ -520,7 +614,8 @@ pub fn vehicle_snapshots_are_valid(
     }
     let mut actor_positions = BTreeMap::new();
     let mut stable_counters = BTreeSet::new();
-    for (actor_id, position) in actors {
+    let mut live_actors = BTreeSet::new();
+    for (actor_id, position, alive) in actors {
         if actor_id.counter() == 0
             || actor_id.world_namespace() != world_namespace
             || !stable_counters.insert(actor_id.counter())
@@ -528,8 +623,12 @@ pub fn vehicle_snapshots_are_valid(
         {
             return false;
         }
+        if *alive {
+            live_actors.insert(*actor_id);
+        }
     }
     let mut passengers = BTreeSet::new();
+    let mut structural_positions = BTreeMap::new();
     for vehicle in vehicles {
         let Some(prototype) = prototypes.get(usize::from(vehicle.prototype_index)) else {
             return false;
@@ -544,12 +643,41 @@ pub fn vehicle_snapshots_are_valid(
         {
             return false;
         }
+        let live_flag = |flag: &str| {
+            vehicle.parts.iter().enumerate().any(|(index, part)| {
+                part.hp > 0
+                    && prototype.parts.get(index).is_some_and(|prototype_part| {
+                        part_types
+                            .get(usize::from(prototype_part.part_type_index))
+                            .is_some_and(|part_type| {
+                                part_type
+                                    .flags
+                                    .binary_search_by(|candidate| candidate.as_str().cmp(flag))
+                                    .is_ok()
+                            })
+                    })
+            })
+        };
+        if (vehicle.engine_on && !live_flag("ENGINE"))
+            || (vehicle.security_locked && !live_flag("SECURITY"))
+        {
+            return false;
+        }
         let mut mount_positions = BTreeMap::new();
         for (index, part) in vehicle.parts.iter().enumerate() {
             if !valid_live_part(part, index, prototype, part_types, vehicle.origin) {
                 return false;
             }
             let prototype_part = &prototype.parts[index];
+            if expected_vehicle_part_position(
+                vehicle.origin,
+                prototype_part.mount_x,
+                prototype_part.mount_y,
+                vehicle.facing_degrees,
+            ) != Some(part.position)
+            {
+                return false;
+            }
             let mount = (prototype_part.mount_x, prototype_part.mount_y);
             if mount_positions
                 .insert(mount, part.position)
@@ -560,10 +688,25 @@ pub fn vehicle_snapshots_are_valid(
             if let Some(passenger) = part.passenger {
                 if passenger.counter() == 0
                     || passenger.world_namespace() != world_namespace
+                    || !live_actors.contains(&passenger)
                     || !passengers.insert(passenger)
                     || actor_positions.get(&passenger) != Some(&part.position)
                 {
                     return false;
+                }
+            }
+            let Some(part_type) = part_types.get(usize::from(prototype_part.part_type_index))
+            else {
+                return false;
+            };
+            if part.hp > 0 && part_type.location == "structure" {
+                match structural_positions.insert(part.position, (vehicle.id, mount)) {
+                    Some((other_vehicle, other_mount))
+                        if other_vehicle != vehicle.id || other_mount != mount =>
+                    {
+                        return false;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -598,6 +741,10 @@ pub fn visible_vehicle_snapshots_are_valid(
     }
     let mut passengers = BTreeSet::new();
     vehicles.iter().all(|vehicle| {
+        let mut part_indices = BTreeSet::new();
+        let mut boardable_indices = BTreeSet::new();
+        let mut openable_indices = BTreeSet::new();
+        let mut cargo_indices = BTreeSet::new();
         vehicle.id.counter() > 0
             && vehicle.id.world_namespace() == world_namespace
             && valid_id(&vehicle.prototype_id)
@@ -610,7 +757,21 @@ pub fn visible_vehicle_snapshots_are_valid(
                 .windows(2)
                 .all(|pair| pair[0].position < pair[1].position)
             && vehicle.tiles.iter().all(|tile| {
-                tile.position.z == vehicle.origin.z
+                usize::from(tile.prototype_part_index) < MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE
+                    && part_indices.insert(tile.prototype_part_index)
+                    && tile.boardable_prototype_part_index.is_none_or(|index| {
+                        usize::from(index) < MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE
+                            && boardable_indices.insert(index)
+                    })
+                    && tile.openable_prototype_part_index.is_none_or(|index| {
+                        usize::from(index) < MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE
+                            && openable_indices.insert(index)
+                    })
+                    && tile.cargo_prototype_part_index.is_none_or(|index| {
+                        usize::from(index) < MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE
+                            && cargo_indices.insert(index)
+                    })
+                    && tile.position.z == vehicle.origin.z
                     && tile.position.x.abs_diff(vehicle.origin.x) <= u32::from(u16::MAX)
                     && tile.position.y.abs_diff(vehicle.origin.y) <= u32::from(u16::MAX)
                     && valid_text(&tile.name, false, MAX_WORLDGEN_VEHICLE_TEXT_BYTES)

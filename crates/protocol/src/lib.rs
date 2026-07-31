@@ -138,7 +138,7 @@ pub use vehicles::{
     WorldgenVehicleDirectItemSpawnV1, WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1,
     WorldgenVehicleItemSpawnV1, WorldgenVehiclePartTypeV1, WorldgenVehiclePartVariantV1,
     WorldgenVehiclePlacementV1, WorldgenVehiclePrototypePartV1, WorldgenVehiclePrototypeV1,
-    insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
+    expected_vehicle_part_position, insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
     visible_vehicle_snapshots_are_valid, worldgen_vehicle_catalog_is_valid,
     worldgen_vehicle_placement_is_valid,
 };
@@ -7386,7 +7386,7 @@ impl WorldSnapshotV1 {
         let actors = self
             .actors
             .iter()
-            .map(|actor| (actor.id, actor.position))
+            .map(|actor| (actor.id, actor.position, actor.hp > 0))
             .collect::<Vec<_>>();
         if !vehicle_snapshots_are_valid(
             self.world_namespace,

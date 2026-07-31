@@ -68,6 +68,7 @@ pub struct VehiclePartDefinition {
     pub cargo_capacity_milliliters: u64,
     pub flags: BTreeSet<String>,
     pub variants: Vec<VehiclePartVariantDefinition>,
+    pub default_variant_id: String,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
     pub abstract_definition: bool,
@@ -195,17 +196,6 @@ impl VehicleRegistry {
                 parse_prototype(id, object, source, &parts).map(|prototype| (id.clone(), prototype))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        for (id, prototype) in &prototypes {
-            if !prototype.abstract_definition {
-                group_entries.entry(id.clone()).or_default().insert(
-                    0,
-                    VehicleGroupEntryDefinition {
-                        prototype_id: id.clone(),
-                        weight: 100,
-                    },
-                );
-            }
-        }
         for (group_id, entries) in &group_entries {
             if entries.is_empty() || entries.len() > MAX_VEHICLE_GROUP_ENTRIES {
                 return Err(VehicleRegistryError::InvalidDefinition {
@@ -359,7 +349,25 @@ fn load_file(
         };
         match object.get("type").and_then(Value::as_str) {
             Some("vehicle_part") => merge_definition(object, file, parts)?,
-            Some("vehicle") => merge_definition(object, file, prototypes)?,
+            Some("vehicle") => {
+                let (id, abstract_definition) = definition_id(object, file)?;
+                merge_definition(object, file, prototypes)?;
+                if !abstract_definition {
+                    let target = groups.entry(id.clone()).or_default();
+                    if target.len() >= MAX_VEHICLE_GROUP_ENTRIES {
+                        return Err(VehicleRegistryError::TooManyGroups);
+                    }
+                    // `vehicle_prototype::load` adds this implicit entry at
+                    // the point the JSON object is visited. Keeping it here,
+                    // rather than reconstructing it from the finalized map,
+                    // preserves interleaving with explicit group extensions
+                    // and repeated concrete definitions.
+                    target.push(VehicleGroupEntryDefinition {
+                        prototype_id: id,
+                        weight: 100,
+                    });
+                }
+            }
             Some("vehicle_group") => load_group(object, file, groups)?,
             _ => {}
         }
@@ -425,12 +433,38 @@ fn resolve_definitions(
                 )?;
                 merged = base;
             }
+            let copying = object.get("copy-from").and_then(Value::as_str).is_some();
+            let prototype = object.get("type").and_then(Value::as_str) == Some("vehicle");
             for (field, value) in object {
                 if !matches!(
                     field.as_str(),
                     "extend" | "delete" | "relative" | "proportional"
                 ) {
-                    merged.insert(field.clone(), value.clone());
+                    if prototype
+                        && ((field == "parts" && merged.contains_key(field))
+                            || (copying && field == "items"))
+                    {
+                        let inherited = merged
+                            .entry(field.clone())
+                            .or_insert_with(|| Value::Array(Vec::new()))
+                            .as_array_mut()
+                            .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                                source: layer_source.clone(),
+                                field: field.clone(),
+                            })?;
+                        inherited.extend(
+                            value
+                                .as_array()
+                                .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                                    source: layer_source.clone(),
+                                    field: field.clone(),
+                                })?
+                                .iter()
+                                .cloned(),
+                        );
+                    } else {
+                        merged.insert(field.clone(), value.clone());
+                    }
                 }
             }
             apply_array_patch_raw(&mut merged, object.get("extend"), false, layer_source)?;
@@ -551,16 +585,44 @@ fn apply_numeric_patch(
                 })?)
             }
         } else {
-            let result = current
+            let multiplier = operand
                 .as_f64()
-                .zip(operand.as_f64())
-                .map(|(left, right)| left * right);
-            Value::from(result.filter(|result| result.is_finite()).ok_or_else(|| {
-                VehicleRegistryError::InvalidDefinition {
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
                     source: source.to_owned(),
                     field: field.clone(),
+                })?;
+            // Generic-factory proportional patches apply compound assignment
+            // to the already typed member. Integer members therefore truncate
+            // toward zero and remain JSON integers; converting the result to a
+            // JSON f64 makes the subsequent typed reader reject valid core data.
+            if let Some(value) = current.as_i64() {
+                let scaled = (value as f64) * multiplier;
+                if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+                    return Err(VehicleRegistryError::InvalidDefinition {
+                        source: source.to_owned(),
+                        field: field.clone(),
+                    });
                 }
-            })?)
+                Value::from(scaled.trunc() as i64)
+            } else if let Some(value) = current.as_u64() {
+                let scaled = (value as f64) * multiplier;
+                if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
+                    return Err(VehicleRegistryError::InvalidDefinition {
+                        source: source.to_owned(),
+                        field: field.clone(),
+                    });
+                }
+                Value::from(scaled.trunc() as u64)
+            } else {
+                let result = current.as_f64().map(|left| left * multiplier);
+                Value::from(result.filter(|result| result.is_finite()).ok_or_else(|| {
+                    VehicleRegistryError::InvalidDefinition {
+                        source: source.to_owned(),
+                        field: field.clone(),
+                    }
+                })?)
+            }
         };
         merged.insert(field.clone(), result);
     }
@@ -634,7 +696,8 @@ fn parse_part(
         .transpose()?
         .unwrap_or(0);
     let flags = string_set(object.get("flags"), source, "flags")?;
-    let variants = parse_variants(object.get("variants"), source)?;
+    let (variants, default_variant_id) =
+        parse_variants(object.get("variants"), object.get("variants_bases"), source)?;
     let unsupported_fields = object
         .keys()
         .filter(|field| !field.starts_with("//") && !PART_FIELDS.contains(&field.as_str()))
@@ -657,6 +720,7 @@ fn parse_part(
         cargo_capacity_milliliters,
         flags,
         variants,
+        default_variant_id,
         unsupported_fields,
         source: source.to_owned(),
         abstract_definition,
@@ -696,62 +760,144 @@ fn parse_vehicle_volume_milliliters(
 
 fn parse_variants(
     value: Option<&Value>,
+    bases: Option<&Value>,
     source: &str,
-) -> Result<Vec<VehiclePartVariantDefinition>, VehicleRegistryError> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    value
-        .as_array()
-        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
-            source: source.to_owned(),
-            field: String::from("variants"),
-        })?
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let object =
-                value
-                    .as_object()
-                    .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
-                        source: source.to_owned(),
-                        field: String::from("variants"),
-                    })?;
-            let variant_id = object
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let symbols = object
-                .get("symbols")
-                .and_then(Value::as_str)
+) -> Result<(Vec<VehiclePartVariantDefinition>, String), VehicleRegistryError> {
+    let mut variants = value
+        .map(|value| {
+            value
+                .as_array()
                 .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
                     source: source.to_owned(),
-                    field: format!("variants[{index}].symbols"),
+                    field: String::from("variants"),
                 })?
-                .to_owned();
-            let broken_symbols = object
-                .get("symbols_broken")
-                .and_then(Value::as_str)
-                .unwrap_or(&symbols)
-                .to_owned();
-            if symbols.is_empty()
-                || symbols.len() > 32
-                || broken_symbols.is_empty()
-                || broken_symbols.len() > 32
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let object = value.as_object().ok_or_else(|| {
+                        VehicleRegistryError::InvalidDefinition {
+                            source: source.to_owned(),
+                            field: String::from("variants"),
+                        }
+                    })?;
+                    let variant_id = object
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let symbols = object
+                        .get("symbols")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                            source: source.to_owned(),
+                            field: format!("variants[{index}].symbols"),
+                        })?
+                        .to_owned();
+                    let broken_symbols = object
+                        .get("symbols_broken")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                            source: source.to_owned(),
+                            field: format!("variants[{index}].symbols_broken"),
+                        })?
+                        .to_owned();
+                    if !matches!(symbols.chars().count(), 1 | 8)
+                        || !matches!(broken_symbols.chars().count(), 1 | 8)
+                        || symbols.len() > 32
+                        || broken_symbols.len() > 32
+                    {
+                        return Err(VehicleRegistryError::InvalidDefinition {
+                            source: source.to_owned(),
+                            field: format!("variants[{index}]"),
+                        });
+                    }
+                    Ok(VehiclePartVariantDefinition {
+                        variant_id,
+                        symbols,
+                        broken_symbols,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    // Finalization stores variants in an ordered map. Base expansion is the
+    // Cartesian product of each source-ordered base and the already finalized
+    // variants; generated entries coexist with the originals.
+    let mut default_variant_id = variants
+        .first()
+        .map(|variant| variant.variant_id.clone())
+        .unwrap_or_default();
+    variants.sort_by(|left, right| left.variant_id.cmp(&right.variant_id));
+    if let Some(bases) = bases {
+        let bases = bases
+            .as_array()
+            .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                source: source.to_owned(),
+                field: String::from("variants_bases"),
+            })?;
+        let original = variants.clone();
+        for (index, base) in bases.iter().enumerate() {
+            let base = base
+                .as_object()
+                .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("variants_bases[{index}]"),
+                })?;
+            if base
+                .keys()
+                .any(|field| !matches!(field.as_str(), "id" | "label"))
             {
                 return Err(VehicleRegistryError::InvalidDefinition {
                     source: source.to_owned(),
-                    field: format!("variants[{index}]"),
+                    field: format!("variants_bases[{index}]"),
                 });
             }
-            Ok(VehiclePartVariantDefinition {
-                variant_id,
-                symbols,
-                broken_symbols,
-            })
-        })
-        .collect()
+            let base_id = base
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("variants_bases[{index}].id"),
+                })?;
+            if translated_string(base.get("label")).is_none() {
+                return Err(VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("variants_bases[{index}].label"),
+                });
+            }
+            for variant in &original {
+                let mut expanded = variant.clone();
+                expanded.variant_id = if variant.variant_id.is_empty() {
+                    base_id.to_owned()
+                } else {
+                    format!("{base_id}_{}", variant.variant_id)
+                };
+                variants.push(expanded);
+            }
+        }
+    }
+    if variants.is_empty() {
+        variants.push(VehiclePartVariantDefinition {
+            variant_id: String::new(),
+            symbols: String::from("?"),
+            broken_symbols: String::from("?"),
+        });
+        default_variant_id.clear();
+    }
+    variants.sort_by(|left, right| left.variant_id.cmp(&right.variant_id));
+    if variants
+        .windows(2)
+        .any(|pair| pair[0].variant_id == pair[1].variant_id)
+    {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("variants"),
+        });
+    }
+    Ok((variants, default_variant_id))
 }
 
 fn parse_prototype(
@@ -798,12 +944,15 @@ fn parse_prototype(
             }
         }
     }
-    for part in &result_parts {
-        if !parts.contains_key(&part.part_id) {
+    for part in &mut result_parts {
+        let Some(definition) = parts.get(&part.part_id) else {
             return Err(VehicleRegistryError::MissingPart {
                 prototype_id: id.to_owned(),
                 part_id: part.part_id.clone(),
             });
+        };
+        if part.variant_id.is_empty() {
+            part.variant_id.clone_from(&definition.default_variant_id);
         }
     }
     let item_spawns = parse_vehicle_item_spawns(object.get("items"), source)?;

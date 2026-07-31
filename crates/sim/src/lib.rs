@@ -5000,6 +5000,8 @@ pub struct WorldState {
     memory_chunk_revisions: BTreeMap<ChunkCoord, u64>,
     #[serde(skip)]
     memory_sight_radius: u16,
+    #[serde(skip)]
+    pending_mapgen_events: Vec<WorldEventKind>,
 }
 
 impl WorldState {
@@ -5042,6 +5044,7 @@ impl WorldState {
             chunks: BTreeMap::new(),
             memory_chunk_revisions: BTreeMap::new(),
             memory_sight_radius: NaturalLightSnapshot::at_tick(SimTick(0)).sight_radius,
+            pending_mapgen_events: Vec::new(),
         }
     }
 
@@ -6125,6 +6128,7 @@ impl WorldState {
             .remove(&actor_id)
             .map(|_actor| ())
             .ok_or(SimError::UnknownActor)?;
+        self.clear_actor_passenger(actor_id);
         for npc in self.npcs.values_mut() {
             npc.social.remove(&actor_id);
         }
@@ -6413,6 +6417,7 @@ impl WorldState {
         }
         self.tick = self.tick.next();
         let mut events = Vec::with_capacity(commands.len());
+        self.drain_pending_mapgen_events(&mut events)?;
         let mut event_eoc_cursor = 0;
         let mut event_eoc_activations = 0;
         self.resolve_disconnected_eoc_confirmations(&mut events)?;
@@ -6438,6 +6443,7 @@ impl WorldState {
         self.advance_scheduled_eocs(&mut events)?;
         let actor_sound_start = events.len();
         self.advance_actor_actions(&mut events)?;
+        self.drain_pending_mapgen_events(&mut events)?;
         self.advance_event_eocs(
             &mut event_eoc_cursor,
             &mut event_eoc_activations,
@@ -6461,6 +6467,7 @@ impl WorldState {
             &mut events,
         )?;
         self.advance_disconnected_autopilot(&mut events)?;
+        self.drain_pending_mapgen_events(&mut events)?;
         self.advance_event_eocs(
             &mut event_eoc_cursor,
             &mut event_eoc_activations,
@@ -6469,6 +6476,7 @@ impl WorldState {
         self.advance_creature_hearing(&events[actor_sound_start..])?;
         let creature_sound_start = events.len();
         self.advance_creatures(&mut events)?;
+        self.drain_pending_mapgen_events(&mut events)?;
         self.advance_creature_hearing(&events[creature_sound_start..])?;
         self.advance_event_eocs(
             &mut event_eoc_cursor,
@@ -9793,6 +9801,7 @@ impl WorldState {
                 .chunks
                 .get(&chunk)
                 .is_some_and(|chunk| chunk.is_transparent(local))
+                || self.vehicle_is_opaque_at(WorldPosition { x, y, z: origin.z })
             {
                 return false;
             }
@@ -9914,7 +9923,9 @@ impl WorldState {
         let global_dynamic_light_changed = events.iter().any(|event| match event.kind {
             WorldEventKind::PoweredToolChanged { .. }
             | WorldEventKind::ItemPickedUp { .. }
-            | WorldEventKind::ItemDropped { .. } => true,
+            | WorldEventKind::ItemDropped { .. }
+            | WorldEventKind::VehiclePartOpenChanged { .. }
+            | WorldEventKind::VehicleSpawned { .. } => true,
             WorldEventKind::ActorMoved { actor_id, .. } => {
                 self.actors.get(&actor_id).is_some_and(|actor| {
                     actor.inventory.values().any(|item| {
@@ -10492,11 +10503,30 @@ impl WorldState {
                 origin: vehicle.origin,
                 facing_degrees: vehicle.facing_degrees,
                 owner_faction_id: vehicle.owner_faction_id,
+                engine_on: vehicle.engine_on,
+                security_locked: vehicle.security_locked,
                 parts: vehicle.parts,
             };
+            let prototype_id = self
+                .worldgen
+                .as_ref()
+                .and_then(|catalog| {
+                    catalog
+                        .vehicle_prototypes
+                        .get(usize::from(snapshot.prototype_index))
+                })
+                .map(|prototype| prototype.prototype_id.clone())
+                .ok_or(SimError::InvalidTerrain)?;
             if self.vehicles.insert(id, snapshot).is_some() {
                 return Err(SimError::InvalidTerrain);
             }
+            self.pending_mapgen_events
+                .push(WorldEventKind::VehicleSpawned {
+                    vehicle_id: id,
+                    prototype_id,
+                    position: vehicle.origin,
+                    facing_degrees: vehicle.facing_degrees,
+                });
         }
         Ok(true)
     }
@@ -15089,12 +15119,31 @@ impl WorldState {
         })
     }
 
+    fn drain_pending_mapgen_events(
+        &mut self,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        for kind in std::mem::take(&mut self.pending_mapgen_events) {
+            events.push(self.make_event(kind)?);
+        }
+        Ok(())
+    }
+
     fn make_event(&mut self, kind: WorldEventKind) -> Result<WorldEvent, SimError> {
+        let dead_actor = match &kind {
+            WorldEventKind::ActorDied { actor_id, .. }
+            | WorldEventKind::ActorDiedFromNeeds { actor_id }
+            | WorldEventKind::ActorDiedFromEffect { actor_id, .. } => Some(*actor_id),
+            _ => None,
+        };
         let id = EventId::new(self.world_namespace, self.next_event_counter);
         self.next_event_counter = self
             .next_event_counter
             .checked_add(1)
             .ok_or(SimError::NumericOverflow)?;
+        if let Some(actor_id) = dead_actor {
+            self.clear_actor_passenger(actor_id);
+        }
         Ok(WorldEvent {
             id,
             tick: self.tick,
@@ -15168,10 +15217,7 @@ impl WorldState {
     }
 
     fn is_passable(&self, position: WorldPosition) -> bool {
-        let (coord, local) = position.chunk_and_local();
-        self.chunks
-            .get(&coord)
-            .is_some_and(|chunk| chunk.is_passable(local))
+        self.tile_movement_cost(position).is_some()
     }
 
     fn tile_movement_cost(&self, position: WorldPosition) -> Option<i64> {
@@ -15186,6 +15232,10 @@ impl WorldState {
             .map_or(0, |furniture| furniture.move_cost_mod);
         if furniture_cost < 0 {
             return None;
+        }
+        let (vehicle_present, vehicle_cost) = self.vehicle_movement_at(position);
+        if vehicle_present {
+            return vehicle_cost;
         }
         i64::from(terrain_cost).checked_add(i64::from(furniture_cost))
     }
@@ -16149,6 +16199,42 @@ impl WorldState {
                     &mut maximum_counter,
                 )?;
             }
+            let catalog = snapshot
+                .worldgen
+                .as_ref()
+                .ok_or(SimError::InvalidSnapshot)?;
+            let prototype = catalog
+                .vehicle_prototypes
+                .get(usize::from(vehicle.prototype_index))
+                .ok_or(SimError::InvalidSnapshot)?;
+            for (index, part) in vehicle.parts.iter().enumerate() {
+                if part.hp == 0 {
+                    continue;
+                }
+                let prototype_part = prototype
+                    .parts
+                    .get(index)
+                    .ok_or(SimError::InvalidSnapshot)?;
+                let part_type = catalog
+                    .vehicle_part_types
+                    .get(usize::from(prototype_part.part_type_index))
+                    .ok_or(SimError::InvalidSnapshot)?;
+                if (part_type.location == "structure"
+                    && !is_passable_in_chunks(&chunks, part.position))
+                    || (part_type
+                        .flags
+                        .binary_search_by(|flag| flag.as_str().cmp("OBSTACLE"))
+                        .is_ok()
+                        && !(part.open
+                            && part_type
+                                .flags
+                                .binary_search_by(|flag| flag.as_str().cmp("OPENABLE"))
+                                .is_ok())
+                        && occupied.contains(&part.position))
+                {
+                    return Err(SimError::InvalidSnapshot);
+                }
+            }
         }
         let vehicles = snapshot
             .vehicles
@@ -16171,6 +16257,32 @@ impl WorldState {
             .iter()
             .map(|(coord, chunk)| (*coord, chunk.revision))
             .collect();
+        let pending_mapgen_events = if snapshot.tick == SimTick(0) {
+            snapshot
+                .vehicles
+                .iter()
+                .map(|vehicle| {
+                    let prototype_id = snapshot
+                        .worldgen
+                        .as_ref()
+                        .and_then(|catalog| {
+                            catalog
+                                .vehicle_prototypes
+                                .get(usize::from(vehicle.prototype_index))
+                        })
+                        .map(|prototype| prototype.prototype_id.clone())
+                        .ok_or(SimError::InvalidSnapshot)?;
+                    Ok(WorldEventKind::VehicleSpawned {
+                        vehicle_id: vehicle.id,
+                        prototype_id,
+                        position: vehicle.origin,
+                        facing_degrees: vehicle.facing_degrees,
+                    })
+                })
+                .collect::<Result<Vec<_>, SimError>>()?
+        } else {
+            Vec::new()
+        };
         let world = Self {
             world_namespace: snapshot.world_namespace,
             world_seed: snapshot.world_seed,
@@ -16213,6 +16325,7 @@ impl WorldState {
             chunks,
             memory_chunk_revisions,
             memory_sight_radius: NaturalLightSnapshot::at_tick(snapshot.tick).sight_radius,
+            pending_mapgen_events,
         };
         if !world.recovered_npc_interactions_are_exact()? {
             return Err(SimError::InvalidSnapshot);
