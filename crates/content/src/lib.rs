@@ -32,6 +32,7 @@ mod spell;
 mod start_location;
 mod terrain;
 mod vehicle;
+mod weather;
 
 pub use ammo_effect::{
     AmmunitionEffectDefinition, AmmunitionEffectRegistry, AmmunitionEffectRegistryError,
@@ -178,6 +179,12 @@ pub use vehicle::{
     VehicleGroupEntryDefinition, VehiclePartDefinition, VehiclePartVariantDefinition,
     VehiclePrototypeDefinition, VehiclePrototypePartDefinition, VehicleRegistry,
     VehicleRegistryError,
+};
+pub use weather::{
+    MAX_WEATHER_CONDITION_DEPTH, MAX_WEATHER_GENERATORS, MAX_WEATHER_TYPES, WEATHER_SCALE,
+    WeatherComparisonDefinition, WeatherConditionDefinition, WeatherGeneratorDefinition,
+    WeatherMetricDefinition, WeatherPrecipitationDefinition, WeatherRegistry, WeatherRegistryError,
+    WeatherTypeDefinition,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -5994,8 +5994,21 @@ fn gameplay_status(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let weather = snapshot.weather.as_ref().map_or_else(
+        || String::from("unavailable"),
+        |weather| {
+            format!(
+                "{} ({:.1}°C, humidity {:.0}%, wind {:.1} mph at {}°)",
+                weather.name,
+                f64::from(weather.temperature_millikelvin) / 1_000.0 - 273.15,
+                weather.humidity_millionths as f64 / cdda_protocol::WEATHER_SCALE as f64,
+                weather.windpower_millionths as f64 / cdda_protocol::WEATHER_SCALE as f64,
+                weather.wind_direction_degrees,
+            )
+        },
+    );
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; interact/board/unboard: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Missions: [{}]. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}. Nearest vehicle: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}; weather: {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; interact/board/unboard: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Missions: [{}]. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}. Nearest vehicle: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -6006,6 +6019,7 @@ fn gameplay_status(
         snapshot.natural_light.phase,
         snapshot.natural_light.moon_phase,
         snapshot.natural_light.sight_radius,
+        weather,
         actor.hp,
         body_parts,
         effects,
@@ -6461,6 +6475,7 @@ mod tests {
             tick,
             calendar: cdda_protocol::CalendarSnapshot::at_tick(tick),
             natural_light: cdda_protocol::NaturalLightSnapshot::at_tick(tick),
+            weather: None,
             detail_vision_available: true,
             controlled_actor: cdda_protocol::ActorSnapshot {
                 id: ActorId::new(1, 10),
@@ -6972,6 +6987,7 @@ mod tests {
             tick,
             calendar: cdda_protocol::CalendarSnapshot::at_tick(tick),
             natural_light: cdda_protocol::NaturalLightSnapshot::at_tick(tick),
+            weather: None,
             detail_vision_available: true,
             controlled_actor: cdda_protocol::ActorSnapshot {
                 id: ActorId::new(1, 10),
@@ -7682,6 +7698,7 @@ mod tests {
             tick,
             calendar: cdda_protocol::CalendarSnapshot::at_tick(tick),
             natural_light: cdda_protocol::NaturalLightSnapshot::at_tick(tick),
+            weather: None,
             detail_vision_available: true,
             controlled_actor: cdda_protocol::ActorSnapshot {
                 id: ActorId::new(1, 10),
@@ -7822,6 +7839,7 @@ mod tests {
             tick,
             calendar: cdda_protocol::CalendarSnapshot::at_tick(tick),
             natural_light: cdda_protocol::NaturalLightSnapshot::at_tick(tick),
+            weather: None,
             detail_vision_available: true,
             controlled_actor: cdda_protocol::ActorSnapshot {
                 id: ActorId::new(1, 10),

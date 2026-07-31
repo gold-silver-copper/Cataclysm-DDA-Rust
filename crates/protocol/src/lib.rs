@@ -16,6 +16,7 @@ mod npc_dialogue;
 mod npc_faction;
 mod use_actions;
 mod vehicles;
+mod weather;
 
 pub use anatomy::{
     ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1,
@@ -140,6 +141,12 @@ pub use vehicles::{
     insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
     visible_vehicle_snapshots_are_valid, worldgen_vehicle_catalog_is_valid,
     worldgen_vehicle_placement_is_valid,
+};
+pub use weather::{
+    MAX_WEATHER_CONDITION_NODES, MAX_WEATHER_ID_BYTES, MAX_WEATHER_TEXT_BYTES, MAX_WEATHER_TYPES,
+    WEATHER_SCALE, WeatherCatalogV1, WeatherComparisonV1, WeatherConditionV1, WeatherGeneratorV1,
+    WeatherMetricV1, WeatherObservationV1, WeatherPrecipitationV1, WeatherStateV1, WeatherTypeV1,
+    weather_catalog_is_valid, weather_observation_is_valid, weather_state_is_valid,
 };
 
 pub const PROTOCOL_VERSION: u16 = 138;
@@ -4257,6 +4264,10 @@ pub struct WorldSnapshotV1 {
     pub allocator_reserved_end: u64,
     pub next_event_counter: u64,
     pub next_field_sequence: u64,
+    /// Immutable pinned weather programs and the mutable server-authoritative
+    /// global weather manager. Both persist and replay as canonical state.
+    pub weather_catalog: Option<WeatherCatalogV1>,
+    pub weather_state: Option<WeatherStateV1>,
     /// Immutable anatomy used for new and recovered player characters.
     pub actor_anatomy: AnatomyDefinitionV1,
     pub wearable_armor_types: Vec<WearableArmorTypeV1>,
@@ -4334,6 +4345,7 @@ pub struct ReplicationSnapshotV1 {
     pub tick: SimTick,
     pub calendar: CalendarSnapshot,
     pub natural_light: NaturalLightSnapshot,
+    pub weather: Option<WeatherObservationV1>,
     /// Server-derived fine-detail light at the controlled actor's tile.
     pub detail_vision_available: bool,
     pub controlled_actor: ActorSnapshot,
@@ -8776,6 +8788,10 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
     stable_item_ids_are_valid
         && snapshot.calendar == CalendarSnapshot::at_tick(snapshot.tick)
         && snapshot.natural_light == NaturalLightSnapshot::at_tick(snapshot.tick)
+        && snapshot
+            .weather
+            .as_ref()
+            .is_none_or(weather_observation_is_valid)
         && actor_eoc_variables_are_valid(&snapshot.controlled_actor.eoc_variables)
         && actor_eoc_schedule_is_valid(
             &snapshot.controlled_actor.scheduled_eocs,

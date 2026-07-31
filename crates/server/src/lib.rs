@@ -4533,6 +4533,7 @@ fn interest_snapshot(
         tick: snapshot.tick,
         calendar: CalendarSnapshot::at_tick(snapshot.tick),
         natural_light: NaturalLightSnapshot::at_tick(snapshot.tick),
+        weather: cdda_sim::weather_observation_from_snapshot(&snapshot),
         detail_vision_available: NaturalLightSnapshot::at_tick(snapshot.tick).phase
             == cdda_protocol::SkyPhase::Day
             || personal_detail_light

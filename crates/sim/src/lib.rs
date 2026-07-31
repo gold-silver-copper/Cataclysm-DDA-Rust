@@ -20,6 +20,7 @@ mod roads;
 mod specials;
 mod use_actions;
 mod vehicles;
+mod weather;
 
 #[cfg(test)]
 use fields::exponential_decay_threshold;
@@ -63,12 +64,13 @@ use cdda_protocol::{
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
     RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase,
     SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId,
-    VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind, WorldPosition,
-    WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
-    healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
-    item_group_sources_are_valid, item_place_monster_catalog_is_valid,
-    item_snapshot_is_compatible_with_spawn_rules, item_snapshots_can_combine_for_containment,
-    item_transform_catalog_is_valid, worldgen_catalog_is_valid,
+    VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WeatherCatalogV1, WeatherObservationV1,
+    WeatherStateV1, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
+    adjusted_book_study_time_moves, eoc_catalog_is_valid, healing_item_catalog_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
+    item_place_monster_catalog_is_valid, item_snapshot_is_compatible_with_spawn_rules,
+    item_snapshots_can_combine_for_containment, item_transform_catalog_is_valid,
+    weather_catalog_is_valid, weather_state_is_valid, worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -113,6 +115,16 @@ pub use specials::{
     OvermapSpecialInterval, OvermapSpecialPlacementResult, OvermapSpecialRoadAnchor,
     place_overmap_specials,
 };
+
+#[must_use]
+pub fn weather_observation_from_snapshot(
+    snapshot: &WorldSnapshotV1,
+) -> Option<WeatherObservationV1> {
+    weather::weather_observation(
+        snapshot.weather_catalog.as_ref()?,
+        snapshot.weather_state.as_ref()?,
+    )
+}
 
 /// Persistent stores reserve counters in blocks large enough for one admitted
 /// item-group invocation or one atomic active-bubble generation transaction.
@@ -4944,6 +4956,8 @@ pub struct WorldState {
     allocator: IdAllocator,
     next_event_counter: u64,
     next_field_sequence: u64,
+    weather_catalog: Option<WeatherCatalogV1>,
+    weather_state: Option<WeatherStateV1>,
     actor_anatomy: AnatomyDefinitionV1,
     wearable_armor_types: BTreeMap<String, WearableArmorTypeV1>,
     field_types: BTreeMap<String, FieldTypeSnapshotV1>,
@@ -4986,6 +5000,8 @@ impl WorldState {
             allocator: IdAllocator::new(world_namespace),
             next_event_counter: 1,
             next_field_sequence: 1,
+            weather_catalog: None,
+            weather_state: None,
             actor_anatomy: anatomy::default_actor_anatomy(),
             wearable_armor_types: BTreeMap::new(),
             field_types: BTreeMap::new(),
@@ -5413,6 +5429,23 @@ impl WorldState {
             return Err(SimError::InvalidTerrain);
         }
         self.worldgen = Some(catalog);
+        Ok(())
+    }
+
+    pub fn configure_weather(&mut self, catalog: WeatherCatalogV1) -> Result<(), SimError> {
+        if self.tick != SimTick(0)
+            || self.weather_catalog.is_some()
+            || self.weather_state.is_some()
+            || !weather_catalog_is_valid(&catalog)
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let state = weather::initial_weather_state(&catalog, self.world_seed)?;
+        if !weather_state_is_valid(&state, &catalog) {
+            return Err(SimError::InvalidSnapshot);
+        }
+        self.weather_catalog = Some(catalog);
+        self.weather_state = Some(state);
         Ok(())
     }
 
@@ -6399,6 +6432,12 @@ impl WorldState {
             &mut events,
         )?;
         self.advance_powered_tools(&mut events)?;
+        if let (Some(catalog), Some(state)) = (&self.weather_catalog, &self.weather_state)
+            && let Some(next) =
+                weather::advance_weather_state(catalog, state, self.world_seed, self.tick)?
+        {
+            self.weather_state = Some(next);
+        }
         self.advance_item_temperatures()?;
         self.advance_fields(&mut events)?;
         self.advance_event_eocs(
@@ -15134,6 +15173,8 @@ impl WorldState {
             allocator_reserved_end: self.allocator.reserved_end(),
             next_event_counter: self.next_event_counter,
             next_field_sequence: self.next_field_sequence,
+            weather_catalog: self.weather_catalog.clone(),
+            weather_state: self.weather_state.clone(),
             actor_anatomy: self.actor_anatomy.clone(),
             wearable_armor_types: self.wearable_armor_types.values().cloned().collect(),
             field_types: self.field_types.values().cloned().collect(),
@@ -15176,6 +15217,14 @@ impl WorldState {
             || !snapshot.vehicles_are_valid()
             || !cdda_protocol::anatomy_definition_is_valid(&snapshot.actor_anatomy)
             || !cdda_protocol::wearable_armor_catalog_is_valid(&snapshot.wearable_armor_types)
+            || snapshot.weather_catalog.is_some() != snapshot.weather_state.is_some()
+            || snapshot.weather_catalog.as_ref().is_some_and(|catalog| {
+                !weather_catalog_is_valid(catalog)
+                    || !snapshot
+                        .weather_state
+                        .as_ref()
+                        .is_some_and(|state| weather_state_is_valid(state, catalog))
+            })
             || !cdda_protocol::npc_dialogue_catalog_is_valid(
                 &snapshot.npc_templates,
                 &snapshot.dialogue_topics,
@@ -16096,6 +16145,8 @@ impl WorldState {
             },
             next_event_counter: snapshot.next_event_counter,
             next_field_sequence: snapshot.next_field_sequence,
+            weather_catalog: snapshot.weather_catalog.clone(),
+            weather_state: snapshot.weather_state.clone(),
             actor_anatomy: snapshot.actor_anatomy.clone(),
             wearable_armor_types,
             field_types,

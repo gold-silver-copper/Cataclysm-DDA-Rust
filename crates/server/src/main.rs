@@ -19,7 +19,7 @@ use cdda_content::{
     MonsterGroupRegistry, MonsterRegistry, NpcClassRegistry, OvermapSpecialRegistry,
     OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
     SkillRegistry, SpellRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
-    VehicleRegistry,
+    VehicleRegistry, WeatherRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -82,6 +82,7 @@ mod npc_faction;
 mod regional_field_acceptance;
 mod use_actions;
 mod vehicles;
+mod weather;
 mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
@@ -107,6 +108,7 @@ use missions::{runtime_item_group_item_type_ids, runtime_mission_catalog};
 use npc_classes::runtime_npc_classes;
 use npc_faction::runtime_npc_factions;
 use use_actions::{runtime_item_place_monster_types, runtime_item_transform_types};
+use weather::runtime_weather_catalog;
 use worldgen::{
     RuntimeMapgenContent, bootstrap_regional_special_overmap, runtime_mapgen_item_group_roots,
     runtime_mapgen_npc_template_ids, runtime_mapgen_worldgen,
@@ -163,6 +165,7 @@ struct RuntimeWorldContent<'a> {
     npc_classes: &'a NpcClassRegistry,
     skills: &'a SkillRegistry,
     missions: &'a MissionRegistry,
+    weather: &'a WeatherRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -402,6 +405,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let weather = WeatherRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let overmap_terrain = OvermapTerrainRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -548,6 +557,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             npc_classes: &npc_classes,
             skills: &skills,
             missions: &missions,
+            weather: &weather,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -925,6 +935,7 @@ fn open_world(
     };
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
+    initial.configure_weather(runtime_weather_catalog(content.weather, "default")?)?;
     let (faction_templates, factions) = runtime_npc_factions(content.factions)?;
     let (npc_templates, _preliminary_dialogue_topics) = runtime_npc_dialogue(
         content.dialogue,
