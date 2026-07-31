@@ -21,6 +21,8 @@ const THERMAL_FIELDS: [&str; 4] = [
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialThermalDefinition {
     pub id: String,
+    /// Finalized damage-type resistance in thousandths of an upstream point.
+    pub damage_resistance_milli: BTreeMap<String, i64>,
     pub specific_heat_liquid_microjoules_per_gram_kelvin: i64,
     pub specific_heat_solid_microjoules_per_gram_kelvin: i64,
     pub latent_heat_microjoules_per_gram: i64,
@@ -32,6 +34,7 @@ impl Default for MaterialThermalDefinition {
     fn default() -> Self {
         Self {
             id: String::new(),
+            damage_resistance_milli: BTreeMap::new(),
             specific_heat_liquid_microjoules_per_gram_kelvin:
                 DEFAULT_SPECIFIC_HEAT_LIQUID_UJ_PER_G_K,
             specific_heat_solid_microjoules_per_gram_kelvin: DEFAULT_SPECIFIC_HEAT_SOLID_UJ_PER_G_K,
@@ -278,6 +281,26 @@ fn load_one(
         &mut material.specific_heat_liquid_microjoules_per_gram_kelvin,
         &source,
     )?;
+    if let Some(value) = raw.object.get("resist") {
+        let resistances = value
+            .as_object()
+            .ok_or_else(|| invalid(&source, "resist"))?;
+        let mut parsed = BTreeMap::new();
+        for (damage_type, value) in resistances {
+            if damage_type.is_empty()
+                || damage_type.len() > 512
+                || damage_type.chars().any(char::is_control)
+            {
+                return Err(invalid(&source, "resist"));
+            }
+            let resistance = scaled_i64(value, 1_000.0, &source, "resist")?;
+            if resistance < 0 {
+                return Err(invalid(&source, "resist"));
+            }
+            parsed.insert(damage_type.clone(), resistance);
+        }
+        material.damage_resistance_milli = parsed;
+    }
     apply_scaled_positive(
         &raw.object,
         "specific_heat_solid",

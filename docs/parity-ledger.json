@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 100,
-  "persistence_schema_version": 78,
+  "protocol_version": 101,
+  "persistence_schema_version": 79,
   "replay_format_version": 3,
   "active_milestone": "anatomy-combat",
   "completion_gate": [
@@ -405,10 +405,16 @@
       "id": "anatomy-combat",
       "title": "Anatomy, armor, damage, dodge, effects, stamina, and ordinary combat",
       "state": "in_progress",
+      "submilestones": [
+        { "id": "bodypart-hp-and-targeting", "state": "implementation_complete" },
+        { "id": "wearable-armor-and-damage-absorption", "state": "implementation_complete" },
+        { "id": "on-hit-effects", "state": "in_progress" },
+        { "id": "dodge-stamina-healing", "state": "planned" }
+      ],
       "priority": 22,
       "depends_on": ["cpp-differential-oracle", "simulation-actors-module", "simulation-combat-module", "simulation-canonical-state-module", "protocol-domain-modules", "persistence-domain-modules"],
       "upstream_sources": ["../Cataclysm-DDA/src/character.cpp", "../Cataclysm-DDA/src/melee.cpp", "../Cataclysm-DDA/src/damage.cpp"],
-      "rust_paths": ["crates/content/src/lib.rs", "crates/sim/src/lib.rs"],
+      "rust_paths": ["crates/content/src/anatomy.rs", "crates/content/src/item.rs", "crates/protocol/src/anatomy.rs", "crates/server/src/anatomy.rs", "crates/sim/src/anatomy.rs", "crates/sim/src/lib.rs", "crates/client/src/main.rs"],
       "scenario_families": ["ordinary-melee-resolution", "armor-and-bodypart-damage", "effects-and-healing"],
       "differential_oracle": "planned",
       "multiplayer_adaptation": "All rolls and damage resolve on the server; private anatomy and intent remain filtered from client replication.",

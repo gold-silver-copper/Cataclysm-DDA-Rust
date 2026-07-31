@@ -1,10 +1,10 @@
 {
   "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "green_parent_commit": "a6b2895fa34e56ea58fa55978b9de73dcde4a920",
+  "green_parent_commit": "83cd7f968e1dcab24e5f46da3004afd38cb59e5c",
   "verified_commit": null,
-  "protocol_version": 100,
-  "persistence_schema_version": 78,
+  "protocol_version": 101,
+  "persistence_schema_version": 79,
   "replay_format_version": 3,
   "evidence_weights": {
     "generated": 1,

@@ -4853,6 +4853,14 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             actor_id: event_actor,
             ..
         }
+        | WorldEventKind::ItemWorn {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::ItemTakenOff {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::ItemConsumed {
             actor_id: event_actor,
             ..
@@ -4863,6 +4871,14 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         }
         | WorldEventKind::ActorDiedFromNeeds {
             actor_id: event_actor,
+        }
+        | WorldEventKind::ActorDamagedByEffect {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::ActorDiedFromEffect {
+            actor_id: event_actor,
+            ..
         }
         | WorldEventKind::TerrainChanged {
             actor_id: event_actor,

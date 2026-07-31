@@ -67,6 +67,12 @@ enum ClientAction {
     Wield {
         item_id: ItemId,
     },
+    Wear {
+        item_id: ItemId,
+    },
+    TakeOff {
+        item_id: ItemId,
+    },
     Unwield,
     Consume {
         item_id: ItemId,
@@ -197,6 +203,8 @@ enum ItemMenuAction {
     PickUp,
     Drop,
     Wield,
+    Wear,
+    TakeOff,
     Reload,
     Consume,
     Activate,
@@ -977,6 +985,10 @@ async fn run_game_session(
                     }
                     Some(ClientAction::Wield { item_id }) => {
                         Some(CommandKind::Wield { item_id })
+                    }
+                    Some(ClientAction::Wear { item_id }) => Some(CommandKind::Wear { item_id }),
+                    Some(ClientAction::TakeOff { item_id }) => {
+                        Some(CommandKind::TakeOff { item_id })
                     }
                     Some(ClientAction::Unwield) => Some(CommandKind::Unwield),
                     Some(ClientAction::Consume { item_id }) => {
@@ -1793,6 +1805,10 @@ fn handle_item_menu(
         Some(ItemMenuAction::Drop)
     } else if keys.just_pressed(KeyCode::KeyE) {
         Some(ItemMenuAction::Wield)
+    } else if keys.just_pressed(KeyCode::KeyW) {
+        Some(ItemMenuAction::Wear)
+    } else if keys.just_pressed(KeyCode::KeyD) {
+        Some(ItemMenuAction::TakeOff)
     } else if keys.just_pressed(KeyCode::KeyU) {
         Some(ItemMenuAction::Reload)
     } else if keys.just_pressed(KeyCode::KeyC) {
@@ -1849,6 +1865,8 @@ impl ItemMenuAction {
             Self::PickUp => "Pick up",
             Self::Drop => "Drop",
             Self::Wield => "Wield",
+            Self::Wear => "Wear",
+            Self::TakeOff => "Take off",
             Self::Reload => "Reload with",
             Self::Consume => "Consume",
             Self::Activate => "Activate/deactivate",
@@ -1862,6 +1880,8 @@ impl ItemMenuAction {
             Self::PickUp => "pick up",
             Self::Drop => "drop",
             Self::Wield => "wield",
+            Self::Wear => "wear",
+            Self::TakeOff => "take off",
             Self::Reload => "reload with",
             Self::Consume => "consume",
             Self::Activate => "activate or deactivate",
@@ -2831,11 +2851,39 @@ fn item_menu_entries(
                 .filter(|ground| ground.position == actor.position)
                 .map(|ground| &ground.item)
                 .collect::<Vec<_>>(),
-            ItemMenuAction::Drop => actor.inventory.iter().collect(),
+            ItemMenuAction::Drop => actor
+                .inventory
+                .iter()
+                .filter(|item| !actor.worn.contains(&item.id))
+                .collect(),
             ItemMenuAction::Wield => actor
                 .inventory
                 .iter()
-                .filter(|item| Some(item.id) != actor.wielded)
+                .filter(|item| Some(item.id) != actor.wielded && !actor.worn.contains(&item.id))
+                .collect(),
+            ItemMenuAction::Wear => actor
+                .inventory
+                .iter()
+                .filter(|item| {
+                    Some(item.id) != actor.wielded
+                        && !actor.worn.contains(&item.id)
+                        && content.is_some_and(|content| {
+                            content.0.get(&item.type_id).is_some_and(|definition| {
+                                definition.subtypes.contains("ARMOR")
+                                    && !definition.armor.is_empty()
+                                    && !definition.unsupported_fields.contains("armor")
+                                    && definition.armor.iter().all(|portion| {
+                                        !portion.materials.is_empty()
+                                            && portion.deferred_fields.is_empty()
+                                    })
+                            })
+                        })
+                })
+                .collect(),
+            ItemMenuAction::TakeOff => actor
+                .worn
+                .iter()
+                .filter_map(|item_id| actor.inventory.iter().find(|item| item.id == *item_id))
                 .collect(),
             ItemMenuAction::Reload => {
                 let wielded = actor
@@ -2876,7 +2924,7 @@ fn item_menu_entries(
             ItemMenuAction::Consume => actor
                 .inventory
                 .iter()
-                .filter(|item| !item.comestible_type.is_empty())
+                .filter(|item| !actor.worn.contains(&item.id) && !item.comestible_type.is_empty())
                 .collect(),
             ItemMenuAction::Activate => actor
                 .inventory
@@ -2927,7 +2975,8 @@ fn item_menu_entries(
                 .inventory
                 .iter()
                 .filter(|item| {
-                    snapshot.detail_vision_available
+                    !actor.worn.contains(&item.id)
+                        && snapshot.detail_vision_available
                         && item.damage <= cdda_protocol::MAX_ITEM_DAMAGE_LEVEL
                         && content.is_some_and(|content| {
                             ammunition.is_some_and(|ammunition| {
@@ -3324,6 +3373,8 @@ fn client_action_for_item_menu(
         ItemMenuAction::PickUp => ClientAction::PickUp { item_id },
         ItemMenuAction::Drop => ClientAction::Drop { item_id },
         ItemMenuAction::Wield => ClientAction::Wield { item_id },
+        ItemMenuAction::Wear => ClientAction::Wear { item_id },
+        ItemMenuAction::TakeOff => ClientAction::TakeOff { item_id },
         ItemMenuAction::Reload => {
             let actor = &snapshot?.controlled_actor;
             let ammunition = actor.inventory.iter().find(|item| item.id == item_id)?;
@@ -4182,10 +4233,14 @@ fn event_message(event: &WorldEvent) -> String {
     match &event.kind {
         WorldEventKind::ActorMoved { .. } => String::from("Moved."),
         WorldEventKind::DamageApplied {
+            body_part_id,
             amount,
+            remaining_part_hp,
             remaining_hp,
             ..
-        } => format!("Hit a survivor for {amount}; {remaining_hp} HP remains."),
+        } => format!(
+            "Hit a survivor's {body_part_id} for {amount}; {remaining_part_hp} part HP and {remaining_hp} vital HP remain."
+        ),
         WorldEventKind::ActorDied { .. } => String::from("A survivor died."),
         WorldEventKind::CreatureMoved { .. } => String::from("A creature moved."),
         WorldEventKind::CreatureDamaged {
@@ -4232,10 +4287,14 @@ fn event_message(event: &WorldEvent) -> String {
             }
         }
         WorldEventKind::ActorDamagedByCreature {
+            body_part_id,
             amount,
+            remaining_part_hp,
             remaining_hp,
             ..
-        } => format!("A creature hit you for {amount}; {remaining_hp} HP remains."),
+        } => format!(
+            "A creature hit your {body_part_id} for {amount}; {remaining_part_hp} part HP and {remaining_hp} vital HP remain."
+        ),
         WorldEventKind::CreatureMissedActor { stumbled, .. } => {
             if *stumbled {
                 String::from("A creature missed you and fell.")
@@ -4254,6 +4313,8 @@ fn event_message(event: &WorldEvent) -> String {
         }
         WorldEventKind::ItemPickedUp { .. } => String::from("Picked up the item."),
         WorldEventKind::ItemDropped { .. } => String::from("Dropped the item."),
+        WorldEventKind::ItemWorn { .. } => String::from("Put on the item."),
+        WorldEventKind::ItemTakenOff { .. } => String::from("Took off the item."),
         WorldEventKind::ItemWielded { item_id, .. } => item_id.map_or_else(
             || String::from("Stopped wielding."),
             |_| String::from("Wielded the item."),
@@ -4264,6 +4325,18 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::ActorNeedsUpdated { .. } => String::from("Needs advanced."),
         WorldEventKind::ActorDiedFromNeeds { .. } => {
             String::from("Your character died from unmet needs.")
+        }
+        WorldEventKind::ActorDamagedByEffect {
+            effect_id,
+            body_part_id,
+            amount,
+            remaining_part_hp,
+            ..
+        } => format!(
+            "The {effect_id} effect damaged your {body_part_id} for {amount}; {remaining_part_hp} part HP remains."
+        ),
+        WorldEventKind::ActorDiedFromEffect { effect_id, .. } => {
+            format!("Your character died from {effect_id}.")
         }
         WorldEventKind::TerrainChanged { to, .. } => {
             format!("Changed the terrain to {to}.")
@@ -4440,6 +4513,10 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::ItemMissing => "item is missing",
         CommandRejection::ItemNotHere => "item is not here",
         CommandRejection::ItemNotOwned => "item is not carried",
+        CommandRejection::ItemNotWearable => "item cannot be worn",
+        CommandRejection::ItemAlreadyWorn => "item is already worn",
+        CommandRejection::ItemNotWorn => "item is not worn",
+        CommandRejection::ItemWorn => "take the item off first",
         CommandRejection::PocketMissing => "the selected item pocket is unavailable",
         CommandRejection::InventoryFull => "inventory is full",
         CommandRejection::ItemNotConsumable => "item cannot be consumed",
@@ -4828,6 +4905,44 @@ fn gameplay_status(
                 })
             },
         );
+    let worn = actor
+        .worn
+        .iter()
+        .filter_map(|item_id| actor.inventory.iter().find(|item| item.id == *item_id))
+        .map(item_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body_parts = actor
+        .body_parts
+        .iter()
+        .map(|part| {
+            format!(
+                "{} {}/{}",
+                part.body_part_id, part.current_hp, part.maximum_hp
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let effects = actor
+        .effects
+        .iter()
+        .map(|effect| {
+            let location = effect
+                .body_part_id
+                .as_ref()
+                .map_or(String::new(), |body_part| format!(" on {body_part}"));
+            let remaining_seconds = effect
+                .expires_at_tick
+                .0
+                .saturating_sub(snapshot.tick.0)
+                .div_ceil(cdda_protocol::SimTick::HZ);
+            format!(
+                "{}{} x{} ({}s)",
+                effect.effect_id, location, effect.intensity, remaining_seconds
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let ground_here = snapshot
         .ground_items
         .iter()
@@ -5035,7 +5150,7 @@ fn gameplay_status(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5047,6 +5162,8 @@ fn gameplay_status(
         snapshot.natural_light.moon_phase,
         snapshot.natural_light.sight_radius,
         actor.hp,
+        body_parts,
+        effects,
         actor.base_strength,
         actor.base_dexterity,
         actor.base_intelligence,
@@ -5068,6 +5185,7 @@ fn gameplay_status(
         current_terrain,
         current_furniture,
         wielded,
+        worn,
         inventory.join(", "),
         ground_here,
         nearest_hostile,
@@ -5377,6 +5495,12 @@ mod tests {
                 id: ActorId::new(1, 10),
                 position,
                 hp: 100,
+                body_parts: vec![cdda_protocol::ActorBodyPartSnapshotV1 {
+                    body_part_id: String::from("torso"),
+                    current_hp: 100,
+                    maximum_hp: 100,
+                }],
+                effects: Vec::new(),
                 base_strength: 8,
                 base_dexterity: 8,
                 base_intelligence: 8,
@@ -5387,6 +5511,7 @@ mod tests {
                 held_movement: None,
                 inventory: vec![gun, ammunition, food],
                 wielded: Some(ItemId::new(1, 3)),
+                worn: Vec::new(),
                 stored_kcal: 55_000,
                 thirst: 0,
                 sleepiness: 0,
@@ -5869,6 +5994,12 @@ mod tests {
                 id: ActorId::new(1, 10),
                 position: cdda_protocol::WorldPosition { x: 0, y: 0, z: 0 },
                 hp: 100,
+                body_parts: vec![cdda_protocol::ActorBodyPartSnapshotV1 {
+                    body_part_id: String::from("torso"),
+                    current_hp: 100,
+                    maximum_hp: 100,
+                }],
+                effects: Vec::new(),
                 base_strength: 8,
                 base_dexterity: 8,
                 base_intelligence: 8,
@@ -5879,6 +6010,7 @@ mod tests {
                 held_movement: None,
                 inventory: vec![item(1, "rock"), item(2, "socks_wool")],
                 wielded: None,
+                worn: Vec::new(),
                 stored_kcal: 55_000,
                 thirst: 0,
                 sleepiness: 0,
@@ -6560,6 +6692,12 @@ mod tests {
                 id: ActorId::new(1, 10),
                 position,
                 hp: 100,
+                body_parts: vec![cdda_protocol::ActorBodyPartSnapshotV1 {
+                    body_part_id: String::from("torso"),
+                    current_hp: 100,
+                    maximum_hp: 100,
+                }],
+                effects: Vec::new(),
                 base_strength: 8,
                 base_dexterity: 8,
                 base_intelligence: 8,
@@ -6570,6 +6708,7 @@ mod tests {
                 held_movement: None,
                 inventory: vec![gun],
                 wielded: Some(gun_id),
+                worn: Vec::new(),
                 stored_kcal: 55_000,
                 thirst: 0,
                 sleepiness: 0,
@@ -6682,6 +6821,12 @@ mod tests {
                 id: ActorId::new(1, 10),
                 position: cdda_protocol::WorldPosition { x: 5, y: 5, z: 0 },
                 hp: 100,
+                body_parts: vec![cdda_protocol::ActorBodyPartSnapshotV1 {
+                    body_part_id: String::from("torso"),
+                    current_hp: 100,
+                    maximum_hp: 100,
+                }],
+                effects: Vec::new(),
                 base_strength: 8,
                 base_dexterity: 8,
                 base_intelligence: 8,
@@ -6692,6 +6837,7 @@ mod tests {
                 held_movement: None,
                 inventory: Vec::new(),
                 wielded: None,
+                worn: Vec::new(),
                 stored_kcal: 55_000,
                 thirst: 0,
                 sleepiness: 0,

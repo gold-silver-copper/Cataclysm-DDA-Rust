@@ -1,5 +1,6 @@
 //! Pinned upstream content identity and provenance primitives.
 
+mod anatomy;
 mod bash;
 mod city;
 mod construction;
@@ -22,6 +23,10 @@ mod snippet;
 mod start_location;
 mod terrain;
 
+pub use anatomy::{
+    ANATOMY_SCALE, AnatomyDefinition, AnatomyRegistry, AnatomyRegistryError, BodyPartDefinition,
+    BodyPartStatHpModifiers, MAX_ANATOMY_DEFINITIONS, MAX_ANATOMY_PARTS, MAX_BODY_PART_DEFINITIONS,
+};
 pub use bash::{
     BASH_MULTIPLIER_SCALE, BashDamageProfileDefinition, BashDamageProfileRegistry,
     BashDamageProfileRegistryError, BashDefinition, BashFieldEffectDefinition, BashItemGroupSource,
@@ -39,10 +44,11 @@ pub use field::{
 };
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
 pub use item::{
-    ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemSnippetDefinition,
-    ItemTemperatureRuntimeClass, ItemVariableValueDefinition, ItemVariantDefinition,
-    MagazineWellDefinition, PocketDefinition, PocketTypeDefinition, SpawnPocketKindDefinition,
-    StrictMagazineDefinition, StrictSpawnPocketDefinition,
+    ArmorMaterialLayerDefinition, ArmorPortionDefinition, ItemDefinition, ItemQualityDefinition,
+    ItemRegistry, ItemRegistryError, ItemSnippetDefinition, ItemTemperatureRuntimeClass,
+    ItemVariableValueDefinition, ItemVariantDefinition, MagazineWellDefinition, PocketDefinition,
+    PocketTypeDefinition, SpawnPocketKindDefinition, StrictMagazineDefinition,
+    StrictSpawnPocketDefinition,
 };
 pub use item_group::{
     ItemGroupChargesRange, ItemGroupContentsSource, ItemGroupDefinition, ItemGroupEntryWrapper,

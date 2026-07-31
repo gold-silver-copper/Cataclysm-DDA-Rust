@@ -9,14 +9,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use cdda_content::MapgenIdChoice;
 use cdda_content::{
-    AmmunitionRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition, CitySettingsRegistry,
-    ConstructionRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH,
-    DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry,
-    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
-    ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
-    MonsterDefinition, MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry,
-    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
-    SkillRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    AmmunitionRegistry, AnatomyRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition,
+    CitySettingsRegistry, ConstructionRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
+    DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry,
+    DescriptionSnippetRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
+    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry,
+    MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry, MonsterRegistry,
+    OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry,
+    RiverSettingsRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
+    TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -68,11 +69,13 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod anatomy;
 mod item_groups;
 #[cfg(test)]
 mod regional_field_acceptance;
 mod worldgen;
 
+use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
 use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
     runtime_bash_item_group_catalog, runtime_bash_item_group_source,
@@ -110,6 +113,7 @@ struct OpenedWorld {
 }
 
 struct RuntimeWorldContent<'a> {
+    anatomy: &'a AnatomyRegistry,
     ammunition: &'a AmmunitionRegistry,
     snippets: &'a DescriptionSnippetRegistry,
     items: &'a ItemRegistry,
@@ -281,6 +285,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let anatomy = AnatomyRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let monster_groups = MonsterGroupRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -425,6 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = open_world(
         &database_path,
         &RuntimeWorldContent {
+            anatomy: &anatomy,
             ammunition: &ammunition,
             snippets: &snippets,
             items: &items,
@@ -765,6 +776,8 @@ fn open_world(
         snippets: content.snippets,
         monsters: content.monsters,
     };
+    let actor_anatomy = runtime_actor_anatomy(content.anatomy)?;
+    let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
@@ -793,6 +806,8 @@ fn open_world(
     };
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
+    initial.register_actor_anatomy(actor_anatomy)?;
+    initial.register_wearable_armor_types(wearable_armor_types)?;
     for field_type_id in [
         "fd_acid",
         "fd_bile",

@@ -6,8 +6,19 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod anatomy;
 mod astronomy_table;
 mod item_groups;
+
+pub use anatomy::{
+    ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectSnapshotV1, AnatomyDefinitionV1,
+    ArmorMaterialProtectionV1, BodyPartHpModifiersV1, BodyPartOnHitEffectV1, BodyPartPrototypeV1,
+    MAX_ANATOMY_PARTS, MAX_ARMOR_DAMAGE_TYPES, MAX_ARMOR_PORTIONS, MAX_BODY_PART_DEFERRED_FIELDS,
+    MAX_BODY_PART_ID_BYTES, MAX_WEARABLE_ARMOR_TYPES, WearableArmorPortionV1, WearableArmorTypeV1,
+    actor_body_part_summary_hp, actor_body_parts_are_valid, actor_effects_are_valid,
+    anatomy_definition_is_valid, body_part_prototype_is_valid, wearable_armor_catalog_is_valid,
+    wearable_armor_type_is_valid,
+};
 
 pub use item_groups::{
     ITEM_DEGRADATION_INCREMENTS_VARIABLE, ITEM_DEGRADATION_VARIABLE,
@@ -54,7 +65,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 100;
+pub const PROTOCOL_VERSION: u16 = 101;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1683,6 +1694,12 @@ pub enum CommandKind {
         item_id: ItemId,
     },
     Unwield,
+    Wear {
+        item_id: ItemId,
+    },
+    TakeOff {
+        item_id: ItemId,
+    },
     PickUp {
         item_id: ItemId,
     },
@@ -1765,6 +1782,10 @@ pub enum CommandRejection {
     ItemMissing,
     ItemNotHere,
     ItemNotOwned,
+    ItemNotWearable,
+    ItemAlreadyWorn,
+    ItemNotWorn,
+    ItemWorn,
     PocketMissing,
     InventoryFull,
     ItemNotConsumable,
@@ -1885,7 +1906,9 @@ pub enum WorldEventKind {
     DamageApplied {
         source: ActorId,
         target: ActorId,
+        body_part_id: String,
         amount: u16,
+        remaining_part_hp: i32,
         remaining_hp: i32,
     },
     ActorDied {
@@ -1960,7 +1983,9 @@ pub enum WorldEventKind {
     ActorDamagedByCreature {
         source: CreatureId,
         target: ActorId,
+        body_part_id: String,
         amount: u16,
+        remaining_part_hp: i32,
         remaining_hp: i32,
     },
     CreatureMissedActor {
@@ -1995,6 +2020,14 @@ pub enum WorldEventKind {
         actor_id: ActorId,
         item_id: Option<ItemId>,
     },
+    ItemWorn {
+        actor_id: ActorId,
+        item_id: ItemId,
+    },
+    ItemTakenOff {
+        actor_id: ActorId,
+        item_id: ItemId,
+    },
     ItemConsumed {
         actor_id: ActorId,
         item_id: ItemId,
@@ -2011,6 +2044,18 @@ pub enum WorldEventKind {
     },
     ActorDiedFromNeeds {
         actor_id: ActorId,
+    },
+    ActorDamagedByEffect {
+        actor_id: ActorId,
+        effect_id: String,
+        body_part_id: String,
+        amount: u16,
+        remaining_part_hp: i32,
+        remaining_hp: i32,
+    },
+    ActorDiedFromEffect {
+        actor_id: ActorId,
+        effect_id: String,
     },
     TerrainChanged {
         actor_id: ActorId,
@@ -2551,6 +2596,11 @@ pub struct ActorSnapshot {
     pub id: ActorId,
     pub position: WorldPosition,
     pub hp: i32,
+    /// Source-ordered human anatomy state. `hp` is the minimum current HP of
+    /// vital parts and is retained as the compact public/death summary.
+    pub body_parts: Vec<ActorBodyPartSnapshotV1>,
+    /// Effect/body-part sorted canonical active effects.
+    pub effects: Vec<ActorEffectSnapshotV1>,
     /// Base Strength. Until limb anatomy lands, a healthy actor's arm-strength
     /// modifier is exactly one and structural smashing derives from this.
     pub base_strength: u16,
@@ -2563,6 +2613,9 @@ pub struct ActorSnapshot {
     pub held_movement: Option<HorizontalDirection>,
     pub inventory: Vec<ItemSnapshot>,
     pub wielded: Option<ItemId>,
+    /// Inner-to-outer stable item order. Armor resolution walks this in
+    /// reverse so the last worn layer is struck first.
+    pub worn: Vec<ItemId>,
     pub stored_kcal: i32,
     pub thirst: i32,
     pub sleepiness: i32,
@@ -3374,6 +3427,9 @@ pub struct WorldSnapshotV1 {
     pub allocator_reserved_end: u64,
     pub next_event_counter: u64,
     pub next_field_sequence: u64,
+    /// Immutable anatomy used for new and recovered player characters.
+    pub actor_anatomy: AnatomyDefinitionV1,
+    pub wearable_armor_types: Vec<WearableArmorTypeV1>,
     /// Field-type-ID-sorted simulation definitions admitted from pinned data.
     pub field_types: Vec<FieldTypeSnapshotV1>,
     /// Group-ID-sorted transitive closure of normalized item groups referenced

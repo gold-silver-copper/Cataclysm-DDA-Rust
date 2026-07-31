@@ -26,6 +26,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "color",
     "ascii_picture",
     "material",
+    "material_thickness",
     "flags",
     "qualities",
     "charged_qualities",
@@ -67,6 +68,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "time",
     "variant_type",
     "variants",
+    "armor",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -96,6 +98,9 @@ pub struct ItemDefinition {
     pub color: String,
     pub ascii_picture: String,
     pub materials: BTreeMap<String, i64>,
+    /// Finalized simple-armor thickness in micrometers. Portion-local
+    /// thickness overrides this when advanced armor data supplies one.
+    pub material_thickness_micrometers: i32,
     pub flags: BTreeSet<String>,
     pub qualities: BTreeMap<String, ItemQualityDefinition>,
     pub charged_qualities: BTreeMap<String, ItemQualityDefinition>,
@@ -185,6 +190,9 @@ pub struct ItemDefinition {
     pub loudness: Option<i32>,
     pub damage: BTreeMap<String, DamageDefinition>,
     pub ranged_damage: BTreeMap<String, DamageDefinition>,
+    /// Final inherited source-ordered modern armor portions. Unsupported
+    /// subpart or conditional semantics remain on each portion explicitly.
+    pub armor: Vec<ArmorPortionDefinition>,
     pub clip_size: i32,
     /// Pinned BOOK `required_level`: the theoretical skill floor used when a
     /// recipe's own `book_learn` entry does not specify a positive override.
@@ -261,6 +269,24 @@ pub struct ItemQualityDefinition {
 pub struct DamageDefinition {
     pub amount: f64,
     pub armor_penetration: f64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArmorMaterialLayerDefinition {
+    pub material_id: String,
+    pub covered_by_material_percent: u8,
+    pub thickness_micrometers: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArmorPortionDefinition {
+    pub covers: BTreeSet<String>,
+    pub coverage_percent: u8,
+    pub encumbrance_minimum: u16,
+    pub encumbrance_maximum: u16,
+    pub material_thickness_micrometers: u32,
+    pub materials: Vec<ArmorMaterialLayerDefinition>,
+    pub deferred_fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1090,6 +1116,15 @@ fn apply_common_fields(
     apply_string(object, "color", &mut item.color, source)?;
     apply_string(object, "ascii_picture", &mut item.ascii_picture, source)?;
     apply_materials(object, &mut item.materials, source)?;
+    apply_fixed_milli_number(
+        object,
+        "material_thickness",
+        &mut item.material_thickness_micrometers,
+        source,
+    )?;
+    if item.material_thickness_micrometers < 0 {
+        return Err(invalid_field(source, "material_thickness"));
+    }
     apply_string_set(object, "flags", &mut item.flags, source)?;
     apply_qualities(object, "qualities", &mut item.qualities, source)?;
     apply_qualities(
@@ -1197,6 +1232,7 @@ fn apply_common_fields(
         &mut item.unsupported_fields,
         source,
     )?;
+    apply_armor_portions(object, item, source)?;
     apply_integer(object, "clip_size", &mut item.clip_size, source)?;
     apply_integer(
         object,
@@ -1253,6 +1289,234 @@ fn apply_common_fields(
         }
     }
     Ok(())
+}
+
+fn apply_armor_portions(
+    object: &Map<String, Value>,
+    item: &mut ItemDefinition,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    for modifier_kind in ["extend", "delete", "relative", "proportional"] {
+        if modifier(object, modifier_kind, "armor", source)?.is_some() {
+            item.unsupported_fields.insert(String::from("armor"));
+        }
+    }
+    let Some(value) = object.get("armor") else {
+        return Ok(());
+    };
+    let portions = value
+        .as_array()
+        .ok_or_else(|| invalid_field(source, "armor"))?;
+    if portions.len() > 256 {
+        return Err(invalid_field(source, "armor"));
+    }
+    item.armor = portions
+        .iter()
+        .enumerate()
+        .map(|(index, value)| parse_armor_portion(value, source, index))
+        .collect::<Result<_, _>>()?;
+    Ok(())
+}
+
+fn parse_armor_portion(
+    value: &Value,
+    source: &str,
+    index: usize,
+) -> Result<ArmorPortionDefinition, ItemRegistryError> {
+    let context = format!("armor[{index}]");
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_field(source, &context))?;
+    let covers = parse_bounded_id_set(
+        object
+            .get("covers")
+            .ok_or_else(|| invalid_field(source, &format!("{context}.covers")))?,
+        source,
+        &format!("{context}.covers"),
+    )?;
+    if covers.is_empty() {
+        return Err(invalid_field(source, &format!("{context}.covers")));
+    }
+    let coverage_percent = parse_bounded_u16(
+        object.get("coverage"),
+        0,
+        0,
+        100,
+        source,
+        &format!("{context}.coverage"),
+    )? as u8;
+    let (encumbrance_minimum, encumbrance_maximum) = match object.get("encumbrance") {
+        None => (0, 0),
+        Some(Value::Array(values)) if values.len() == 2 => {
+            let minimum = parse_bounded_u16(
+                values.first(),
+                0,
+                0,
+                u16::MAX,
+                source,
+                &format!("{context}.encumbrance.minimum"),
+            )?;
+            let maximum = parse_bounded_u16(
+                values.get(1),
+                0,
+                minimum,
+                u16::MAX,
+                source,
+                &format!("{context}.encumbrance.maximum"),
+            )?;
+            (minimum, maximum)
+        }
+        Some(value) => {
+            let value = parse_bounded_u16(
+                Some(value),
+                0,
+                0,
+                u16::MAX,
+                source,
+                &format!("{context}.encumbrance"),
+            )?;
+            (value, value)
+        }
+    };
+    let material_thickness_micrometers =
+        object.get("material_thickness").map_or(Ok(0), |value| {
+            let thickness = value
+                .as_f64()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| invalid_field(source, &format!("{context}.material_thickness")))?;
+            let micrometers = thickness * 1_000.0;
+            if !micrometers.is_finite() || micrometers > f64::from(u32::MAX) {
+                return Err(invalid_field(
+                    source,
+                    &format!("{context}.material_thickness"),
+                ));
+            }
+            Ok(micrometers.round() as u32)
+        })?;
+    let materials =
+        object
+            .get("material")
+            .and_then(Value::as_array)
+            .map_or(Ok(Vec::new()), |values| {
+                if values.len() > 64 {
+                    return Err(invalid_field(source, &format!("{context}.material")));
+                }
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(material_index, value)| {
+                        parse_armor_material(value, source, &context, material_index)
+                    })
+                    .collect()
+            })?;
+    let deferred_fields = object
+        .keys()
+        .filter(|field| {
+            !field.starts_with("//")
+                && !matches!(
+                    field.as_str(),
+                    "covers" | "coverage" | "encumbrance" | "material" | "material_thickness"
+                )
+        })
+        .cloned()
+        .collect();
+    Ok(ArmorPortionDefinition {
+        covers,
+        coverage_percent,
+        encumbrance_minimum,
+        encumbrance_maximum,
+        material_thickness_micrometers,
+        materials,
+        deferred_fields,
+    })
+}
+
+fn parse_armor_material(
+    value: &Value,
+    source: &str,
+    context: &str,
+    index: usize,
+) -> Result<ArmorMaterialLayerDefinition, ItemRegistryError> {
+    let context = format!("{context}.material[{index}]");
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_field(source, &context))?;
+    if object.keys().any(|field| {
+        !field.starts_with("//")
+            && !matches!(
+                field.as_str(),
+                "type" | "covered_by_mat" | "thickness" | "ignore_sheet_thickness"
+            )
+    }) {
+        return Err(invalid_field(source, &context));
+    }
+    let material_id = object
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or_else(|| invalid_field(source, &format!("{context}.type")))?
+        .to_owned();
+    let covered_by_material_percent = parse_bounded_u16(
+        object.get("covered_by_mat"),
+        100,
+        1,
+        100,
+        source,
+        &format!("{context}.covered_by_mat"),
+    )? as u8;
+    let thickness = object
+        .get("thickness")
+        .map_or(Some(0.0), Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| invalid_field(source, &format!("{context}.thickness")))?;
+    let thickness_micrometers = thickness * 1_000.0;
+    if thickness_micrometers > f64::from(u32::MAX) {
+        return Err(invalid_field(source, &format!("{context}.thickness")));
+    }
+    Ok(ArmorMaterialLayerDefinition {
+        material_id,
+        covered_by_material_percent,
+        thickness_micrometers: thickness_micrometers.round() as u32,
+    })
+}
+
+fn parse_bounded_id_set(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<BTreeSet<String>, ItemRegistryError> {
+    let values = match value {
+        Value::String(_) => std::slice::from_ref(value),
+        Value::Array(values) if values.len() <= 256 => values.as_slice(),
+        _ => return Err(invalid_field(source, field)),
+    };
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_field(source, field))
+        })
+        .collect()
+}
+
+fn parse_bounded_u16(
+    value: Option<&Value>,
+    default: u16,
+    minimum: u16,
+    maximum: u16,
+    source: &str,
+    field: &str,
+) -> Result<u16, ItemRegistryError> {
+    value.map_or(Ok(default), |value| {
+        value
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| (minimum..=maximum).contains(value))
+            .ok_or_else(|| invalid_field(source, field))
+    })
 }
 
 fn apply_inline_snippets(

@@ -1,5 +1,6 @@
 //! Renderer-independent canonical simulation state.
 
+mod anatomy;
 mod cities;
 mod items;
 mod mapgen;
@@ -13,8 +14,9 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt;
 
 use cdda_protocol::{
-    ActorConnectionUpdateV1, ActorId, ActorSnapshot, AmmunitionContainerPocketPrototypeV1,
-    AmmunitionContainerPocketSnapshotV1, BashTargetKindV1, BookStudyActivitySnapshotV1,
+    ActorBodyPartSnapshotV1, ActorConnectionUpdateV1, ActorEffectSnapshotV1, ActorId,
+    ActorSnapshot, AmmunitionContainerPocketPrototypeV1, AmmunitionContainerPocketSnapshotV1,
+    AnatomyDefinitionV1, BashTargetKindV1, BookStudyActivitySnapshotV1,
     BookStudyInterruptionReason, BookStudyV1, CRAFT_PRACTICE_ACTION_POINTS,
     CRAFT_PROFICIENCY_SCALE, CharacterCreationStatsV1, ChunkCoord, ChunkSnapshot, ClientCommand,
     CommandKind, CommandRejection, CommandSequence, ConstructionActivitySnapshotV1,
@@ -42,8 +44,8 @@ use cdda_protocol::{
     MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot, PoweredToolStateV1,
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
     RangedWeaponSnapshot, SUBMAP_SIZE, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
-    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WorldEvent,
-    WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WearableArmorTypeV1,
+    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
     adjusted_book_study_time_moves, item_group_catalog_is_valid, item_group_source_max_outputs,
     item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
     item_snapshots_can_combine_for_containment, worldgen_catalog_is_valid,
@@ -2597,6 +2599,8 @@ struct Actor {
     id: ActorId,
     position: WorldPosition,
     hp: i32,
+    body_parts: Vec<ActorBodyPartSnapshotV1>,
+    effects: Vec<ActorEffectSnapshotV1>,
     base_strength: u16,
     base_dexterity: u16,
     base_intelligence: u16,
@@ -2607,6 +2611,7 @@ struct Actor {
     held_movement: Option<HorizontalDirection>,
     inventory: BTreeMap<ItemId, ItemInstance>,
     wielded: Option<ItemId>,
+    worn: Vec<ItemId>,
     stored_kcal: i32,
     thirst: i32,
     sleepiness: i32,
@@ -2631,6 +2636,8 @@ impl Actor {
             id: self.id,
             position: self.position,
             hp: self.hp,
+            body_parts: self.body_parts.clone(),
+            effects: self.effects.clone(),
             base_strength: self.base_strength,
             base_dexterity: self.base_dexterity,
             base_intelligence: self.base_intelligence,
@@ -2645,6 +2652,7 @@ impl Actor {
                 .map(ItemInstance::snapshot)
                 .collect(),
             wielded: self.wielded,
+            worn: self.worn.clone(),
             stored_kcal: self.stored_kcal,
             thirst: self.thirst,
             sleepiness: self.sleepiness,
@@ -2672,15 +2680,82 @@ impl Actor {
     }
 }
 
-fn valid_actor_schedule(snapshot: &ActorSnapshot, current_tick: SimTick) -> bool {
-    if [
-        snapshot.base_strength,
-        snapshot.base_dexterity,
-        snapshot.base_intelligence,
-        snapshot.base_perception,
-    ]
-    .into_iter()
-    .any(|stat| stat == 0 || stat > MAX_ACTOR_BASE_STAT)
+fn runtime_armor_is_supported(armor: &WearableArmorTypeV1) -> bool {
+    armor.deferred_fields.is_empty()
+        && armor
+            .portions
+            .iter()
+            .all(|portion| portion.deferred_fields.is_empty())
+}
+
+fn apply_actor_effect_applications(
+    actor: &mut Actor,
+    applications: Vec<anatomy::ActorEffectApplication>,
+    current_tick: SimTick,
+) -> Result<(), SimError> {
+    for application in applications {
+        let duration_ticks = u64::from(application.duration_turns)
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let maximum_duration_ticks = u64::from(application.max_duration_turns)
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let key = (&application.effect_id, &application.body_part_id);
+        if let Some(existing) = actor
+            .effects
+            .iter_mut()
+            .find(|effect| (&effect.effect_id, &effect.body_part_id) == key)
+        {
+            existing.intensity = existing
+                .intensity
+                .saturating_add(application.intensity)
+                .min(application.max_intensity);
+            let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
+            existing.expires_at_tick = SimTick(
+                current_tick
+                    .0
+                    .checked_add(
+                        remaining
+                            .saturating_add(duration_ticks)
+                            .min(maximum_duration_ticks),
+                    )
+                    .ok_or(SimError::NumericOverflow)?,
+            );
+        } else {
+            actor.effects.push(ActorEffectSnapshotV1 {
+                effect_id: application.effect_id,
+                body_part_id: application.body_part_id,
+                intensity: application.intensity.min(application.max_intensity),
+                expires_at_tick: SimTick(
+                    current_tick
+                        .0
+                        .checked_add(duration_ticks.min(maximum_duration_ticks))
+                        .ok_or(SimError::NumericOverflow)?,
+                ),
+            });
+        }
+    }
+    actor.effects.sort_by(|left, right| {
+        (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+    });
+    Ok(())
+}
+
+fn valid_actor_schedule(
+    snapshot: &ActorSnapshot,
+    current_tick: SimTick,
+    anatomy: &AnatomyDefinitionV1,
+) -> bool {
+    if !anatomy::actor_anatomy_state_is_valid(anatomy, &snapshot.body_parts, snapshot.hp)
+        || !cdda_protocol::actor_effects_are_valid(anatomy, &snapshot.effects, current_tick)
+        || [
+            snapshot.base_strength,
+            snapshot.base_dexterity,
+            snapshot.base_intelligence,
+            snapshot.base_perception,
+        ]
+        .into_iter()
+        .any(|stat| stat == 0 || stat > MAX_ACTOR_BASE_STAT)
         || snapshot.speed == 0
         || u32::from(snapshot.speed) > ACTOR_ACTION_THRESHOLD
         || snapshot.action_points > i64::from(ACTOR_ACTION_THRESHOLD)
@@ -2689,6 +2764,15 @@ fn valid_actor_schedule(snapshot: &ActorSnapshot, current_tick: SimTick) -> bool
         || snapshot.sleepiness > SLEEPINESS_MAX
         || (!snapshot.sleeping && snapshot.sleep_intervals != 0)
         || snapshot.sleep_intervals > MAX_SLEEP_INTENSITY
+        || snapshot.worn.len() > MAX_ACTOR_INVENTORY_ITEMS
+        || snapshot.worn.iter().copied().collect::<BTreeSet<_>>().len() != snapshot.worn.len()
+        || snapshot
+            .worn
+            .iter()
+            .any(|item_id| !snapshot.inventory.iter().any(|item| item.id == *item_id))
+        || snapshot
+            .wielded
+            .is_some_and(|item_id| snapshot.worn.contains(&item_id))
         || snapshot.queued_actions.len() > MAX_QUEUED_ACTIONS
         || snapshot.craft_activity.as_ref().is_some_and(|activity| {
             validate_craft_activity(activity, snapshot.id).is_err()
@@ -4048,11 +4132,13 @@ fn select_quality_items(
 fn plan_craft_consumption(
     inventory: &BTreeMap<ItemId, ItemInstance>,
     recipe: &CraftRecipeV1,
+    protected_items: &[ItemId],
 ) -> Result<Option<Vec<PlannedCraftConsumption>>, SimError> {
     let Some(tool_selection) = select_craft_tools(inventory, recipe) else {
         return Ok(None);
     };
     let mut protected = tool_selection.protected_items;
+    protected.extend(protected_items.iter().copied());
     let Some(quality_items) = select_craft_quality_items(inventory, recipe) else {
         return Ok(None);
     };
@@ -4380,6 +4466,8 @@ fn command_mutates_craft_split_parent(
 ) -> bool {
     match command {
         CommandKind::Drop { item_id }
+        | CommandKind::Wear { item_id }
+        | CommandKind::TakeOff { item_id }
         | CommandKind::Consume { item_id }
         | CommandKind::Activate { item_id } => is_craft_split_parent(activity, *item_id),
         CommandKind::Reload {
@@ -4419,6 +4507,8 @@ fn command_mutates_construction_split_parent(
     };
     match command {
         CommandKind::Drop { item_id }
+        | CommandKind::Wear { item_id }
+        | CommandKind::TakeOff { item_id }
         | CommandKind::Consume { item_id }
         | CommandKind::Activate { item_id } => is_split_parent(*item_id),
         CommandKind::Reload {
@@ -4509,6 +4599,8 @@ pub struct WorldState {
     allocator: IdAllocator,
     next_event_counter: u64,
     next_field_sequence: u64,
+    actor_anatomy: AnatomyDefinitionV1,
+    wearable_armor_types: BTreeMap<String, WearableArmorTypeV1>,
     field_types: BTreeMap<String, FieldTypeSnapshotV1>,
     item_groups: BTreeMap<String, ItemGroupDefinitionV1>,
     terrain_bash_types: BTreeMap<String, TerrainBashTypeV1>,
@@ -4536,6 +4628,8 @@ impl WorldState {
             allocator: IdAllocator::new(world_namespace),
             next_event_counter: 1,
             next_field_sequence: 1,
+            actor_anatomy: anatomy::default_actor_anatomy(),
+            wearable_armor_types: BTreeMap::new(),
             field_types: BTreeMap::new(),
             item_groups: BTreeMap::new(),
             terrain_bash_types: BTreeMap::new(),
@@ -4589,6 +4683,34 @@ impl WorldState {
                 Ok(())
             }
         }
+    }
+
+    pub fn register_actor_anatomy(&mut self, anatomy: AnatomyDefinitionV1) -> Result<(), SimError> {
+        if !cdda_protocol::anatomy_definition_is_valid(&anatomy)
+            || self.tick != SimTick(0)
+            || !self.actors.is_empty()
+        {
+            return Err(SimError::InvalidActorAnatomy);
+        }
+        self.actor_anatomy = anatomy;
+        Ok(())
+    }
+
+    pub fn register_wearable_armor_types(
+        &mut self,
+        catalog: Vec<WearableArmorTypeV1>,
+    ) -> Result<(), SimError> {
+        if !cdda_protocol::wearable_armor_catalog_is_valid(&catalog)
+            || self.tick != SimTick(0)
+            || !self.actors.is_empty()
+        {
+            return Err(SimError::InvalidArmor);
+        }
+        self.wearable_armor_types = catalog
+            .into_iter()
+            .map(|armor| (armor.item_type_id.clone(), armor))
+            .collect();
+        Ok(())
     }
 
     /// Installs the complete reachable item-group closure atomically. Named
@@ -5325,13 +5447,18 @@ impl WorldState {
         {
             return Err(SimError::SpawnBlocked);
         }
+        let body_parts = anatomy::initial_body_parts(&self.actor_anatomy, base_stats)?;
+        let hp = cdda_protocol::actor_body_part_summary_hp(&self.actor_anatomy, &body_parts)
+            .ok_or(SimError::InvalidActorAnatomy)?;
         let id = self.allocator.allocate_actor()?;
         self.actors.insert(
             id,
             Actor {
                 id,
                 position,
-                hp: DEFAULT_ACTOR_HP,
+                hp,
+                body_parts,
+                effects: Vec::new(),
                 base_strength: base_stats.strength,
                 base_dexterity: base_stats.dexterity,
                 base_intelligence: base_stats.intelligence,
@@ -5342,6 +5469,7 @@ impl WorldState {
                 held_movement: None,
                 inventory: BTreeMap::new(),
                 wielded: None,
+                worn: Vec::new(),
                 stored_kcal: DEFAULT_STORED_KCAL,
                 thirst: 0,
                 sleepiness: 0,
@@ -5448,7 +5576,7 @@ impl WorldState {
             || self.actors.contains_key(&actor.id)
             || actor.id.counter() != self.allocator.next()
             || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
-            || !valid_actor_schedule(&actor, self.tick)
+            || !valid_actor_schedule(&actor, self.tick, &self.actor_anatomy)
             || actor.craft_activity.is_some()
             || actor.read_activity.is_some()
             || actor.disassembly_activity.is_some()
@@ -5498,6 +5626,12 @@ impl WorldState {
         if actor
             .wielded
             .is_some_and(|item_id| !restored_inventory.contains_key(&item_id))
+            || actor.worn.iter().any(|item_id| {
+                restored_inventory
+                    .get(item_id)
+                    .and_then(|item| self.wearable_armor_types.get(&item.type_id))
+                    .is_none_or(|armor| !runtime_armor_is_supported(armor))
+            })
         {
             return Err(SimError::InvalidActorRestore);
         }
@@ -5528,6 +5662,8 @@ impl WorldState {
                 id: actor.id,
                 position: actor.position,
                 hp: actor.hp,
+                body_parts: actor.body_parts,
+                effects: actor.effects,
                 base_strength: actor.base_strength,
                 base_dexterity: actor.base_dexterity,
                 base_intelligence: actor.base_intelligence,
@@ -5538,6 +5674,7 @@ impl WorldState {
                 held_movement: actor.held_movement,
                 inventory: restored_inventory,
                 wielded: actor.wielded,
+                worn: actor.worn,
                 stored_kcal: actor.stored_kcal,
                 thirst: actor.thirst,
                 sleepiness: actor.sleepiness,
@@ -5620,6 +5757,7 @@ impl WorldState {
         for command in commands {
             self.admit_command(command, &mut events)?;
         }
+        self.advance_actor_effects(&mut events)?;
         let actor_sound_start = events.len();
         self.advance_actor_actions(&mut events)?;
         self.advance_powered_tools(&mut events)?;
@@ -5675,6 +5813,98 @@ impl WorldState {
         }
         for item_id in rotten_ground_items {
             self.ground_items.remove(&item_id);
+        }
+        Ok(())
+    }
+
+    fn advance_actor_effects(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        for actor in self.actors.values_mut() {
+            actor
+                .effects
+                .retain(|effect| effect.expires_at_tick > self.tick);
+        }
+        if !self.tick.0.is_multiple_of(5 * SimTick::HZ) {
+            return Ok(());
+        }
+        let actor_ids = self.actors.keys().copied().collect::<Vec<_>>();
+        for actor_id in actor_ids {
+            let bleeding = self
+                .actors
+                .get(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .effects
+                .iter()
+                .filter(|effect| effect.effect_id == "bleed")
+                .cloned()
+                .collect::<Vec<_>>();
+            for effect in bleeding {
+                if self.actors.get(&actor_id).is_none_or(|actor| actor.hp <= 0) {
+                    break;
+                }
+                let selected = effect
+                    .body_part_id
+                    .as_ref()
+                    .and_then(|body_part_id| {
+                        self.actor_anatomy
+                            .parts
+                            .iter()
+                            .position(|part| part.body_part_id == *body_part_id)
+                    })
+                    .or_else(|| self.actor_anatomy.parts.iter().position(|part| part.vital))
+                    .ok_or(SimError::InvalidActorAnatomy)?;
+                let amount = u16::try_from(effect.intensity.min(u32::from(u16::MAX)))
+                    .map_err(|_| SimError::NumericOverflow)?;
+                let (outcome, was_sleeping) = {
+                    let actor = self
+                        .actors
+                        .get_mut(&actor_id)
+                        .ok_or(SimError::UnknownActor)?;
+                    let outcome = anatomy::apply_damage_to_part(
+                        &self.actor_anatomy,
+                        &mut actor.body_parts,
+                        selected,
+                        amount,
+                    )?;
+                    let was_sleeping = actor.sleeping;
+                    actor.hp = outcome.remaining_hp;
+                    if actor.hp <= 0 {
+                        actor.sleeping = false;
+                        actor.sleep_intervals = 0;
+                        actor.held_movement = None;
+                        actor.queued_actions.clear();
+                    }
+                    (outcome, was_sleeping)
+                };
+                events.push(self.make_event(WorldEventKind::ActorDamagedByEffect {
+                    actor_id,
+                    effect_id: effect.effect_id.clone(),
+                    body_part_id: outcome.body_part_id,
+                    amount: outcome.amount,
+                    remaining_part_hp: outcome.remaining_part_hp,
+                    remaining_hp: outcome.remaining_hp,
+                })?);
+                self.interrupt_craft(actor_id, events)?;
+                self.interrupt_book_study(actor_id, BookStudyInterruptionReason::Damage, events)?;
+                self.interrupt_disassembly(
+                    actor_id,
+                    DisassemblyInterruptionReason::Damage,
+                    events,
+                )?;
+                self.interrupt_construction(
+                    actor_id,
+                    ConstructionInterruptionReason::Damage,
+                    events,
+                )?;
+                if was_sleeping && outcome.remaining_hp > 0 {
+                    self.wake_actor(actor_id, WakeReason::Damage, events)?;
+                }
+                if outcome.remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::ActorDiedFromEffect {
+                        actor_id,
+                        effect_id: effect.effect_id,
+                    })?);
+                }
+            }
         }
         Ok(())
     }
@@ -6029,6 +6259,13 @@ impl WorldState {
                         None,
                         None,
                     )
+                } else if actor
+                    .effects
+                    .iter()
+                    .any(|effect| effect.effect_id == "downed")
+                {
+                    actor.held_movement = None;
+                    (None, None, None, Vec::new(), None, None, None, None)
                 } else if actor
                     .craft_activity
                     .as_ref()
@@ -7169,6 +7406,12 @@ impl WorldState {
                 self.apply_wield(actor_id, sequence, Some(item_id), events)
             }
             CommandKind::Unwield => self.apply_wield(actor_id, sequence, None, events),
+            CommandKind::Wear { item_id } => {
+                self.apply_wear(actor_id, sequence, item_id, true, events)
+            }
+            CommandKind::TakeOff { item_id } => {
+                self.apply_wear(actor_id, sequence, item_id, false, events)
+            }
             CommandKind::PickUp { item_id } => {
                 self.apply_pickup(actor_id, sequence, item_id, events)
             }
@@ -7361,38 +7604,34 @@ impl WorldState {
             return Ok(());
         }
         let damage = self.melee_damage(source)?;
-        let (remaining_hp, was_sleeping) = {
-            let target_actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
-            target_actor.hp = target_actor
-                .hp
-                .checked_sub(i32::from(damage))
-                .ok_or(SimError::NumericOverflow)?;
-            let was_sleeping = target_actor.sleeping;
-            if target_actor.hp <= 0 {
-                target_actor.sleeping = false;
-                target_actor.sleep_intervals = 0;
-                target_actor.queued_actions.clear();
-            }
-            (target_actor.hp, was_sleeping)
-        };
+        let mut rng = self.named_session_rng(
+            b"actor-melee-body-part",
+            &[source.as_u128(), target.as_u128()],
+            sequence.0,
+        );
+        let (outcome, was_sleeping) = self.damage_actor(target, "bash", damage, &mut rng)?;
         events.push(self.make_event(WorldEventKind::DamageApplied {
             source,
             target,
-            amount: damage,
-            remaining_hp,
+            body_part_id: outcome.body_part_id,
+            amount: outcome.amount,
+            remaining_part_hp: outcome.remaining_part_hp,
+            remaining_hp: outcome.remaining_hp,
         })?);
-        self.interrupt_craft(target, events)?;
-        self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
-        self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
-        self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
-        if was_sleeping && remaining_hp > 0 {
-            self.wake_actor(target, WakeReason::Damage, events)?;
-        }
-        if remaining_hp <= 0 {
-            events.push(self.make_event(WorldEventKind::ActorDied {
-                actor_id: target,
-                killer: source,
-            })?);
+        if outcome.amount > 0 {
+            self.interrupt_craft(target, events)?;
+            self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+            self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+            self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
+            if was_sleeping && outcome.remaining_hp > 0 {
+                self.wake_actor(target, WakeReason::Damage, events)?;
+            }
+            if outcome.remaining_hp <= 0 {
+                events.push(self.make_event(WorldEventKind::ActorDied {
+                    actor_id: target,
+                    killer: source,
+                })?);
+            }
         }
         Ok(())
     }
@@ -7508,49 +7747,42 @@ impl WorldState {
 
         match target {
             RangedTarget::Actor(target_id) => {
-                let (remaining_hp, was_sleeping) = {
-                    let actor = self
-                        .actors
-                        .get_mut(&target_id)
-                        .ok_or(SimError::UnknownActor)?;
-                    actor.hp = actor
-                        .hp
-                        .checked_sub(i32::from(ranged_weapon.damage))
-                        .ok_or(SimError::NumericOverflow)?;
-                    let was_sleeping = actor.sleeping;
-                    if actor.hp <= 0 {
-                        actor.sleeping = false;
-                        actor.sleep_intervals = 0;
-                        actor.queued_actions.clear();
-                    }
-                    (actor.hp, was_sleeping)
-                };
+                let (outcome, was_sleeping) =
+                    self.damage_actor(target_id, "bullet", ranged_weapon.damage, &mut rng)?;
                 events.push(self.make_event(WorldEventKind::DamageApplied {
                     source,
                     target: target_id,
-                    amount: ranged_weapon.damage,
-                    remaining_hp,
+                    body_part_id: outcome.body_part_id,
+                    amount: outcome.amount,
+                    remaining_part_hp: outcome.remaining_part_hp,
+                    remaining_hp: outcome.remaining_hp,
                 })?);
-                self.interrupt_craft(target_id, events)?;
-                self.interrupt_book_study(target_id, BookStudyInterruptionReason::Damage, events)?;
-                self.interrupt_disassembly(
-                    target_id,
-                    DisassemblyInterruptionReason::Damage,
-                    events,
-                )?;
-                self.interrupt_construction(
-                    target_id,
-                    ConstructionInterruptionReason::Damage,
-                    events,
-                )?;
-                if was_sleeping && remaining_hp > 0 {
-                    self.wake_actor(target_id, WakeReason::Damage, events)?;
-                }
-                if remaining_hp <= 0 {
-                    events.push(self.make_event(WorldEventKind::ActorDied {
-                        actor_id: target_id,
-                        killer: source,
-                    })?);
+                if outcome.amount > 0 {
+                    self.interrupt_craft(target_id, events)?;
+                    self.interrupt_book_study(
+                        target_id,
+                        BookStudyInterruptionReason::Damage,
+                        events,
+                    )?;
+                    self.interrupt_disassembly(
+                        target_id,
+                        DisassemblyInterruptionReason::Damage,
+                        events,
+                    )?;
+                    self.interrupt_construction(
+                        target_id,
+                        ConstructionInterruptionReason::Damage,
+                        events,
+                    )?;
+                    if was_sleeping && outcome.remaining_hp > 0 {
+                        self.wake_actor(target_id, WakeReason::Damage, events)?;
+                    }
+                    if outcome.remaining_hp <= 0 {
+                        events.push(self.make_event(WorldEventKind::ActorDied {
+                            actor_id: target_id,
+                            killer: source,
+                        })?);
+                    }
                 }
             }
             RangedTarget::Creature(target_id) => {
@@ -10591,40 +10823,112 @@ impl WorldState {
         if damage == 0 {
             return Ok(());
         }
-        let (remaining_hp, was_sleeping) = {
-            let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
-            actor.hp = actor
-                .hp
-                .checked_sub(i32::from(damage))
-                .ok_or(SimError::NumericOverflow)?;
-            let was_sleeping = actor.sleeping;
-            if actor.hp <= 0 {
-                actor.sleeping = false;
-                actor.sleep_intervals = 0;
-                actor.queued_actions.clear();
-            }
-            (actor.hp, was_sleeping)
-        };
+        let (outcome, was_sleeping) = self.damage_actor(target, "bash", damage, &mut rng)?;
         events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
             source,
             target,
-            amount: damage,
-            remaining_hp,
+            body_part_id: outcome.body_part_id,
+            amount: outcome.amount,
+            remaining_part_hp: outcome.remaining_part_hp,
+            remaining_hp: outcome.remaining_hp,
         })?);
-        self.interrupt_craft(target, events)?;
-        self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
-        self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
-        self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
-        if was_sleeping && remaining_hp > 0 {
-            self.wake_actor(target, WakeReason::Damage, events)?;
-        }
-        if remaining_hp <= 0 {
-            events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
-                actor_id: target,
-                killer: source,
-            })?);
+        if outcome.amount > 0 {
+            self.interrupt_craft(target, events)?;
+            self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+            self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+            self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
+            if was_sleeping && outcome.remaining_hp > 0 {
+                self.wake_actor(target, WakeReason::Damage, events)?;
+            }
+            if outcome.remaining_hp <= 0 {
+                events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
+                    actor_id: target,
+                    killer: source,
+                })?);
+            }
         }
         Ok(())
+    }
+
+    fn damage_actor(
+        &mut self,
+        target: ActorId,
+        damage_type: &str,
+        damage: u16,
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool), SimError> {
+        let selected = anatomy::select_body_part_index(&self.actor_anatomy, rng)?;
+        let body_part_id = self
+            .actor_anatomy
+            .parts
+            .get(selected)
+            .ok_or(SimError::InvalidActorAnatomy)?
+            .body_part_id
+            .as_str();
+        let actor = self.actors.get(&target).ok_or(SimError::UnknownActor)?;
+        let mut remaining_milli = u32::from(damage)
+            .checked_mul(1_000)
+            .ok_or(SimError::NumericOverflow)?;
+        for item_id in actor.worn.iter().rev() {
+            let item = actor.inventory.get(item_id).ok_or(SimError::InvalidArmor)?;
+            let armor = self
+                .wearable_armor_types
+                .get(&item.type_id)
+                .filter(|armor| runtime_armor_is_supported(armor))
+                .ok_or(SimError::InvalidArmor)?;
+            for portion in armor.portions.iter().filter(|portion| {
+                portion
+                    .covers
+                    .binary_search_by(|covered| covered.as_str().cmp(body_part_id))
+                    .is_ok()
+            }) {
+                if rng.next_u32() % 100 >= u32::from(portion.coverage_percent) {
+                    continue;
+                }
+                for material in &portion.materials {
+                    if rng.next_u32() % 100 < u32::from(material.covered_by_material_percent) {
+                        remaining_milli = remaining_milli.saturating_sub(
+                            material
+                                .protection_milli
+                                .get(damage_type)
+                                .copied()
+                                .unwrap_or(0),
+                        );
+                    }
+                }
+            }
+        }
+        let damage = u16::try_from(
+            remaining_milli
+                .checked_add(500)
+                .ok_or(SimError::NumericOverflow)?
+                / 1_000,
+        )
+        .map_err(|_| SimError::NumericOverflow)?;
+        let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+        let outcome = anatomy::apply_damage_to_part(
+            &self.actor_anatomy,
+            &mut actor.body_parts,
+            selected,
+            damage,
+        )?;
+        let applications = anatomy::on_hit_effects(
+            &self.actor_anatomy,
+            &actor.body_parts,
+            selected,
+            damage_type,
+            outcome.amount,
+            rng,
+        )?;
+        apply_actor_effect_applications(actor, applications, self.tick)?;
+        actor.hp = outcome.remaining_hp;
+        let was_sleeping = actor.sleeping;
+        if actor.hp <= 0 {
+            actor.sleeping = false;
+            actor.sleep_intervals = 0;
+            actor.queued_actions.clear();
+        }
+        Ok((outcome, was_sleeping))
     }
 
     /// Exact currently admitted monster-hit subset. Sleeping actors cannot
@@ -10671,8 +10975,72 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
             return Ok(());
         }
+        if item_id.is_some_and(|item_id| actor.worn.contains(&item_id)) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemWorn)?);
+            return Ok(());
+        }
         actor.wielded = item_id;
         events.push(self.make_event(WorldEventKind::ItemWielded { actor_id, item_id })?);
+        Ok(())
+    }
+
+    fn apply_wear(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        item_id: ItemId,
+        wear: bool,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(item) = actor.inventory.get(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if wear {
+            if actor.worn.contains(&item_id) {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::ItemAlreadyWorn,
+                )?);
+                return Ok(());
+            }
+            if actor.wielded == Some(item_id)
+                || self
+                    .wearable_armor_types
+                    .get(&item.type_id)
+                    .is_none_or(|armor| !runtime_armor_is_supported(armor))
+            {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::ItemNotWearable,
+                )?);
+                return Ok(());
+            }
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .worn
+                .push(item_id);
+            events.push(self.make_event(WorldEventKind::ItemWorn { actor_id, item_id })?);
+        } else {
+            let Some(index) = actor
+                .worn
+                .iter()
+                .position(|candidate| *candidate == item_id)
+            else {
+                events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotWorn)?);
+                return Ok(());
+            };
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .worn
+                .remove(index);
+            events.push(self.make_event(WorldEventKind::ItemTakenOff { actor_id, item_id })?);
+        }
         Ok(())
     }
 
@@ -10740,6 +11108,10 @@ impl WorldState {
             .get_mut(&actor_id)
             .ok_or(SimError::UnknownActor)?;
         let position = actor.position;
+        if actor.worn.contains(&item_id) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemWorn)?);
+            return Ok(());
+        }
         let Some(item) = actor.inventory.remove(&item_id) else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
             return Ok(());
@@ -10765,6 +11137,10 @@ impl WorldState {
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if actor.worn.contains(&item_id) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemWorn)?);
+            return Ok(());
+        }
         let Some(item) = actor.inventory.get(&item_id) else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
             return Ok(());
@@ -10979,7 +11355,7 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
             return Ok(());
         }
-        let Some(plan) = plan_craft_consumption(&actor.inventory, &recipe)? else {
+        let Some(plan) = plan_craft_consumption(&actor.inventory, &recipe, &actor.worn)? else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::MissingComponents)?);
             return Ok(());
         };
@@ -11517,7 +11893,9 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::MissingQualities)?);
             return Ok(());
         };
-        let Some(plan) = plan_construction_components(&actor.inventory, &recipe, &quality_items)?
+        let mut protected_items = quality_items;
+        protected_items.extend(&actor.worn);
+        let Some(plan) = plan_construction_components(&actor.inventory, &recipe, &protected_items)?
         else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::MissingComponents)?);
             return Ok(());
@@ -11860,6 +12238,10 @@ impl WorldState {
             return Ok(());
         }
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        if actor.worn.contains(&item_id) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemWorn)?);
+            return Ok(());
+        }
         let Some(target) = actor.inventory.get(&item_id) else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
             return Ok(());
@@ -13334,6 +13716,8 @@ impl WorldState {
             allocator_reserved_end: self.allocator.reserved_end(),
             next_event_counter: self.next_event_counter,
             next_field_sequence: self.next_field_sequence,
+            actor_anatomy: self.actor_anatomy.clone(),
+            wearable_armor_types: self.wearable_armor_types.values().cloned().collect(),
             field_types: self.field_types.values().cloned().collect(),
             item_groups: self.item_groups.values().cloned().collect(),
             terrain_bash_types: self.terrain_bash_types.values().cloned().collect(),
@@ -13353,7 +13737,10 @@ impl WorldState {
     }
 
     pub fn from_snapshot(snapshot: &WorldSnapshotV1) -> Result<Self, SimError> {
-        if !snapshot.item_groups_are_valid() {
+        if !snapshot.item_groups_are_valid()
+            || !cdda_protocol::anatomy_definition_is_valid(&snapshot.actor_anatomy)
+            || !cdda_protocol::wearable_armor_catalog_is_valid(&snapshot.wearable_armor_types)
+        {
             return Err(SimError::InvalidSnapshot);
         }
         let item_groups = snapshot
@@ -13361,6 +13748,12 @@ impl WorldState {
             .iter()
             .cloned()
             .map(|definition| (definition.group_id.clone(), definition))
+            .collect::<BTreeMap<_, _>>();
+        let wearable_armor_types = snapshot
+            .wearable_armor_types
+            .iter()
+            .cloned()
+            .map(|armor| (armor.item_type_id.clone(), armor))
             .collect::<BTreeMap<_, _>>();
         if snapshot
             .worldgen
@@ -13478,7 +13871,7 @@ impl WorldState {
             if actor.id.world_namespace() != snapshot.world_namespace
                 || actors.contains_key(&actor.id)
                 || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
-                || !valid_actor_schedule(actor, snapshot.tick)
+                || !valid_actor_schedule(actor, snapshot.tick, &snapshot.actor_anatomy)
                 || (actor.hp > 0 && !occupied.insert(actor.position))
             {
                 return Err(SimError::InvalidSnapshot);
@@ -13583,6 +13976,12 @@ impl WorldState {
             if actor
                 .wielded
                 .is_some_and(|item_id| !inventory.contains_key(&item_id))
+                || actor.worn.iter().any(|item_id| {
+                    inventory
+                        .get(item_id)
+                        .and_then(|item| wearable_armor_types.get(&item.type_id))
+                        .is_none_or(|armor| !runtime_armor_is_supported(armor))
+                })
             {
                 return Err(SimError::InvalidSnapshot);
             }
@@ -13604,6 +14003,8 @@ impl WorldState {
                     id: actor.id,
                     position: actor.position,
                     hp: actor.hp,
+                    body_parts: actor.body_parts.clone(),
+                    effects: actor.effects.clone(),
                     base_strength: actor.base_strength,
                     base_dexterity: actor.base_dexterity,
                     base_intelligence: actor.base_intelligence,
@@ -13614,6 +14015,7 @@ impl WorldState {
                     held_movement: actor.held_movement,
                     inventory,
                     wielded: actor.wielded,
+                    worn: actor.worn.clone(),
                     stored_kcal: actor.stored_kcal,
                     thirst: actor.thirst,
                     sleepiness: actor.sleepiness,
@@ -13783,6 +14185,8 @@ impl WorldState {
             },
             next_event_counter: snapshot.next_event_counter,
             next_field_sequence: snapshot.next_field_sequence,
+            actor_anatomy: snapshot.actor_anatomy.clone(),
+            wearable_armor_types,
             field_types,
             item_groups,
             terrain_bash_types,
@@ -13805,7 +14209,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV76");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV77");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13841,6 +14245,8 @@ impl WorldState {
 pub enum SimError {
     IdReservationExhausted,
     InvalidActorRestore,
+    InvalidActorAnatomy,
+    InvalidArmor,
     InvalidBookStudy,
     InvalidCharacterCreation,
     InvalidCreature,
@@ -13869,6 +14275,8 @@ impl fmt::Display for SimError {
         match self {
             Self::IdReservationExhausted => formatter.write_str("stable ID reservation exhausted"),
             Self::InvalidActorRestore => formatter.write_str("invalid restored actor state"),
+            Self::InvalidActorAnatomy => formatter.write_str("invalid actor anatomy state"),
+            Self::InvalidArmor => formatter.write_str("invalid wearable armor state"),
             Self::InvalidBookStudy => formatter.write_str("invalid book-study state"),
             Self::InvalidCharacterCreation => {
                 formatter.write_str("invalid character-creation base stats")
@@ -20761,6 +21169,12 @@ mod tests {
             id: ActorId::new(13, 1),
             position: WorldPosition { x: 2, y: 2, z: 0 },
             hp: DEFAULT_ACTOR_HP,
+            body_parts: vec![ActorBodyPartSnapshotV1 {
+                body_part_id: String::from("torso"),
+                current_hp: DEFAULT_ACTOR_HP,
+                maximum_hp: DEFAULT_ACTOR_HP,
+            }],
+            effects: Vec::new(),
             base_strength: DEFAULT_ACTOR_BASE_STAT,
             base_dexterity: DEFAULT_ACTOR_BASE_STAT,
             base_intelligence: DEFAULT_ACTOR_BASE_STAT,
@@ -20771,6 +21185,7 @@ mod tests {
             held_movement: None,
             inventory: Vec::new(),
             wielded: None,
+            worn: Vec::new(),
             stored_kcal: DEFAULT_STORED_KCAL,
             thirst: 0,
             sleepiness: 0,
@@ -20797,6 +21212,12 @@ mod tests {
                 id: ActorId::new(13, 3),
                 position: WorldPosition { x: 3, y: 2, z: 0 },
                 hp: DEFAULT_ACTOR_HP,
+                body_parts: vec![ActorBodyPartSnapshotV1 {
+                    body_part_id: String::from("torso"),
+                    current_hp: DEFAULT_ACTOR_HP,
+                    maximum_hp: DEFAULT_ACTOR_HP,
+                }],
+                effects: Vec::new(),
                 base_strength: DEFAULT_ACTOR_BASE_STAT,
                 base_dexterity: DEFAULT_ACTOR_BASE_STAT,
                 base_intelligence: DEFAULT_ACTOR_BASE_STAT,
@@ -20807,6 +21228,7 @@ mod tests {
                 held_movement: None,
                 inventory: Vec::new(),
                 wielded: None,
+                worn: Vec::new(),
                 stored_kcal: DEFAULT_STORED_KCAL,
                 thirst: 0,
                 sleepiness: 0,

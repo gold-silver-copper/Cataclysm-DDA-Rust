@@ -16,3 +16,6 @@ Run only when the user explicitly requests a verification checkpoint.
   recovery/replay, and real-Iroh two-client population persistence. The broad
   `cdda-server --all-targets` check hit the mandatory 60-second timeout; bounded
   library, binary, and test-target checks are used during implementation.
+- Anatomy/combat checkpoint: run exact C++ body-part HP, hit-selection, armor
+  layer, and on-hit-effect traces; canonical fixture updates; recovery/replay
+  modes; production admission; and two-client melee/ranged/monster combat.
