@@ -200,6 +200,94 @@ impl WorldState {
         Ok(true)
     }
 
+    pub(super) fn apply_creature_spell_eocs(
+        &mut self,
+        creature_id: CreatureId,
+        victim: ActorId,
+        eoc_ids: &[String],
+        activation_sequence: u64,
+    ) -> Result<bool, SimError> {
+        let victim_actor = self.actors.get(&victim).ok_or(SimError::UnknownActor)?;
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        let mut execution = EocExecution {
+            actor: eoc_actor_context(victim_actor),
+            effects: victim_actor.effects.clone(),
+            variables: victim_actor.eoc_variables.clone(),
+            target_effects: Some(creature.effects.clone()),
+            target_variables: Some(creature.eoc_variables.clone()),
+            next_schedule_sequence: 0,
+            scheduled_eocs: Vec::new(),
+            inactive_recurring_eocs: Vec::new(),
+            messages: Vec::new(),
+            mission_operations: Vec::new(),
+            interactive: false,
+            confirmation: None,
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(
+                b"creature-spell-eoc-activation",
+                &[victim.as_u128(), creature_id.as_u128()],
+                activation_sequence,
+            ),
+        };
+        for eoc_id in eoc_ids {
+            if execute_eoc(
+                &self.eoc_definitions,
+                &self.mission_definitions,
+                eoc_id,
+                &mut execution,
+                0,
+            )
+            .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        if execution.effects.len() > 1_024
+            || !cdda_protocol::actor_eoc_variables_are_valid(&execution.variables)
+            || execution
+                .target_effects
+                .as_ref()
+                .is_none_or(|effects| effects.len() > 1_024)
+            || execution
+                .target_variables
+                .as_ref()
+                .is_none_or(|variables| !cdda_protocol::actor_eoc_variables_are_valid(variables))
+            || !execution.messages.is_empty()
+            || execution.confirmation.is_some()
+            || !execution.scheduled_eocs.is_empty()
+            || !execution.inactive_recurring_eocs.is_empty()
+            || !execution.mission_operations.is_empty()
+        {
+            return Ok(false);
+        }
+        execution.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        execution
+            .target_effects
+            .as_mut()
+            .ok_or(SimError::InvalidItem)?
+            .sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
+        let victim_actor = self.actors.get_mut(&victim).ok_or(SimError::UnknownActor)?;
+        commit_eoc_actor_context(victim_actor, &execution.actor);
+        victim_actor.effects = execution.effects;
+        victim_actor.eoc_variables = execution.variables;
+        let creature = self
+            .creatures
+            .get_mut(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        creature.effects = execution.target_effects.ok_or(SimError::InvalidItem)?;
+        creature.eoc_variables = execution.target_variables.ok_or(SimError::InvalidItem)?;
+        Ok(true)
+    }
+
     pub(super) fn apply_eoc_item_use(
         &mut self,
         actor_id: ActorId,

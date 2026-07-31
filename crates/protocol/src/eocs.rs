@@ -627,6 +627,95 @@ pub fn creature_eoc_supported_ids(definitions: &[EocDefinitionV1]) -> BTreeSet<S
     }
 }
 
+/// EOCs invoked by the pinned spell effect use the victim as alpha and the
+/// casting monster as beta.  This admission set therefore permits the full
+/// represented actor alpha context while restricting beta operations to the
+/// whole-creature state modeled by canonical snapshots.
+#[must_use]
+pub fn creature_spell_eoc_supported_ids(definitions: &[EocDefinitionV1]) -> BTreeSet<String> {
+    let mut supported = definitions
+        .iter()
+        .filter(|definition| {
+            definition.recurrence.is_none()
+                && definition.deactivate_condition.is_none()
+                && definition.event_trigger.is_none()
+                && definition
+                    .condition
+                    .as_ref()
+                    .is_none_or(creature_spell_eoc_condition_is_supported)
+                && creature_spell_eoc_effects_are_supported(&definition.effects)
+                && creature_spell_eoc_effects_are_supported(&definition.false_effects)
+        })
+        .map(|definition| definition.eoc_id.clone())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let unavailable = definitions
+            .iter()
+            .filter(|definition| supported.contains(&definition.eoc_id))
+            .filter(|definition| {
+                definition
+                    .referenced_eocs()
+                    .iter()
+                    .any(|reference| !supported.contains(*reference))
+            })
+            .map(|definition| definition.eoc_id.clone())
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            return supported;
+        }
+        for eoc_id in unavailable {
+            supported.remove(&eoc_id);
+        }
+    }
+}
+
+fn creature_spell_eoc_condition_is_supported(condition: &EocConditionV1) -> bool {
+    match condition {
+        EocConditionV1::TargetHasEffect { body_part_id, .. }
+        | EocConditionV1::TargetHasAnyEffect { body_part_id, .. } => body_part_id.is_none(),
+        EocConditionV1::Not(condition) => creature_spell_eoc_condition_is_supported(condition),
+        EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => conditions
+            .iter()
+            .all(creature_spell_eoc_condition_is_supported),
+        _ => true,
+    }
+}
+
+fn creature_spell_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectV1::AddTargetEffect {
+            effect_id,
+            body_part_id,
+            ..
+        } => body_part_id.is_none() && creature_runtime_effect_is_supported(effect_id),
+        EocEffectV1::RemoveTargetEffects { body_part_id, .. } => body_part_id.is_none(),
+        EocEffectV1::RunEocs { delay, .. } => delay.is_none(),
+        EocEffectV1::Conditional {
+            condition,
+            then_effects,
+            else_effects,
+        } => {
+            creature_spell_eoc_condition_is_supported(condition)
+                && creature_spell_eoc_effects_are_supported(then_effects)
+                && creature_spell_eoc_effects_are_supported(else_effects)
+        }
+        EocEffectV1::Message { .. }
+        | EocEffectV1::Confirmation { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => false,
+        EocEffectV1::AddEffect { .. }
+        | EocEffectV1::RemoveEffects { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. } => true,
+        EocEffectV1::MathAssignment { target, .. } => !matches!(
+            target,
+            EocMathAssignmentTargetV1::ActorValue(EocActorValueV1::MaximumStamina)
+        ),
+    })
+}
+
 #[must_use]
 pub fn creature_eoc_condition_is_supported(condition: &EocConditionV1) -> bool {
     match condition {

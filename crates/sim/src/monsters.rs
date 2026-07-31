@@ -8,7 +8,7 @@ use cdda_protocol::{
     WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
 };
 use rand_core::Rng;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
     SimError, UNARMED_DAMAGE, WorldState, combat::ActorDamageUnit, horizontal_distance_squared,
@@ -96,80 +96,188 @@ fn projectile_line(origin: WorldPosition, endpoint: WorldPosition) -> Vec<WorldP
 pub(super) fn special_state_matches_catalog(
     catalog: Option<&WorldgenCatalogV1>,
     snapshot: &CreatureSnapshot,
+    snapshot_tick: SimTick,
 ) -> bool {
-    let prototype = catalog.and_then(|catalog| {
-        catalog
-            .monster_prototypes
-            .binary_search_by(|prototype| {
-                prototype
-                    .base
-                    .monster_type_id
-                    .as_str()
-                    .cmp(&snapshot.type_id)
-            })
-            .ok()
-            .and_then(|index| catalog.monster_prototypes.get(index))
-    });
-    let Some(prototype) = prototype else {
-        return catalog.is_none()
-            && snapshot.special_attacks.is_empty()
+    let Some(catalog) = catalog else {
+        return snapshot.special_attacks.is_empty()
             && snapshot.ammunition.is_empty()
             && snapshot.corpse.is_none();
     };
+    let indices = catalog
+        .monster_prototypes
+        .iter()
+        .enumerate()
+        .map(|(index, prototype)| (prototype.base.monster_type_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let Some(&prototype_index) = indices.get(snapshot.type_id.as_str()) else {
+        return false;
+    };
+    let prototype = &catalog.monster_prototypes[prototype_index];
     if !prototype.runtime_spawnable {
         return false;
     }
-    let expected = prototype
-        .special_attacks
-        .iter()
-        .map(|attack| attack.attack_id.as_str())
-        .collect::<Vec<_>>();
-    let attacks_match = snapshot
-        .special_attacks
-        .iter()
-        .map(|attack| attack.attack_id.as_str())
-        .eq(expected);
+    let attacks_match = snapshot.special_attacks.len() == prototype.special_attacks.len()
+        && snapshot
+            .special_attacks
+            .iter()
+            .zip(&prototype.special_attacks)
+            .all(|(state, attack)| {
+                state.attack_id == attack.attack_id
+                    && state.enabled
+                    && state.cooldown_turns <= attack.cooldown_turns
+            });
     let base = &prototype.base;
     let corpse_matches = if prototype.leaves_corpse {
         snapshot.corpse.as_ref() == Some(base)
     } else {
         snapshot.corpse.is_none()
     };
-    let mut possible_ammunition_sources = BTreeSet::from([snapshot.type_id.clone()]);
-    loop {
-        let previous_len = possible_ammunition_sources.len();
-        for candidate in catalog
-            .into_iter()
-            .flat_map(|catalog| &catalog.monster_prototypes)
-            .filter(|candidate| candidate.runtime_spawnable)
-        {
-            if candidate.special_attacks.iter().any(|attack| {
-                attack.kind == WorldgenMonsterSpecialAttackKindV1::Polymorph
-                    && possible_ammunition_sources
-                        .contains(attack.polymorph_monster_type_id.as_str())
-            }) {
-                possible_ammunition_sources.insert(candidate.base.monster_type_id.clone());
-            }
+    #[derive(Clone, Copy)]
+    struct ReversePolymorph {
+        source: usize,
+        keep_speed: bool,
+        keep_hp: bool,
+        keep_aggression: bool,
+    }
+    let mut reverse = vec![Vec::new(); catalog.monster_prototypes.len()];
+    for (source, candidate) in catalog.monster_prototypes.iter().enumerate() {
+        if !candidate.runtime_spawnable {
+            continue;
         }
-        if possible_ammunition_sources.len() == previous_len {
-            break;
+        for attack in &candidate.special_attacks {
+            if attack.kind != WorldgenMonsterSpecialAttackKindV1::Polymorph {
+                continue;
+            }
+            let Some(&target) = indices.get(attack.polymorph_monster_type_id.as_str()) else {
+                continue;
+            };
+            reverse[target].push(ReversePolymorph {
+                source,
+                keep_speed: attack.polymorph_keep_speed,
+                keep_hp: attack.polymorph_keep_hp,
+                keep_aggression: attack.polymorph_keep_aggression,
+            });
         }
     }
-    let ammunition_matches = catalog.into_iter().any(|catalog| {
-        catalog.monster_prototypes.iter().any(|candidate| {
-            candidate.runtime_spawnable
-                && possible_ammunition_sources.contains(candidate.base.monster_type_id.as_str())
-                && snapshot.ammunition.len() == candidate.starting_ammunition.len()
-                && snapshot.ammunition.iter().all(|(item_id, amount)| {
-                    candidate
-                        .starting_ammunition
-                        .get(item_id)
-                        .is_some_and(|initial| amount <= initial)
-                })
+    let reachable = |keep: fn(ReversePolymorph) -> bool| {
+        let mut seen = vec![false; reverse.len()];
+        let mut queue = VecDeque::from([prototype_index]);
+        seen[prototype_index] = true;
+        while let Some(target) = queue.pop_front() {
+            for edge in reverse[target].iter().copied().filter(|edge| keep(*edge)) {
+                if !seen[edge.source] {
+                    seen[edge.source] = true;
+                    queue.push_back(edge.source);
+                }
+            }
+        }
+        seen
+    };
+    let ammunition_sources = reachable(|_| true);
+    let ammunition_matches =
+        catalog
+            .monster_prototypes
+            .iter()
+            .enumerate()
+            .any(|(index, candidate)| {
+                candidate.runtime_spawnable
+                    && ammunition_sources[index]
+                    && snapshot.ammunition.len() == candidate.starting_ammunition.len()
+                    && snapshot.ammunition.iter().all(|(item_id, amount)| {
+                        candidate
+                            .starting_ammunition
+                            .get(item_id)
+                            .is_some_and(|initial| amount <= initial)
+                    })
+            });
+    let speed_sources = reachable(|edge| edge.keep_speed);
+    let speed_matches = catalog
+        .monster_prototypes
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| speed_sources[*index] && candidate.runtime_spawnable)
+        .any(|(_index, candidate)| {
+            snapshot.speed == candidate.base.speed
+                || (candidate.base.revives
+                    && (0..=cdda_protocol::MAX_ITEM_DAMAGE_LEVEL).any(|damage| {
+                        let speed =
+                            u32::from(candidate.base.speed) * 80 / 100 / (u32::from(damage) + 1);
+                        speed > 0 && u16::try_from(speed) == Ok(snapshot.speed)
+                    }))
+        });
+    let aggression_sources = reachable(|edge| edge.keep_aggression);
+    let aggression_matches =
+        catalog
+            .monster_prototypes
+            .iter()
+            .enumerate()
+            .any(|(index, candidate)| {
+                aggression_sources[index]
+                    && candidate.runtime_spawnable
+                    && snapshot.aggression == candidate.base.aggression
+            });
+    let hp_matches = if snapshot.hp == 0 {
+        reverse[prototype_index].iter().any(|edge| {
+            !edge.keep_hp && catalog.monster_prototypes[edge.source].base.max_hp > base.max_hp
+        })
+    } else {
+        let mut required = vec![None::<i64>; reverse.len()];
+        required[prototype_index] = Some(i64::from(snapshot.hp));
+        let mut queue = VecDeque::from([prototype_index]);
+        let mut matches = false;
+        let mut relaxations = 0_usize;
+        let relaxation_limit = reverse.len().saturating_mul(4_096);
+        while let Some(target) = queue.pop_front() {
+            relaxations = relaxations.saturating_add(1);
+            if relaxations > relaxation_limit {
+                break;
+            }
+            let needed = required[target].unwrap_or(i64::MAX);
+            let candidate = &catalog.monster_prototypes[target];
+            if candidate.runtime_spawnable && needed <= i64::from(candidate.base.max_hp) {
+                matches = true;
+                break;
+            }
+            for edge in &reverse[target] {
+                let source_max = i64::from(catalog.monster_prototypes[edge.source].base.max_hp);
+                let target_max = i64::from(catalog.monster_prototypes[target].base.max_hp);
+                let source_needed = if edge.keep_hp {
+                    needed
+                } else {
+                    let Some(product) = needed.checked_mul(source_max) else {
+                        continue;
+                    };
+                    product / target_max + i64::from(product % target_max != 0)
+                };
+                if source_needed <= 0 || source_needed > i64::from(i32::MAX) {
+                    continue;
+                }
+                if required[edge.source].is_none_or(|existing| source_needed < existing) {
+                    required[edge.source] = Some(source_needed);
+                    queue.push_back(edge.source);
+                }
+            }
+        }
+        matches
+    };
+    let downed_matches = snapshot.downed_until_tick.is_none_or(|until| {
+        let remaining = until.0.checked_sub(snapshot_tick.0);
+        remaining.is_some_and(|remaining| {
+            remaining > 0
+                && remaining <= 5 * SimTick::HZ
+                && if remaining > 2 * SimTick::HZ {
+                    base.revives
+                } else {
+                    base.revives || snapshot.clumsy_attacks
+                }
         })
     });
     attacks_match
         && ammunition_matches
+        && hp_matches
+        && speed_matches
+        && aggression_matches
+        && downed_matches
         && snapshot.max_hp == base.max_hp
         && snapshot.attack_cost_moves == base.attack_cost_moves
         && snapshot.melee_skill == base.melee_skill
@@ -814,24 +922,13 @@ impl WorldState {
                 };
                 let position = WorldPosition { x, y, z: center.z };
                 if ranged_distance(center, position) > u32::from(profile.spell_aoe)
-                    || (!profile.spell_no_projectile
+                    || (!profile.spell_ignore_walls
                         && !self.spell_blast_line_is_passable(center, position))
                     || !self.chunks.contains_key(&position.chunk_and_local().0)
                 {
                     continue;
                 }
-                let valid = match self.actor_at(position) {
-                    Some(actor_id) => {
-                        profile.spell_targets_hostile
-                            && self.actors.get(&actor_id).is_some_and(|actor| actor.hp > 0)
-                    }
-                    None => {
-                        self.creature_at(position).is_none()
-                            && self.npc_at(position).is_none()
-                            && profile.spell_targets_ground
-                    }
-                };
-                if valid {
+                if self.spell_area_position_is_valid(source, position, profile) {
                     area.push(position);
                 }
             }
@@ -851,7 +948,8 @@ impl WorldState {
                 continue;
             };
             if !profile.eoc_ids.is_empty() {
-                let _ = self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
+                let _ =
+                    self.apply_creature_spell_eocs(source, target, &profile.eoc_ids, sequence)?;
                 continue;
             }
             if profile.damage.is_empty() {
@@ -958,6 +1056,66 @@ impl WorldState {
                 return true;
             }
         }
+    }
+
+    fn spell_area_position_is_valid(
+        &self,
+        source: CreatureId,
+        position: WorldPosition,
+        profile: &WorldgenMonsterSpecialAttackV1,
+    ) -> bool {
+        if self
+            .creatures
+            .get(&source)
+            .is_some_and(|creature| creature.position == position)
+        {
+            return profile.spell_targets_self;
+        }
+        if self
+            .creatures
+            .values()
+            .any(|creature| creature.position == position)
+        {
+            return false;
+        }
+        if let Some(actor) = self
+            .actors
+            .values()
+            .find(|actor| actor.position == position)
+        {
+            return actor.hp > 0 && profile.spell_targets_hostile;
+        }
+        if self.npcs.values().any(|npc| npc.position == position) {
+            return false;
+        }
+        profile.spell_targets_ground
+    }
+
+    fn summoned_creature_can_enter(
+        &self,
+        prototype: &WorldgenMonsterPrototypeV1,
+        position: WorldPosition,
+    ) -> bool {
+        self.chunks.contains_key(&position.chunk_and_local().0)
+            && self.is_passable(position)
+            && !self.actors.values().any(|actor| actor.position == position)
+            && !self
+                .creatures
+                .values()
+                .any(|creature| creature.position == position)
+            && (!prototype.base.path_settings.avoid_dangerous_fields
+                || !self.fields_at(position).is_some_and(|fields| {
+                    fields.iter().any(|field| {
+                        self.field_types
+                            .get(&field.field_type_id)
+                            .and_then(|field_type| {
+                                field_type
+                                    .intensity_levels
+                                    .get(usize::from(field.intensity - 1))
+                            })
+                            .is_some_and(|level| level.dangerous)
+                    })
+                }))
     }
 
     fn spell_blast_epicenter(
@@ -1109,10 +1267,10 @@ impl WorldState {
                 };
                 let position = WorldPosition { x, y, z: center.z };
                 if ranged_distance(center, position) <= u32::from(profile.spell_aoe)
-                    && self.is_passable(position)
-                    && self.actor_at(position).is_none()
-                    && self.creature_at(position).is_none()
-                    && self.npc_at(position).is_none()
+                    && (profile.spell_ignore_walls
+                        || self.spell_blast_line_is_passable(center, position))
+                    && self.chunks.contains_key(&position.chunk_and_local().0)
+                    && self.spell_area_position_is_valid(source, position, profile)
                 {
                     candidates.push(position);
                 }
@@ -1129,18 +1287,17 @@ impl WorldState {
         } else {
             u32::from(profile.spell_minimum_summons)
         };
-        let actual = usize::try_from(requested)
-            .map_err(|_| SimError::NumericOverflow)?
-            .min(candidates.len());
-        if self.allocator.remaining() < u64::try_from(actual).unwrap_or(u64::MAX) {
-            return Err(SimError::IdReservationExhausted);
-        }
-        for _ in 0..actual {
+        let mut remaining = requested;
+        while remaining > 0 && !candidates.is_empty() {
             let index = usize::try_from(rng.next_u64() % candidates.len() as u64)
                 .map_err(|_| SimError::NumericOverflow)?;
             let position = candidates.remove(index);
+            if !self.summoned_creature_can_enter(&prototype, position) {
+                continue;
+            }
             let creature_id =
                 self.spawn_creature(creature_spawn_from_worldgen(&prototype, position))?;
+            remaining -= 1;
             events.push(self.make_event(WorldEventKind::CreatureSummoned {
                 caster: source,
                 creature_id,
@@ -1200,7 +1357,7 @@ impl WorldState {
             .ok_or(SimError::NumericOverflow)?
             / i64::from(old_max_hp);
         let proportional_hp =
-            i32::try_from(proportional_hp.max(1)).map_err(|_| SimError::NumericOverflow)?;
+            i32::try_from(proportional_hp).map_err(|_| SimError::NumericOverflow)?;
         let creature = self
             .creatures
             .get_mut(&source)
@@ -1849,17 +2006,12 @@ impl WorldState {
                 .ok_or(SimError::UnknownCreature)?
                 .melee_skill,
         ));
-        let (spread, dodge_attempted) = self.creature_actor_special_attack_roll(
-            source,
-            target,
-            turn_sequence,
-            accuracy,
-            profile.dodgeable,
-        )?;
+        let (spread, dodge_attempted) =
+            self.creature_actor_special_attack_roll(source, target, turn_sequence, accuracy)?;
         if dodge_attempted {
             self.consume_actor_dodge_attempt(target)?;
         }
-        if spread < 0 {
+        if profile.dodgeable && spread < 0 {
             let target_was_sleeping = self
                 .actors
                 .get(&target)

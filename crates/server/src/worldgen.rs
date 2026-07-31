@@ -719,6 +719,7 @@ struct RuntimeMonsterSpellProfile {
     eoc_id: String,
     target_self: bool,
     no_projectile: bool,
+    ignore_walls: bool,
     minimum_summons: u16,
     maximum_summons: u16,
     random_summons: bool,
@@ -732,6 +733,7 @@ struct RuntimeMonsterSpellProfile {
     field_duration_turns: u32,
     targets_hostile: bool,
     targets_ground: bool,
+    targets_self: bool,
 }
 
 fn runtime_monster_gun_profile(
@@ -1197,7 +1199,7 @@ fn runtime_monster_spell_profile(
     attack: &cdda_content::MonsterSpecialAttackDefinition,
     spells: &SpellRegistry,
     fields: &FieldTypeRegistry,
-    creature_eoc_ids: &BTreeSet<String>,
+    creature_spell_eoc_ids: &BTreeSet<String>,
 ) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
     if attack.kind != MonsterSpecialAttackKind::Spell {
         return Ok(None);
@@ -1212,8 +1214,7 @@ fn runtime_monster_spell_profile(
     let typed_damage = false;
     let status_effect = spell.supports_hostile_status_effect();
     let effect_on_condition = spell.supports_hostile_effect_on_condition()
-        && creature_eoc_ids.contains(&spell.effect_str)
-        && !spell.valid_targets.contains("ground");
+        && creature_spell_eoc_ids.contains(&spell.effect_str);
     if (!summon && !typed_damage && !status_effect && !effect_on_condition)
         || !spell.flags.contains("SILENT")
         || !spell.flags.contains("NO_EXPLOSION_SFX")
@@ -1231,7 +1232,7 @@ fn runtime_monster_spell_profile(
         return Ok(None);
     }
     let target_self = attack.spell_hit_self || attack.spell_allow_no_target;
-    if (target_self && !spell.valid_targets.contains("self"))
+    if (!summon && target_self)
         || (!target_self
             && !spell.valid_targets.contains("hostile")
             && !spell.valid_targets.contains("ground"))
@@ -1369,6 +1370,7 @@ fn runtime_monster_spell_profile(
         || (target_self && range != 0)
         || (!target_self && range == 0)
         || (summon && aoe == 0)
+        || ((status_effect || effect_on_condition) && aoe != 0)
         || ((typed_damage || status_effect || effect_on_condition) && target_self)
     {
         return Ok(None);
@@ -1402,6 +1404,7 @@ fn runtime_monster_spell_profile(
             .unwrap_or_default(),
         target_self,
         no_projectile: spell.flags.contains("NO_PROJECTILE"),
+        ignore_walls: spell.flags.contains("IGNORE_WALLS"),
         minimum_summons: summon
             .then(|| u16::try_from(minimum_damage))
             .transpose()?
@@ -1422,8 +1425,9 @@ fn runtime_monster_spell_profile(
             .map(|_| u32::try_from(leveled_duration).map(|moves| moves / 100))
             .transpose()?
             .unwrap_or(0),
-        targets_hostile: !target_self && spell.valid_targets.contains("hostile"),
-        targets_ground: !target_self && spell.valid_targets.contains("ground"),
+        targets_hostile: spell.valid_targets.contains("hostile"),
+        targets_ground: spell.valid_targets.contains("ground"),
+        targets_self: spell.valid_targets.contains("self"),
     }))
 }
 
@@ -1438,6 +1442,7 @@ fn runtime_monster_catalog(
     fields: &FieldTypeRegistry,
     spells: &SpellRegistry,
     creature_eoc_ids: &BTreeSet<String>,
+    creature_spell_eoc_ids: &BTreeSet<String>,
 ) -> Result<
     (
         Vec<WorldgenMonsterPrototypeV1>,
@@ -1512,7 +1517,7 @@ fn runtime_monster_catalog(
                     Some(attack.polymorph_monster_type_id.clone())
                 }
                 MonsterSpecialAttackKind::Spell => {
-                    runtime_monster_spell_profile(attack, spells, fields, creature_eoc_ids)?
+                    runtime_monster_spell_profile(attack, spells, fields, creature_spell_eoc_ids)?
                         .and_then(|profile| {
                             (!profile.summoned_monster_type_id.is_empty())
                                 .then_some(profile.summoned_monster_type_id)
@@ -1597,6 +1602,36 @@ fn runtime_monster_catalog(
                 .iter()
                 .cloned()
                 .collect::<BTreeSet<_>>();
+            const MODELED_MONSTER_FLAGS: &[&str] = &[
+                "SEES",
+                "STUMBLES",
+                "BASHES",
+                "GROUP_BASH",
+                "HEARS",
+                "GOODHEARING",
+                "CLUMSY_ATTACKS",
+                "IMMOBILE",
+                "PACIFIST",
+                "CAN_OPEN_DOORS",
+                "REVIVES",
+                "NO_CORPSE",
+                "VENOM",
+                "BADVENOM",
+                "PARALYZEVENOM",
+            ];
+            deferred_behavior_fields.extend(
+                monster
+                    .flags
+                    .iter()
+                    .filter(|flag| !MODELED_MONSTER_FLAGS.contains(&flag.as_str()))
+                    .map(|flag| format!("flags.{flag}")),
+            );
+            if monster.path_settings.avoid_traps {
+                deferred_behavior_fields.insert(String::from("path_settings.avoid_traps"));
+            }
+            if monster.path_settings.avoid_sharp {
+                deferred_behavior_fields.insert(String::from("path_settings.avoid_sharp"));
+            }
             deferred_behavior_fields.extend(
                 monster
                     .special_attacks
@@ -1697,7 +1732,7 @@ fn runtime_monster_catalog(
                     && attack.kind == MonsterSpecialAttackKind::Spell
             }) {
                 if let Some(profile) =
-                    runtime_monster_spell_profile(attack, spells, fields, creature_eoc_ids)?
+                    runtime_monster_spell_profile(attack, spells, fields, creature_spell_eoc_ids)?
                 {
                     spell_profiles.insert(attack.id.clone(), profile);
                 } else {
@@ -1859,10 +1894,14 @@ fn runtime_monster_catalog(
                         leap_prefer: attack.leap_prefer,
                         leap_random: attack.leap_random,
                         leap_ignore_destination_danger: attack.leap_ignore_destination_danger,
-                        condition: attack
-                            .condition
-                            .as_ref()
-                            .map(crate::eocs::runtime_condition),
+                        condition: (attack.kind != MonsterSpecialAttackKind::Polymorph)
+                            .then(|| {
+                                attack
+                                    .condition
+                                    .as_ref()
+                                    .map(crate::eocs::runtime_condition)
+                            })
+                            .flatten(),
                         eoc_ids: spell_profile.map_or_else(
                             || attack.eoc_ids.clone(),
                             |profile| {
@@ -1891,6 +1930,8 @@ fn runtime_monster_catalog(
                         spell_target_self: spell_profile.is_some_and(|profile| profile.target_self),
                         spell_no_projectile: spell_profile
                             .is_some_and(|profile| profile.no_projectile),
+                        spell_ignore_walls: spell_profile
+                            .is_some_and(|profile| profile.ignore_walls),
                         spell_minimum_summons: spell_profile
                             .map_or(0, |profile| profile.minimum_summons),
                         spell_maximum_summons: spell_profile
@@ -1912,6 +1953,8 @@ fn runtime_monster_catalog(
                             .is_some_and(|profile| profile.targets_hostile),
                         spell_targets_ground: spell_profile
                             .is_some_and(|profile| profile.targets_ground),
+                        spell_targets_self: spell_profile
+                            .is_some_and(|profile| profile.targets_self),
                         gun_type_id: gun_profile
                             .map(|_| attack.gun_type_id.clone())
                             .unwrap_or_default(),
@@ -2586,6 +2629,7 @@ pub(super) fn runtime_mapgen_worldgen(
             fields,
             spells,
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
+            &cdda_protocol::creature_spell_eoc_supported_ids(eoc_definitions),
         )?;
     let vehicle_catalog = runtime_vehicle_catalog(vehicle_group_roots, vehicles)?;
 

@@ -162,8 +162,9 @@ impl SpellDefinition {
             "NO_EXPLOSION_SFX",
             "SILENT",
             "NO_PROJECTILE",
+            "IGNORE_WALLS",
         ];
-        const ALLOWED_TARGETS: &[&str] = &["ground", "self", "hostile"];
+        const ALLOWED_TARGETS: &[&str] = &["ground", "self"];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Summon
             && self.shape == "blast"
@@ -178,6 +179,7 @@ impl SpellDefinition {
                 .valid_targets
                 .iter()
                 .all(|target| ALLOWED_TARGETS.contains(&target.as_str()))
+            && self.valid_targets.contains("ground")
             && self.maximum_level >= 0
             && self.damage_type_id.is_empty()
             && self.minimum_damage > 0
@@ -200,6 +202,7 @@ impl SpellDefinition {
             "NO_PROJECTILE",
             "NO_EXPLOSION_SFX",
             "SILENT",
+            "IGNORE_WALLS",
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Attack
@@ -240,6 +243,7 @@ impl SpellDefinition {
             "NO_PROJECTILE",
             "NO_EXPLOSION_SFX",
             "SILENT",
+            "IGNORE_WALLS",
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Attack
@@ -252,19 +256,13 @@ impl SpellDefinition {
                 .flags
                 .iter()
                 .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
-            && self
-                .valid_targets
-                .iter()
-                .all(|target| matches!(target.as_str(), "ground" | "hostile"))
-            && self
-                .valid_targets
-                .iter()
-                .any(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self.valid_targets.len() == 1
+            && self.valid_targets.contains("hostile")
             && self.maximum_level >= 0
             && self.minimum_range > 0
             && self.maximum_range > 0
-            && self.minimum_aoe >= 0
-            && self.maximum_aoe >= 0
+            && self.minimum_aoe == 0
+            && self.maximum_aoe == 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
             && self.minimum_duration_moves > 0
@@ -278,7 +276,12 @@ impl SpellDefinition {
 
     #[must_use]
     pub fn supports_hostile_effect_on_condition(&self) -> bool {
-        const ALLOWED_FLAGS: &[&str] = &["NO_PROJECTILE", "NO_EXPLOSION_SFX", "SILENT"];
+        const ALLOWED_FLAGS: &[&str] = &[
+            "NO_PROJECTILE",
+            "IGNORE_WALLS",
+            "NO_EXPLOSION_SFX",
+            "SILENT",
+        ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::EffectOnCondition
             && self.shape == "blast"
@@ -290,19 +293,13 @@ impl SpellDefinition {
                 .flags
                 .iter()
                 .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
-            && self
-                .valid_targets
-                .iter()
-                .all(|target| matches!(target.as_str(), "ground" | "hostile"))
-            && self
-                .valid_targets
-                .iter()
-                .any(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self.valid_targets.len() == 1
+            && self.valid_targets.contains("hostile")
             && self.maximum_level >= 0
             && self.minimum_range > 0
             && self.maximum_range > 0
-            && self.minimum_aoe >= 0
-            && self.maximum_aoe >= 0
+            && self.minimum_aoe == 0
+            && self.maximum_aoe == 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
             && self.minimum_duration_moves == 0

@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: i64 = 109;
 /// Old Postcard snapshots and journals cannot be decoded after Protocol 131
-/// added canonical authoritative vehicle catalogs, live parts, and passengers.
+/// added split spell targeting/projectile semantics together with canonical
+/// authoritative vehicle catalogs, live parts, and passengers.
 /// Metadata-only databases may still migrate.
 pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 109;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;

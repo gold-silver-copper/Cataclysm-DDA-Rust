@@ -21,11 +21,12 @@ pub use anatomy::{
     ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1,
     ActorEffectSnapshotV1, AnatomyDefinitionV1, ArmorMaterialProtectionV1, BodyPartHpModifiersV1,
     BodyPartOnHitEffectV1, BodyPartPrototypeV1, MAX_ANATOMY_PARTS, MAX_ARMOR_DAMAGE_TYPES,
-    MAX_ARMOR_PORTIONS, MAX_BODY_PART_DEFERRED_FIELDS, MAX_BODY_PART_ID_BYTES,
-    MAX_WEARABLE_ARMOR_TYPES, WearableArmorPortionV1, WearableArmorTypeV1,
-    actor_body_part_summary_hp, actor_body_parts_are_valid, actor_effect_modifiers_are_valid,
-    actor_effects_are_valid, anatomy_definition_is_valid, body_part_prototype_is_valid,
-    wearable_armor_catalog_is_valid, wearable_armor_type_is_valid,
+    MAX_ARMOR_PORTIONS, MAX_BODY_PART_DEFERRED_FIELDS, MAX_BODY_PART_HIT_DIFFICULTY_MILLIONTHS,
+    MAX_BODY_PART_HIT_SIZE_MILLIONTHS, MAX_BODY_PART_ID_BYTES, MAX_WEARABLE_ARMOR_TYPES,
+    WearableArmorPortionV1, WearableArmorTypeV1, actor_body_part_summary_hp,
+    actor_body_parts_are_valid, actor_effect_modifiers_are_valid, actor_effects_are_valid,
+    anatomy_definition_is_valid, body_part_prototype_is_valid, wearable_armor_catalog_is_valid,
+    wearable_armor_type_is_valid,
 };
 pub use eocs::{
     EocActorStatV1, EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
@@ -35,11 +36,11 @@ pub use eocs::{
     MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES, MAX_EOC_SAFE_INTEGER, MAX_EOC_TREE_DEPTH,
     MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES, ScheduledEocV1, actor_eoc_schedule_is_valid,
     actor_eoc_variables_are_valid, actor_inactive_recurring_eocs_are_valid,
-    creature_eoc_condition_is_supported, creature_eoc_supported_ids, eoc_catalog_is_valid,
-    eoc_condition_is_valid, eoc_condition_requires_target_context,
-    eoc_confirmation_branches_are_valid, eoc_definition_requires_target_context,
-    eoc_effect_referenced_ids, eoc_effects_are_valid, eoc_effects_contain_confirmation,
-    eoc_effects_require_target_context,
+    creature_eoc_condition_is_supported, creature_eoc_supported_ids,
+    creature_spell_eoc_supported_ids, eoc_catalog_is_valid, eoc_condition_is_valid,
+    eoc_condition_requires_target_context, eoc_confirmation_branches_are_valid,
+    eoc_definition_requires_target_context, eoc_effect_referenced_ids, eoc_effects_are_valid,
+    eoc_effects_contain_confirmation, eoc_effects_require_target_context,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -3506,9 +3507,11 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_summoned_monster_type_id: String,
     /// Self-centered spells do not require an actor target or line of sight.
     pub spell_target_self: bool,
-    /// Pinned `NO_PROJECTILE`: blast targeting and area propagation ignore
-    /// impassable terrain instead of moving the epicenter to the collision.
+    /// Pinned `NO_PROJECTILE`: blast targeting does not move the epicenter to
+    /// the first impassable tile on the projectile line.
     pub spell_no_projectile: bool,
+    /// Pinned `IGNORE_WALLS`: blast propagation ignores impassable terrain.
+    pub spell_ignore_walls: bool,
     pub spell_minimum_summons: u16,
     pub spell_maximum_summons: u16,
     pub spell_random_summons: bool,
@@ -3521,6 +3524,7 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_field_duration_turns: u32,
     pub spell_targets_hostile: bool,
     pub spell_targets_ground: bool,
+    pub spell_targets_self: bool,
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
     /// Empty for ammo-free pseudo guns; otherwise the concrete item ID whose
@@ -5947,11 +5951,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             let common = attack.spell_aoe <= 32
                                 && ((attack.spell_target_self && attack.range == 0)
                                     || (!attack.spell_target_self && attack.range > 0))
-                                && (if attack.spell_target_self {
-                                    !attack.spell_targets_hostile && !attack.spell_targets_ground
-                                } else {
-                                    attack.spell_targets_hostile || attack.spell_targets_ground
-                                });
+                                && (attack.spell_targets_hostile
+                                    || attack.spell_targets_ground
+                                    || attack.spell_targets_self);
                             let no_field = attack.spell_field_type_id.is_empty()
                                 && attack.spell_field_chance == 0
                                 && attack.spell_field_intensity == 0
@@ -5974,6 +5976,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.damage.is_empty()
                                 && attack.effects.is_empty()
                                 && attack.eoc_ids.is_empty()
+                                && attack.spell_targets_ground
+                                && !attack.spell_targets_hostile
                                 && no_field;
                             // Typed spell damage still lacks pinned defense,
                             // body-part selection, and RNG-order semantics.
@@ -5998,6 +6002,10 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.effects[0].intensity_minimum == 1
                                 && attack.effects[0].intensity_maximum == 1
                                 && attack.eoc_ids.is_empty()
+                                && attack.spell_aoe == 0
+                                && attack.spell_targets_hostile
+                                && !attack.spell_targets_ground
+                                && !attack.spell_targets_self
                                 && (no_field || field);
                             let eoc = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
@@ -6010,12 +6018,16 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.damage.is_empty()
                                 && attack.effects.is_empty()
                                 && !attack.eoc_ids.is_empty()
+                                && attack.spell_aoe == 0
+                                && attack.spell_targets_hostile
+                                && !attack.spell_targets_self
                                 && no_field;
                             common && (summon || typed_damage || status_effect || eoc)
                         } else {
                             attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && !attack.spell_no_projectile
+                                && !attack.spell_ignore_walls
                                 && attack.spell_minimum_summons == 0
                                 && attack.spell_maximum_summons == 0
                                 && !attack.spell_random_summons
@@ -6027,6 +6039,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.spell_field_duration_turns == 0
                                 && !attack.spell_targets_hostile
                                 && !attack.spell_targets_ground
+                                && !attack.spell_targets_self
                         })
                         && attack.gun_ranges.len() <= 64
                         && attack.infection_chance_millionths <= 1_000_000
@@ -6140,6 +6153,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             WorldgenMonsterSpecialAttackKindV1::Gun => false,
                             WorldgenMonsterSpecialAttackKindV1::Polymorph => {
                                 attack.move_cost_moves == 0
+                                    && attack.range == 0
                                     && attack.accuracy.is_none()
                                     && !attack.no_adjacent
                                     && !attack.dodgeable
@@ -6157,6 +6171,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_prefer
                                     && !attack.leap_random
                                     && !attack.leap_ignore_destination_danger
+                                    && attack.condition.is_none()
                                     && attack.eoc_ids.is_empty()
                                     && attack.gun_type_id.is_empty()
                                     && attack.gun_ammunition_type_id.is_empty()

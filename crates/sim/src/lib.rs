@@ -3320,7 +3320,7 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
     validate_item_type_id(&snapshot.type_id)?;
     if snapshot.id.counter() == 0
         || snapshot.max_hp <= 0
-        || snapshot.hp <= 0
+        || snapshot.hp < 0
         || snapshot.speed == 0
         || snapshot.attack_cost_moves == 0
         || snapshot.melee_dice_sides == 0
@@ -5280,6 +5280,8 @@ impl WorldState {
         let item_groups = self.item_groups.values().cloned().collect::<Vec<_>>();
         let eoc_definitions = self.eoc_definitions.values().cloned().collect::<Vec<_>>();
         let creature_eoc_ids = cdda_protocol::creature_eoc_supported_ids(&eoc_definitions);
+        let creature_spell_eoc_ids =
+            cdda_protocol::creature_spell_eoc_supported_ids(&eoc_definitions);
         if self.tick != SimTick(0)
             || !self.chunks.is_empty()
             || self.worldgen.is_some()
@@ -5288,17 +5290,20 @@ impl WorldState {
                 prototype.special_attacks.iter().any(|attack| {
                     attack.condition.as_ref().is_some_and(|condition| {
                         !cdda_protocol::creature_eoc_condition_is_supported(condition)
+                    }) || attack.eoc_ids.iter().any(|eoc_id| {
+                        let supported = if attack.kind
+                            == cdda_protocol::WorldgenMonsterSpecialAttackKindV1::Spell
+                        {
+                            &creature_spell_eoc_ids
+                        } else {
+                            &creature_eoc_ids
+                        };
+                        !supported.contains(eoc_id)
                     }) || attack
-                        .eoc_ids
+                        .gun_projectile_effects
                         .iter()
-                        .any(|eoc_id| !creature_eoc_ids.contains(eoc_id))
-                        || attack
-                            .gun_projectile_effects
-                            .iter()
-                            .flat_map(|effect| {
-                                effect.area_fields.iter().chain(&effect.trail_fields)
-                            })
-                            .any(|field| !self.field_types.contains_key(&field.field_type_id))
+                        .flat_map(|effect| effect.area_fields.iter().chain(&effect.trail_fields))
+                        .any(|field| !self.field_types.contains_key(&field.field_type_id))
                         || (!attack.spell_field_type_id.is_empty()
                             && !self.field_types.contains_key(&attack.spell_field_type_id))
                 })
@@ -15115,6 +15120,7 @@ impl WorldState {
                 || !monsters::special_state_matches_catalog(
                     snapshot.worldgen.as_ref(),
                     creature_snapshot,
+                    snapshot.tick,
                 )
                 || (!creature_snapshot.blood_field_type_id.is_empty()
                     && !field_types.contains_key(&creature_snapshot.blood_field_type_id))

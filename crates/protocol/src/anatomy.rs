@@ -9,6 +9,8 @@ pub const MAX_ANATOMY_PARTS: usize = 256;
 pub const MAX_BODY_PART_ID_BYTES: usize = 512;
 pub const MAX_BODY_PART_DEFERRED_FIELDS: usize = 128;
 pub const MAX_BODY_PART_LIMB_TYPES: usize = 32;
+pub const MAX_BODY_PART_HIT_SIZE_MILLIONTHS: u64 = 1_000 * ANATOMY_SCALE as u64;
+pub const MAX_BODY_PART_HIT_DIFFICULTY_MILLIONTHS: i64 = 3 * ANATOMY_SCALE;
 pub const MAX_WEARABLE_ARMOR_TYPES: usize = 16_384;
 pub const MAX_ARMOR_PORTIONS: usize = 256;
 pub const MAX_ARMOR_DAMAGE_TYPES: usize = 64;
@@ -190,8 +192,8 @@ pub fn body_part_prototype_is_valid(part: &BodyPartPrototypeV1) -> bool {
         && valid_id(&part.main_part_id)
         && valid_id(&part.connected_to_id)
         && valid_id(&part.opposite_part_id)
-        && part.hit_size_millionths > 0
-        && part.hit_difficulty_millionths >= 0
+        && (1..=MAX_BODY_PART_HIT_SIZE_MILLIONTHS).contains(&part.hit_size_millionths)
+        && (0..=MAX_BODY_PART_HIT_DIFFICULTY_MILLIONTHS).contains(&part.hit_difficulty_millionths)
         && !part.limb_types.is_empty()
         && sorted_unique_ids(&part.limb_types, MAX_BODY_PART_LIMB_TYPES)
         && part.base_hp > 0

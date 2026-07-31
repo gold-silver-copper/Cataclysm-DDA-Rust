@@ -1638,7 +1638,7 @@ fn parse_special_attack(
                 .chain(LEAP_ONLY_FIELDS)
                 .chain(GUN_ONLY_FIELDS)
                 .copied()
-                .chain(["move_cost", "range", "eoc"])
+                .chain(["move_cost", "eoc"])
                 .filter(|field| fields.contains_key(*field))
                 .map(str::to_owned),
         );
@@ -1663,6 +1663,11 @@ fn parse_special_attack(
                 .filter(|field| fields.contains_key(*field))
                 .map(str::to_owned),
         );
+    }
+    if kind == MonsterSpecialAttackKind::Polymorph {
+        // The pinned polymorph actor has no range member.  Generic actor
+        // inheritance may leave one behind, but it is not observed by call().
+        attack.range = 0;
     }
     if kind == MonsterSpecialAttackKind::Leap && fields.contains_key("range") {
         attack.unsupported_fields.insert(String::from("range"));
