@@ -12,6 +12,8 @@ pub const MAX_EOC_MESSAGE_BYTES: usize = 16 * 1_024;
 pub const MAX_EOC_ACTOR_VARIABLES: usize = 1_024;
 pub const MAX_EOC_VARIABLE_VALUE_BYTES: usize = 16 * 1_024;
 pub const MAX_ACTOR_SCHEDULED_EOCS: usize = 4_096;
+pub const MAX_EOC_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+pub const MAX_EOC_MATH_NODES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EocDelayV1 {
@@ -68,6 +70,7 @@ pub enum EocConditionV1 {
         stat: EocActorStatV1,
         minimum: i32,
     },
+    Math(EocMathExpressionV1),
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
@@ -79,6 +82,35 @@ pub enum EocActorStatV1 {
     Dexterity,
     Intelligence,
     Perception,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EocMathExpressionV1 {
+    Constant(i64),
+    ActorVariable(String),
+    HasActorVariable(String),
+    ActorStat(EocActorStatV1),
+    Negate(Box<Self>),
+    Not(Box<Self>),
+    Add(Box<Self>, Box<Self>),
+    Subtract(Box<Self>, Box<Self>),
+    Multiply(Box<Self>, Box<Self>),
+    Equal(Box<Self>, Box<Self>),
+    NotEqual(Box<Self>, Box<Self>),
+    Less(Box<Self>, Box<Self>),
+    LessOrEqual(Box<Self>, Box<Self>),
+    Greater(Box<Self>, Box<Self>),
+    GreaterOrEqual(Box<Self>, Box<Self>),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EocMathAssignmentOperationV1 {
+    Set,
+    Add,
+    Subtract,
+    Multiply,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +136,11 @@ pub enum EocEffectV1 {
     },
     RemoveActorVariable {
         variable_id: String,
+    },
+    MathAssignment {
+        variable_id: String,
+        operation: EocMathAssignmentOperationV1,
+        value: EocMathExpressionV1,
     },
     RunEocs {
         eoc_ids: Vec<String>,
@@ -133,7 +170,8 @@ impl EocEffectV1 {
             | Self::AddEffect { .. }
             | Self::RemoveEffects { .. }
             | Self::SetActorVariable { .. }
-            | Self::RemoveActorVariable { .. } => {}
+            | Self::RemoveActorVariable { .. }
+            | Self::MathAssignment { .. } => {}
         }
     }
 }
@@ -281,6 +319,9 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
         EocConditionV1::HasProficiency { proficiency_id } => valid_id(proficiency_id),
         EocConditionV1::KnowsRecipe { recipe_id } => valid_id(recipe_id),
         EocConditionV1::StatAtLeast { .. } => true,
+        EocConditionV1::Math(expression) => {
+            valid_math_expression_tree(expression, depth + 1, nodes)
+        }
         EocConditionV1::Not(condition) => valid_condition(condition, depth + 1, nodes),
         EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => {
             !conditions.is_empty()
@@ -338,6 +379,9 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                         .all(|value| valid_variable_value(value))
             }
             EocEffectV1::RemoveActorVariable { variable_id } => valid_id(variable_id),
+            EocEffectV1::MathAssignment {
+                variable_id, value, ..
+            } => valid_id(variable_id) && valid_math_expression_tree(value, depth + 1, nodes),
             EocEffectV1::RunEocs { eoc_ids, delay } => {
                 !eoc_ids.is_empty()
                     && eoc_ids.len() <= MAX_EOC_REFERENCES
@@ -357,6 +401,53 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             }
         }
     })
+}
+
+fn valid_math_expression_tree(
+    expression: &EocMathExpressionV1,
+    depth: usize,
+    nodes: &mut usize,
+) -> bool {
+    let before = *nodes;
+    valid_math_expression(expression, depth, nodes)
+        && nodes.saturating_sub(before) <= MAX_EOC_MATH_NODES
+}
+
+fn valid_math_expression(
+    expression: &EocMathExpressionV1,
+    depth: usize,
+    nodes: &mut usize,
+) -> bool {
+    if depth >= MAX_EOC_TREE_DEPTH {
+        return false;
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_EOC_TREE_NODES {
+        return false;
+    }
+    match expression {
+        EocMathExpressionV1::Constant(value) => value.unsigned_abs() <= MAX_EOC_SAFE_INTEGER as u64,
+        EocMathExpressionV1::ActorVariable(variable_id)
+        | EocMathExpressionV1::HasActorVariable(variable_id) => valid_id(variable_id),
+        EocMathExpressionV1::ActorStat(_) => true,
+        EocMathExpressionV1::Negate(value) | EocMathExpressionV1::Not(value) => {
+            valid_math_expression(value, depth + 1, nodes)
+        }
+        EocMathExpressionV1::Add(left, right)
+        | EocMathExpressionV1::Subtract(left, right)
+        | EocMathExpressionV1::Multiply(left, right)
+        | EocMathExpressionV1::Equal(left, right)
+        | EocMathExpressionV1::NotEqual(left, right)
+        | EocMathExpressionV1::Less(left, right)
+        | EocMathExpressionV1::LessOrEqual(left, right)
+        | EocMathExpressionV1::Greater(left, right)
+        | EocMathExpressionV1::GreaterOrEqual(left, right)
+        | EocMathExpressionV1::And(left, right)
+        | EocMathExpressionV1::Or(left, right) => {
+            valid_math_expression(left, depth + 1, nodes)
+                && valid_math_expression(right, depth + 1, nodes)
+        }
+    }
 }
 
 fn valid_string_value(value: &EocStringValueV1) -> bool {

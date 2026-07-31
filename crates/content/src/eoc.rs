@@ -5,6 +5,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
+use crate::eoc_math::{
+    EocMathAssignmentDefinition, EocMathExpressionDefinition, parse_math_assignment,
+    parse_math_condition,
+};
 use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
 
 pub const MAX_EOC_TREE_DEPTH: usize = 64;
@@ -57,6 +61,7 @@ pub enum EocConditionDefinition {
         stat: EocActorStatDefinition,
         minimum: i32,
     },
+    Math(EocMathExpressionDefinition),
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
@@ -93,6 +98,7 @@ pub enum EocEffectDefinition {
     RemoveActorVariable {
         variable_id: String,
     },
+    MathAssignment(EocMathAssignmentDefinition),
     RunEocs {
         eoc_ids: Vec<String>,
         delay: Option<EocDelayDefinition>,
@@ -121,7 +127,8 @@ impl EocEffectDefinition {
             | Self::AddEffect { .. }
             | Self::RemoveEffects { .. }
             | Self::SetActorVariable { .. }
-            | Self::RemoveActorVariable { .. } => {}
+            | Self::RemoveActorVariable { .. }
+            | Self::MathAssignment(_) => {}
         }
     }
 }
@@ -443,6 +450,17 @@ fn parse_condition(
         unsupported.insert(path.to_owned());
         return None;
     };
+    if let Some(math) = object.get("math") {
+        if object.len() != 1 {
+            unsupported.insert(path.to_owned());
+            return None;
+        }
+        let Some(expression) = parse_math_condition(math) else {
+            unsupported.insert(format!("{path}.math"));
+            return None;
+        };
+        return Some(EocConditionDefinition::Math(expression));
+    }
     if let Some(value) = object.get("not") {
         if object.len() != 1 {
             unsupported.insert(path.to_owned());
@@ -713,6 +731,18 @@ fn parse_effects(
             unsupported.insert(item_path);
             continue;
         };
+        if let Some(math) = object.get("math") {
+            if object.len() != 1 {
+                unsupported.insert(item_path);
+                continue;
+            }
+            let Some(assignment) = parse_math_assignment(math) else {
+                unsupported.insert(format!("{item_path}.math"));
+                continue;
+            };
+            effects.push(EocEffectDefinition::MathAssignment(assignment));
+            continue;
+        }
         if let Some(condition) = object.get("if") {
             if object
                 .keys()

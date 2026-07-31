@@ -5,6 +5,7 @@ mod bash;
 mod city;
 mod construction;
 mod eoc;
+mod eoc_math;
 mod field;
 mod furniture;
 mod item;
@@ -44,6 +45,10 @@ pub use eoc::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EffectOnConditionRegistryError,
     EocActorStatDefinition, EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,
     EocStringValueDefinition, MAX_EOC_TREE_DEPTH,
+};
+pub use eoc_math::{
+    EocMathAssignmentDefinition, EocMathAssignmentOperationDefinition, EocMathExpressionDefinition,
+    MAX_EOC_MATH_NODES, MAX_EOC_MATH_SOURCE_BYTES, MAX_EOC_SAFE_INTEGER,
 };
 pub use field::{
     FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry, FieldTypeRegistryError,

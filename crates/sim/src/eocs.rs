@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocActorStatV1,
-    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1,
-    ItemId, MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, ScheduledEocV1, SimTick, WorldEvent,
-    WorldEventKind, eoc_catalog_is_valid,
+    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1,
+    EocMathAssignmentOperationV1, EocMathExpressionV1, EocStringValueV1, ItemId,
+    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, ScheduledEocV1,
+    SimTick, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -554,6 +555,9 @@ fn evaluate_condition(
             };
             actual >= *minimum
         }
+        EocConditionV1::Math(expression) => {
+            evaluate_math_expression(expression, actor, variables, operations)? != 0
+        }
         EocConditionV1::Not(condition) => {
             !evaluate_condition(condition, actor, effects, variables, operations)?
         }
@@ -578,6 +582,119 @@ fn evaluate_condition(
             matches
         }
     })
+}
+
+fn evaluate_math_expression(
+    expression: &EocMathExpressionV1,
+    actor: &EocActorContext,
+    variables: &BTreeMap<String, String>,
+    operations: &mut usize,
+) -> Result<i64, SimError> {
+    *operations = operations.saturating_add(1);
+    if *operations > MAX_EOC_OPERATIONS_PER_COMMAND {
+        return Err(SimError::InvalidItem);
+    }
+    let binary = |left: &EocMathExpressionV1,
+                  right: &EocMathExpressionV1,
+                  operations: &mut usize|
+     -> Result<(i64, i64), SimError> {
+        Ok((
+            evaluate_math_expression(left, actor, variables, operations)?,
+            evaluate_math_expression(right, actor, variables, operations)?,
+        ))
+    };
+    match expression {
+        EocMathExpressionV1::Constant(value) => safe_math_result(Some(*value)),
+        EocMathExpressionV1::ActorVariable(variable_id) => {
+            actor_variable_integer(variables, variable_id)
+        }
+        EocMathExpressionV1::HasActorVariable(variable_id) => {
+            Ok(i64::from(variables.contains_key(variable_id)))
+        }
+        EocMathExpressionV1::ActorStat(stat) => Ok(i64::from(match stat {
+            EocActorStatV1::Strength => actor.base_strength,
+            EocActorStatV1::Dexterity => actor.base_dexterity,
+            EocActorStatV1::Intelligence => actor.base_intelligence,
+            EocActorStatV1::Perception => actor.base_perception,
+        })),
+        EocMathExpressionV1::Negate(value) => safe_math_result(
+            evaluate_math_expression(value, actor, variables, operations)?.checked_neg(),
+        ),
+        EocMathExpressionV1::Not(value) => Ok(i64::from(
+            evaluate_math_expression(value, actor, variables, operations)? == 0,
+        )),
+        EocMathExpressionV1::Add(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            safe_math_result(left.checked_add(right))
+        }
+        EocMathExpressionV1::Subtract(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            safe_math_result(left.checked_sub(right))
+        }
+        EocMathExpressionV1::Multiply(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            safe_math_result(left.checked_mul(right))
+        }
+        EocMathExpressionV1::Equal(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            Ok(i64::from(left == right))
+        }
+        EocMathExpressionV1::NotEqual(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            Ok(i64::from(left != right))
+        }
+        EocMathExpressionV1::Less(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            Ok(i64::from(left < right))
+        }
+        EocMathExpressionV1::LessOrEqual(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            Ok(i64::from(left <= right))
+        }
+        EocMathExpressionV1::Greater(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            Ok(i64::from(left > right))
+        }
+        EocMathExpressionV1::GreaterOrEqual(left, right) => {
+            let (left, right) = binary(left, right, operations)?;
+            Ok(i64::from(left >= right))
+        }
+        EocMathExpressionV1::And(left, right) => {
+            if evaluate_math_expression(left, actor, variables, operations)? == 0 {
+                Ok(0)
+            } else {
+                Ok(i64::from(
+                    evaluate_math_expression(right, actor, variables, operations)? != 0,
+                ))
+            }
+        }
+        EocMathExpressionV1::Or(left, right) => {
+            if evaluate_math_expression(left, actor, variables, operations)? != 0 {
+                Ok(1)
+            } else {
+                Ok(i64::from(
+                    evaluate_math_expression(right, actor, variables, operations)? != 0,
+                ))
+            }
+        }
+    }
+}
+
+fn actor_variable_integer(
+    variables: &BTreeMap<String, String>,
+    variable_id: &str,
+) -> Result<i64, SimError> {
+    let Some(value) = variables.get(variable_id) else {
+        return Ok(0);
+    };
+    let value = value.parse::<i64>().map_err(|_| SimError::InvalidItem)?;
+    safe_math_result(Some(value))
+}
+
+fn safe_math_result(value: Option<i64>) -> Result<i64, SimError> {
+    value
+        .filter(|value| value.unsigned_abs() <= MAX_EOC_SAFE_INTEGER as u64)
+        .ok_or(SimError::NumericOverflow)
 }
 
 fn execute_effects(
@@ -637,6 +754,40 @@ fn execute_effects(
             }
             EocEffectV1::RemoveActorVariable { variable_id } => {
                 execution.variables.remove(variable_id);
+            }
+            EocEffectV1::MathAssignment {
+                variable_id,
+                operation,
+                value,
+            } => {
+                let value = evaluate_math_expression(
+                    value,
+                    &execution.actor,
+                    &execution.variables,
+                    &mut execution.operations,
+                )?;
+                let next = match operation {
+                    EocMathAssignmentOperationV1::Set => value,
+                    EocMathAssignmentOperationV1::Add
+                    | EocMathAssignmentOperationV1::Subtract
+                    | EocMathAssignmentOperationV1::Multiply => {
+                        let current = actor_variable_integer(&execution.variables, variable_id)?;
+                        safe_math_result(match operation {
+                            EocMathAssignmentOperationV1::Add => current.checked_add(value),
+                            EocMathAssignmentOperationV1::Subtract => current.checked_sub(value),
+                            EocMathAssignmentOperationV1::Multiply => current.checked_mul(value),
+                            EocMathAssignmentOperationV1::Set => unreachable!(),
+                        })?
+                    }
+                };
+                if !execution.variables.contains_key(variable_id)
+                    && execution.variables.len() >= MAX_EOC_ACTOR_VARIABLES
+                {
+                    return Err(SimError::InvalidItem);
+                }
+                execution
+                    .variables
+                    .insert(variable_id.clone(), next.to_string());
             }
             EocEffectV1::RunEocs { eoc_ids, delay } => {
                 if let Some(delay) = delay {
@@ -812,7 +963,8 @@ fn condition_body_parts_are_valid(
         | EocConditionV1::IsWearing { .. }
         | EocConditionV1::HasProficiency { .. }
         | EocConditionV1::KnowsRecipe { .. }
-        | EocConditionV1::StatAtLeast { .. } => true,
+        | EocConditionV1::StatAtLeast { .. }
+        | EocConditionV1::Math(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
         | EocConditionV1::HasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => condition_body_parts_are_valid(condition, valid_part),
@@ -841,6 +993,7 @@ fn effects_body_parts_are_valid(
         EocEffectV1::Message { .. }
         | EocEffectV1::SetActorVariable { .. }
         | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. } => true,
     })
 }

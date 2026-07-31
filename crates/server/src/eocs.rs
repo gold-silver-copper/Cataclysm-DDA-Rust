@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EocActorStatDefinition,
-    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition, EocStringValueDefinition,
+    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,
+    EocMathAssignmentOperationDefinition, EocMathExpressionDefinition, EocStringValueDefinition,
     ItemRegistry, ProficiencyRegistry, RecipeRegistry,
 };
 use cdda_protocol::{
     AnatomyDefinitionV1, EocActorStatV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
-    EocItemUseTypeV1, EocStringValueV1, eoc_catalog_is_valid,
+    EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathExpressionV1, EocStringValueV1,
+    eoc_catalog_is_valid,
 };
 
 pub(super) fn runtime_eoc_catalog(
@@ -157,7 +159,8 @@ fn condition_references_are_supported(
         | EocConditionDefinition::CompareString(_)
         | EocConditionDefinition::CompareStringAll(_)
         | EocConditionDefinition::HasWeapon
-        | EocConditionDefinition::StatAtLeast { .. } => true,
+        | EocConditionDefinition::StatAtLeast { .. }
+        | EocConditionDefinition::Math(_) => true,
     }
 }
 
@@ -182,6 +185,7 @@ fn effects_references_are_supported(
         | EocEffectDefinition::RemoveEffects { .. }
         | EocEffectDefinition::SetActorVariable { .. }
         | EocEffectDefinition::RemoveActorVariable { .. }
+        | EocEffectDefinition::MathAssignment(_)
         | EocEffectDefinition::RunEocs { .. } => true,
     })
 }
@@ -225,7 +229,8 @@ fn runtime_condition_body_parts_are_supported(
         | EocConditionV1::IsWearing { .. }
         | EocConditionV1::HasProficiency { .. }
         | EocConditionV1::KnowsRecipe { .. }
-        | EocConditionV1::StatAtLeast { .. } => true,
+        | EocConditionV1::StatAtLeast { .. }
+        | EocConditionV1::Math(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
         | EocConditionV1::HasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => {
@@ -256,6 +261,7 @@ fn runtime_effect_body_parts_are_supported(
         EocEffectV1::Message { .. }
         | EocEffectV1::SetActorVariable { .. }
         | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. } => true,
     })
 }
@@ -363,6 +369,9 @@ fn runtime_condition(condition: &EocConditionDefinition) -> EocConditionV1 {
             },
             minimum: *minimum,
         },
+        EocConditionDefinition::Math(expression) => {
+            EocConditionV1::Math(runtime_math_expression(expression))
+        }
         EocConditionDefinition::Not(condition) => {
             EocConditionV1::Not(Box::new(runtime_condition(condition)))
         }
@@ -410,6 +419,20 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
                 variable_id: variable_id.clone(),
             }
         }
+        EocEffectDefinition::MathAssignment(assignment) => EocEffectV1::MathAssignment {
+            variable_id: assignment.variable_id.clone(),
+            operation: match assignment.operation {
+                EocMathAssignmentOperationDefinition::Set => EocMathAssignmentOperationV1::Set,
+                EocMathAssignmentOperationDefinition::Add => EocMathAssignmentOperationV1::Add,
+                EocMathAssignmentOperationDefinition::Subtract => {
+                    EocMathAssignmentOperationV1::Subtract
+                }
+                EocMathAssignmentOperationDefinition::Multiply => {
+                    EocMathAssignmentOperationV1::Multiply
+                }
+            },
+            value: runtime_math_expression(&assignment.value),
+        },
         EocEffectDefinition::RunEocs { eoc_ids, delay } => EocEffectV1::RunEocs {
             eoc_ids: eoc_ids.clone(),
             delay: delay.map(
@@ -431,5 +454,81 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
             then_effects: then_effects.iter().map(runtime_effect).collect(),
             else_effects: else_effects.iter().map(runtime_effect).collect(),
         },
+    }
+}
+
+fn runtime_math_expression(expression: &EocMathExpressionDefinition) -> EocMathExpressionV1 {
+    let binary = |left: &EocMathExpressionDefinition, right: &EocMathExpressionDefinition| {
+        (
+            Box::new(runtime_math_expression(left)),
+            Box::new(runtime_math_expression(right)),
+        )
+    };
+    match expression {
+        EocMathExpressionDefinition::Constant(value) => EocMathExpressionV1::Constant(*value),
+        EocMathExpressionDefinition::ActorVariable(variable_id) => {
+            EocMathExpressionV1::ActorVariable(variable_id.clone())
+        }
+        EocMathExpressionDefinition::HasActorVariable(variable_id) => {
+            EocMathExpressionV1::HasActorVariable(variable_id.clone())
+        }
+        EocMathExpressionDefinition::ActorStat(stat) => {
+            EocMathExpressionV1::ActorStat(match stat {
+                EocActorStatDefinition::Strength => EocActorStatV1::Strength,
+                EocActorStatDefinition::Dexterity => EocActorStatV1::Dexterity,
+                EocActorStatDefinition::Intelligence => EocActorStatV1::Intelligence,
+                EocActorStatDefinition::Perception => EocActorStatV1::Perception,
+            })
+        }
+        EocMathExpressionDefinition::Negate(value) => {
+            EocMathExpressionV1::Negate(Box::new(runtime_math_expression(value)))
+        }
+        EocMathExpressionDefinition::Not(value) => {
+            EocMathExpressionV1::Not(Box::new(runtime_math_expression(value)))
+        }
+        EocMathExpressionDefinition::Add(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Add(left, right)
+        }
+        EocMathExpressionDefinition::Subtract(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Subtract(left, right)
+        }
+        EocMathExpressionDefinition::Multiply(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Multiply(left, right)
+        }
+        EocMathExpressionDefinition::Equal(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Equal(left, right)
+        }
+        EocMathExpressionDefinition::NotEqual(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::NotEqual(left, right)
+        }
+        EocMathExpressionDefinition::Less(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Less(left, right)
+        }
+        EocMathExpressionDefinition::LessOrEqual(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::LessOrEqual(left, right)
+        }
+        EocMathExpressionDefinition::Greater(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Greater(left, right)
+        }
+        EocMathExpressionDefinition::GreaterOrEqual(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::GreaterOrEqual(left, right)
+        }
+        EocMathExpressionDefinition::And(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::And(left, right)
+        }
+        EocMathExpressionDefinition::Or(left, right) => {
+            let (left, right) = binary(left, right);
+            EocMathExpressionV1::Or(left, right)
+        }
     }
 }

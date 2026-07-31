@@ -38,9 +38,11 @@ Run only when the user explicitly requests a verification checkpoint.
   variable-bound, queue-bound, overdue catch-up, failed-execution, recurring
   enrollment/range/reschedule/deactivation/reactivation, and disconnected cases,
   actor inventory/count-by-charges/worn/wielded/progression/stat predicates,
-  effect-set/intensity predicates,
+  effect-set/intensity predicates, bounded integer actor-variable math parsing,
+  assignments, missing/invalid variable reads, safe-integer overflow, expression
+  depth/node limits, comparisons, boolean short-circuiting, and base-stat reads,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 112/schema 90, CanonicalStateV88,
+  expiry, stale-response, protocol 113/schema 91, CanonicalStateV89,
   canonical-event-V19, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
