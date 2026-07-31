@@ -912,6 +912,7 @@ fn open_world(
             terrain,
             furniture,
             item_groups: &item_group_catalog,
+            items,
             monsters,
             monster_groups,
             eoc_definitions: &eoc_catalog.0,
@@ -5365,8 +5366,10 @@ mod tests {
                 terrain: &terrain,
                 furniture: &furniture,
                 item_groups: &wall_catalog,
+                items: &items,
                 monsters: &monsters,
                 monster_groups: &monster_groups,
+                eoc_definitions: &[],
             },
         )
         .expect("pinned surface mapgen should normalize");
@@ -5397,8 +5400,10 @@ mod tests {
                     terrain: &terrain,
                     furniture: &furniture,
                     item_groups: &wall_catalog,
+                    items: &items,
                     monsters: &monsters,
                     monster_groups: &monster_groups,
+                    eoc_definitions: &[],
                 },
             )
             .is_err(),

@@ -90,7 +90,16 @@ pub enum MonsterSpecialAttackKind {
     Bite,
     Leap,
     Eoc,
+    Gun,
     Unsupported,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonsterGunRangeDefinition {
+    pub minimum: u32,
+    pub maximum: u32,
+    /// Empty and `DEFAULT` both select the ordinary single-shot gun mode.
+    pub mode_id: String,
 }
 
 /// One finalized generic monster attack actor. Definitions with behavior
@@ -122,6 +131,25 @@ pub struct MonsterSpecialAttackDefinition {
     pub leap_ignore_destination_danger: bool,
     pub condition: Option<EocConditionDefinition>,
     pub eoc_ids: Vec<String>,
+    pub gun_type_id: String,
+    pub gun_ammunition_type_id: String,
+    pub gun_fake_skills: BTreeMap<String, u16>,
+    pub gun_fake_strength: u16,
+    pub gun_fake_dexterity: u16,
+    pub gun_fake_intelligence: u16,
+    pub gun_fake_perception: u16,
+    pub gun_ranges: Vec<MonsterGunRangeDefinition>,
+    pub gun_max_ammunition: Option<u32>,
+    pub gun_targeting_cost_moves: u32,
+    pub gun_require_targeting_player: bool,
+    pub gun_require_targeting_npc: bool,
+    pub gun_require_targeting_monster: bool,
+    pub gun_targeting_timeout_turns: u32,
+    pub gun_targeting_timeout_extend_turns: u32,
+    pub gun_targeting_volume: u32,
+    pub gun_laser_lock: bool,
+    pub gun_target_moving_vehicles: bool,
+    pub gun_require_sunlight: bool,
     pub unsupported_fields: BTreeSet<String>,
 }
 
@@ -144,6 +172,20 @@ impl MonsterSpecialAttackDefinition {
                     && self.leap_minimum_range_milli <= self.leap_maximum_range_milli
                     && self.leap_minimum_consider_range_milli
                         <= self.leap_maximum_consider_range_milli))
+            && (self.kind != MonsterSpecialAttackKind::Gun
+                || (!self.gun_type_id.is_empty()
+                    && !self.gun_ranges.is_empty()
+                    && self
+                        .gun_ranges
+                        .iter()
+                        .all(|range| range.minimum <= range.maximum)
+                    && self.range
+                        == self
+                            .gun_ranges
+                            .iter()
+                            .map(|range| range.maximum)
+                            .max()
+                            .unwrap_or(0)))
     }
 }
 
@@ -680,6 +722,25 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         leap_ignore_destination_danger: false,
         condition: None,
         eoc_ids: Vec::new(),
+        gun_type_id: String::new(),
+        gun_ammunition_type_id: String::new(),
+        gun_fake_skills: BTreeMap::new(),
+        gun_fake_strength: 8,
+        gun_fake_dexterity: 8,
+        gun_fake_intelligence: 8,
+        gun_fake_perception: 8,
+        gun_ranges: Vec::new(),
+        gun_max_ammunition: None,
+        gun_targeting_cost_moves: 100,
+        gun_require_targeting_player: true,
+        gun_require_targeting_npc: false,
+        gun_require_targeting_monster: false,
+        gun_targeting_timeout_turns: 8,
+        gun_targeting_timeout_extend_turns: 3,
+        gun_targeting_volume: 6,
+        gun_laser_lock: false,
+        gun_target_moving_vehicles: false,
+        gun_require_sunlight: false,
         unsupported_fields: BTreeSet::from([field.to_owned()]),
     }
 }
@@ -705,6 +766,7 @@ fn parse_special_attack(
         "bite" => MonsterSpecialAttackKind::Bite,
         "leap" => MonsterSpecialAttackKind::Leap,
         "eoc" => MonsterSpecialAttackKind::Eoc,
+        "gun" => MonsterSpecialAttackKind::Gun,
         "monster_attack" => base
             .map(|base| base.kind)
             .unwrap_or(MonsterSpecialAttackKind::Unsupported),
@@ -719,7 +781,7 @@ fn parse_special_attack(
         attack.unsupported_fields.remove("missing_actor_type");
     }
     if declared_type != "monster_attack"
-        && !matches!(declared_type, "melee" | "bite" | "leap" | "eoc")
+        && !matches!(declared_type, "melee" | "bite" | "leap" | "eoc" | "gun")
     {
         attack
             .unsupported_fields
@@ -735,6 +797,7 @@ fn parse_special_attack(
         attack.move_cost_moves = 150;
         attack.damage.clear();
         attack.effects.clear();
+        attack.effects_require_damage = false;
         attack.minimum_damage_multiplier_millionths = 0;
         attack.maximum_damage_multiplier_millionths = 0;
         attack.leap_minimum_range_milli = 1_000;
@@ -749,6 +812,47 @@ fn parse_special_attack(
         attack.maximum_damage_multiplier_millionths = 0;
         attack.damage.clear();
         attack.effects.clear();
+    }
+    if kind == MonsterSpecialAttackKind::Gun && base.is_none() {
+        attack.move_cost_moves = 150;
+        attack.accuracy = None;
+        attack.range = 0;
+        attack.no_adjacent = false;
+        attack.dodgeable = false;
+        attack.minimum_damage_multiplier_millionths = 0;
+        attack.maximum_damage_multiplier_millionths = 0;
+        attack.damage.clear();
+        attack.effects.clear();
+        attack.effects_require_damage = false;
+        attack.infection_chance_millionths = 0;
+        attack.leap_minimum_range_milli = 0;
+        attack.leap_maximum_range_milli = 0;
+        attack.leap_minimum_consider_range_milli = 0;
+        attack.leap_maximum_consider_range_milli = 0;
+        attack.leap_allow_no_target = false;
+        attack.leap_prefer = false;
+        attack.leap_random = false;
+        attack.leap_ignore_destination_danger = false;
+        attack.eoc_ids.clear();
+        attack.gun_type_id.clear();
+        attack.gun_ammunition_type_id.clear();
+        attack.gun_fake_skills.clear();
+        attack.gun_fake_strength = 8;
+        attack.gun_fake_dexterity = 8;
+        attack.gun_fake_intelligence = 8;
+        attack.gun_fake_perception = 8;
+        attack.gun_ranges.clear();
+        attack.gun_max_ammunition = None;
+        attack.gun_targeting_cost_moves = 100;
+        attack.gun_require_targeting_player = true;
+        attack.gun_require_targeting_npc = false;
+        attack.gun_require_targeting_monster = false;
+        attack.gun_targeting_timeout_turns = 8;
+        attack.gun_targeting_timeout_extend_turns = 3;
+        attack.gun_targeting_volume = 6;
+        attack.gun_laser_lock = false;
+        attack.gun_target_moving_vehicles = false;
+        attack.gun_require_sunlight = false;
     }
     if let Some(value) = fields.get("move_cost") {
         attack.move_cost_moves = parse_u32(value, source, "special_attacks.move_cost")?;
@@ -824,6 +928,147 @@ fn parse_special_attack(
             attack.eoc_ids = eoc_ids;
         }
     }
+    if kind == MonsterSpecialAttackKind::Gun {
+        if let Some(value) = fields.get("gun_type") {
+            attack.gun_type_id = value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .ok_or_else(|| invalid(source, "special_attacks.gun_type"))?
+                .to_owned();
+        } else if base.is_none() || attack.gun_type_id.is_empty() {
+            return Err(invalid(source, "special_attacks.gun_type"));
+        }
+        if let Some(value) = fields.get("ammo_type") {
+            attack.gun_ammunition_type_id = value
+                .as_str()
+                .filter(|id| id.len() <= 512 && !id.chars().any(char::is_control))
+                .ok_or_else(|| invalid(source, "special_attacks.ammo_type"))?
+                .to_owned();
+        }
+        if let Some(value) = fields.get("fake_skills") {
+            let values = value
+                .as_array()
+                .ok_or_else(|| invalid(source, "special_attacks.fake_skills"))?;
+            let mut skills = BTreeMap::new();
+            for value in values {
+                let pair = value
+                    .as_array()
+                    .filter(|pair| pair.len() == 2)
+                    .ok_or_else(|| invalid(source, "special_attacks.fake_skills"))?;
+                let skill_id = pair[0]
+                    .as_str()
+                    .filter(|id| {
+                        !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| invalid(source, "special_attacks.fake_skills"))?;
+                let level =
+                    u16::try_from(parse_u32(&pair[1], source, "special_attacks.fake_skills")?)
+                        .map_err(|_| invalid(source, "special_attacks.fake_skills"))?;
+                skills.insert(skill_id.to_owned(), level);
+            }
+            attack.gun_fake_skills = skills;
+        }
+        for (field, target) in [
+            ("fake_str", &mut attack.gun_fake_strength),
+            ("fake_dex", &mut attack.gun_fake_dexterity),
+            ("fake_int", &mut attack.gun_fake_intelligence),
+            ("fake_per", &mut attack.gun_fake_perception),
+        ] {
+            if let Some(value) = fields.get(field) {
+                *target = u16::try_from(parse_u32(
+                    value,
+                    source,
+                    &format!("special_attacks.{field}"),
+                )?)
+                .map_err(|_| invalid(source, &format!("special_attacks.{field}")))?;
+            }
+        }
+        if let Some(value) = fields.get("ranges") {
+            let values = value
+                .as_array()
+                .ok_or_else(|| invalid(source, "special_attacks.ranges"))?;
+            let mut ranges = BTreeMap::new();
+            for value in values {
+                let range = value
+                    .as_array()
+                    .filter(|range| (2..=3).contains(&range.len()))
+                    .ok_or_else(|| invalid(source, "special_attacks.ranges"))?;
+                let minimum = parse_u32(&range[0], source, "special_attacks.ranges")?;
+                let maximum = parse_u32(&range[1], source, "special_attacks.ranges")?;
+                if minimum > maximum {
+                    return Err(invalid(source, "special_attacks.ranges"));
+                }
+                let mode_id = range
+                    .get(2)
+                    .map_or(Ok(""), |value| {
+                        value
+                            .as_str()
+                            .filter(|id| id.len() <= 512 && !id.chars().any(char::is_control))
+                            .ok_or_else(|| invalid(source, "special_attacks.ranges"))
+                    })?
+                    .to_owned();
+                ranges.entry((minimum, maximum)).or_insert(mode_id);
+            }
+            attack.gun_ranges = ranges
+                .into_iter()
+                .map(|((minimum, maximum), mode_id)| MonsterGunRangeDefinition {
+                    minimum,
+                    maximum,
+                    mode_id,
+                })
+                .collect();
+            attack.range = attack
+                .gun_ranges
+                .iter()
+                .map(|range| range.maximum)
+                .max()
+                .unwrap_or(0);
+        } else if base.is_none() || attack.gun_ranges.is_empty() {
+            return Err(invalid(source, "special_attacks.ranges"));
+        }
+        if let Some(value) = fields.get("max_ammo") {
+            attack.gun_max_ammunition = Some(parse_u32(value, source, "special_attacks.max_ammo")?);
+        }
+        for (field, target) in [
+            ("targeting_cost", &mut attack.gun_targeting_cost_moves),
+            ("targeting_timeout", &mut attack.gun_targeting_timeout_turns),
+            (
+                "targeting_timeout_extend",
+                &mut attack.gun_targeting_timeout_extend_turns,
+            ),
+            ("targeting_volume", &mut attack.gun_targeting_volume),
+        ] {
+            if let Some(value) = fields.get(field) {
+                *target = parse_u32(value, source, &format!("special_attacks.{field}"))?;
+            }
+        }
+        for (field, target) in [
+            (
+                "require_targeting_player",
+                &mut attack.gun_require_targeting_player,
+            ),
+            (
+                "require_targeting_npc",
+                &mut attack.gun_require_targeting_npc,
+            ),
+            (
+                "require_targeting_monster",
+                &mut attack.gun_require_targeting_monster,
+            ),
+            ("laser_lock", &mut attack.gun_laser_lock),
+            (
+                "target_moving_vehicles",
+                &mut attack.gun_target_moving_vehicles,
+            ),
+            ("require_sunlight", &mut attack.gun_require_sunlight),
+        ] {
+            if let Some(value) = fields.get(field) {
+                *target = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, &format!("special_attacks.{field}")))?;
+            }
+        }
+    }
     if kind == MonsterSpecialAttackKind::Bite {
         if let Some(value) = fields.get("infection_chance") {
             let percent = parse_u32(value, source, "special_attacks.infection_chance")?;
@@ -894,6 +1139,10 @@ fn parse_special_attack(
         "hit_dmg_npc",
         "throw_msg_u",
         "throw_msg_npc",
+        "description",
+        "failure_msg",
+        "no_ammo_sound",
+        "targeting_sound",
     ];
     const IMPLEMENTED: &[&str] = &[
         "type",
@@ -929,6 +1178,25 @@ fn parse_special_attack(
         "min_consider_range",
         "max_consider_range",
         "message",
+        "gun_type",
+        "ammo_type",
+        "fake_skills",
+        "fake_str",
+        "fake_dex",
+        "fake_int",
+        "fake_per",
+        "ranges",
+        "max_ammo",
+        "targeting_cost",
+        "require_targeting_player",
+        "require_targeting_npc",
+        "require_targeting_monster",
+        "targeting_timeout",
+        "targeting_timeout_extend",
+        "targeting_volume",
+        "laser_lock",
+        "target_moving_vehicles",
+        "require_sunlight",
     ];
     for field in fields.keys().filter(|field| !field.starts_with("//")) {
         if COSMETIC_FIELDS.contains(&field.as_str()) {
@@ -976,10 +1244,31 @@ fn parse_special_attack(
         "min_consider_range",
         "max_consider_range",
     ];
+    const GUN_ONLY_FIELDS: &[&str] = &[
+        "gun_type",
+        "ammo_type",
+        "fake_skills",
+        "fake_str",
+        "fake_dex",
+        "fake_int",
+        "fake_per",
+        "ranges",
+        "max_ammo",
+        "targeting_cost",
+        "require_targeting_player",
+        "require_targeting_npc",
+        "require_targeting_monster",
+        "targeting_timeout",
+        "targeting_timeout_extend",
+        "targeting_volume",
+        "laser_lock",
+        "target_moving_vehicles",
+        "require_sunlight",
+    ];
     let inapplicable = match kind {
         MonsterSpecialAttackKind::Leap => MELEE_ONLY_FIELDS,
         MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite => LEAP_ONLY_FIELDS,
-        MonsterSpecialAttackKind::Eoc => &[],
+        MonsterSpecialAttackKind::Eoc | MonsterSpecialAttackKind::Gun => &[],
         MonsterSpecialAttackKind::Unsupported => &[],
     };
     attack.unsupported_fields.extend(
@@ -1018,6 +1307,27 @@ fn parse_special_attack(
                 .unsupported_fields
                 .insert(String::from("allow_no_target"));
         }
+    }
+    if kind == MonsterSpecialAttackKind::Gun {
+        attack.unsupported_fields.extend(
+            MELEE_ONLY_FIELDS
+                .iter()
+                .chain(LEAP_ONLY_FIELDS)
+                .filter(|field| fields.contains_key(**field))
+                .map(|field| (*field).to_owned()),
+        );
+        for field in ["range", "eoc"] {
+            if fields.contains_key(field) {
+                attack.unsupported_fields.insert(field.to_owned());
+            }
+        }
+    } else {
+        attack.unsupported_fields.extend(
+            GUN_ONLY_FIELDS
+                .iter()
+                .filter(|field| fields.contains_key(**field))
+                .map(|field| (*field).to_owned()),
+        );
     }
     if kind != MonsterSpecialAttackKind::Bite && fields.contains_key("infection_chance") {
         attack

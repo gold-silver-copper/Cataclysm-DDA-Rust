@@ -61,6 +61,8 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "range",
     "dispersion",
     "loudness",
+    "skill",
+    "ammo_effects",
     "damage",
     "ranged_damage",
     "clip_size",
@@ -195,6 +197,11 @@ pub struct ItemDefinition {
     pub count: i32,
     pub range: i32,
     pub dispersion: i32,
+    /// Final inherited gun-skill identity used by authoritative fake shooters.
+    pub gun_skill: String,
+    /// Final inherited projectile effect identities. Consumers admit only the
+    /// effect subset whose impact semantics they execute.
+    pub ammunition_effects: BTreeSet<String>,
     /// Explicit GUN or AMMO loudness. `None` uses the pinned subtype default:
     /// zero for guns and derived range/damage loudness for ammunition.
     pub loudness: Option<i32>,
@@ -1247,6 +1254,8 @@ fn apply_common_fields(
     apply_integer(object, "count", &mut item.count, source)?;
     apply_integer(object, "range", &mut item.range, source)?;
     apply_integer(object, "dispersion", &mut item.dispersion, source)?;
+    apply_string(object, "skill", &mut item.gun_skill, source)?;
+    apply_string_set(object, "ammo_effects", &mut item.ammunition_effects, source)?;
     let loudness_default = if item.subtypes.contains("AMMO") {
         -1
     } else {

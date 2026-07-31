@@ -11,7 +11,7 @@ use rand_core::Rng;
 
 use crate::{
     SimError, UNARMED_DAMAGE, WorldState, combat::ActorDamageUnit, horizontal_distance_squared,
-    horizontally_adjacent, ranged_distance,
+    horizontally_adjacent, ranged_distance, ranged_sound_description,
 };
 
 pub(super) fn special_state_matches_catalog(
@@ -385,6 +385,37 @@ impl WorldState {
                     let _ = self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
                     true
                 }
+                WorldgenMonsterSpecialAttackKindV1::Gun => {
+                    let Some((target, target_position)) = visible_target else {
+                        continue;
+                    };
+                    let source_position = self
+                        .creatures
+                        .get(&source)
+                        .ok_or(SimError::UnknownCreature)?
+                        .position;
+                    let distance = ranged_distance(source_position, target_position);
+                    if distance == 0
+                        || distance > profile.gun_item_range
+                        || !profile
+                            .gun_ranges
+                            .iter()
+                            .any(|range| (range.minimum..=range.maximum).contains(&distance))
+                        || !self.has_clear_shot(source_position, target_position)
+                        || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
+                    {
+                        continue;
+                    }
+                    self.execute_creature_gun_attack(
+                        source,
+                        target,
+                        source_position,
+                        profile,
+                        sequence,
+                        events,
+                    )?;
+                    true
+                }
             };
             if !used {
                 continue;
@@ -408,6 +439,148 @@ impl WorldState {
                 .ok_or(SimError::NumericOverflow)?;
         }
         Ok(total_cost)
+    }
+
+    fn execute_creature_gun_attack(
+        &mut self,
+        source: CreatureId,
+        target: ActorId,
+        origin: WorldPosition,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let target_position = self
+            .actors
+            .get(&target)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let distance = ranged_distance(origin, target_position);
+        let mut rng = self.named_rng(
+            b"creature-special-gun-hit",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let miss_per_thousand = u64::from(profile.gun_dispersion)
+            .checked_mul(u64::from(distance))
+            .ok_or(SimError::NumericOverflow)?
+            .checked_div(u64::from(profile.gun_item_range))
+            .ok_or(SimError::NumericOverflow)?
+            .min(900);
+        let hit = u64::from(rng.next_u32() % 1_000) >= miss_per_thousand;
+        events.push(
+            self.make_event(WorldEventKind::CreatureRangedAttackResolved {
+                source,
+                target,
+                origin,
+                gun_type_id: profile.gun_type_id.clone(),
+                hit,
+                sound: ranged_sound_description(profile.gun_sound_volume).to_owned(),
+                sound_volume: profile.gun_sound_volume,
+            })?,
+        );
+        if !hit {
+            return Ok(());
+        }
+        let damage = profile
+            .damage
+            .iter()
+            .map(|unit| ActorDamageUnit {
+                damage_type_id: unit.damage_type_id.clone(),
+                amount_milli: unit.amount_milli,
+                armor_penetration_milli: unit.armor_penetration_milli,
+                armor_multiplier_millionths: unit.armor_multiplier_millionths,
+                damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
+                constant_damage_multiplier_millionths: unit.constant_damage_multiplier_millionths,
+            })
+            .collect::<Vec<_>>();
+        let (outcome, was_sleeping, _cut_or_stab_damage) =
+            self.damage_actor_components(target, &damage, &mut rng)?;
+        if profile.gun_blinds_eyes {
+            self.apply_creature_projectile_blindness(target, &outcome.body_part_id, &mut rng)?;
+        }
+        events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
+            source,
+            target,
+            body_part_id: outcome.body_part_id,
+            amount: outcome.amount,
+            remaining_part_hp: outcome.remaining_part_hp,
+            remaining_hp: outcome.remaining_hp,
+        })?);
+        if outcome.amount > 0 {
+            self.interrupt_craft(target, events)?;
+            self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+            self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+            self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
+            if was_sleeping && outcome.remaining_hp > 0 {
+                self.wake_actor(target, cdda_protocol::WakeReason::Damage, events)?;
+            }
+            if outcome.remaining_hp <= 0 {
+                events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
+                    actor_id: target,
+                    killer: source,
+                })?);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_creature_projectile_blindness(
+        &mut self,
+        target: ActorId,
+        hit_body_part_id: &str,
+        rng: &mut impl Rng,
+    ) -> Result<(), SimError> {
+        let hit_head = self
+            .actor_anatomy
+            .parts
+            .iter()
+            .find(|part| part.body_part_id == hit_body_part_id)
+            .is_some_and(|part| part.limb_types.iter().any(|limb_type| limb_type == "head"));
+        if !hit_head {
+            return Ok(());
+        }
+        let sensor_parts = self
+            .actor_anatomy
+            .parts
+            .iter()
+            .filter(|part| {
+                part.limb_types
+                    .iter()
+                    .any(|limb_type| limb_type == "sensor")
+            })
+            .map(|part| part.body_part_id.clone())
+            .collect::<Vec<_>>();
+        if sensor_parts.is_empty() {
+            return Ok(());
+        }
+        let sensor_index = usize::try_from(rng.next_u64() % sensor_parts.len() as u64)
+            .map_err(|_| SimError::NumericOverflow)?;
+        let body_part_id = sensor_parts[sensor_index].clone();
+        let duration_turns = roll_inclusive_u32(3, 10, rng)?;
+        let duration_ticks = u64::from(duration_turns)
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let expires_at_tick = SimTick(self.tick.0.saturating_add(duration_ticks).min(u64::MAX - 1));
+        let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+        if let Some(effect) = actor.effects.iter_mut().find(|effect| {
+            effect.effect_id == "blind" && effect.body_part_id.as_deref() == Some(&body_part_id)
+        }) {
+            effect.intensity = effect.intensity.max(5);
+            effect.expires_at_tick = effect.expires_at_tick.max(expires_at_tick);
+        } else if actor.effects.len() < 1_024 {
+            actor.effects.push(ActorEffectSnapshotV1 {
+                effect_id: String::from("blind"),
+                body_part_id: Some(body_part_id),
+                intensity: 5,
+                expires_at_tick,
+            });
+            actor.effects.sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
+        }
+        Ok(())
     }
 
     fn execute_creature_leap(

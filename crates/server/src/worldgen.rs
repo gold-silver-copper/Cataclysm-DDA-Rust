@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
+    CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemRegistry,
     MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, MonsterGroupRegistry,
     MonsterGroupTarget, MonsterRegistry, MonsterSpecialAttackKind, OvermapSpecialDefinition,
     OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
@@ -17,19 +17,19 @@ use cdda_protocol::{
     WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
     WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
     WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1, WorldgenMonsterGroupEntryV1,
-    WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterMeleeDamageUnitV1,
-    WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1,
-    WorldgenMonsterSpecialAttackV1, WorldgenNeighborConditionV1, WorldgenNestedChoiceV1,
-    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
-    WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
-    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
-    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1,
-    WorldgenSpecialPlacementV1, WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
-    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenU16RangeV1, WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
-    worldgen_omt_matches,
+    WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterGunRangeV1,
+    WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1,
+    WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
+    WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
+    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
+    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
+    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
+    WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1, WorldgenSpecialPlacementV1,
+    WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1, WorldgenStartLocationV1,
+    WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenU16RangeV1,
+    WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -499,9 +499,163 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub terrain: &'a TerrainRegistry,
     pub furniture: &'a FurnitureRegistry,
     pub item_groups: &'a [ItemGroupDefinitionV1],
+    pub items: &'a ItemRegistry,
     pub monsters: &'a MonsterRegistry,
     pub monster_groups: &'a MonsterGroupRegistry,
     pub eoc_definitions: &'a [EocDefinitionV1],
+}
+
+#[derive(Clone)]
+struct RuntimeMonsterGunProfile {
+    damage: Vec<WorldgenMonsterMeleeDamageUnitV1>,
+    ranges: Vec<WorldgenMonsterGunRangeV1>,
+    item_range: u32,
+    dispersion: u32,
+    sound_volume: u16,
+    no_damage_scaling: bool,
+    blinds_eyes: bool,
+    target_moving_vehicles: bool,
+}
+
+fn runtime_monster_gun_profile(
+    attack: &cdda_content::MonsterSpecialAttackDefinition,
+    items: &ItemRegistry,
+) -> Result<Option<RuntimeMonsterGunProfile>, Box<dyn std::error::Error>> {
+    if attack.kind != MonsterSpecialAttackKind::Gun {
+        return Ok(None);
+    }
+    let gun = items.get(&attack.gun_type_id).ok_or_else(|| {
+        format!(
+            "monster gun actor references unknown item {}",
+            attack.gun_type_id
+        )
+    })?;
+    let single_shot_ranges = !attack.gun_ranges.is_empty()
+        && attack
+            .gun_ranges
+            .iter()
+            .all(|range| matches!(range.mode_id.as_str(), "" | "DEFAULT"));
+    let targeting_is_immediate = !attack.gun_require_targeting_player
+        && !attack.gun_require_targeting_npc
+        && !attack.gun_require_targeting_monster
+        && !attack.gun_laser_lock
+        && !attack.gun_require_sunlight;
+    let projectile_effects_are_supported =
+        gun.ammunition_effects.iter().all(|effect| {
+            matches!(
+                effect.as_str(),
+                "BLINDS_EYES" | "NO_DAMAGE_SCALING" | "NO_PENETRATE_OBSTACLES"
+            )
+        }) && gun.ammunition_effects.contains("NO_DAMAGE_SCALING")
+            && gun.ammunition_effects.contains("NO_PENETRATE_OBSTACLES");
+    let gun_is_supported = gun.subtypes.contains("GUN")
+        && gun.flags.contains("NEVER_JAMS")
+        && gun.ammo.is_empty()
+        && attack.gun_ammunition_type_id.is_empty()
+        && attack.gun_max_ammunition.is_none()
+        && single_shot_ranges
+        && targeting_is_immediate
+        && !attack.gun_fake_skills.contains_key("throw")
+        && !gun.gun_skill.is_empty()
+        && gun.range > 0
+        && gun.dispersion >= 0
+        && !gun.ranged_damage.is_empty()
+        && !gun
+            .unsupported_fields
+            .iter()
+            .any(|field| field.starts_with("ranged_damage."))
+        && !gun.unsupported_fields.contains("modes")
+        && !gun.unsupported_fields.contains("energy_drain")
+        && projectile_effects_are_supported;
+    if !gun_is_supported {
+        return Ok(None);
+    }
+    let gun_skill = attack
+        .gun_fake_skills
+        .get("gun")
+        .copied()
+        .zip(attack.gun_fake_skills.get(&gun.gun_skill).copied());
+    let Some((generic_skill, weapon_skill)) = gun_skill else {
+        return Ok(None);
+    };
+    let item_range = u32::try_from(gun.range)?;
+    if attack.range > item_range {
+        return Ok(None);
+    }
+    let raw_dispersion = u32::try_from(gun.dispersion)?;
+    let weapon_dispersion = raw_dispersion
+        .saturating_add(9)
+        .checked_div(18)
+        .unwrap_or(0)
+        .max(1);
+    let dexterity_penalty = 20_u32.saturating_sub(u32::from(attack.gun_fake_dexterity)) / 2;
+    let skill_twice = u32::from(generic_skill)
+        .saturating_add(u32::from(weapon_skill))
+        .min(20);
+    let shortfall_twice = 20 - skill_twice;
+    let base_skill_penalty = shortfall_twice.saturating_mul(5);
+    let (skill_numerator, skill_denominator) = if skill_twice >= 10 {
+        (25_u32.saturating_mul(shortfall_twice), 12_u32)
+    } else {
+        (
+            25_u32.saturating_mul(45_u32.saturating_sub(skill_twice.saturating_mul(4))),
+            6_u32,
+        )
+    };
+    let scaled_skill_penalty = skill_numerator
+        .saturating_add(skill_denominator / 2)
+        .checked_div(skill_denominator)
+        .unwrap_or(0);
+    let dispersion = weapon_dispersion
+        .checked_add(dexterity_penalty)
+        .and_then(|value| value.checked_add(base_skill_penalty))
+        .and_then(|value| value.checked_add(scaled_skill_penalty))
+        .ok_or("monster gun dispersion overflow")?;
+    let damage = gun
+        .ranged_damage
+        .iter()
+        .map(|(damage_type_id, unit)| {
+            if !unit.amount.is_finite()
+                || !unit.armor_penetration.is_finite()
+                || unit.amount < 0.0
+                || unit.armor_penetration < 0.0
+                || unit.amount > f64::from(i32::MAX) / 1_000.0
+                || unit.armor_penetration > f64::from(i32::MAX) / 1_000.0
+            {
+                return Err("monster gun damage is outside fixed-point bounds".into());
+            }
+            Ok(WorldgenMonsterMeleeDamageUnitV1 {
+                damage_type_id: damage_type_id.clone(),
+                amount_milli: (unit.amount * 1_000.0).round() as i32,
+                armor_penetration_milli: (unit.armor_penetration * 1_000.0).round() as i32,
+                armor_multiplier_millionths: 1_000_000,
+                damage_multiplier_millionths: 1_000_000,
+                constant_armor_multiplier_millionths: 1_000_000,
+                constant_damage_multiplier_millionths: 1_000_000,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    if damage.iter().all(|unit| unit.amount_milli == 0) {
+        return Ok(None);
+    }
+    let ranges = attack
+        .gun_ranges
+        .iter()
+        .map(|range| WorldgenMonsterGunRangeV1 {
+            minimum: range.minimum,
+            maximum: range.maximum,
+        })
+        .collect();
+    Ok(Some(RuntimeMonsterGunProfile {
+        damage,
+        ranges,
+        item_range,
+        dispersion,
+        sound_volume: u16::try_from(gun.loudness.unwrap_or(0))?,
+        no_damage_scaling: true,
+        blinds_eyes: gun.ammunition_effects.contains("BLINDS_EYES"),
+        target_moving_vehicles: attack.gun_target_moving_vehicles,
+    }))
 }
 
 fn runtime_monster_catalog(
@@ -509,6 +663,7 @@ fn runtime_monster_catalog(
     mut monster_ids: BTreeSet<String>,
     groups: &MonsterGroupRegistry,
     monsters: &MonsterRegistry,
+    items: &ItemRegistry,
     creature_eoc_ids: &BTreeSet<String>,
 ) -> Result<
     (
@@ -684,11 +839,27 @@ fn runtime_monster_catalog(
                     attack.id
                 ));
             }
+            let mut gun_profiles = BTreeMap::new();
+            for attack in monster.special_attacks.values().filter(|attack| {
+                attack.is_fully_supported()
+                    && creature_eoc_context_is_supported(attack)
+                    && attack.kind == MonsterSpecialAttackKind::Gun
+            }) {
+                if let Some(profile) = runtime_monster_gun_profile(attack, items)? {
+                    gun_profiles.insert(attack.id.clone(), profile);
+                } else {
+                    deferred_behavior_fields
+                        .insert(format!("special_attacks.{}.gun_runtime_context", attack.id));
+                }
+            }
             let special_attacks = monster
                 .special_attacks
                 .values()
                 .filter(|attack| {
-                    attack.is_fully_supported() && creature_eoc_context_is_supported(attack)
+                    attack.is_fully_supported()
+                        && creature_eoc_context_is_supported(attack)
+                        && (attack.kind != MonsterSpecialAttackKind::Gun
+                            || gun_profiles.contains_key(&attack.id))
                 })
                 .map(|attack| {
                     let kind = match attack.kind {
@@ -698,12 +869,14 @@ fn runtime_monster_catalog(
                         MonsterSpecialAttackKind::Bite => WorldgenMonsterSpecialAttackKindV1::Bite,
                         MonsterSpecialAttackKind::Leap => WorldgenMonsterSpecialAttackKindV1::Leap,
                         MonsterSpecialAttackKind::Eoc => WorldgenMonsterSpecialAttackKindV1::Eoc,
+                        MonsterSpecialAttackKind::Gun => WorldgenMonsterSpecialAttackKindV1::Gun,
                         MonsterSpecialAttackKind::Unsupported => {
                             return Err(
                                 "unsupported special attack reached runtime admission".into()
                             );
                         }
                     };
+                    let gun_profile = gun_profiles.get(&attack.id);
                     Ok(WorldgenMonsterSpecialAttackV1 {
                         attack_id: attack.id.clone(),
                         kind,
@@ -717,21 +890,28 @@ fn runtime_monster_catalog(
                             .minimum_damage_multiplier_millionths,
                         maximum_damage_multiplier_millionths: attack
                             .maximum_damage_multiplier_millionths,
-                        damage: attack
-                            .damage
-                            .iter()
-                            .map(|unit| WorldgenMonsterMeleeDamageUnitV1 {
-                                damage_type_id: unit.damage_type_id.clone(),
-                                amount_milli: unit.amount_milli,
-                                armor_penetration_milli: unit.armor_penetration_milli,
-                                armor_multiplier_millionths: unit.armor_multiplier_millionths,
-                                damage_multiplier_millionths: unit.damage_multiplier_millionths,
-                                constant_armor_multiplier_millionths: unit
-                                    .constant_armor_multiplier_millionths,
-                                constant_damage_multiplier_millionths: unit
-                                    .constant_damage_multiplier_millionths,
-                            })
-                            .collect(),
+                        damage: gun_profile.map_or_else(
+                            || {
+                                attack
+                                    .damage
+                                    .iter()
+                                    .map(|unit| WorldgenMonsterMeleeDamageUnitV1 {
+                                        damage_type_id: unit.damage_type_id.clone(),
+                                        amount_milli: unit.amount_milli,
+                                        armor_penetration_milli: unit.armor_penetration_milli,
+                                        armor_multiplier_millionths: unit
+                                            .armor_multiplier_millionths,
+                                        damage_multiplier_millionths: unit
+                                            .damage_multiplier_millionths,
+                                        constant_armor_multiplier_millionths: unit
+                                            .constant_armor_multiplier_millionths,
+                                        constant_damage_multiplier_millionths: unit
+                                            .constant_damage_multiplier_millionths,
+                                    })
+                                    .collect()
+                            },
+                            |profile| profile.damage.clone(),
+                        ),
                         effects: attack
                             .effects
                             .iter()
@@ -763,6 +943,20 @@ fn runtime_monster_catalog(
                             .as_ref()
                             .map(crate::eocs::runtime_condition),
                         eoc_ids: attack.eoc_ids.clone(),
+                        gun_type_id: gun_profile
+                            .map(|_| attack.gun_type_id.clone())
+                            .unwrap_or_default(),
+                        gun_ranges: gun_profile
+                            .map(|profile| profile.ranges.clone())
+                            .unwrap_or_default(),
+                        gun_item_range: gun_profile.map_or(0, |profile| profile.item_range),
+                        gun_dispersion: gun_profile.map_or(0, |profile| profile.dispersion),
+                        gun_sound_volume: gun_profile.map_or(0, |profile| profile.sound_volume),
+                        gun_no_damage_scaling: gun_profile
+                            .is_some_and(|profile| profile.no_damage_scaling),
+                        gun_blinds_eyes: gun_profile.is_some_and(|profile| profile.blinds_eyes),
+                        gun_target_moving_vehicles: gun_profile
+                            .is_some_and(|profile| profile.target_moving_vehicles),
                     })
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
@@ -1072,6 +1266,7 @@ pub(super) fn runtime_mapgen_worldgen(
         terrain,
         furniture,
         item_groups,
+        items,
         monsters,
         monster_groups,
         eoc_definitions,
@@ -1229,6 +1424,7 @@ pub(super) fn runtime_mapgen_worldgen(
             individual_monster_roots,
             monster_groups,
             monsters,
+            items,
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
         )?;
 
@@ -2182,7 +2378,7 @@ mod tests {
 
     use cdda_content::{
         CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_RIVER_SETTINGS_ID,
-        DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemGroupRegistry,
+        DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemGroupRegistry, ItemRegistry,
         MapgenRegistry, ModCatalog, MonsterGroupRegistry, MonsterRegistry, OvermapTerrainRegistry,
         RiverSettingsRegistry, StartLocationRegistry, TerrainRegistry,
     };
@@ -2208,6 +2404,7 @@ mod tests {
             FurnitureRegistry::load_selected(&manifest, root, &mods, &enabled).expect("furniture");
         let item_groups = ItemGroupRegistry::load_selected(&manifest, root, &mods, &enabled)
             .expect("item groups");
+        let items = ItemRegistry::load_selected(&manifest, root, &mods, &enabled).expect("items");
         let monsters =
             MonsterRegistry::load_selected(&manifest, root, &mods, &enabled).expect("monsters");
         let monster_groups = MonsterGroupRegistry::load_selected(&manifest, root, &mods, &enabled)
@@ -2314,8 +2511,10 @@ mod tests {
                 terrain: &terrain,
                 furniture: &furniture,
                 item_groups: &runtime_groups,
+                items: &items,
                 monsters: &monsters,
                 monster_groups: &monster_groups,
+                eoc_definitions: &[],
             },
         )
         .expect("production road mapgen should compile");

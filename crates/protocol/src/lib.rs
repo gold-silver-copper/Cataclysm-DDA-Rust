@@ -89,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 117;
+pub const PROTOCOL_VERSION: u16 = 118;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2149,6 +2149,15 @@ pub enum WorldEventKind {
         sound: String,
         sound_volume: u16,
     },
+    CreatureRangedAttackResolved {
+        source: CreatureId,
+        target: ActorId,
+        origin: WorldPosition,
+        gun_type_id: String,
+        hit: bool,
+        sound: String,
+        sound_volume: u16,
+    },
     WeaponReloaded {
         actor_id: ActorId,
         weapon: ItemId,
@@ -3193,6 +3202,13 @@ pub enum WorldgenMonsterSpecialAttackKindV1 {
     Bite,
     Leap,
     Eoc,
+    Gun,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterGunRangeV1 {
+    pub minimum: u32,
+    pub maximum: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3226,6 +3242,20 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub condition: Option<EocConditionV1>,
     /// Source-ordered immediate monster-alpha EOC activations.
     pub eoc_ids: Vec<String>,
+    /// Empty outside strict content-derived gun actors.
+    pub gun_type_id: String,
+    /// Lexicographically sorted single-shot engagement bands. Overlap is
+    /// harmless because strict admission permits only the same default mode.
+    pub gun_ranges: Vec<WorldgenMonsterGunRangeV1>,
+    pub gun_item_range: u32,
+    /// Finalized fake-shooter dispersion in pinned engine dispersion units.
+    pub gun_dispersion: u32,
+    pub gun_sound_volume: u16,
+    pub gun_no_damage_scaling: bool,
+    pub gun_blinds_eyes: bool,
+    /// Retained even before vehicles exist so later vehicle admission cannot
+    /// silently change an already-canonical gun actor.
+    pub gun_target_moving_vehicles: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -5396,12 +5426,21 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             .eoc_ids
                             .iter()
                             .all(|eoc_id| valid_worldgen_id(eoc_id))
+                        && attack.gun_ranges.len() <= 64
                         && attack.infection_chance_millionths <= 1_000_000
                         && (matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Bite)
                             || attack.infection_chance_millionths == 0)
                         && match attack.kind {
                             WorldgenMonsterSpecialAttackKindV1::Leap => {
-                                attack.damage.is_empty()
+                                attack.gun_type_id.is_empty()
+                                    && attack.gun_ranges.is_empty()
+                                    && attack.gun_item_range == 0
+                                    && attack.gun_dispersion == 0
+                                    && attack.gun_sound_volume == 0
+                                    && !attack.gun_no_damage_scaling
+                                    && !attack.gun_blinds_eyes
+                                    && !attack.gun_target_moving_vehicles
+                                    && attack.damage.is_empty()
                                     && attack.effects.is_empty()
                                     && attack.condition.is_none()
                                     && attack.eoc_ids.is_empty()
@@ -5414,7 +5453,15 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             }
                             WorldgenMonsterSpecialAttackKindV1::Melee
                             | WorldgenMonsterSpecialAttackKindV1::Bite => {
-                                attack.leap_minimum_range_milli == 0
+                                attack.gun_type_id.is_empty()
+                                    && attack.gun_ranges.is_empty()
+                                    && attack.gun_item_range == 0
+                                    && attack.gun_dispersion == 0
+                                    && attack.gun_sound_volume == 0
+                                    && !attack.gun_no_damage_scaling
+                                    && !attack.gun_blinds_eyes
+                                    && !attack.gun_target_moving_vehicles
+                                    && attack.leap_minimum_range_milli == 0
                                     && attack.leap_maximum_range_milli == 0
                                     && attack.leap_minimum_consider_range_milli == 0
                                     && attack.leap_maximum_consider_range_milli == 0
@@ -5424,7 +5471,15 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_ignore_destination_danger
                             }
                             WorldgenMonsterSpecialAttackKindV1::Eoc => {
-                                attack.move_cost_moves == 0
+                                attack.gun_type_id.is_empty()
+                                    && attack.gun_ranges.is_empty()
+                                    && attack.gun_item_range == 0
+                                    && attack.gun_dispersion == 0
+                                    && attack.gun_sound_volume == 0
+                                    && !attack.gun_no_damage_scaling
+                                    && !attack.gun_blinds_eyes
+                                    && !attack.gun_target_moving_vehicles
+                                    && attack.move_cost_moves == 0
                                     && attack.accuracy.is_none()
                                     && !attack.no_adjacent
                                     && !attack.dodgeable
@@ -5442,6 +5497,48 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_random
                                     && !attack.leap_ignore_destination_danger
                                     && !attack.eoc_ids.is_empty()
+                            }
+                            WorldgenMonsterSpecialAttackKindV1::Gun => {
+                                attack.accuracy.is_none()
+                                    && !attack.no_adjacent
+                                    && !attack.dodgeable
+                                    && attack.minimum_damage_multiplier_millionths == 0
+                                    && attack.maximum_damage_multiplier_millionths == 0
+                                    && !attack.damage.is_empty()
+                                    && attack.effects.is_empty()
+                                    && !attack.effects_require_damage
+                                    && attack.infection_chance_millionths == 0
+                                    && attack.leap_minimum_range_milli == 0
+                                    && attack.leap_maximum_range_milli == 0
+                                    && attack.leap_minimum_consider_range_milli == 0
+                                    && attack.leap_maximum_consider_range_milli == 0
+                                    && !attack.leap_allow_no_target
+                                    && !attack.leap_prefer
+                                    && !attack.leap_random
+                                    && !attack.leap_ignore_destination_danger
+                                    && attack.eoc_ids.is_empty()
+                                    && valid_worldgen_id(&attack.gun_type_id)
+                                    && !attack.gun_ranges.is_empty()
+                                    && (1..=1_000_000).contains(&attack.gun_item_range)
+                                    && (1..=1_000_000).contains(&attack.gun_dispersion)
+                                    && attack.gun_no_damage_scaling
+                                    && attack.gun_ranges.windows(2).all(|ranges| {
+                                        (ranges[0].minimum, ranges[0].maximum)
+                                            < (ranges[1].minimum, ranges[1].maximum)
+                                    })
+                                    && attack.gun_ranges.iter().all(|range| {
+                                        range.minimum > 0
+                                            && range.minimum <= range.maximum
+                                            && range.maximum <= attack.range
+                                            && range.maximum <= attack.gun_item_range
+                                    })
+                                    && attack.range
+                                        == attack
+                                            .gun_ranges
+                                            .iter()
+                                            .map(|range| range.maximum)
+                                            .max()
+                                            .unwrap_or(0)
                             }
                         }
                 })

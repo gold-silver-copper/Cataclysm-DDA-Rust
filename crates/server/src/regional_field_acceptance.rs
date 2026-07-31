@@ -768,8 +768,10 @@ pub(super) fn assert_production_regional_field_gameplay(
             terrain,
             furniture,
             item_groups: &production_field_catalog,
+            items: item_group_content.items,
             monsters: item_group_content.monsters,
             monster_groups,
+            eoc_definitions: &[],
         },
     )
     .expect("production regional field should normalize");

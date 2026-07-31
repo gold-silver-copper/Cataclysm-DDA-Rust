@@ -5062,6 +5062,7 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             source == actor_id
                 || matches!(target, cdda_protocol::RangedTarget::Actor(target) if target == actor_id)
         }
+        WorldEventKind::CreatureRangedAttackResolved { target, .. } => target == actor_id,
         WorldEventKind::CreatureMoved { .. }
         | WorldEventKind::CreatureCorpseCreated { .. }
         | WorldEventKind::CreatureRevived { .. }

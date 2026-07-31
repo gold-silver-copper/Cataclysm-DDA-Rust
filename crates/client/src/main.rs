@@ -4571,6 +4571,12 @@ fn event_message(event: &WorldEvent) -> String {
             "Shot {}; {remaining_ammunition} round(s) remain.",
             if *hit { "hit" } else { "missed" }
         ),
+        WorldEventKind::CreatureRangedAttackResolved {
+            gun_type_id, hit, ..
+        } => format!(
+            "A creature fired {gun_type_id} and {} you.",
+            if *hit { "hit" } else { "missed" }
+        ),
         WorldEventKind::WeaponReloaded {
             loaded,
             ammunition_remaining,

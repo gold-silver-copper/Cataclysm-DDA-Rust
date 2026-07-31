@@ -4698,7 +4698,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV21");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV22");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -9018,12 +9018,16 @@ impl WorldState {
         target: WorldPosition,
         sources: &[ActiveLightSource],
     ) -> Result<bool, SimError> {
-        let origin = self
-            .actors
-            .get(&actor_id)
-            .ok_or(SimError::UnknownActor)?
-            .position;
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let origin = actor.position;
         let distance = ranged_distance(origin, target);
+        if actor
+            .effects
+            .iter()
+            .any(|effect| effect.effect_id == "blind")
+        {
+            return Ok(distance == 0);
+        }
         if origin.z != target.z
             || distance > TERRAIN_MEMORY_RADIUS_TILES
             || !self.has_clear_shot(origin, target)
@@ -10436,6 +10440,11 @@ impl WorldState {
         for event in events {
             let stimulus = match &event.kind {
                 WorldEventKind::RangedAttackResolved {
+                    origin,
+                    sound_volume,
+                    ..
+                }
+                | WorldEventKind::CreatureRangedAttackResolved {
                     origin,
                     sound_volume,
                     ..
@@ -14493,7 +14502,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV93");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV94");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
