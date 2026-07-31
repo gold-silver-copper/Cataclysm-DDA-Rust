@@ -8956,11 +8956,7 @@ impl WorldState {
         else {
             return Ok(false);
         };
-        let required_item_ids = planned.items.iter().try_fold(0_u64, |total, (_, item)| {
-            total
-                .checked_add(item.object_count().ok_or(SimError::NumericOverflow)?)
-                .ok_or(SimError::NumericOverflow)
-        })?;
+        let required_item_ids = planned.item_object_count;
         if self.allocator.remaining() < required_item_ids {
             return Err(SimError::IdReservationExhausted);
         }

@@ -4769,6 +4769,12 @@ fn valid_worldgen_predecessor_graph(catalog: &WorldgenCatalogV1) -> bool {
         .enumerate()
         .map(|(index, generator)| (generator.omt_id.as_str(), index))
         .collect::<BTreeMap<_, _>>();
+    let identity_ids = catalog
+        .overmap
+        .identities
+        .iter()
+        .map(|identity| identity.full_id.as_str())
+        .collect::<BTreeSet<_>>();
     let Some(edges) = catalog
         .omt_generators
         .iter()
@@ -4777,7 +4783,12 @@ fn valid_worldgen_predecessor_graph(catalog: &WorldgenCatalogV1) -> bool {
                 .templates
                 .iter()
                 .filter_map(|template| template.predecessor_id.as_deref())
-                .map(|id| lookup.get(id).copied())
+                .map(|id| {
+                    lookup
+                        .get(id)
+                        .copied()
+                        .filter(|_| identity_ids.contains(id))
+                })
                 .collect::<Option<Vec<_>>>()
         })
         .collect::<Option<Vec<_>>>()
@@ -7336,6 +7347,16 @@ mod tests {
         let mut invalid = worldgen_test_catalog();
         invalid.overmap.identities[0].generator_id = String::from("missing");
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
+
+        let mut invalid = worldgen_test_catalog();
+        let mut predecessor = invalid.omt_generators[0].clone();
+        predecessor.omt_id = String::from("predecessor");
+        invalid.omt_generators[0].templates[0].predecessor_id = Some(predecessor.omt_id.clone());
+        invalid.omt_generators.push(predecessor);
+        assert!(
+            !worldgen_catalog_shape_is_valid(&invalid),
+            "a predecessor needs a concrete identity carrying its own rotation"
+        );
 
         let mut invalid = worldgen_test_catalog();
         invalid.overmap.layers[0].runs[0].length -= 1;
