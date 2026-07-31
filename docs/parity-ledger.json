@@ -4,7 +4,7 @@
   "protocol_version": 95,
   "persistence_schema_version": 73,
   "replay_format_version": 3,
-  "active_milestone": "regional-terrain-base",
+  "active_milestone": "overmap-cities",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -14,6 +14,42 @@
     "normal authoritative server/client path or explicit not-applicable rationale"
   ],
   "completed_family_evidence": [
+    {
+      "milestone_id": "conformance-foundation",
+      "pinned_characterization": ["crates/conformance/src/lib.rs", "docs/oracles/item-group-generation-v1.json", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "generalized_rust_engine": ["crates/conformance/src/lib.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "runtime_content_admission": ["crates/server/src/main.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "cpp-differential-oracle",
+      "pinned_characterization": ["tools/cpp-oracle/item_pocket_oracle_test.cpp", "tools/cpp-oracle/item_group_oracle_test.cpp", "tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/item-pocket-max-length-v1.json", "docs/oracles/item-group-generation-v1.json", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "generalized_rust_engine": ["crates/tools/src/cpp_oracle.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "runtime_content_admission": ["crates/server/src/item_groups.rs", "crates/server/src/worldgen.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "item-containment",
+      "pinned_characterization": ["tools/cpp-oracle/item_pocket_oracle_test.cpp", "tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-pocket-max-length-v1.json", "docs/oracles/item-group-generation-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/item.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "runtime_content_admission": ["crates/server/src/item_groups.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "item-groups",
+      "pinned_characterization": ["tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-group-generation-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/item_group.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/conformance/src/lib.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "runtime_content_admission": ["crates/server/src/item_groups.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
     {
       "milestone_id": "atomic-static-mapgen",
       "pinned_characterization": ["tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
@@ -49,58 +85,67 @@
       "four_mode_conformance": ["crates/conformance/src/lib.rs"],
       "runtime_content_admission": ["crates/server/src/item_groups.rs", "crates/server/src/main.rs"],
       "authoritative_client_path": ["crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "regional-terrain-base",
+      "pinned_characterization": ["tools/cpp-oracle/mapgen_oracle_test.cpp", "tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json", "docs/oracles/item-group-generation-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/region.rs", "crates/protocol/src/lib.rs", "crates/sim/src/mapgen.rs", "crates/sim/src/items.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"],
+      "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "authoritative_client_path": ["crates/client/src/main.rs"]
     }
   ],
   "milestones": [
     {
       "id": "conformance-foundation",
       "title": "Reusable deterministic scenario and recovery harness",
-      "state": "in_progress",
+      "state": "complete",
       "priority": 0,
       "depends_on": [],
       "upstream_sources": ["../Cataclysm-DDA/tests/cata_catch.h"],
       "rust_paths": ["crates/conformance/src/lib.rs"],
       "scenario_families": ["item-pickup-wield-drop-disconnect", "named-item-group-structural-bash"],
-      "differential_oracle": "planned",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "Runs authoritative commands and connection transitions while requiring exact direct, snapshot, SQLite recovery, and portable replay equivalence.",
       "unlocks": ["single-source persistence and replay parity scenarios", "minimized cross-subsystem regression fixtures"]
     },
     {
       "id": "cpp-differential-oracle",
       "title": "Pinned headless C++ differential oracle",
-      "state": "in_progress",
+      "state": "complete",
       "priority": 1,
       "depends_on": ["conformance-foundation"],
       "upstream_sources": ["../Cataclysm-DDA/tests/cata_catch.h", "../Cataclysm-DDA/tests/test_main.cpp", "../Cataclysm-DDA/tests/fake_messages.cpp", "../Cataclysm-DDA/src/item_pocket.cpp", "../Cataclysm-DDA/src/item_pocket.h", "../Cataclysm-DDA/src/item_group.cpp", "../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/mapgen.cpp", "../Cataclysm-DDA/src/mapgen_functions.cpp"],
       "rust_paths": ["crates/tools/src/cpp_oracle.rs", "tools/cpp-oracle/item_pocket_oracle_test.cpp", "tools/cpp-oracle/item_group_oracle_test.cpp", "tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/item-pocket-max-length-v1.json", "docs/oracles/item-group-generation-v1.json", "docs/oracles/mapgen-static-semantics-v1.json"],
       "scenario_families": ["item-pocket-max-length", "item-group-generation", "mapgen-static-semantics", "movement-kernel", "combat-kernel"],
-      "differential_oracle": "active",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "Compares normalized deterministic kernels; server authority, connection state, and persistent time are reported as explicit Rust adaptations.",
       "unlocks": ["generated characterization corpora", "pinned semantic drift detection"]
     },
     {
       "id": "item-containment",
       "title": "Stable item ownership, magazines, ammunition, and item-owned power",
-      "state": "in_progress",
+      "state": "complete",
       "priority": 2,
       "depends_on": ["conformance-foundation"],
       "upstream_sources": ["../Cataclysm-DDA/src/item_pocket.cpp", "../Cataclysm-DDA/src/item_contents.cpp", "../Cataclysm-DDA/src/item_gun_tool_ammo.cpp"],
       "rust_paths": ["crates/content/src/item.rs", "crates/protocol/src/lib.rs", "crates/sim/src/lib.rs", "crates/conformance/src/lib.rs"],
       "scenario_families": ["item-pickup-wield-drop-disconnect", "magazine-insert-detach-reload-unload", "integral-ammunition-split-remove-round-trip", "ammunition-container-partial-insert-multivariant-remove-category-switch"],
-      "differential_oracle": "planned",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "The server owns every nested item ID and applies atomic explicit-pocket transfers; clients request commands and receive authoritative semantic events.",
       "unlocks": ["1437 observed magazine and magazine-well pocket descriptors", "strict ammunition-restricted container pockets", "detachable ammunition and batteries", "nested item-group dressing"]
     },
     {
       "id": "item-groups",
       "title": "Deterministic item-group interpretation and nested generation",
-      "state": "in_progress",
+      "state": "complete",
       "priority": 3,
       "depends_on": ["item-containment", "cpp-differential-oracle"],
       "upstream_sources": ["../Cataclysm-DDA/src/item_group.cpp", "../Cataclysm-DDA/src/item_factory.cpp", "../Cataclysm-DDA/src/item.cpp", "../Cataclysm-DDA/src/text_snippets.cpp"],
       "rust_paths": ["crates/content/src/item_group.rs", "crates/content/src/bash.rs", "crates/content/src/snippet.rs", "crates/protocol/src/item_groups.rs", "crates/protocol/src/lib.rs", "crates/sim/src/items.rs", "crates/sim/src/lib.rs", "crates/server/src/item_groups.rs", "crates/server/src/main.rs", "crates/conformance/src/lib.rs", "tools/cpp-oracle/item_group_oracle_test.cpp", "docs/oracles/item-group-generation-v1.json"],
       "scenario_families": ["weighted-collection-and-distribution", "raw-damage-and-selected-variants", "fixed-zero-modifier-rng-phase", "disabled-holiday-event-selection", "named-wall-bash-snapshot-recovery-replay", "gun-magazine-ammunition-dressing", "detachable-tool-charge-storage", "integral-magazine-charge-loading-and-production-light-batteries", "capacity-sentinel-integral-detachable-magazine-container-and-unresolved-boundaries", "rigid-wrapper-contents-sealing-snippets-and-variables", "recursive-base-and-variant-description-snippet-expansion", "variable-size-fit-construction-crafting-disassembly-and-client-rendering", "default-container-direct-fill-modifier-fallback-explicit-null-explicit-creator-and-production-boundaries", "materialless-temperature-constructor-processing-nested-recovery-and-client-rendering", "flexible-reserved-volume-wrapper-constructor-default-and-automatic-collapse", "nonperishable-material-inheritance-weighting-fixed-point-energy-and-recovery"],
-      "differential_oracle": "active",
+      "differential_oracle": "verified",
       "multiplayer_adaptation": "The authoritative server consumes named deterministic RNG streams, fixes real-world event spawns to the pinned default disabled policy for portable replay, and allocates every generated object a stable ID.",
       "unlocks": ["strict closure admission from 7621 pinned definitions", "pinned wall_bash_results generation", "mapgen and monster item spawning", "ordinary loot generation"]
     },
@@ -146,20 +191,20 @@
     {
       "id": "regional-terrain-base",
       "title": "Default regional terrain base layer",
-      "state": "in_progress",
+      "state": "complete",
       "priority": 7,
       "depends_on": ["atomic-static-mapgen", "omt-identities-routing", "item-groups", "cpp-differential-oracle"],
       "upstream_sources": ["../Cataclysm-DDA/src/regional_settings.cpp", "../Cataclysm-DDA/src/overmap.cpp"],
-      "rust_paths": ["crates/content/src/region.rs", "crates/content/src/mapgen.rs", "crates/content/src/item_group.rs", "crates/content/src/item.rs", "crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/sim/src/mapgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/worldgen.rs", "crates/server/src/main.rs", "crates/client/src/main.rs"],
-      "scenario_families": ["regional-pseudo-substitution", "field-base-loot-closure", "materialless-temperature-constructor-and-nested-recovery", "nonperishable-material-thermodynamics-and-four-mode-recovery", "persistent-default-surface"],
-      "differential_oracle": "active",
-      "multiplayer_adaptation": "The server must generate the same ordinary field base continuously and persist every nested loot object before replacing the current LMOE bootstrap fill.",
+      "rust_paths": ["crates/content/src/region.rs", "crates/content/src/mapgen.rs", "crates/content/src/item_group.rs", "crates/content/src/item.rs", "crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/sim/src/mapgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/worldgen.rs", "crates/server/src/regional_field_acceptance.rs", "crates/server/src/main.rs", "crates/client/src/main.rs"],
+      "scenario_families": ["recursive-regional-pseudo-substitution", "production-field-base-loot-closure", "multi-pocket-selection-and-general-containment", "perishable-food-and-static-corpse-rot", "insulated-container-metadata", "two-client-exploration-nested-loot-disconnect-sqlite-and-portable-replay"],
+      "differential_oracle": "verified",
+      "multiplayer_adaptation": "The server generates the production regional field continuously, allocates stable identities for all loot, preserves nested ownership and world-time rot, and reproduces the same two-client trace through snapshot, SQLite recovery, and portable replay.",
       "unlocks": ["ordinary field surface", "runtime-usable default regional content", "forest-city-road-river population substrate"]
     },
     {
       "id": "overmap-cities",
       "title": "City placement and ownership",
-      "state": "planned",
+      "state": "in_progress",
       "priority": 8,
       "depends_on": ["regional-terrain-base"],
       "upstream_sources": ["../Cataclysm-DDA/src/overmap.cpp"],

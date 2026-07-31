@@ -1491,18 +1491,17 @@ mod tests {
     #[test]
     fn completed_milestone_requires_completed_dependencies() {
         let mut ledger = ledger();
-        ledger.active_milestone = String::from("conformance-foundation");
         let item = ledger
             .milestones
             .iter_mut()
-            .find(|milestone| milestone.id == "item-containment")
-            .expect("item milestone should exist");
+            .find(|milestone| milestone.id == "overmap-roads")
+            .expect("road milestone should exist");
         item.state = ParityState::Complete;
         item.differential_oracle = DifferentialState::NotApplicable;
         ledger
             .completed_family_evidence
             .push(CompletedFamilyEvidence {
-                milestone_id: String::from("item-containment"),
+                milestone_id: String::from("overmap-roads"),
                 pinned_characterization: vec![String::from("README.md")],
                 generalized_rust_engine: vec![String::from("README.md")],
                 direct_rust_cpp_comparison: vec![String::from("README.md")],
@@ -1517,13 +1516,9 @@ mod tests {
     #[test]
     fn completed_milestone_requires_six_part_evidence() {
         let mut ledger = ledger();
-        let foundation = ledger
-            .milestones
-            .iter_mut()
-            .find(|milestone| milestone.id == "conformance-foundation")
-            .expect("foundation milestone should exist");
-        foundation.state = ParityState::Complete;
-        foundation.differential_oracle = DifferentialState::NotApplicable;
+        ledger
+            .completed_family_evidence
+            .retain(|evidence| evidence.milestone_id != "conformance-foundation");
         let result = validate_parity_ledger(&ledger, workspace());
         assert!(result.is_err_and(|error| {
             error

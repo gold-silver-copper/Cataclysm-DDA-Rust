@@ -10,9 +10,9 @@ use cdda_protocol::{
     ActorConnectionUpdateV1, ActorId, AmmunitionContainerPocketPrototypeV1,
     CharacterCreationStatsV1, ChunkCoord, ClientCommand, CommandKind, CommandSequence,
     ContentIdentity, IntegralMagazinePocketPrototypeV1, ItemGroupDefinitionV1, ItemId,
-    MagazineWellPrototypeV1, PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1,
-    TerrainBashTypeV1, TerrainTileSnapshot, WorldEvent, WorldPosition, WorldSnapshotV1,
-    WorldgenCatalogV1, worldgen_catalog_is_valid,
+    ItemSnapshot, MagazineWellPrototypeV1, PoweredToolStateV1, RangedWeaponSnapshot, SimTick,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WorldEvent, WorldPosition,
+    WorldSnapshotV1, WorldgenCatalogV1, worldgen_catalog_is_valid,
 };
 use cdda_sim::{
     Chunk, ID_RESERVATION_SIZE, ItemSpawn, ReservedIdBlock, SimError, WorldState,
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use cdda_protocol::WorldEventKind;
 
-pub const SCENARIO_FORMAT_VERSION: u16 = 7;
+pub const SCENARIO_FORMAT_VERSION: u16 = 8;
 pub const OBSERVATION_FORMAT_VERSION: u16 = 6;
 const MAX_ALIASES: usize = 512;
 const MAX_ALIAS_BYTES: usize = 64;
@@ -54,6 +54,7 @@ pub struct ScenarioV1 {
     pub terrain: Vec<ScenarioTerrainV1>,
     pub actors: Vec<ScenarioActorV1>,
     pub ground_items: Vec<ScenarioItemV1>,
+    pub generated_items: Vec<ScenarioGeneratedItemV1>,
     pub steps: Vec<ScenarioStepV1>,
     pub expected: ScenarioExpectationV1,
 }
@@ -79,6 +80,7 @@ pub struct ScenarioActorV1 {
 pub enum ScenarioActorSpawnV1 {
     At(WorldPosition),
     StartLocation,
+    AtGeneratedGroundItem { item: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +106,27 @@ pub struct ScenarioItemV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ScenarioGeneratedItemV1 {
+    pub alias: String,
+    pub selector: ScenarioGeneratedItemSelectorV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub enum ScenarioGeneratedItemSelectorV1 {
+    Ground {
+        type_id: String,
+        ordinal: u16,
+    },
+    Pocket {
+        owner: String,
+        pocket_index: u16,
+        ordinal: u16,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScenarioStepV1 {
     Command {
         actor: String,
@@ -114,6 +137,12 @@ pub enum ScenarioStepV1 {
         connected: bool,
     },
     Advance {
+        ticks: u16,
+    },
+    /// Advance every authoritative tick and retain every journal input, but
+    /// perform snapshot-mode recovery once at the declared boundary. This is
+    /// useful for long action-point debts in production-sized worlds.
+    AdvanceBatch {
         ticks: u16,
     },
 }
@@ -378,6 +407,7 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
                 || !scenario.ground_items.is_empty()
                 || !worldgen_catalog_is_valid(worldgen, &scenario.item_groups)
         })
+        || (scenario.worldgen.is_none() && !scenario.generated_items.is_empty())
     {
         return Err(ConformanceError::InvalidScenario("invalid chunk count"));
     }
@@ -399,6 +429,7 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
         ));
     }
     if scenario.ground_items.len() > MAX_ITEMS
+        || scenario.generated_items.len() > MAX_ITEMS
         || scenario.terrain.len() > MAX_TERRAIN_FIXTURES
         || scenario.steps.len() > MAX_STEPS
     {
@@ -408,7 +439,9 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
     }
     let ticks = scenario.steps.iter().try_fold(0_u64, |total, step| {
         total.checked_add(match step {
-            ScenarioStepV1::Advance { ticks } => u64::from(*ticks),
+            ScenarioStepV1::Advance { ticks } | ScenarioStepV1::AdvanceBatch { ticks } => {
+                u64::from(*ticks)
+            }
             ScenarioStepV1::Command { .. } | ScenarioStepV1::Connection { .. } => 1,
         })
     });
@@ -423,6 +456,12 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
         .iter()
         .map(|actor| actor.alias.as_str())
         .chain(scenario.ground_items.iter().map(|item| item.alias.as_str()))
+        .chain(
+            scenario
+                .generated_items
+                .iter()
+                .map(|item| item.alias.as_str()),
+        )
     {
         if !valid_alias(alias) || !aliases.insert(alias) || aliases.len() > MAX_ALIASES {
             return Err(ConformanceError::InvalidScenario(
@@ -430,11 +469,46 @@ fn validate_scenario(scenario: &ScenarioV1) -> Result<(), ConformanceError> {
             ));
         }
     }
-    if scenario
-        .steps
-        .iter()
-        .any(|step| matches!(step, ScenarioStepV1::Advance { ticks: 0 }))
-    {
+    let mut generated_aliases = BTreeSet::new();
+    for generated in &scenario.generated_items {
+        match &generated.selector {
+            ScenarioGeneratedItemSelectorV1::Ground { type_id, .. } => {
+                if type_id.is_empty()
+                    || type_id.len() > 512
+                    || type_id.chars().any(char::is_control)
+                {
+                    return Err(ConformanceError::InvalidScenario(
+                        "generated ground selector type must be bounded",
+                    ));
+                }
+            }
+            ScenarioGeneratedItemSelectorV1::Pocket { owner, .. } => {
+                if !generated_aliases.contains(owner.as_str()) {
+                    return Err(ConformanceError::InvalidScenario(
+                        "generated pocket selector owner must precede the child alias",
+                    ));
+                }
+            }
+        }
+        generated_aliases.insert(generated.alias.as_str());
+    }
+    if scenario.actors.iter().any(|actor| {
+        matches!(
+            &actor.spawn,
+            ScenarioActorSpawnV1::AtGeneratedGroundItem { item }
+                if !generated_aliases.contains(item.as_str())
+        )
+    }) {
+        return Err(ConformanceError::InvalidScenario(
+            "generated-item actor spawn references an unknown alias",
+        ));
+    }
+    if scenario.steps.iter().any(|step| {
+        matches!(
+            step,
+            ScenarioStepV1::Advance { ticks: 0 } | ScenarioStepV1::AdvanceBatch { ticks: 0 }
+        )
+    }) {
         return Err(ConformanceError::InvalidScenario(
             "advance step must contain at least one tick",
         ));
@@ -557,6 +631,21 @@ fn execute_scenario(
                     )?;
                 }
             }
+            ScenarioStepV1::AdvanceBatch { ticks } => {
+                for _ in 0..*ticks {
+                    advance_and_record(
+                        &mut world,
+                        Vec::new(),
+                        Vec::new(),
+                        false,
+                        &mut journal_ticks,
+                        &mut event_batches,
+                    )?;
+                }
+                if snapshot_each_tick {
+                    round_trip_world_snapshot(&mut world)?;
+                }
+            }
         }
     }
     Ok(ScenarioExecution {
@@ -606,6 +695,7 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
             world.insert_chunk(chunk);
         }
     }
+    let mut items = resolve_generated_item_aliases(&world, &scenario.generated_items)?;
     let mut actors = BTreeMap::new();
     let mut actor_specs = scenario.actors.iter().collect::<Vec<_>>();
     actor_specs.sort_by(|left, right| left.alias.cmp(&right.alias));
@@ -627,10 +717,22 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
                 }
                 world.spawn_actor_first_available_with_stats(actor.connected, actor.stats)?
             }
+            ScenarioActorSpawnV1::AtGeneratedGroundItem { item } => {
+                let item_id = items
+                    .get(item)
+                    .copied()
+                    .ok_or_else(|| ConformanceError::UnknownItem(item.clone()))?;
+                let position = world
+                    .ground_item_snapshot(item_id)
+                    .ok_or(ConformanceError::InvalidScenario(
+                        "generated-item actor spawn requires a top-level ground item",
+                    ))?
+                    .position;
+                world.spawn_actor_with_base_stats(position, actor.connected, actor.stats)?
+            }
         };
         actors.insert(actor.alias.clone(), id);
     }
-    let mut items = BTreeMap::new();
     let mut item_specs = scenario.ground_items.iter().collect::<Vec<_>>();
     item_specs.sort_by(|left, right| left.alias.cmp(&right.alias));
     for item in item_specs {
@@ -684,6 +786,89 @@ fn build_world(scenario: &ScenarioV1) -> Result<(WorldState, ScenarioHandles), C
         items.insert(item.alias.clone(), id);
     }
     Ok((world, ScenarioHandles { actors, items }))
+}
+
+fn resolve_generated_item_aliases(
+    world: &WorldState,
+    generated_items: &[ScenarioGeneratedItemV1],
+) -> Result<BTreeMap<String, ItemId>, ConformanceError> {
+    let snapshot = world.snapshot();
+    let mut aliases = BTreeMap::new();
+    let mut selected_ids = BTreeSet::new();
+    for generated in generated_items {
+        let item_id = match &generated.selector {
+            ScenarioGeneratedItemSelectorV1::Ground { type_id, ordinal } => snapshot
+                .ground_items
+                .iter()
+                .filter(|ground| ground.item.type_id == *type_id)
+                .nth(usize::from(*ordinal))
+                .map(|ground| ground.item.id),
+            ScenarioGeneratedItemSelectorV1::Pocket {
+                owner,
+                pocket_index,
+                ordinal,
+            } => {
+                let owner_id = aliases
+                    .get(owner)
+                    .copied()
+                    .ok_or_else(|| ConformanceError::UnknownItem(owner.clone()))?;
+                find_item_snapshot(&snapshot, owner_id)
+                    .and_then(|owner| {
+                        owner
+                            .ammunition_containers
+                            .iter()
+                            .find(|pocket| pocket.pocket_index == *pocket_index)
+                    })
+                    .and_then(|pocket| pocket.contents.get(usize::from(*ordinal)))
+                    .map(|item| item.id)
+            }
+        }
+        .ok_or(ConformanceError::InvalidScenario(
+            "generated item selector did not resolve exactly",
+        ))?;
+        if !selected_ids.insert(item_id) {
+            return Err(ConformanceError::InvalidScenario(
+                "generated item selectors must identify distinct items",
+            ));
+        }
+        aliases.insert(generated.alias.clone(), item_id);
+    }
+    Ok(aliases)
+}
+
+fn find_item_snapshot(snapshot: &WorldSnapshotV1, item_id: ItemId) -> Option<&ItemSnapshot> {
+    snapshot
+        .ground_items
+        .iter()
+        .find_map(|ground| find_nested_item_snapshot(&ground.item, item_id))
+        .or_else(|| {
+            snapshot.actors.iter().find_map(|actor| {
+                actor
+                    .inventory
+                    .iter()
+                    .find_map(|item| find_nested_item_snapshot(item, item_id))
+            })
+        })
+}
+
+fn find_nested_item_snapshot(item: &ItemSnapshot, item_id: ItemId) -> Option<&ItemSnapshot> {
+    if item.id == item_id {
+        return Some(item);
+    }
+    item.integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+        .chain(
+            item.magazine_wells
+                .iter()
+                .filter_map(|well| well.installed_magazine.as_deref()),
+        )
+        .chain(
+            item.ammunition_containers
+                .iter()
+                .flat_map(|pocket| &pocket.contents),
+        )
+        .find_map(|child| find_nested_item_snapshot(child, item_id))
 }
 
 fn resolve_command(
@@ -770,10 +955,15 @@ fn advance_and_record(
         events: outcome.events,
     });
     if snapshot_each_tick {
-        let encoded = postcard::to_stdvec(&world.snapshot())?;
-        let snapshot = postcard::from_bytes(&encoded)?;
-        *world = WorldState::from_snapshot(&snapshot)?;
+        round_trip_world_snapshot(world)?;
     }
+    Ok(())
+}
+
+fn round_trip_world_snapshot(world: &mut WorldState) -> Result<(), ConformanceError> {
+    let encoded = postcard::to_stdvec(&world.snapshot())?;
+    let snapshot = postcard::from_bytes(&encoded)?;
+    *world = WorldState::from_snapshot(&snapshot)?;
     Ok(())
 }
 
@@ -982,6 +1172,7 @@ mod tests {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             }],
+            generated_items: Vec::new(),
             steps: vec![
                 ScenarioStepV1::Command {
                     actor: String::from("survivor"),
@@ -1192,6 +1383,7 @@ mod tests {
             terrain: Vec::new(),
             actors: vec![actor("alpha"), actor("beta")],
             ground_items: Vec::new(),
+            generated_items: Vec::new(),
             steps: vec![ScenarioStepV1::Advance { ticks: 1 }],
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(0),
@@ -1777,6 +1969,7 @@ mod tests {
                 residual_energy_millijoules: 0,
                 powered_tool: None,
             }],
+            generated_items: Vec::new(),
             steps: vec![
                 ScenarioStepV1::Command {
                     actor: String::from("survivor"),
@@ -2143,6 +2336,7 @@ mod tests {
                     None,
                 ),
             ],
+            generated_items: Vec::new(),
             steps,
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(0),
@@ -2292,6 +2486,7 @@ mod tests {
                     powered_tool: None,
                 },
             ],
+            generated_items: Vec::new(),
             steps,
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(0),
@@ -2494,6 +2689,7 @@ mod tests {
                     stats: CharacterCreationStatsV1::default(),
                 }],
                 ground_items,
+                generated_items: Vec::new(),
                 steps,
                 expected: ScenarioExpectationV1 {
                     final_tick: SimTick(0),
@@ -2677,6 +2873,12 @@ mod tests {
             Err(ConformanceError::InvalidScenario(_))
         ));
         let mut invalid = item_flow_scenario();
+        invalid.steps = vec![ScenarioStepV1::AdvanceBatch { ticks: 0 }];
+        assert!(matches!(
+            run_scenario(&invalid, ScenarioMode::Direct),
+            Err(ConformanceError::InvalidScenario(_))
+        ));
+        let mut invalid = item_flow_scenario();
         invalid.ground_items[0].alias = String::from("survivor");
         assert!(matches!(
             run_scenario(&invalid, ScenarioMode::Direct),
@@ -2688,6 +2890,22 @@ mod tests {
             run_scenario(&invalid, ScenarioMode::Direct),
             Err(ConformanceError::InvalidScenario(_))
         ));
+    }
+
+    #[test]
+    fn declared_snapshot_boundaries_preserve_the_complete_journal_trace() {
+        let mut scenario = item_flow_scenario();
+        for step in &mut scenario.steps {
+            if let ScenarioStepV1::Advance { ticks } = step {
+                *step = ScenarioStepV1::AdvanceBatch { ticks: *ticks };
+            }
+        }
+        assert_eq!(
+            run_scenario(&scenario, ScenarioMode::SnapshotEachTick)
+                .expect("declared snapshot boundaries should recover"),
+            run_scenario(&scenario, ScenarioMode::Direct)
+                .expect("batched journal trace should run directly")
+        );
     }
 
     #[test]

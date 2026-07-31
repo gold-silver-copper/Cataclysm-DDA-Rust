@@ -11,49 +11,230 @@
     "collection": {
       "entry_probability": 50,
       "rolls_consumed": 3,
-      "expected_trace": ["first", "conditional", "last"],
-      "actual_trace": ["first", "conditional", "last"],
+      "expected_trace": [
+        "first",
+        "conditional",
+        "last"
+      ],
+      "actual_trace": [
+        "first",
+        "conditional",
+        "last"
+      ],
       "downstream_draw_matches": true
     },
     "distribution": [
-      { "ticket": 1, "selected": "low" },
-      { "ticket": 2, "selected": "low" },
-      { "ticket": 3, "selected": "middle" },
-      { "ticket": 5, "selected": "middle" },
-      { "ticket": 6, "selected": "high" },
-      { "ticket": 10, "selected": "high" }
+      {
+        "ticket": 1,
+        "selected": "low"
+      },
+      {
+        "ticket": 2,
+        "selected": "low"
+      },
+      {
+        "ticket": 3,
+        "selected": "middle"
+      },
+      {
+        "ticket": 5,
+        "selected": "middle"
+      },
+      {
+        "ticket": 6,
+        "selected": "high"
+      },
+      {
+        "ticket": 10,
+        "selected": "high"
+      }
     ],
     "counts": [
-      { "case_id": "fixed", "minimum": 3, "maximum": 3, "target": 3, "observed": 3 },
-      { "case_id": "range_minimum", "minimum": 2, "maximum": 4, "target": 2, "observed": 2 },
-      { "case_id": "range_maximum", "minimum": 2, "maximum": 4, "target": 4, "observed": 4 }
+      {
+        "case_id": "fixed",
+        "minimum": 3,
+        "maximum": 3,
+        "target": 3,
+        "observed": 3
+      },
+      {
+        "case_id": "range_minimum",
+        "minimum": 2,
+        "maximum": 4,
+        "target": 2,
+        "observed": 2
+      },
+      {
+        "case_id": "range_maximum",
+        "minimum": 2,
+        "maximum": 4,
+        "target": 4,
+        "observed": 4
+      }
     ],
     "charges": [
-      { "case_id": "fixed", "minimum": 4, "maximum": 4, "target": 4, "observed": 4 },
-      { "case_id": "zero_clamped_to_one", "minimum": 0, "maximum": 0, "target": 1, "observed": 1 },
-      { "case_id": "range_minimum", "minimum": 1, "maximum": 4, "target": 1, "observed": 1 },
-      { "case_id": "range_maximum", "minimum": 1, "maximum": 4, "target": 4, "observed": 4 }
+      {
+        "case_id": "fixed",
+        "minimum": 4,
+        "maximum": 4,
+        "target": 4,
+        "observed": 4
+      },
+      {
+        "case_id": "zero_clamped_to_one",
+        "minimum": 0,
+        "maximum": 0,
+        "target": 1,
+        "observed": 1
+      },
+      {
+        "case_id": "range_minimum",
+        "minimum": 1,
+        "maximum": 4,
+        "target": 1,
+        "observed": 1
+      },
+      {
+        "case_id": "range_maximum",
+        "minimum": 1,
+        "maximum": 4,
+        "target": 4,
+        "observed": 4
+      }
     ],
     "tool_charges": [
-      { "requested_charges": 0, "tool_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 0 },
-      { "requested_charges": 1, "tool_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 1, "remaining_capacity": 0 },
-      { "requested_charges": 56, "tool_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 56, "remaining_capacity": 0 },
-      { "requested_charges": 100, "tool_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 56, "remaining_capacity": 0 }
+      {
+        "requested_charges": 0,
+        "tool_type": "wearable_light",
+        "magazine_present": true,
+        "magazine_type": "medium_battery_cell",
+        "ammunition_type": "null",
+        "ammunition_remaining": 0,
+        "remaining_capacity": 0
+      },
+      {
+        "requested_charges": 1,
+        "tool_type": "wearable_light",
+        "magazine_present": true,
+        "magazine_type": "medium_battery_cell",
+        "ammunition_type": "battery",
+        "ammunition_remaining": 1,
+        "remaining_capacity": 0
+      },
+      {
+        "requested_charges": 56,
+        "tool_type": "wearable_light",
+        "magazine_present": true,
+        "magazine_type": "medium_battery_cell",
+        "ammunition_type": "battery",
+        "ammunition_remaining": 56,
+        "remaining_capacity": 0
+      },
+      {
+        "requested_charges": 100,
+        "tool_type": "wearable_light",
+        "magazine_present": true,
+        "magazine_type": "medium_battery_cell",
+        "ammunition_type": "battery",
+        "ammunition_remaining": 56,
+        "remaining_capacity": 0
+      }
     ],
     "magazine_charges": {
       "production_group": "ammo_light_batteries",
       "direct": [
-        { "case_id": "light_0", "seed": 8675309, "requested_charges": 0, "item_type": "light_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 16, "downstream_draw": 8054 },
-        { "case_id": "light_1", "seed": 8675309, "requested_charges": 1, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 1, "remaining_capacity": 15, "downstream_draw": 8012 },
-        { "case_id": "light_16", "seed": 8675309, "requested_charges": 16, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 16, "remaining_capacity": 0, "downstream_draw": 8012 },
-        { "case_id": "light_100", "seed": 8675309, "requested_charges": 100, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 16, "remaining_capacity": 0, "downstream_draw": 8012 },
-        { "case_id": "ultralight_overflow", "seed": 8675309, "requested_charges": 100, "item_type": "light_minus_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 2, "remaining_capacity": 0, "downstream_draw": 8012 }
+        {
+          "case_id": "light_0",
+          "seed": 8675309,
+          "requested_charges": 0,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 16,
+          "downstream_draw": 8054
+        },
+        {
+          "case_id": "light_1",
+          "seed": 8675309,
+          "requested_charges": 1,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 1,
+          "remaining_capacity": 15,
+          "downstream_draw": 8012
+        },
+        {
+          "case_id": "light_16",
+          "seed": 8675309,
+          "requested_charges": 16,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 16,
+          "remaining_capacity": 0,
+          "downstream_draw": 8012
+        },
+        {
+          "case_id": "light_100",
+          "seed": 8675309,
+          "requested_charges": 100,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 16,
+          "remaining_capacity": 0,
+          "downstream_draw": 8012
+        },
+        {
+          "case_id": "ultralight_overflow",
+          "seed": 8675309,
+          "requested_charges": 100,
+          "item_type": "light_minus_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 2,
+          "remaining_capacity": 0,
+          "downstream_draw": 8012
+        }
       ],
       "production": [
-        { "case_id": "production_empty_light", "seed": 378, "requested_charges": -1, "item_type": "light_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 16, "downstream_draw": 4351 },
-        { "case_id": "production_partial_light", "seed": 19, "requested_charges": -1, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 4, "remaining_capacity": 12, "downstream_draw": 6734 },
-        { "case_id": "production_full_light", "seed": 1, "requested_charges": -1, "item_type": "light_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 16, "remaining_capacity": 0, "downstream_draw": 272 },
-        { "case_id": "production_full_ultralight", "seed": 4, "requested_charges": -1, "item_type": "light_minus_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 2, "remaining_capacity": 0, "downstream_draw": 7453 }
+        {
+          "case_id": "production_empty_light",
+          "seed": 378,
+          "requested_charges": -1,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 16,
+          "downstream_draw": 4351
+        },
+        {
+          "case_id": "production_partial_light",
+          "seed": 19,
+          "requested_charges": -1,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 4,
+          "remaining_capacity": 12,
+          "downstream_draw": 6734
+        },
+        {
+          "case_id": "production_full_light",
+          "seed": 1,
+          "requested_charges": -1,
+          "item_type": "light_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 16,
+          "remaining_capacity": 0,
+          "downstream_draw": 272
+        },
+        {
+          "case_id": "production_full_ultralight",
+          "seed": 4,
+          "requested_charges": -1,
+          "item_type": "light_minus_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 2,
+          "remaining_capacity": 0,
+          "downstream_draw": 7453
+        }
       ]
     },
     "repeated_tool_charges": {
@@ -105,19 +286,67 @@
     "variable_size_fit": {
       "production_group": "accessory_weaponcarry",
       "direct": [
-        { "case_id": "non_variable_control", "seed": 2, "item_type": "test_pipe", "variable_size": false, "fitted": false, "name": "TEST pipe", "downstream_draw": 7599 },
-        { "case_id": "variable_unfitted", "seed": 1, "item_type": "leg_sheath6", "variable_size": true, "fitted": false, "name": "throwing knives leg sheath (poor fit)", "downstream_draw": 6855 },
-        { "case_id": "variable_fitted", "seed": 2, "item_type": "leg_sheath6", "variable_size": true, "fitted": true, "name": "throwing knives leg sheath", "downstream_draw": 7599 }
+        {
+          "case_id": "non_variable_control",
+          "seed": 2,
+          "item_type": "test_pipe",
+          "variable_size": false,
+          "fitted": false,
+          "name": "TEST pipe",
+          "downstream_draw": 7599
+        },
+        {
+          "case_id": "variable_unfitted",
+          "seed": 1,
+          "item_type": "leg_sheath6",
+          "variable_size": true,
+          "fitted": false,
+          "name": "throwing knives leg sheath (poor fit)",
+          "downstream_draw": 6855
+        },
+        {
+          "case_id": "variable_fitted",
+          "seed": 2,
+          "item_type": "leg_sheath6",
+          "variable_size": true,
+          "fitted": true,
+          "name": "throwing knives leg sheath",
+          "downstream_draw": 7599
+        }
       ],
       "production": [
-        { "case_id": "production_unfitted", "seed": 219, "item_type": "leg_sheath6", "variable_size": true, "fitted": false, "name": "throwing knives leg sheath (poor fit)", "downstream_draw": 3293 },
-        { "case_id": "production_fitted", "seed": 97, "item_type": "leg_sheath6", "variable_size": true, "fitted": true, "name": "throwing knives leg sheath", "downstream_draw": 8155 }
+        {
+          "case_id": "production_unfitted",
+          "seed": 219,
+          "item_type": "leg_sheath6",
+          "variable_size": true,
+          "fitted": false,
+          "name": "throwing knives leg sheath (poor fit)",
+          "downstream_draw": 3293
+        },
+        {
+          "case_id": "production_fitted",
+          "seed": 97,
+          "item_type": "leg_sheath6",
+          "variable_size": true,
+          "fitted": true,
+          "name": "throwing knives leg sheath",
+          "downstream_draw": 8155
+        }
       ]
     },
     "nested": {
       "rolls_consumed": 4,
-      "expected_trace": ["child_conditional", "child_always", "root_last"],
-      "actual_trace": ["child_conditional", "child_always", "root_last"],
+      "expected_trace": [
+        "child_conditional",
+        "child_always",
+        "root_last"
+      ],
+      "actual_trace": [
+        "child_conditional",
+        "child_always",
+        "root_last"
+      ],
       "downstream_draw_matches": true
     },
     "modifiers": {
@@ -136,24 +365,264 @@
     },
     "dressing": {
       "direct": [
-        { "case_id": "integral_full", "source_group": "", "seed": 1, "ammunition_chance": 100, "magazine_chance": 100, "charges_minimum": -1, "charges_maximum": -1, "item_type": "matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "match", "ammunition_remaining": 20, "remaining_capacity": 0, "downstream_draw": 4747 },
-        { "case_id": "integral_chance_failure", "source_group": "", "seed": 1, "ammunition_chance": 50, "magazine_chance": 100, "charges_minimum": -1, "charges_maximum": -1, "item_type": "matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 20, "downstream_draw": 2557 },
-        { "case_id": "integral_chance_success", "source_group": "", "seed": 2, "ammunition_chance": 50, "magazine_chance": 100, "charges_minimum": -1, "charges_maximum": -1, "item_type": "matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "match", "ammunition_remaining": 20, "remaining_capacity": 0, "downstream_draw": 9496 },
-        { "case_id": "detachable_ammunition", "source_group": "", "seed": 1, "ammunition_chance": 100, "magazine_chance": 0, "charges_minimum": -1, "charges_maximum": -1, "item_type": "wearable_light", "magazine_present": false, "magazine_type": "", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 0, "downstream_draw": 2557 },
-        { "case_id": "detachable_magazine", "source_group": "", "seed": 1, "ammunition_chance": 0, "magazine_chance": 100, "charges_minimum": -1, "charges_maximum": -1, "item_type": "wearable_light", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 0, "downstream_draw": 4747 },
-        { "case_id": "explicit_charge_suppression", "source_group": "", "seed": 1, "ammunition_chance": 100, "magazine_chance": 100, "charges_minimum": 0, "charges_maximum": 0, "item_type": "permanent_marker", "magazine_present": false, "magazine_type": "", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 500, "downstream_draw": 2557 }
+        {
+          "case_id": "integral_full",
+          "source_group": "",
+          "seed": 1,
+          "ammunition_chance": 100,
+          "magazine_chance": 100,
+          "charges_minimum": -1,
+          "charges_maximum": -1,
+          "item_type": "matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "match",
+          "ammunition_remaining": 20,
+          "remaining_capacity": 0,
+          "downstream_draw": 4747
+        },
+        {
+          "case_id": "integral_chance_failure",
+          "source_group": "",
+          "seed": 1,
+          "ammunition_chance": 50,
+          "magazine_chance": 100,
+          "charges_minimum": -1,
+          "charges_maximum": -1,
+          "item_type": "matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 20,
+          "downstream_draw": 2557
+        },
+        {
+          "case_id": "integral_chance_success",
+          "source_group": "",
+          "seed": 2,
+          "ammunition_chance": 50,
+          "magazine_chance": 100,
+          "charges_minimum": -1,
+          "charges_maximum": -1,
+          "item_type": "matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "match",
+          "ammunition_remaining": 20,
+          "remaining_capacity": 0,
+          "downstream_draw": 9496
+        },
+        {
+          "case_id": "detachable_ammunition",
+          "source_group": "",
+          "seed": 1,
+          "ammunition_chance": 100,
+          "magazine_chance": 0,
+          "charges_minimum": -1,
+          "charges_maximum": -1,
+          "item_type": "wearable_light",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 0,
+          "downstream_draw": 2557
+        },
+        {
+          "case_id": "detachable_magazine",
+          "source_group": "",
+          "seed": 1,
+          "ammunition_chance": 0,
+          "magazine_chance": 100,
+          "charges_minimum": -1,
+          "charges_maximum": -1,
+          "item_type": "wearable_light",
+          "magazine_present": true,
+          "magazine_type": "medium_battery_cell",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 0,
+          "downstream_draw": 4747
+        },
+        {
+          "case_id": "explicit_charge_suppression",
+          "source_group": "",
+          "seed": 1,
+          "ammunition_chance": 100,
+          "magazine_chance": 100,
+          "charges_minimum": 0,
+          "charges_maximum": 0,
+          "item_type": "permanent_marker",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 500,
+          "downstream_draw": 2557
+        }
       ],
       "production": [
-        { "case_id": "lighter_matches_empty", "source_group": "everyday_lighter", "seed": 532, "ammunition_chance": 0, "magazine_chance": 0, "charges_minimum": 0, "charges_maximum": 20, "item_type": "matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 20, "downstream_draw": 8631 },
-        { "case_id": "lighter_matches_full", "source_group": "everyday_lighter", "seed": 224, "ammunition_chance": 0, "magazine_chance": 0, "charges_minimum": 0, "charges_maximum": 20, "item_type": "matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "match", "ammunition_remaining": 20, "remaining_capacity": 0, "downstream_draw": 9519 },
-        { "case_id": "lighter_ref_matches_empty", "source_group": "everyday_lighter", "seed": 774, "ammunition_chance": 0, "magazine_chance": 0, "charges_minimum": 0, "charges_maximum": 32, "item_type": "ref_matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 32, "downstream_draw": 7351 },
-        { "case_id": "lighter_ref_matches_full", "source_group": "everyday_lighter", "seed": 374, "ammunition_chance": 0, "magazine_chance": 0, "charges_minimum": 0, "charges_maximum": 32, "item_type": "ref_matches", "magazine_present": false, "magazine_type": "", "ammunition_type": "match", "ammunition_remaining": 32, "remaining_capacity": 0, "downstream_draw": 158 },
-        { "case_id": "gear_marker_empty", "source_group": "everyday_gear", "seed": 1160, "ammunition_chance": 75, "magazine_chance": 100, "charges_minimum": 0, "charges_maximum": -1, "item_type": "permanent_marker", "magazine_present": false, "magazine_type": "", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 500, "downstream_draw": 6927 },
-        { "case_id": "gear_marker_full", "source_group": "everyday_gear", "seed": 10600, "ammunition_chance": 75, "magazine_chance": 100, "charges_minimum": 0, "charges_maximum": -1, "item_type": "permanent_marker", "magazine_present": false, "magazine_type": "", "ammunition_type": "permanent_ink", "ammunition_remaining": 500, "remaining_capacity": 0, "downstream_draw": 2428 },
-        { "case_id": "gear_inhaler_minimum", "source_group": "everyday_gear", "seed": 244, "ammunition_chance": 75, "magazine_chance": 100, "charges_minimum": 10, "charges_maximum": 100, "item_type": "inhaler", "magazine_present": false, "magazine_type": "", "ammunition_type": "albuterol", "ammunition_remaining": 10, "remaining_capacity": 90, "downstream_draw": 3914 },
-        { "case_id": "gear_inhaler_maximum", "source_group": "everyday_gear", "seed": 474, "ammunition_chance": 75, "magazine_chance": 100, "charges_minimum": 10, "charges_maximum": 100, "item_type": "inhaler", "magazine_present": false, "magazine_type": "", "ammunition_type": "albuterol", "ammunition_remaining": 100, "remaining_capacity": 0, "downstream_draw": 2726 },
-        { "case_id": "gear_flashlight_empty", "source_group": "everyday_gear", "seed": 848, "ammunition_chance": 75, "magazine_chance": 100, "charges_minimum": 0, "charges_maximum": 300, "item_type": "flashlight", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "null", "ammunition_remaining": 0, "remaining_capacity": 0, "downstream_draw": 3362 },
-        { "case_id": "gear_flashlight_full", "source_group": "everyday_gear", "seed": 101, "ammunition_chance": 75, "magazine_chance": 100, "charges_minimum": 0, "charges_maximum": 300, "item_type": "flashlight", "magazine_present": true, "magazine_type": "medium_battery_cell", "ammunition_type": "battery", "ammunition_remaining": 56, "remaining_capacity": 0, "downstream_draw": 1486 }
+        {
+          "case_id": "lighter_matches_empty",
+          "source_group": "everyday_lighter",
+          "seed": 532,
+          "ammunition_chance": 0,
+          "magazine_chance": 0,
+          "charges_minimum": 0,
+          "charges_maximum": 20,
+          "item_type": "matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 20,
+          "downstream_draw": 8631
+        },
+        {
+          "case_id": "lighter_matches_full",
+          "source_group": "everyday_lighter",
+          "seed": 224,
+          "ammunition_chance": 0,
+          "magazine_chance": 0,
+          "charges_minimum": 0,
+          "charges_maximum": 20,
+          "item_type": "matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "match",
+          "ammunition_remaining": 20,
+          "remaining_capacity": 0,
+          "downstream_draw": 9519
+        },
+        {
+          "case_id": "lighter_ref_matches_empty",
+          "source_group": "everyday_lighter",
+          "seed": 774,
+          "ammunition_chance": 0,
+          "magazine_chance": 0,
+          "charges_minimum": 0,
+          "charges_maximum": 32,
+          "item_type": "ref_matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 32,
+          "downstream_draw": 7351
+        },
+        {
+          "case_id": "lighter_ref_matches_full",
+          "source_group": "everyday_lighter",
+          "seed": 374,
+          "ammunition_chance": 0,
+          "magazine_chance": 0,
+          "charges_minimum": 0,
+          "charges_maximum": 32,
+          "item_type": "ref_matches",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "match",
+          "ammunition_remaining": 32,
+          "remaining_capacity": 0,
+          "downstream_draw": 158
+        },
+        {
+          "case_id": "gear_marker_empty",
+          "source_group": "everyday_gear",
+          "seed": 1160,
+          "ammunition_chance": 75,
+          "magazine_chance": 100,
+          "charges_minimum": 0,
+          "charges_maximum": -1,
+          "item_type": "permanent_marker",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 500,
+          "downstream_draw": 6927
+        },
+        {
+          "case_id": "gear_marker_full",
+          "source_group": "everyday_gear",
+          "seed": 10600,
+          "ammunition_chance": 75,
+          "magazine_chance": 100,
+          "charges_minimum": 0,
+          "charges_maximum": -1,
+          "item_type": "permanent_marker",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "permanent_ink",
+          "ammunition_remaining": 500,
+          "remaining_capacity": 0,
+          "downstream_draw": 2428
+        },
+        {
+          "case_id": "gear_inhaler_minimum",
+          "source_group": "everyday_gear",
+          "seed": 244,
+          "ammunition_chance": 75,
+          "magazine_chance": 100,
+          "charges_minimum": 10,
+          "charges_maximum": 100,
+          "item_type": "inhaler",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "albuterol",
+          "ammunition_remaining": 10,
+          "remaining_capacity": 90,
+          "downstream_draw": 3914
+        },
+        {
+          "case_id": "gear_inhaler_maximum",
+          "source_group": "everyday_gear",
+          "seed": 474,
+          "ammunition_chance": 75,
+          "magazine_chance": 100,
+          "charges_minimum": 10,
+          "charges_maximum": 100,
+          "item_type": "inhaler",
+          "magazine_present": false,
+          "magazine_type": "",
+          "ammunition_type": "albuterol",
+          "ammunition_remaining": 100,
+          "remaining_capacity": 0,
+          "downstream_draw": 2726
+        },
+        {
+          "case_id": "gear_flashlight_empty",
+          "source_group": "everyday_gear",
+          "seed": 848,
+          "ammunition_chance": 75,
+          "magazine_chance": 100,
+          "charges_minimum": 0,
+          "charges_maximum": 300,
+          "item_type": "flashlight",
+          "magazine_present": true,
+          "magazine_type": "medium_battery_cell",
+          "ammunition_type": "null",
+          "ammunition_remaining": 0,
+          "remaining_capacity": 0,
+          "downstream_draw": 3362
+        },
+        {
+          "case_id": "gear_flashlight_full",
+          "source_group": "everyday_gear",
+          "seed": 101,
+          "ammunition_chance": 75,
+          "magazine_chance": 100,
+          "charges_minimum": 0,
+          "charges_maximum": 300,
+          "item_type": "flashlight",
+          "magazine_present": true,
+          "magazine_type": "medium_battery_cell",
+          "ammunition_type": "battery",
+          "ammunition_remaining": 56,
+          "remaining_capacity": 0,
+          "downstream_draw": 1486
+        }
       ]
     },
     "modifier_container_capacity": {
@@ -379,7 +848,9 @@
         "case_id": "direct_water",
         "seed": 31415,
         "outer_type": "bottle_plastic",
-        "content_types": ["water_clean"],
+        "content_types": [
+          "water_clean"
+        ],
         "payload_charges": 2,
         "sealed": true,
         "pocket_collapsed": true,
@@ -389,7 +860,9 @@
         "case_id": "direct_aspirin",
         "seed": 31415,
         "outer_type": "bottle_plastic_pill_painkiller",
-        "content_types": ["aspirin"],
+        "content_types": [
+          "aspirin"
+        ],
         "payload_charges": 0,
         "sealed": false,
         "pocket_collapsed": true,
@@ -399,7 +872,9 @@
         "case_id": "modifier_aspirin",
         "seed": 31415,
         "outer_type": "bottle_plastic_pill_painkiller",
-        "content_types": ["aspirin"],
+        "content_types": [
+          "aspirin"
+        ],
         "payload_charges": 0,
         "sealed": false,
         "pocket_collapsed": true,
@@ -419,7 +894,10 @@
         "case_id": "explicit_container_default",
         "seed": 31415,
         "outer_type": "bottle_plastic_pill_painkiller",
-        "content_types": ["ibuprofen", "aspirin"],
+        "content_types": [
+          "ibuprofen",
+          "aspirin"
+        ],
         "payload_charges": 0,
         "sealed": false,
         "pocket_collapsed": true,
@@ -429,7 +907,9 @@
         "case_id": "production_aspirin_minimum",
         "seed": 86,
         "outer_type": "bottle_plastic_pill_painkiller",
-        "content_types": ["aspirin"],
+        "content_types": [
+          "aspirin"
+        ],
         "payload_charges": 0,
         "sealed": false,
         "pocket_collapsed": true,
@@ -440,10 +920,26 @@
         "seed": 5,
         "outer_type": "bottle_plastic_pill_painkiller",
         "content_types": [
-          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin",
-          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin",
-          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin",
-          "aspirin", "aspirin", "aspirin", "aspirin", "aspirin"
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin",
+          "aspirin"
         ],
         "payload_charges": 0,
         "sealed": false,
@@ -460,9 +956,15 @@
         "pocket_rigid": false,
         "pocket_collapsed_by_default": false,
         "pocket_collapsed": true,
-        "content_types": ["chaw"],
-        "content_variants": [""],
-        "content_charges": [0],
+        "content_types": [
+          "chaw"
+        ],
+        "content_variants": [
+          ""
+        ],
+        "content_charges": [
+          0
+        ],
         "outer_volume_ml": 50,
         "outer_weight_g": 7,
         "pocket_capacity_volume_ml": 2500,
@@ -480,18 +982,70 @@
         "pocket_collapsed_by_default": false,
         "pocket_collapsed": true,
         "content_types": [
-          "chaw", "chaw", "chaw", "chaw", "chaw",
-          "chaw", "chaw", "chaw", "chaw", "chaw",
-          "chaw", "chaw", "chaw", "chaw", "chaw",
-          "chaw", "chaw", "chaw", "chaw", "chaw"
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw",
+          "chaw"
         ],
         "content_variants": [
-          "", "", "", "", "", "", "", "", "", "",
-          "", "", "", "", "", "", "", "", "", ""
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          ""
         ],
         "content_charges": [
-          0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-          0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
         ],
         "outer_volume_ml": 85,
         "outer_weight_g": 83,
@@ -510,15 +1064,47 @@
         "pocket_collapsed_by_default": true,
         "pocket_collapsed": true,
         "content_types": [
-          "gum", "gum", "gum", "gum", "gum", "gum",
-          "gum", "gum", "gum", "gum", "gum", "gum"
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum",
+          "gum"
         ],
         "content_variants": [
-          "gum_watermelon", "gum_watermelon", "gum_watermelon", "gum_watermelon",
-          "gum_watermelon", "gum_watermelon", "gum_watermelon", "gum_watermelon",
-          "gum_watermelon", "gum_watermelon", "gum_watermelon", "gum_watermelon"
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon",
+          "gum_watermelon"
         ],
-        "content_charges": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "content_charges": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
         "outer_volume_ml": 31,
         "outer_weight_g": 41,
         "pocket_capacity_volume_ml": 50,
@@ -737,20 +1323,302 @@
         "frozen": false
       }
     ],
+    "rot_family": [
+      {
+        "case_id": "food_apple",
+        "item_type": "apple",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 576000,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 1152000,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_banana",
+        "item_type": "banana",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 432000,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 864000,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_cheeseburger",
+        "item_type": "cheeseburger",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_fish_sandwich",
+        "item_type": "fish_sandwich",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 86400,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 172800,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_hamburger",
+        "item_type": "hamburger",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_orange",
+        "item_type": "orange",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 1814400,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 3628800,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_cheese",
+        "item_type": "sandwich_cheese",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_cucumber",
+        "item_type": "sandwich_cucumber",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_deluxe",
+        "item_type": "sandwich_deluxe",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 115200,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 230400,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_jam",
+        "item_type": "sandwich_jam",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 133200,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 266400,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_jam_butter",
+        "item_type": "sandwich_jam_butter",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 133200,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 266400,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_pb",
+        "item_type": "sandwich_pb",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_pbf",
+        "item_type": "sandwich_pbf",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_pbh",
+        "item_type": "sandwich_pbh",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_pbj",
+        "item_type": "sandwich_pbj",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_pbm",
+        "item_type": "sandwich_pbm",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_reuben",
+        "item_type": "sandwich_reuben",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 115200,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 230400,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_t",
+        "item_type": "sandwich_t",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 129600,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 259200,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "food_sandwich_veggy",
+        "item_type": "sandwich_veggy",
+        "corpse": false,
+        "goes_bad": true,
+        "shelf_life_turns": 172800,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 345600,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "corpse_child_calm",
+        "item_type": "corpse_child_calm",
+        "corpse": true,
+        "goes_bad": true,
+        "shelf_life_turns": 86400,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 864000,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "corpse_generic_female",
+        "item_type": "corpse_generic_female",
+        "corpse": true,
+        "goes_bad": true,
+        "shelf_life_turns": 86400,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 864000,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      },
+      {
+        "case_id": "corpse_generic_male",
+        "item_type": "corpse_generic_male",
+        "corpse": true,
+        "goes_bad": true,
+        "shelf_life_turns": 86400,
+        "rot_after_ten_minutes": 683,
+        "rot_after_one_hour": 4099,
+        "removal_threshold_turns": 864000,
+        "removed_at_threshold": false,
+        "removed_after_threshold": true
+      }
+    ],
     "named_snippet_categories": [
       {
         "case_id": "months_old_news",
         "item_type": "months_old_newspaper",
         "category": "months_old_news",
         "choice_ids": [
-          "months_old_news_1", "months_old_news_2", "months_old_news_3",
-          "months_old_news_4", "months_old_news_5", "months_old_news_6",
-          "months_old_news_8", "months_old_news_9", "months_old_news_10",
-          "months_old_news_11", "months_old_news_12", "months_old_news_13",
-          "months_old_news_14", "months_old_news_15", "months_old_news_16",
-          "months_old_news_17", "months_old_news_18", "months_old_news_19",
-          "months_old_news_20", "months_old_news_21", "months_old_news_22",
-          "months_old_news_23", "months_old_news_24", "months_old_news_25"
+          "months_old_news_1",
+          "months_old_news_2",
+          "months_old_news_3",
+          "months_old_news_4",
+          "months_old_news_5",
+          "months_old_news_6",
+          "months_old_news_8",
+          "months_old_news_9",
+          "months_old_news_10",
+          "months_old_news_11",
+          "months_old_news_12",
+          "months_old_news_13",
+          "months_old_news_14",
+          "months_old_news_15",
+          "months_old_news_16",
+          "months_old_news_17",
+          "months_old_news_18",
+          "months_old_news_19",
+          "months_old_news_20",
+          "months_old_news_21",
+          "months_old_news_22",
+          "months_old_news_23",
+          "months_old_news_24",
+          "months_old_news_25"
         ],
         "first_text": "SUPPORT THE COUNTRIES THAT SUPPORT YOURS - PRESIDENT: Earlier today, in an unexpected and unpopular decision, the president suggested the possible institution of a peacetime draft in response to increasing Chinese aggression towards Taiwan and the Philippines.  \"We must pray for the best while preparing for the worst.  We cannot abandon key allies in the face of Chinese bullying.\"",
         "last_text": "GIANT INSECTS: NOTHING TO WORRY ABOUT?.  Amidst rising concerns about massive insects, the USDA has issued an official statement.  In it, they stated that farmers should not worry about the increasing insect sizes.  \"We are working tightly with experts in the pesticide industry, to ensure that even IF insects keep getting bigger, so does our arsenal to combat them,\" a USDA official declared.  On top of that, they assured that \"the USA has stockpiled enough food for years to come.\"",
@@ -772,19 +1640,44 @@
         "item_type": "wallet_photo",
         "category": "wallet_photos",
         "choice_ids": [
-          "wallet_picture_1", "wallet_picture_2", "wallet_picture_3",
-          "wallet_picture_4", "wallet_picture_5", "wallet_picture_6",
-          "wallet_picture_7", "wallet_picture_8", "wallet_picture_9",
-          "wallet_picture_10", "wallet_picture_11", "wallet_picture_12",
-          "wallet_picture_13", "wallet_picture_14", "wallet_picture_15",
-          "wallet_picture_16", "wallet_picture_17", "wallet_picture_18",
-          "wallet_picture_19", "wallet_picture_20", "wallet_picture_21",
-          "wallet_picture_22", "wallet_picture_23", "wallet_picture_24",
-          "wallet_picture_25", "wallet_picture_26", "wallet_picture_27",
-          "wallet_picture_28", "wallet_picture_29", "wallet_picture_30",
-          "wallet_picture_31", "wallet_picture_32", "wallet_picture_33",
-          "wallet_picture_34", "wallet_picture_35", "wallet_picture_36",
-          "wallet_picture_37", "wallet_picture_38"
+          "wallet_picture_1",
+          "wallet_picture_2",
+          "wallet_picture_3",
+          "wallet_picture_4",
+          "wallet_picture_5",
+          "wallet_picture_6",
+          "wallet_picture_7",
+          "wallet_picture_8",
+          "wallet_picture_9",
+          "wallet_picture_10",
+          "wallet_picture_11",
+          "wallet_picture_12",
+          "wallet_picture_13",
+          "wallet_picture_14",
+          "wallet_picture_15",
+          "wallet_picture_16",
+          "wallet_picture_17",
+          "wallet_picture_18",
+          "wallet_picture_19",
+          "wallet_picture_20",
+          "wallet_picture_21",
+          "wallet_picture_22",
+          "wallet_picture_23",
+          "wallet_picture_24",
+          "wallet_picture_25",
+          "wallet_picture_26",
+          "wallet_picture_27",
+          "wallet_picture_28",
+          "wallet_picture_29",
+          "wallet_picture_30",
+          "wallet_picture_31",
+          "wallet_picture_32",
+          "wallet_picture_33",
+          "wallet_picture_34",
+          "wallet_picture_35",
+          "wallet_picture_36",
+          "wallet_picture_37",
+          "wallet_picture_38"
         ],
         "first_text": "This is a small and creased photo of a smirking young woman standing with booted feet planted upon the asphalt of a driveway, a thick cowl of blond hair flowing over her leather jacket-clad shoulders.  With the setting sun's light reflecting off the surface of a helmet she holds under one arm, she's casually leaning against a propped-up motorcycle, her head slightly inclined as she shoots a black-glossed grin towards the camera.  In looping handwriting, the back end of the picture is inscribed with the text, \"Dallas, 1993.\"\n\n\"Though cancer has parted us, I'll always carry you with me.\"",
         "last_text": "A strange gray fruit is placed on a pedestal, like a relic would be placed on a stand for others to admire.  Clearly, it isn't anything originating from this world, and the vein-like tendrils along its skin only convince you of that even more.  A piece of plastic crudely paperclipped to the back has been used to carve out the message \"I'm sorry I'm sorry Im sorr'm soryI'm sorrm sorrsorr\" in increasingly illegible handwriting.  It gives off the faint smell of mold.",
@@ -808,7 +1701,16 @@
         "seed": 814,
         "wrapper_type": "leg_sheath6",
         "payload_type": "throwing_knife",
-        "pocket_contents": [["throwing_knife"], [], [], [], [], []],
+        "pocket_contents": [
+          [
+            "throwing_knife"
+          ],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
         "downstream_draw": 6123
       },
       {
@@ -817,8 +1719,24 @@
         "wrapper_type": "leg_sheath6",
         "payload_type": "throwing_knife",
         "pocket_contents": [
-          ["throwing_knife"], ["throwing_knife"], ["throwing_knife"],
-          ["throwing_knife"], ["throwing_knife"], ["throwing_knife"]
+          [
+            "throwing_knife"
+          ],
+          [
+            "throwing_knife"
+          ],
+          [
+            "throwing_knife"
+          ],
+          [
+            "throwing_knife"
+          ],
+          [
+            "throwing_knife"
+          ],
+          [
+            "throwing_knife"
+          ]
         ],
         "downstream_draw": 9021
       },
@@ -827,7 +1745,16 @@
         "seed": 212,
         "wrapper_type": "hat_hard",
         "payload_type": "plastic_mandible_guard",
-        "pocket_contents": [[], [], [], ["plastic_mandible_guard"], [], []],
+        "pocket_contents": [
+          [],
+          [],
+          [],
+          [
+            "plastic_mandible_guard"
+          ],
+          [],
+          []
+        ],
         "downstream_draw": 7327
       }
     ],
@@ -853,38 +1780,68 @@
           {
             "witness": "first_content_order:test_utility_belt,test_pants_fur",
             "seed": 1,
-            "top_level_types": ["test_balloon"],
-            "content_types": ["test_utility_belt", "test_pants_fur"]
+            "top_level_types": [
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_utility_belt",
+              "test_pants_fur"
+            ]
           },
           {
             "witness": "first_content_order:test_utility_belt,test_nuclear_carafe",
             "seed": 2,
-            "top_level_types": ["test_balloon"],
-            "content_types": ["test_utility_belt", "test_nuclear_carafe"]
+            "top_level_types": [
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_utility_belt",
+              "test_nuclear_carafe"
+            ]
           },
           {
             "witness": "first_content_order:test_nuclear_carafe,test_pants_fur",
             "seed": 3,
-            "top_level_types": ["test_balloon"],
-            "content_types": ["test_nuclear_carafe", "test_pants_fur"]
+            "top_level_types": [
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_nuclear_carafe",
+              "test_pants_fur"
+            ]
           },
           {
             "witness": "first_content_order:test_pants_fur,test_utility_belt",
             "seed": 4,
-            "top_level_types": ["test_balloon"],
-            "content_types": ["test_pants_fur", "test_utility_belt"]
+            "top_level_types": [
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_pants_fur",
+              "test_utility_belt"
+            ]
           },
           {
             "witness": "first_content_order:test_pants_fur,test_nuclear_carafe",
             "seed": 9,
-            "top_level_types": ["test_balloon"],
-            "content_types": ["test_pants_fur", "test_nuclear_carafe"]
+            "top_level_types": [
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_pants_fur",
+              "test_nuclear_carafe"
+            ]
           },
           {
             "witness": "first_content_order:test_nuclear_carafe,test_utility_belt",
             "seed": 19,
-            "top_level_types": ["test_balloon"],
-            "content_types": ["test_nuclear_carafe", "test_utility_belt"]
+            "top_level_types": [
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_nuclear_carafe",
+              "test_utility_belt"
+            ]
           }
         ]
       },
@@ -904,43 +1861,83 @@
           "test_utility_belt,test_nuclear_carafe",
           "test_utility_belt,test_pants_fur"
         ],
-        "outside_types": ["test_nuclear_carafe", "test_pants_fur", "test_utility_belt"],
+        "outside_types": [
+          "test_nuclear_carafe",
+          "test_pants_fur",
+          "test_utility_belt"
+        ],
         "exact_traces": [
           {
             "witness": "first_content_order:test_utility_belt,test_pants_fur",
             "seed": 1,
-            "top_level_types": ["test_nuclear_carafe", "test_balloon"],
-            "content_types": ["test_utility_belt", "test_pants_fur"]
+            "top_level_types": [
+              "test_nuclear_carafe",
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_utility_belt",
+              "test_pants_fur"
+            ]
           },
           {
             "witness": "first_content_order:test_utility_belt,test_nuclear_carafe",
             "seed": 2,
-            "top_level_types": ["test_pants_fur", "test_balloon"],
-            "content_types": ["test_utility_belt", "test_nuclear_carafe"]
+            "top_level_types": [
+              "test_pants_fur",
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_utility_belt",
+              "test_nuclear_carafe"
+            ]
           },
           {
             "witness": "first_content_order:test_nuclear_carafe,test_pants_fur",
             "seed": 3,
-            "top_level_types": ["test_utility_belt", "test_balloon"],
-            "content_types": ["test_nuclear_carafe", "test_pants_fur"]
+            "top_level_types": [
+              "test_utility_belt",
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_nuclear_carafe",
+              "test_pants_fur"
+            ]
           },
           {
             "witness": "first_content_order:test_pants_fur,test_utility_belt",
             "seed": 4,
-            "top_level_types": ["test_nuclear_carafe", "test_balloon"],
-            "content_types": ["test_pants_fur", "test_utility_belt"]
+            "top_level_types": [
+              "test_nuclear_carafe",
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_pants_fur",
+              "test_utility_belt"
+            ]
           },
           {
             "witness": "first_content_order:test_pants_fur,test_nuclear_carafe",
             "seed": 9,
-            "top_level_types": ["test_utility_belt", "test_balloon"],
-            "content_types": ["test_pants_fur", "test_nuclear_carafe"]
+            "top_level_types": [
+              "test_utility_belt",
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_pants_fur",
+              "test_nuclear_carafe"
+            ]
           },
           {
             "witness": "first_content_order:test_nuclear_carafe,test_utility_belt",
             "seed": 19,
-            "top_level_types": ["test_pants_fur", "test_balloon"],
-            "content_types": ["test_nuclear_carafe", "test_utility_belt"]
+            "top_level_types": [
+              "test_pants_fur",
+              "test_balloon"
+            ],
+            "content_types": [
+              "test_nuclear_carafe",
+              "test_utility_belt"
+            ]
           }
         ]
       }
@@ -948,9 +1945,17 @@
     "everyday_corpse": {
       "seed_search_limit": 100000,
       "valid_shapes": true,
-      "wrapper_types": ["corpse_child_calm", "corpse_generic_female", "corpse_generic_male"],
-      "wrapper_raw_damage": [4000],
-      "wrapper_damage_levels": [5],
+      "wrapper_types": [
+        "corpse_child_calm",
+        "corpse_generic_female",
+        "corpse_generic_male"
+      ],
+      "wrapper_raw_damage": [
+        4000
+      ],
+      "wrapper_damage_levels": [
+        5
+      ],
       "multiple_content_counts": true,
       "observed_pristine_content": true,
       "observed_damage_four_content": true,
@@ -961,9 +1966,36 @@
           "wrapper_type": "corpse_child_calm",
           "wrapper_raw_damage": 4000,
           "wrapper_damage_level": 5,
-          "content_types": ["multitool", "string_6", "socks_ankle", "hoodie", "camisole", "smart_phone_locked", "wallet_large"],
-          "content_raw_damage": [0, 0, 2792, 2751, 2330, 0, 0],
-          "content_damage_levels": [0, 0, 3, 3, 3, 0, 0]
+          "wrapper_pocket_forbidden": true,
+          "wrapper_pocket_no_unload": false,
+          "unloadable_content_count": 7,
+          "content_types": [
+            "multitool",
+            "string_6",
+            "socks_ankle",
+            "hoodie",
+            "camisole",
+            "smart_phone_locked",
+            "wallet_large"
+          ],
+          "content_raw_damage": [
+            0,
+            0,
+            2792,
+            2751,
+            2330,
+            0,
+            0
+          ],
+          "content_damage_levels": [
+            0,
+            0,
+            3,
+            3,
+            3,
+            0,
+            0
+          ]
         },
         {
           "witness": "first_damage_four_content",
@@ -971,16 +2003,79 @@
           "wrapper_type": "corpse_generic_male",
           "wrapper_raw_damage": 4000,
           "wrapper_damage_level": 5,
-          "content_types": ["tank_top", "blister_pack_small", "socks_ankle", "b_shorts", "wrapper", "wrapper", "portable_game", "comb_pocket", "mp3", "jacket_flannel", "pockknife", "boxer_briefs", "comb_pocket", "leathersandals", "teleumbrella", "heavy_flashlight", "smart_phone_locked", "smart_phone"],
-          "content_raw_damage": [3015, 0, 4000, 1601, 0, 0, 0, 0, 0, 3542, 0, 1772, 0, 3296, 0, 0, 0, 0],
-          "content_damage_levels": [4, 0, 5, 2, 0, 0, 0, 0, 0, 4, 0, 2, 0, 4, 0, 0, 0, 0]
+          "wrapper_pocket_forbidden": true,
+          "wrapper_pocket_no_unload": false,
+          "unloadable_content_count": 18,
+          "content_types": [
+            "tank_top",
+            "blister_pack_small",
+            "socks_ankle",
+            "b_shorts",
+            "wrapper",
+            "wrapper",
+            "portable_game",
+            "comb_pocket",
+            "mp3",
+            "jacket_flannel",
+            "pockknife",
+            "boxer_briefs",
+            "comb_pocket",
+            "leathersandals",
+            "teleumbrella",
+            "heavy_flashlight",
+            "smart_phone_locked",
+            "smart_phone"
+          ],
+          "content_raw_damage": [
+            3015,
+            0,
+            4000,
+            1601,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3542,
+            0,
+            1772,
+            0,
+            3296,
+            0,
+            0,
+            0,
+            0
+          ],
+          "content_damage_levels": [
+            4,
+            0,
+            5,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            0,
+            2,
+            0,
+            4,
+            0,
+            0,
+            0,
+            0
+          ]
         }
       ]
     },
     "civilian_phone_case": {
       "seed_search_limit": 100000,
       "valid_shapes": true,
-      "phone_types": ["smart_phone", "smart_phone_locked"],
+      "phone_types": [
+        "smart_phone",
+        "smart_phone_locked"
+      ],
       "observed_empty_efiles": true,
       "observed_many_efiles": true,
       "exact_traces": [
@@ -997,8 +2092,16 @@
           "phone_ammo_remaining": 3,
           "phone_ammunition_type": "battery",
           "phone_raw_damage": 0,
-          "efile_types": ["efile_recipes", "efile_lore", "efile_map"],
-          "efile_raw_damage": [0, 0, 0],
+          "efile_types": [
+            "efile_recipes",
+            "efile_lore",
+            "efile_map"
+          ],
+          "efile_raw_damage": [
+            0,
+            0,
+            0
+          ],
           "downstream_draw": 9907
         },
         {
@@ -1014,8 +2117,16 @@
           "phone_ammo_remaining": 3,
           "phone_ammunition_type": "battery",
           "phone_raw_damage": 0,
-          "efile_types": ["efile_recipes", "efile_lore", "efile_map"],
-          "efile_raw_damage": [0, 0, 0],
+          "efile_types": [
+            "efile_recipes",
+            "efile_lore",
+            "efile_map"
+          ],
+          "efile_raw_damage": [
+            0,
+            0,
+            0
+          ],
           "downstream_draw": 9907
         },
         {
@@ -1041,7 +2152,16 @@
             "efile_lore",
             "efile_map"
           ],
-          "efile_raw_damage": [0, 0, 0, 0, 0, 0, 0, 0],
+          "efile_raw_damage": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
           "downstream_draw": 9375
         },
         {
@@ -1067,7 +2187,16 @@
             "efile_lore",
             "efile_map"
           ],
-          "efile_raw_damage": [0, 0, 0, 0, 0, 0, 0, 0],
+          "efile_raw_damage": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
           "downstream_draw": 4342
         },
         {
@@ -1089,12 +2218,31 @@
         }
       ]
     },
-    "nonholiday_event_types": ["test_rock"],
+    "nonholiday_event_types": [
+      "test_rock"
+    ],
     "event_distribution": [
-      { "ticket": 1, "selected": "none" },
-      { "ticket": 3, "selected": "none" },
-      { "ticket": 4, "selected": "ordinary" },
-      { "ticket": 5, "selected": "ordinary" }
-    ]
+      {
+        "ticket": 1,
+        "selected": "none"
+      },
+      {
+        "ticket": 3,
+        "selected": "none"
+      },
+      {
+        "ticket": 4,
+        "selected": "ordinary"
+      },
+      {
+        "ticket": 5,
+        "selected": "ordinary"
+      }
+    ],
+    "insulated_container": {
+      "item_type": "thermos",
+      "pocket_index": 0,
+      "insulation_milli": 10000
+    }
   }
 }

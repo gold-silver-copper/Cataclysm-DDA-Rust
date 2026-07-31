@@ -68,12 +68,15 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod item_groups;
+#[cfg(test)]
+mod regional_field_acceptance;
 mod worldgen;
 
 use item_groups::{
-    RuntimeItemGroupContent, runtime_ammunition_containers, runtime_bash_item_group_catalog,
-    runtime_bash_item_group_source, runtime_item_temperature_capability,
-    runtime_item_tracks_temperature,
+    RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
+    runtime_bash_item_group_catalog, runtime_bash_item_group_source,
+    runtime_item_temperature_capability, runtime_item_tracks_temperature,
+    runtime_named_item_group_catalog,
 };
 #[cfg(test)]
 use item_groups::{
@@ -81,9 +84,11 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
-use worldgen::{RuntimeMapgenContent, bootstrap_lmoe_overmap, runtime_mapgen_worldgen};
+use worldgen::{RuntimeMapgenContent, bootstrap_regional_field_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
-use worldgen::{runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice};
+use worldgen::{
+    bootstrap_lmoe_overmap, runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice,
+};
 
 #[derive(Default)]
 struct PendingJournal {
@@ -778,7 +783,7 @@ fn open_world(
         item_group_content,
         item_groups,
     )?;
-    let item_group_catalog = runtime_bash_item_group_catalog(
+    let bash_item_group_catalog = runtime_bash_item_group_catalog(
         terrain_bash_definitions
             .iter()
             .filter_map(|definition| definition.bash.as_ref())
@@ -790,11 +795,16 @@ fn open_world(
         item_groups,
         item_group_content,
     )?;
+    let field_graph = item_groups.strict_graph("field")?;
+    let item_group_catalog = merge_item_group_catalogs([
+        bash_item_group_catalog,
+        runtime_named_item_group_catalog(&field_graph, item_group_content)?,
+    ])?;
     let worldgen = runtime_mapgen_worldgen(
-        bootstrap_lmoe_overmap(overmap_terrain)?,
+        bootstrap_regional_field_overmap(overmap_terrain)?,
         start_locations
-            .get("sloc_lmoe")
-            .ok_or("pinned default content is missing sloc_lmoe")?,
+            .get("sloc_field")
+            .ok_or("pinned default content is missing sloc_field")?,
         RuntimeMapgenContent {
             mapgen,
             regions,
@@ -1218,11 +1228,13 @@ fn build_crafting_catalog(
         let result = items
             .get(&recipe.result)
             .ok_or("runnable recipe result disappeared from the item registry")?;
-        if runtime_item_tracks_temperature(result, materials).is_err()
+        if runtime_item_temperature_capability(result, materials)
+            .map_or(true, |capability| capability.rot_shelf_life_turns.is_some())
             || recipe.byproducts.keys().any(|type_id| {
-                items
-                    .get(type_id)
-                    .is_none_or(|item| runtime_item_tracks_temperature(item, materials).is_err())
+                items.get(type_id).is_none_or(|item| {
+                    runtime_item_temperature_capability(item, materials)
+                        .map_or(true, |capability| capability.rot_shelf_life_turns.is_some())
+                })
             })
         {
             continue;
@@ -1484,6 +1496,7 @@ fn build_crafting_catalog(
                 ammunition_type,
                 items,
                 materials,
+                false,
             )?,
             retain_components: recipe.reversible && !result.count_by_charges(),
             byproducts,
@@ -2030,6 +2043,23 @@ fn craft_item_prototype(
         single_ammunition_type(item)?,
         items,
         materials,
+        false,
+    )
+}
+
+fn craft_item_group_prototype(
+    item: &ItemDefinition,
+    charges: i32,
+    items: &ItemRegistry,
+    materials: &MaterialRegistry,
+) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
+    craft_item_prototype_with_ammunition(
+        item,
+        charges,
+        single_ammunition_type(item)?,
+        items,
+        materials,
+        true,
     )
 }
 
@@ -2049,6 +2079,7 @@ fn craft_item_prototype_with_ammunition(
     ammunition_type: String,
     items: &ItemRegistry,
     materials: &MaterialRegistry,
+    allow_item_group_state: bool,
 ) -> Result<CraftItemPrototypeV1, Box<dyn std::error::Error>> {
     let (magazine_capacity, magazine_wells) = runtime_magazine_storage(item, items)?;
     let integral_magazines = runtime_integral_magazines(item);
@@ -2069,6 +2100,25 @@ fn craft_item_prototype_with_ammunition(
         0
     };
     let temperature = runtime_item_temperature_capability(item, materials)?;
+    if temperature.rot_shelf_life_turns.is_some() && !allow_item_group_state {
+        return Err(format!(
+            "item {} requires rot metadata unavailable at this constructor boundary",
+            item.id
+        )
+        .into());
+    }
+    if !allow_item_group_state
+        && item
+            .spawn_pockets
+            .iter()
+            .any(|pocket| pocket.insulation_f32_bits != 1.0_f32.to_bits())
+    {
+        return Err(format!(
+            "item {} requires pocket insulation metadata unavailable at this constructor boundary",
+            item.id
+        )
+        .into());
+    }
     Ok(CraftItemPrototypeV1 {
         type_id: item.id.clone(),
         charges,
@@ -4438,6 +4488,9 @@ mod tests {
             if !capability.tracks_temperature {
                 continue;
             }
+            if capability.rot_shelf_life_turns.is_some() {
+                continue;
+            }
             if capability.thermal_properties.is_some() {
                 material_temperature_items.push(id);
             } else {
@@ -5208,6 +5261,16 @@ mod tests {
             .is_err(),
             "parameterized start locations must fail closed"
         );
+        super::regional_field_acceptance::assert_production_regional_field_gameplay(
+            &field_graph,
+            item_group_content,
+            &overmap_terrain,
+            &start_locations,
+            &mapgen,
+            &regions,
+            &terrain,
+            &furniture,
+        );
         assert_eq!(wilderness.omt_generators[0].templates.len(), 1);
         assert_eq!(wilderness.regional_terrain.len(), 1);
         assert_eq!(
@@ -5331,13 +5394,20 @@ mod tests {
         assert_eq!(pre_material_bashes.len(), 530);
         assert_eq!(
             newly_admitted_material_bashes,
-            ["f_archery_target_bale", "f_hay", "f_straw_bed", "f_tatami"],
-            "the changed aggregate must remain explained by exact material-backed drop owners"
+            [
+                "f_archery_target_bale",
+                "f_beach_seaweed",
+                "f_firefly_terrarium",
+                "f_hay",
+                "f_straw_bed",
+                "f_tatami",
+            ],
+            "the changed aggregate must remain explained by exact material-backed and perishable drop owners"
         );
         assert_eq!(
             furniture_bashes.len(),
-            534,
-            "material thermodynamics should admit exactly four additional furniture bashes"
+            536,
+            "material thermodynamics and rot should admit exactly six additional furniture bashes"
         );
         for furniture_id in [
             "f_cardboard_door_o",
@@ -5385,11 +5455,9 @@ mod tests {
         }
         for furniture_id in [
             "f_clothing_rail",
-            "f_beach_seaweed",
             "f_drophammer",
             "f_dumpster",
             "f_exodii_charger_cheap",
-            "f_firefly_terrarium",
             "f_power_hammer",
             "f_treadmill",
         ] {
@@ -5734,6 +5802,18 @@ mod tests {
                 ("battery_car", 3_000),
                 ("battery_motorbike", 450),
                 ("battery_motorbike_small", 225),
+                ("cell_phone", 17),
+                ("cell_phone_flashlight", 17),
+                ("diving_flashlight_variable", 35),
+                ("diving_flashlight_variable_on_hi", 35),
+                ("diving_flashlight_variable_on_low", 35),
+                ("diving_flashlight_variable_on_med", 35),
+                ("elec_jackhammer", 7_920),
+                ("electric_lantern", 58),
+                ("electric_lantern_on", 58),
+                ("electric_lighter", 30),
+                ("electric_masonrysaw_off", 2_970),
+                ("electric_masonrysaw_on", 2_970),
                 ("folding_solar_panel_deployed", 1),
                 ("folding_solar_panel_v2_deployed", 1),
                 ("heavy_atomic_battery_cell", 4_800),
@@ -5747,8 +5827,28 @@ mod tests {
                 ("light_minus_disposable_cell", 2),
                 ("medium_battery_cell", 56),
                 ("medium_storage_battery", 10_000),
+                ("mobile_weather_station", 1_000),
+                ("mp3", 50),
+                ("mp3_on", 50),
+                ("nl_safehouse_boiler", 10_000),
+                ("phase_immersion_suit", 7_000),
+                ("phase_immersion_suit_on", 7_000),
+                ("portable_game", 48),
+                ("powered_earplugs", 10),
+                ("powered_earplugs_on", 10),
+                ("reading_light", 13),
+                ("reading_light_on", 13),
+                ("rm13_armor", 5_000),
+                ("rm13_armor_on", 5_000),
+                ("robofac_mobile_weather_station", 1_000),
                 ("small_storage_battery", 1_000),
+                ("smart_lamp", 33),
+                ("smart_lamp_on", 33),
+                ("smart_watch", 20),
+                ("smart_watch_music", 20),
                 ("storage_battery", 50_000),
+                ("vibrator", 58),
+                ("xedra_mobile_weather_station", 1_000),
             ]
         );
         assert_eq!(
@@ -5892,7 +5992,7 @@ mod tests {
                 ("wearable_light", false),
             ]
         );
-        assert_eq!(empty_charge_targets.len(), 52);
+        assert_eq!(empty_charge_targets.len(), 51);
         for item_id in ["matches", "ref_matches"] {
             assert!(
                 !disassembly
@@ -5921,6 +6021,7 @@ mod tests {
                 "ph_meter",
                 "radio_car",
                 "radiocontrol",
+                "ref_lighter_butane",
                 "small_repairkit",
                 "soldering_iron_portable",
                 "spectrophotometer",

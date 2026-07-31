@@ -39,6 +39,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "charges",
     "phase",
     "freezing_point",
+    "spoils_in",
     "source_monster",
     "container",
     "container_variant",
@@ -127,6 +128,9 @@ pub struct ItemDefinition {
     /// stores this as Celsius and defaults it to zero; fixed-point retention
     /// avoids carrying a platform-dependent float into authoritative content.
     pub freezing_point_millicelsius: i32,
+    /// Final inherited comestible shelf life in upstream one-second turns.
+    /// Zero is the explicit nonperishable sentinel.
+    pub spoilage_lifetime_seconds: u64,
     /// Final inherited monster identity assigned by the ordinary item
     /// constructor to definitions carrying the `CORPSE` flag. An empty value
     /// is upstream's `mon_null` sentinel.
@@ -165,8 +169,9 @@ pub struct ItemDefinition {
     /// `pocket_data`; one entry maps an ammunition category to capacity.
     pub integral_magazines: Vec<BTreeMap<String, i32>>,
     /// Strict ammo-restricted CONTAINER pockets from inherited `pocket_data`.
-    /// Mixed layouts remain closed so projecting these pockets cannot silently
-    /// discard unsupported sibling pocket behavior.
+    /// Supported pockets retain their source indices in mixed layouts; each
+    /// consumer must separately prove that omitted sibling kinds cannot win
+    /// its upstream pocket-selection path.
     pub ammunition_containers: Vec<StrictAmmunitionContainerDefinition>,
     /// Strict general spawn-time pockets used by item-group containment. This
     /// is separate from ammunition pockets so existing reload semantics stay
@@ -348,6 +353,10 @@ pub struct StrictSpawnPocketDefinition {
     pub item_restrictions: BTreeSet<String>,
     pub flag_restrictions: BTreeSet<String>,
     pub access_moves: u16,
+    /// Exact upstream `float` bits for the pocket's temperature insulation.
+    /// Runtime serialization retains non-default values in the existing typed
+    /// item-variable map while Protocol 95 remains frozen.
+    pub insulation_f32_bits: u32,
     pub rigid: bool,
     pub watertight: bool,
     pub transparent: bool,
@@ -477,6 +486,7 @@ impl PocketDefinition {
             "holster",
             "id",
             "inherits_flags",
+            "insulation",
             "item_restriction",
             "magazine_well",
             "max_contains_volume",
@@ -541,6 +551,13 @@ impl PocketDefinition {
                 .filter(|moves| *moves > 0)?,
             None => 100,
         };
+        let insulation = match self.raw_fields.get("insulation") {
+            Some(value) => value.as_f64()? as f32,
+            None => 1.0,
+        };
+        if !insulation.is_finite() || insulation <= 0.0 {
+            return None;
+        }
         let sealable = match self.raw_fields.get("sealed_data") {
             None => false,
             Some(Value::Object(data))
@@ -623,6 +640,7 @@ impl PocketDefinition {
             item_restrictions: self.item_restrictions.clone(),
             flag_restrictions: self.flag_restrictions.clone(),
             access_moves,
+            insulation_f32_bits: insulation.to_bits(),
             rigid: boolean("rigid", false)?,
             watertight: boolean("watertight", false)?,
             transparent: boolean("transparent", false)?,
@@ -741,15 +759,15 @@ impl ItemRegistry {
         &self.tool_subtype_replacements
     }
 
-    /// Returns concrete compatible MAGAZINE item IDs in stable order for a
-    /// normalized well. Explicit item restrictions take precedence over flag
-    /// restrictions, matching pinned pocket behavior.
+    /// Returns concrete compatible pocket-based magazine item IDs in stable
+    /// order for a normalized well. Explicit item restrictions take
+    /// precedence over flag restrictions, matching pinned pocket behavior.
     #[must_use]
     pub fn compatible_magazines<'a>(&'a self, well: &'a MagazineWellDefinition) -> Vec<&'a str> {
         self.items
             .iter()
             .filter(|(item_id, item)| {
-                item.subtypes.contains("MAGAZINE")
+                item.strict_magazine().is_some()
                     && if !well.item_restrictions.is_empty() {
                         well.item_restrictions.contains(item_id.as_str())
                     } else if !well.flag_restrictions.is_empty() {
@@ -765,13 +783,15 @@ impl ItemRegistry {
 
 impl ItemDefinition {
     /// Classifies the finalized pinned constructor without implying support
-    /// for material thermodynamics, rot, or weather.
+    /// for weather or unrepresented temperature modifiers.
     #[must_use]
     pub fn temperature_runtime_class(&self) -> ItemTemperatureRuntimeClass {
-        if !self.subtypes.contains("COMESTIBLE") || self.flags.contains("NO_TEMP") {
+        let comestible = self.subtypes.contains("COMESTIBLE");
+        let corpse = self.flags.contains("CORPSE");
+        if (!comestible && !corpse) || self.flags.contains("NO_TEMP") {
             return ItemTemperatureRuntimeClass::NotTracked;
         }
-        if self.unsupported_fields.contains("spoils_in") {
+        if self.spoilage_lifetime_seconds > 0 || corpse {
             return ItemTemperatureRuntimeClass::RequiresRot;
         }
         if !self.materials.is_empty() {
@@ -817,9 +837,10 @@ impl ItemDefinition {
         (centimeters as u64).checked_mul(10)
     }
 
-    /// Returns the generalized runtime shape for a concrete, single-pocket
-    /// magazine. Multiple ammunition categories and pockets with extra
-    /// behavior remain unavailable rather than being projected lossily.
+    /// Returns the generalized runtime shape for an item with one strict
+    /// MAGAZINE pocket. Pinned `is_magazine()` is pocket-based, so tools such
+    /// as fuel canisters qualify even without the legacy MAGAZINE subtype,
+    /// `ammo_type`, or `capacity` mirrors.
     #[must_use]
     pub fn strict_magazine(&self) -> Option<StrictMagazineDefinition> {
         let [pocket] = self.pockets.as_slice() else {
@@ -832,10 +853,10 @@ impl ItemDefinition {
             return None;
         }
         let capacity = u32::try_from(*capacity).ok()?;
-        (self.subtypes.contains("MAGAZINE")
-            && self.ammo_types.len() == 1
-            && self.ammo_types.contains(ammunition_type.as_str())
-            && self.magazine_capacity == i32::try_from(capacity).ok()?
+        ((self.ammo_types.is_empty()
+            || (self.ammo_types.len() == 1 && self.ammo_types.contains(ammunition_type.as_str())))
+            && (self.magazine_capacity == 0
+                || self.magazine_capacity == i32::try_from(capacity).ok()?)
             && capacity > 0)
             .then(|| StrictMagazineDefinition {
                 pocket_index: pocket.pocket_index,
@@ -1091,6 +1112,7 @@ fn apply_common_fields(
         &mut item.freezing_point_millicelsius,
         source,
     )?;
+    apply_spoilage_lifetime_seconds(object, &mut item.spoilage_lifetime_seconds, source)?;
     for modifier_name in ["extend", "delete", "relative", "proportional"] {
         if modifier(object, modifier_name, "source_monster", source)?.is_some() {
             return Err(invalid_field(
@@ -1516,28 +1538,14 @@ fn apply_power_pocket_projections(
             _ => (),
         }
     }
-    let all_pockets_have_supported_shapes = normalized_pockets.iter().all(|pocket| {
-        pocket.strict_integral_magazine().is_some()
-            || pocket.strict_magazine_well()
-            || pocket.strict_ammunition_container().is_some()
-            || pocket.strict_spawn_pocket().is_some()
-    });
-    let ammunition_containers = if all_pockets_have_supported_shapes {
-        normalized_pockets
-            .iter()
-            .filter_map(PocketDefinition::strict_ammunition_container)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let spawn_pockets = if all_pockets_have_supported_shapes {
-        normalized_pockets
-            .iter()
-            .filter_map(PocketDefinition::strict_spawn_pocket)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let ammunition_containers = normalized_pockets
+        .iter()
+        .filter_map(PocketDefinition::strict_ammunition_container)
+        .collect();
+    let spawn_pockets = normalized_pockets
+        .iter()
+        .filter_map(PocketDefinition::strict_spawn_pocket)
+        .collect();
     item.pockets = normalized_pockets;
     item.magazine_wells = magazine_wells;
     item.integral_magazines = integral_magazines;
@@ -1789,6 +1797,37 @@ fn apply_duration_moves(
 }
 
 fn parse_duration_moves(value: &str, source: &str, field: &str) -> Result<u64, ItemRegistryError> {
+    parse_duration_seconds(value, source, field)?
+        .checked_mul(100)
+        .ok_or_else(|| invalid_field(source, field))
+}
+
+fn apply_spoilage_lifetime_seconds(
+    object: &Map<String, Value>,
+    target: &mut u64,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    for modifier_name in ["extend", "delete", "relative", "proportional"] {
+        if modifier(object, modifier_name, "spoils_in", source)?.is_some() {
+            return Err(invalid_field(source, &format!("{modifier_name}.spoils_in")));
+        }
+    }
+    let Some(value) = object.get("spoils_in") else {
+        return Ok(());
+    };
+    *target = match value {
+        Value::String(value) => parse_duration_seconds(value, source, "spoils_in")?,
+        Value::Number(value) if value.as_u64() == Some(0) => 0,
+        _ => return Err(invalid_field(source, "spoils_in")),
+    };
+    Ok(())
+}
+
+fn parse_duration_seconds(
+    value: &str,
+    source: &str,
+    field: &str,
+) -> Result<u64, ItemRegistryError> {
     let bytes = value.as_bytes();
     let mut index = 0_usize;
     let mut seconds = 0_u64;
@@ -1839,9 +1878,7 @@ fn parse_duration_moves(value: &str, source: &str, field: &str) -> Result<u64, I
     if terms == 0 {
         return Err(invalid_field(source, field));
     }
-    seconds
-        .checked_mul(100)
-        .ok_or_else(|| invalid_field(source, field))
+    Ok(seconds)
 }
 
 fn apply_qualities(
@@ -3111,6 +3148,63 @@ mod tests {
     }
 
     #[test]
+    fn spoilage_lifetime_inherits_exact_compound_duration_and_rejects_modifiers() {
+        let mut items = BTreeMap::new();
+        let mut abstracts = BTreeMap::new();
+        let base = raw(serde_json::json!({
+            "type": "COMESTIBLE",
+            "id": "test_perishable",
+            "name": "test perishable",
+            "spoils_in": "1 day 13 hours"
+        }));
+        assert!(load_one(&base, &mut items, &mut abstracts).expect("base food should load"));
+        let inherited = raw(serde_json::json!({
+            "type": "COMESTIBLE",
+            "id": "test_inherited_perishable",
+            "copy-from": "test_perishable",
+            "name": "test inherited perishable"
+        }));
+        assert!(
+            load_one(&inherited, &mut items, &mut abstracts).expect("inherited food should load")
+        );
+        let nonperishable = raw(serde_json::json!({
+            "type": "COMESTIBLE",
+            "id": "test_nonperishable",
+            "copy-from": "test_perishable",
+            "name": "test nonperishable",
+            "spoils_in": 0
+        }));
+        assert!(
+            load_one(&nonperishable, &mut items, &mut abstracts)
+                .expect("numeric zero sentinel should load")
+        );
+        assert_eq!(items["test_perishable"].spoilage_lifetime_seconds, 133_200);
+        assert_eq!(
+            items["test_inherited_perishable"].spoilage_lifetime_seconds,
+            133_200
+        );
+        assert_eq!(items["test_nonperishable"].spoilage_lifetime_seconds, 0);
+        assert!(
+            !items["test_perishable"]
+                .unsupported_fields
+                .contains("spoils_in")
+        );
+
+        let modified = raw(serde_json::json!({
+            "type": "COMESTIBLE",
+            "id": "test_modified_perishable",
+            "copy-from": "test_perishable",
+            "name": "test modified perishable",
+            "relative": { "spoils_in": "1 hour" }
+        }));
+        assert!(matches!(
+            load_one(&modified, &mut items, &mut abstracts),
+            Err(ItemRegistryError::InvalidField { field, .. })
+                if field == "relative.spoils_in"
+        ));
+    }
+
+    #[test]
     fn corpse_source_monster_inherits_and_replaces_exact_identity() {
         let mut items = BTreeMap::new();
         let mut abstracts = BTreeMap::new();
@@ -3360,6 +3454,33 @@ mod tests {
             load_one(&replacement, &mut items, &mut abstracts)
                 .expect("replacement tool should load")
         );
+        let fuel_canister = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_butane_can",
+            "subtypes": ["TOOL"],
+            "name": "test butane can",
+            "pocket_data": [{
+                "pocket_type": "MAGAZINE",
+                "ammo_restriction": {"butane": 400},
+                "rigid": true
+            }]
+        }));
+        assert!(
+            load_one(&fuel_canister, &mut items, &mut abstracts)
+                .expect("pocket-based tool magazine should load")
+        );
+        let fuel_tool = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_butane_lighter",
+            "subtypes": ["TOOL"],
+            "name": "test butane lighter",
+            "tool_ammo": ["butane"],
+            "pocket_data": [{
+                "pocket_type": "MAGAZINE_WELL",
+                "item_restriction": ["test_butane_can"]
+            }]
+        }));
+        assert!(load_one(&fuel_tool, &mut items, &mut abstracts).expect("tool well should load"));
 
         assert_eq!(items["test_inherited_tool"].magazine_wells.len(), 1);
         assert_eq!(items["test_inherited_tool"].pockets.len(), 1);
@@ -3415,6 +3536,15 @@ mod tests {
             items["test_integral_tool"].integral_magazines,
             [BTreeMap::from([(String::from("battery"), 20)])]
         );
+        assert_eq!(
+            items["test_butane_can"].strict_magazine(),
+            Some(StrictMagazineDefinition {
+                pocket_index: 0,
+                pocket_id: String::new(),
+                ammunition_type: String::from("butane"),
+                capacity: 400,
+            })
+        );
         let registry = ItemRegistry {
             items,
             tool_subtype_replacements: BTreeMap::new(),
@@ -3427,6 +3557,15 @@ mod tests {
         assert_eq!(
             registry.compatible_magazines(inherited_well),
             ["test_medium_battery"]
+        );
+        assert_eq!(
+            registry.compatible_magazines(
+                &registry
+                    .get("test_butane_lighter")
+                    .expect("butane lighter remains")
+                    .magazine_wells[0]
+            ),
+            ["test_butane_can"]
         );
     }
 
@@ -3752,6 +3891,7 @@ mod tests {
                     "item_restriction": ["test_phone"],
                     "flag_restriction": ["ELECTRONIC"],
                     "moves": 80,
+                    "insulation": 10,
                     "rigid": true,
                     "watertight": true,
                     "transparent": true,
@@ -3785,6 +3925,7 @@ mod tests {
                 item_restrictions: BTreeSet::from([String::from("test_phone")]),
                 flag_restrictions: BTreeSet::from([String::from("ELECTRONIC")]),
                 access_moves: 80,
+                insulation_f32_bits: 10.0_f32.to_bits(),
                 rigid: true,
                 watertight: true,
                 transparent: true,
@@ -3803,10 +3944,57 @@ mod tests {
             DEFAULT_SPAWN_POCKET_WEIGHT_MILLIGRAMS
         );
         assert_eq!(pockets[1].max_item_length_millimeters, 8_273);
+        for insulation in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!("10"),
+            serde_json::json!(1e100),
+        ] {
+            let pocket = serde_json::json!({
+                "pocket_type": "CONTAINER",
+                "max_contains_volume": "1 L",
+                "insulation": insulation,
+            });
+            let pocket = parse_pocket_definition(
+                pocket.as_object().expect("pocket should be an object"),
+                0,
+                "test",
+            )
+            .expect("raw insulation should remain inventoried");
+            assert!(pocket.strict_spawn_pocket().is_none());
+        }
         assert_eq!(
             default_spawn_pocket_max_item_length_millimeters(250),
             Some(84)
         );
+
+        let legacy_usb = raw(serde_json::json!({
+            "type": "ITEM",
+            "id": "test_legacy_usb",
+            "name": "test legacy USB drive",
+            "pocket_data": [
+                {
+                    "pocket_type": "SOFTWARE",
+                    "max_contains_volume": "1 L",
+                    "max_contains_weight": "1 kg"
+                },
+                {
+                    "pocket_type": "E_FILE_STORAGE",
+                    "ememory_max": "128 GB",
+                    "weight_multiplier": 0,
+                    "rigid": true
+                }
+            ]
+        }));
+        assert!(
+            load_one(&legacy_usb, &mut items, &mut abstracts)
+                .expect("legacy USB layout should remain inventoried")
+        );
+        let [efile] = items["test_legacy_usb"].spawn_pockets.as_slice() else {
+            panic!("the supported e-file pocket must survive its obsolete SOFTWARE sibling")
+        };
+        assert_eq!(efile.pocket_index, 1);
+        assert_eq!(efile.kind, SpawnPocketKindDefinition::EFileStorage);
 
         let unsupported = raw(serde_json::json!({
             "type": "ITEM",

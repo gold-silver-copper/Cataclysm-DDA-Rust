@@ -595,6 +595,70 @@ struct temperature_constructor_trace {
     bool frozen = false;
 };
 
+struct rot_trace {
+    std::string case_id;
+    std::string item_type;
+    bool corpse = false;
+    bool goes_bad = false;
+    std::int64_t shelf_life_turns = 0;
+    std::int64_t rot_after_ten_minutes = 0;
+    std::int64_t rot_after_one_hour = 0;
+    std::int64_t removal_threshold_turns = 0;
+    bool removed_at_threshold = false;
+    bool removed_after_threshold = false;
+};
+
+struct insulated_container_trace {
+    std::string item_type;
+    int pocket_index = -1;
+    int insulation_milli = 0;
+};
+
+insulated_container_trace observe_insulated_container( const std::string &item_id )
+{
+    const item container( itype_id( item_id ), calendar::turn_zero );
+    const std::vector<const item_pocket *> pockets = container.get_pockets(
+                []( const item_pocket & pocket ) {
+        return pocket.is_type( pocket_type::CONTAINER );
+    } );
+    REQUIRE( pockets.size() == 1 );
+    return {
+        item_id,
+        0,
+        static_cast<int>( std::lround( pockets.front()->insulation() * 1000.0f ) )
+    };
+}
+
+rot_trace observe_rot( const std::string &case_id, const std::string &item_id )
+{
+    const item initial( itype_id( item_id ), calendar::turn_zero );
+    item ten_minutes = initial;
+    ten_minutes.calc_rot( units::from_celsius( 20.0 ), 1.0f, 10_minutes );
+    item one_hour = initial;
+    one_hour.calc_rot( units::from_celsius( 20.0 ), 1.0f, 1_hours );
+    item threshold = initial;
+    if( threshold.is_corpse() ) {
+        threshold.set_damage( threshold.max_damage() );
+    }
+    const time_duration removal_threshold = threshold.is_corpse() ?
+                                            10_days : threshold.get_shelf_life() * 2;
+    threshold.set_rot( removal_threshold );
+    const bool removed_at_threshold = threshold.has_rotten_away();
+    threshold.set_rot( removal_threshold + 1_turns );
+    return {
+        case_id,
+        item_id,
+        initial.is_corpse(),
+        initial.goes_bad(),
+        to_turns<std::int64_t>( initial.get_shelf_life() ),
+        to_turns<std::int64_t>( ten_minutes.get_rot() ),
+        to_turns<std::int64_t>( one_hour.get_rot() ),
+        to_turns<std::int64_t>( removal_threshold ),
+        removed_at_threshold,
+        threshold.has_rotten_away()
+    };
+}
+
 temperature_constructor_trace observe_temperature_constructor( const std::string &case_id,
         const std::string &item_id, int birth_turn )
 {
@@ -1509,6 +1573,9 @@ struct corpse_observation {
         std::string wrapper_type;
         int wrapper_raw_damage = 0;
         int wrapper_damage_level = 0;
+        bool wrapper_pocket_forbidden = false;
+        bool wrapper_pocket_no_unload = false;
+        int unloadable_content_count = 0;
         std::vector<std::string> content_types;
         std::vector<int> content_raw_damage;
         std::vector<int> content_damage_levels;
@@ -1548,17 +1615,24 @@ corpse_observation observe_everyday_corpses()
     observation.seed_search_limit = maximum_seed_search;
     for( unsigned int seed = 1; seed <= maximum_seed_search; ++seed ) {
         rng_set_engine_seed( static_cast<unsigned int>( seed ) );
-        const item_group::ItemList items = item_group::items_from( item_group_id( "everyday_corpse" ) );
+        item_group::ItemList items = item_group::items_from( item_group_id( "everyday_corpse" ) );
         if( items.size() != 1 ) {
             observation.valid_shapes = false;
             break;
         }
-        const item &corpse = items.front();
+        item &corpse = items.front();
+        const item &corpse_view = corpse;
         observation.wrapper_types.insert( corpse.typeId().str() );
         observation.wrapper_raw_damage.insert( corpse.damage() );
         observation.wrapper_damage_levels.insert( corpse.damage_level() );
-        const std::list<const item *> contents = corpse.all_items_top();
-        if( contents.empty() ) {
+        const std::list<const item *> contents = corpse_view.all_items_top();
+        const std::vector<const item_pocket *> corpse_pockets = corpse_view.get_pockets(
+                    []( const item_pocket & pocket ) {
+            return pocket.is_type( pocket_type::CONTAINER );
+        } );
+        const std::list<item *> unloadable_contents = corpse.all_items_top(
+                    pocket_type::CONTAINER, true );
+        if( contents.empty() || corpse_pockets.size() != 1 ) {
             observation.valid_shapes = false;
             break;
         }
@@ -1591,6 +1665,9 @@ corpse_observation observe_everyday_corpses()
                 corpse.typeId().str(),
                 corpse.damage(),
                 corpse.damage_level(),
+                corpse_pockets.front()->is_forbidden(),
+                corpse_pockets.front()->get_pocket_data()->_no_unload,
+                static_cast<int>( unloadable_contents.size() ),
                 content_types,
                 content_raw_damage,
                 content_damage_levels
@@ -1986,6 +2063,36 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         observe_temperature_constructor( "no_temp_comestible", "caffeine", 123 ),
         observe_temperature_constructor( "ordinary_control", "rock", 123 )
     };
+    const std::vector<rot_trace> rot_family = {
+        observe_rot( "food_apple", "apple" ),
+        observe_rot( "food_banana", "banana" ),
+        observe_rot( "food_cheeseburger", "cheeseburger" ),
+        observe_rot( "food_fish_sandwich", "fish_sandwich" ),
+        observe_rot( "food_hamburger", "hamburger" ),
+        observe_rot( "food_orange", "orange" ),
+        observe_rot( "food_sandwich_cheese", "sandwich_cheese" ),
+        observe_rot( "food_sandwich_cucumber", "sandwich_cucumber" ),
+        observe_rot( "food_sandwich_deluxe", "sandwich_deluxe" ),
+        observe_rot( "food_sandwich_jam", "sandwich_jam" ),
+        observe_rot( "food_sandwich_jam_butter", "sandwich_jam_butter" ),
+        observe_rot( "food_sandwich_pb", "sandwich_pb" ),
+        observe_rot( "food_sandwich_pbf", "sandwich_pbf" ),
+        observe_rot( "food_sandwich_pbh", "sandwich_pbh" ),
+        observe_rot( "food_sandwich_pbj", "sandwich_pbj" ),
+        observe_rot( "food_sandwich_pbm", "sandwich_pbm" ),
+        observe_rot( "food_sandwich_reuben", "sandwich_reuben" ),
+        observe_rot( "food_sandwich_t", "sandwich_t" ),
+        observe_rot( "food_sandwich_veggy", "sandwich_veggy" ),
+        observe_rot( "corpse_child_calm", "corpse_child_calm" ),
+        observe_rot( "corpse_generic_female", "corpse_generic_female" ),
+        observe_rot( "corpse_generic_male", "corpse_generic_male" )
+    };
+    REQUIRE( std::all_of( rot_family.begin(), rot_family.end(), []( const rot_trace & trace ) {
+        return trace.goes_bad && !trace.removed_at_threshold && trace.removed_after_threshold;
+    } ) );
+    const insulated_container_trace insulated_container = observe_insulated_container( "thermos" );
+    REQUIRE( insulated_container.pocket_index == 0 );
+    REQUIRE( insulated_container.insulation_milli == 10000 );
     REQUIRE( temperature_constructors[0].has_temperature );
     REQUIRE( temperature_constructors[0].active );
     REQUIRE( temperature_constructors[0].processing_speed == to_turns<int>( 10_minutes ) );
@@ -2442,6 +2549,31 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
         }
         json.end_array();
 
+        json.member( "rot_family" );
+        json.start_array();
+        for( const rot_trace &trace : rot_family ) {
+            json.start_object();
+            json.member( "case_id", trace.case_id );
+            json.member( "item_type", trace.item_type );
+            json.member( "corpse", trace.corpse );
+            json.member( "goes_bad", trace.goes_bad );
+            json.member( "shelf_life_turns", trace.shelf_life_turns );
+            json.member( "rot_after_ten_minutes", trace.rot_after_ten_minutes );
+            json.member( "rot_after_one_hour", trace.rot_after_one_hour );
+            json.member( "removal_threshold_turns", trace.removal_threshold_turns );
+            json.member( "removed_at_threshold", trace.removed_at_threshold );
+            json.member( "removed_after_threshold", trace.removed_after_threshold );
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member( "insulated_container" );
+        json.start_object();
+        json.member( "item_type", insulated_container.item_type );
+        json.member( "pocket_index", insulated_container.pocket_index );
+        json.member( "insulation_milli", insulated_container.insulation_milli );
+        json.end_object();
+
         json.member( "named_snippet_categories" );
         json.start_array();
         for( const named_snippet_category_trace &trace : named_snippet_categories ) {
@@ -2554,6 +2686,9 @@ TEST_CASE( "rust_cpp_oracle_item_group_generation", "[cpp-oracle][item-group]" )
             json.member( "wrapper_type", trace.wrapper_type );
             json.member( "wrapper_raw_damage", trace.wrapper_raw_damage );
             json.member( "wrapper_damage_level", trace.wrapper_damage_level );
+            json.member( "wrapper_pocket_forbidden", trace.wrapper_pocket_forbidden );
+            json.member( "wrapper_pocket_no_unload", trace.wrapper_pocket_no_unload );
+            json.member( "unloadable_content_count", trace.unloadable_content_count );
             json.member( "content_types" );
             write_trace( json, trace.content_types );
             json.member( "content_raw_damage" );

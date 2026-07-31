@@ -63,12 +63,13 @@ pub use items::{
     item_group_fitted_after_phase, item_group_flexible_wrapper_projection,
     item_group_integral_charge_projection, item_group_multi_pocket_projection,
     item_group_snippet_projection, item_group_static_corpse_projection,
-    resolve_item_group_charge_range,
+    normal_ambient_rot_increment_turns, resolve_item_group_charge_range, rot_has_rotten_away,
 };
 use items::{
     ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
-    item_from_craft_prototype, item_from_planned_spawn, item_temperature_timestamps_are_valid,
-    plan_item_group_source, process_item_snapshot_temperature,
+    item_from_craft_prototype, item_from_planned_spawn, item_rot_metadata_is_valid,
+    item_temperature_timestamps_are_valid, plan_item_group_source,
+    process_item_snapshot_temperature,
 };
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;
@@ -986,7 +987,20 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
         || snapshot.temperature.as_ref().is_some_and(|state| {
             !cdda_protocol::item_temperature_state_matches_phase(state, snapshot.containment.phase)
         })
-        || (snapshot.temperature.is_some() && snapshot.comestible_type.is_empty())
+        || !item_rot_metadata_is_valid(
+            &snapshot.variables,
+            &snapshot.comestible_type,
+            &snapshot.containment,
+            snapshot.temperature.is_some(),
+            snapshot.raw_damage,
+        )
+        || !cdda_protocol::item_pocket_insulation_variables_are_valid(
+            &snapshot.variables,
+            snapshot
+                .ammunition_containers
+                .iter()
+                .map(|pocket| pocket.pocket_index),
+        )
         || snapshot.ammunition_type.len() > 64
         || snapshot.ammunition_type.chars().any(char::is_control)
         || (!snapshot.ammunition_type.is_empty()
@@ -1681,7 +1695,20 @@ fn validate_item_component(
         || component.temperature.as_ref().is_some_and(|state| {
             !cdda_protocol::item_temperature_state_matches_phase(state, component.containment.phase)
         })
-        || (component.temperature.is_some() && component.comestible_type.is_empty())
+        || !item_rot_metadata_is_valid(
+            &component.variables,
+            &component.comestible_type,
+            &component.containment,
+            component.temperature.is_some(),
+            component.raw_damage,
+        )
+        || !cdda_protocol::item_pocket_insulation_variables_are_valid(
+            &component.variables,
+            component
+                .ammunition_containers
+                .iter()
+                .map(|pocket| pocket.pocket_index),
+        )
         || component.ammunition_type.len() > 64
         || component.ammunition_type.chars().any(char::is_control)
         || (!component.ammunition_type.is_empty()
@@ -2138,7 +2165,12 @@ fn craft_item_temperature_is_valid(item: &CraftItemPrototypeV1) -> bool {
     if !item.tracks_temperature {
         return item.thermal_properties.is_none();
     }
-    if item.comestible_type.is_empty() {
+    let static_corpse = item
+        .containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+        .is_ok();
+    if item.comestible_type.is_empty() && !static_corpse {
         return false;
     }
     cdda_protocol::item_temperature_state_matches_phase(
@@ -5605,8 +5637,17 @@ impl WorldState {
                 }
             }
         }
-        for ground in self.ground_items.values_mut() {
-            ground.item.process_temperature(current_tick)?;
+        let mut rotten_ground_items = Vec::new();
+        for (item_id, ground) in &mut self.ground_items {
+            if ground
+                .item
+                .process_temperature_and_rot(current_tick, true)?
+            {
+                rotten_ground_items.push(*item_id);
+            }
+        }
+        for item_id in rotten_ground_items {
+            self.ground_items.remove(&item_id);
         }
         Ok(())
     }
@@ -20065,6 +20106,14 @@ mod tests {
             validate_craft_item_prototype(&noncomestible_temperature_prototype),
             Err(SimError::InvalidCraft)
         ));
+        let mut static_corpse_prototype = noncomestible_temperature_prototype;
+        static_corpse_prototype
+            .containment
+            .flags
+            .push(String::from("CORPSE"));
+        static_corpse_prototype.containment.flags.sort();
+        validate_craft_item_prototype(&static_corpse_prototype)
+            .expect("temperature-tracked static corpse prototype should be valid");
         assert!(component_state_matches_prototype(
             &temperature_component,
             &temperature_prototype
@@ -29484,11 +29533,21 @@ mod tests {
         impossible
             .register_item_group_catalog(vec![oversized_group])
             .expect("individually bounded group should register");
+        impossible
+            .install_reserved_block(
+                ReservedIdBlock::new(1, ID_RESERVATION_SIZE).expect("valid full block"),
+            )
+            .expect("full block should install");
+        impossible
+            .configure_worldgen(oversized_catalog)
+            .expect("low-chance groups should be admitted by their atomic bound");
         assert!(matches!(
-            impossible.configure_worldgen(oversized_catalog),
-            Err(SimError::InvalidTerrain)
+            impossible.generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 }),
+            Err(SimError::InvalidItem)
         ));
-        assert!(impossible.worldgen.is_none());
+        assert!(impossible.chunks.is_empty());
+        assert!(impossible.ground_items.is_empty());
+        assert_eq!(impossible.allocator.next(), 1);
 
         let mut exhausted = WorldState::new(31, [7; 32]);
         exhausted

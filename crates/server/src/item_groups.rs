@@ -8,22 +8,26 @@ use cdda_content::{
     StrictItemGroupGraph, StrictItemGroupNode, StrictItemGroupNodeKind,
     StrictSpawnPocketDefinition,
 };
+#[cfg(test)]
+use cdda_protocol::item_rot_state;
 use cdda_protocol::{
     AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, CraftItemPrototypeV1,
-    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
-    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
-    ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1,
-    ItemVariableValueV1, ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
+    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE,
+    ITEM_ROT_TURNS_VARIABLE, ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS, InclusiveU16RangeV1,
+    ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1,
+    ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1, ItemGroupContainerV1,
+    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
+    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
+    ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
+    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
     SPAWN_POCKET_SINGLE_ITEM_MARKER, SpawnPocketKindV1, SpawnPocketRulesV1,
     encode_item_group_dressing_marker, is_reserved_item_group_dressing_marker,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
-    item_group_source_max_outputs,
+    item_group_source_max_outputs, item_pocket_insulation_variable_key,
 };
 
-use super::{craft_item_prototype, default_instance_charges};
+use super::{craft_item_group_prototype, craft_item_prototype, default_instance_charges};
 
 #[derive(Clone, Copy)]
 pub(super) struct RuntimeItemGroupContent<'a> {
@@ -119,6 +123,149 @@ pub(super) fn assert_regional_field_item_group_closure(
     field_graph: &StrictItemGroupGraph,
     content: RuntimeItemGroupContent<'_>,
 ) {
+    let mut referenced_items = BTreeSet::new();
+    for definition in std::iter::once(&field_graph.root).chain(field_graph.groups.values()) {
+        if let Some(wrapper) = &definition.wrapper {
+            referenced_items.insert(wrapper.item.as_str());
+        }
+        for node in &definition.nodes {
+            if let StrictItemGroupNodeKind::Item(item_id) = &node.kind {
+                referenced_items.insert(item_id.as_str());
+            }
+            if let Some(wrapper) = &node.direct_wrapper {
+                referenced_items.insert(wrapper.item.as_str());
+            }
+            if let Some(container) = &node.modifier_container {
+                referenced_items.insert(container.as_str());
+            }
+            for source in &node.contents {
+                if let ItemGroupContentsSource::Item(item_id) = source {
+                    referenced_items.insert(item_id.as_str());
+                }
+            }
+        }
+    }
+    let perishable_foods = referenced_items
+        .iter()
+        .filter_map(|item_id| {
+            content
+                .items
+                .get(item_id)
+                .filter(|item| item.spoilage_lifetime_seconds > 0)
+                .map(|_| *item_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        perishable_foods,
+        [
+            "apple",
+            "banana",
+            "cheeseburger",
+            "fish_sandwich",
+            "hamburger",
+            "orange",
+            "sandwich_cheese",
+            "sandwich_cucumber",
+            "sandwich_deluxe",
+            "sandwich_jam",
+            "sandwich_jam_butter",
+            "sandwich_pb",
+            "sandwich_pbf",
+            "sandwich_pbh",
+            "sandwich_pbj",
+            "sandwich_pbm",
+            "sandwich_reuben",
+            "sandwich_t",
+            "sandwich_veggy",
+        ],
+        "regional field closure must retain its complete perishable-food denominator"
+    );
+    let static_corpses = referenced_items
+        .iter()
+        .filter_map(|item_id| {
+            content
+                .items
+                .get(item_id)
+                .filter(|item| item.flags.contains("CORPSE"))
+                .map(|_| *item_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        static_corpses,
+        [
+            "corpse_child_calm",
+            "corpse_generic_female",
+            "corpse_generic_male",
+        ],
+        "regional field closure must retain its complete static-corpse denominator"
+    );
+    let partial_pocket_projections = referenced_items
+        .iter()
+        .filter_map(|item_id| {
+            let item = content.items.get(item_id)?;
+            let prototype = craft_item_group_prototype(
+                item,
+                default_instance_charges(item),
+                content.items,
+                content.materials,
+            )
+            .ok()?;
+            (!runtime_item_pocket_projection_is_lossless(item, &prototype)).then_some(*item_id)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        partial_pocket_projections.is_empty(),
+        "field constructors must not silently omit pocket behavior: {partial_pocket_projections:?}"
+    );
+    let rot_constructor_projection = referenced_items
+        .iter()
+        .filter_map(|item_id| {
+            let item = content.items.get(item_id)?;
+            (item.spoilage_lifetime_seconds > 0 || item.flags.contains("CORPSE")).then(|| {
+                let runtime = runtime_item_group_item(item, None, content)
+                    .expect("every field rot constructor should normalize");
+                let (shelf_life_turns, rot_turns) = item_rot_state(&runtime.initial_variables)
+                    .expect("every field rot constructor should retain typed rot metadata");
+                (
+                    *item_id,
+                    shelf_life_turns,
+                    rot_turns,
+                    runtime
+                        .prototype
+                        .containment
+                        .flags
+                        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+                        .is_ok(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rot_constructor_projection.len(), 22);
+    assert!(
+        rot_constructor_projection
+            .iter()
+            .all(|(_, shelf_life_turns, rot_turns, corpse)| {
+                *shelf_life_turns > 0
+                    && *rot_turns == 0
+                    && (!corpse || *shelf_life_turns == ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS)
+            }),
+        "every field rot constructor must start with exact nonzero shelf life and zero rot"
+    );
+    let thermos = runtime_item_group_item(
+        content
+            .items
+            .get("thermos")
+            .expect("field closure should retain the insulated thermos"),
+        None,
+        content,
+    )
+    .expect("insulated field container should normalize");
+    assert_eq!(
+        cdda_protocol::item_pocket_insulation(&thermos.initial_variables, 0),
+        Some(10.0),
+        "thermos must retain its exact pinned pocket insulation"
+    );
+
     let costume_accessories = runtime_item_group_graph(
         field_graph
             .groups
@@ -371,7 +518,7 @@ pub(super) fn assert_regional_field_item_group_closure(
             .items
             .get(item_id)
             .expect("corpse wrapper should retain its concrete item definition");
-        let mut prototype = craft_item_prototype(
+        let mut prototype = craft_item_group_prototype(
             item,
             default_instance_charges(item),
             content.items,
@@ -384,7 +531,22 @@ pub(super) fn assert_regional_field_item_group_closure(
         assert_eq!(actual_source, source_monster);
         assert_eq!(prototype.containment.weight_milligrams, weight_milligrams);
         assert_eq!(prototype.containment.volume_milliliters, volume_milliliters);
-        assert!(item_group_contents_insertion_supported(item, &prototype));
+        assert!(runtime_item_pocket_projection_is_lossless(item, &prototype));
+        let [corpse_pocket] = runtime_ammunition_containers(item)
+            .expect("corpse containment pocket should normalize")
+            .try_into()
+            .expect("static corpse should retain exactly one containment pocket");
+        let rules = corpse_pocket
+            .spawn_rules
+            .expect("corpse containment should retain its insertion rules");
+        assert!(
+            rules.forbidden,
+            "corpse pocket must reject ordinary insertion"
+        );
+        assert!(
+            corpse_pocket.unloadable,
+            "forbidden corpse contents must remain manually lootable"
+        );
     }
 
     let field_runtime_errors = field_graph
@@ -396,50 +558,9 @@ pub(super) fn assert_regional_field_item_group_closure(
                 .map(|error| (definition.id.as_str(), error.to_string()))
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        field_runtime_errors
-            .iter()
-            .map(|(group, error)| (*group, error.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            (
-                "everyday_corpse_child",
-                "item group corpse corpse_child_calm requires unimplemented 24-hour rot state",
-            ),
-            (
-                "everyday_corpse_female",
-                "item group corpse corpse_generic_female requires unimplemented 24-hour rot state",
-            ),
-            (
-                "everyday_corpse_male",
-                "item group corpse corpse_generic_male requires unimplemented 24-hour rot state",
-            ),
-            (
-                "lunchbox_food",
-                "temperature-tracked item cheeseburger requires unimplemented rot state",
-            ),
-            (
-                "lunchbox_fruit",
-                "temperature-tracked item banana requires unimplemented rot state",
-            ),
-            (
-                "sandwich_deluxe_wrapper_2",
-                "temperature-tracked item sandwich_deluxe requires unimplemented rot state",
-            ),
-            (
-                "sandwich_reuben_wrapper_2",
-                "temperature-tracked item sandwich_reuben requires unimplemented rot state",
-            ),
-            (
-                "sandwich_t_wrapper_2",
-                "temperature-tracked item sandwich_t requires unimplemented rot state",
-            ),
-            (
-                "sandwiches",
-                "temperature-tracked item sandwich_cucumber requires unimplemented rot state",
-            ),
-        ],
-        "every production-field blocker must remain classified until its generalized family is implemented"
+    assert!(
+        field_runtime_errors.is_empty(),
+        "the production regional-field item-group closure must admit as one family: {field_runtime_errors:#?}"
     );
 }
 
@@ -505,7 +626,10 @@ pub(super) fn runtime_ammunition_containers(
                 rigid: pocket.rigid,
                 access_moves: pocket.access_moves,
                 reloadable: false,
-                unloadable: !pocket.forbidden && !item.flags.contains("NO_UNLOAD"),
+                // Pinned `forbidden` rejects ordinary insertion but does not
+                // make existing contents irremovable. Only `NO_UNLOAD` owns
+                // that independent behavior.
+                unloadable: !item.flags.contains("NO_UNLOAD"),
                 spawn_rules: Some(SpawnPocketRulesV1 {
                     kind: match pocket.kind {
                         cdda_content::SpawnPocketKindDefinition::Container => {
@@ -582,6 +706,7 @@ pub(super) fn runtime_bash_item_group_source(
 pub(super) struct RuntimeItemTemperatureCapability {
     pub(super) tracks_temperature: bool,
     pub(super) thermal_properties: Option<ItemThermalPropertiesV1>,
+    pub(super) rot_shelf_life_turns: Option<u64>,
 }
 
 /// Resolves the complete strict constructor capability for nonperishable
@@ -596,18 +721,80 @@ pub(super) fn runtime_item_temperature_capability(
         ItemTemperatureRuntimeClass::NotTracked => Ok(RuntimeItemTemperatureCapability {
             tracks_temperature: false,
             thermal_properties: None,
+            rot_shelf_life_turns: None,
         }),
         ItemTemperatureRuntimeClass::MateriallessNonperishable => {
             Ok(RuntimeItemTemperatureCapability {
                 tracks_temperature: true,
                 thermal_properties: None,
+                rot_shelf_life_turns: None,
             })
         }
-        ItemTemperatureRuntimeClass::RequiresRot => Err(format!(
-            "temperature-tracked item {} requires unimplemented rot state",
-            item.id
-        )
-        .into()),
+        ItemTemperatureRuntimeClass::RequiresRot => {
+            let corpse = item.flags.contains("CORPSE");
+            if corpse && item.spoilage_lifetime_seconds != 0 {
+                return Err(format!(
+                    "static corpse {} also declares a comestible shelf life",
+                    item.id
+                )
+                .into());
+            }
+            if !matches!(
+                item.phase.to_ascii_lowercase().as_str(),
+                "" | "solid" | "liquid"
+            ) {
+                return Err(format!(
+                    "temperature-tracked item {} has unsupported phase {}",
+                    item.id, item.phase
+                )
+                .into());
+            }
+            let freezing_point_millikelvin = item.freezing_point_millikelvin().ok_or_else(|| {
+                format!(
+                    "temperature-tracked item {} has an overflowing freezing point",
+                    item.id
+                )
+            })?;
+            let thermal_properties = materials
+                .comestible_thermal_properties(item)?
+                .map(|properties| ItemThermalPropertiesV1 {
+                    specific_heat_liquid_microjoules_per_gram_kelvin: properties
+                        .specific_heat_liquid_microjoules_per_gram_kelvin,
+                    specific_heat_solid_microjoules_per_gram_kelvin: properties
+                        .specific_heat_solid_microjoules_per_gram_kelvin,
+                    latent_heat_microjoules_per_gram: properties.latent_heat_microjoules_per_gram,
+                    freezing_point_millikelvin,
+                });
+            if thermal_properties.is_none() && item.freezing_point_millicelsius != 0 {
+                return Err(format!(
+                    "temperature-tracked item {} has a custom freezing point without material thermodynamics",
+                    item.id
+                )
+                .into());
+            }
+            if thermal_properties.is_some_and(|properties| {
+                properties
+                    .normal_ambient_specific_energy_millijoules_per_gram()
+                    .is_none()
+                    || properties.freezing_point_millikelvin
+                        > cdda_protocol::ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
+            }) {
+                return Err(format!(
+                    "temperature-tracked item {} has a freezing point outside the modeled ambient lifecycle",
+                    item.id
+                )
+                .into());
+            }
+            Ok(RuntimeItemTemperatureCapability {
+                tracks_temperature: true,
+                thermal_properties,
+                rot_shelf_life_turns: Some(if corpse {
+                    ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS
+                } else {
+                    item.spoilage_lifetime_seconds
+                }),
+            })
+        }
         ItemTemperatureRuntimeClass::RequiresCustomFreezing => Err(format!(
             "temperature-tracked item {} has a custom freezing point without material thermodynamics",
             item.id
@@ -660,6 +847,7 @@ pub(super) fn runtime_item_temperature_capability(
             Ok(RuntimeItemTemperatureCapability {
                 tracks_temperature: true,
                 thermal_properties: Some(thermal_properties),
+                rot_shelf_life_turns: None,
             })
         }
         ItemTemperatureRuntimeClass::UnsupportedPhase => Err(format!(
@@ -750,6 +938,221 @@ fn runtime_strict_item_group_catalog(
         .into());
     }
     Ok(catalog)
+}
+
+pub(super) fn runtime_named_item_group_catalog(
+    graph: &StrictItemGroupGraph,
+    content: RuntimeItemGroupContent<'_>,
+) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
+    if graph.maximum_output > cdda_sim::ID_RESERVATION_SIZE {
+        return Err(format!(
+            "item-group closure rooted at {} can generate {} objects, exceeding the stable-ID reservation",
+            graph.root.id, graph.maximum_output
+        )
+        .into());
+    }
+    let mut definitions = BTreeMap::new();
+    for definition in std::iter::once(&graph.root).chain(graph.groups.values()) {
+        match definitions.get(&definition.id) {
+            Some(existing) if *existing != definition => {
+                return Err(format!(
+                    "item-group closure rooted at {} normalized {} inconsistently",
+                    graph.root.id, definition.id
+                )
+                .into());
+            }
+            Some(_) => {}
+            None => {
+                definitions.insert(definition.id.clone(), definition);
+            }
+        }
+    }
+    let catalog = definitions
+        .into_values()
+        .map(|definition| runtime_item_group_definition(definition, content))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !item_group_catalog_is_valid(&catalog) {
+        let total_nodes = catalog
+            .iter()
+            .map(|definition| definition.graph.nodes.len())
+            .sum::<usize>();
+        let total_entries = catalog
+            .iter()
+            .flat_map(|definition| &definition.graph.nodes)
+            .map(|node| node.entries.len())
+            .sum::<usize>();
+        let invalid_frontier = invalid_item_group_catalog_frontier(&catalog);
+        let invalid_entries = invalid_item_group_root_entries(&catalog, &invalid_frontier);
+        return Err(format!(
+            "named item-group closure rooted at {} is invalid for the current protocol ({} definitions, {total_nodes} nodes, {total_entries} entries; lowest invalid groups: {invalid_frontier:?}; independently invalid root entries: {invalid_entries:?})",
+            graph.root.id,
+            catalog.len(),
+        )
+        .into());
+    }
+    Ok(catalog)
+}
+
+/// Finds the lowest named groups whose complete dependency closures fail
+/// protocol validation. This runs only on the error path and keeps production
+/// admission diagnostics tied to the actual semantic frontier instead of an
+/// aggregate catalog failure.
+fn invalid_item_group_catalog_frontier(catalog: &[ItemGroupDefinitionV1]) -> Vec<String> {
+    let definitions = catalog
+        .iter()
+        .map(|definition| (definition.group_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let direct_references = catalog
+        .iter()
+        .map(|definition| {
+            (
+                definition.group_id.as_str(),
+                item_group_definition_references(definition),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut invalid = BTreeSet::new();
+    for definition in catalog {
+        let mut closure_ids = BTreeSet::new();
+        let mut pending = vec![definition.group_id.as_str()];
+        let mut missing_reference = false;
+        while let Some(group_id) = pending.pop() {
+            if !closure_ids.insert(group_id) {
+                continue;
+            }
+            let Some(references) = direct_references.get(group_id) else {
+                missing_reference = true;
+                continue;
+            };
+            pending.extend(references.iter().copied());
+        }
+        let closure = closure_ids
+            .iter()
+            .filter_map(|group_id| definitions.get(group_id).copied().cloned())
+            .collect::<Vec<_>>();
+        if missing_reference
+            || closure.len() != closure_ids.len()
+            || !item_group_catalog_is_valid(&closure)
+        {
+            invalid.insert(definition.group_id.as_str());
+        }
+    }
+    invalid
+        .iter()
+        .filter(|group_id| {
+            direct_references
+                .get(**group_id)
+                .is_none_or(|references| references.iter().all(|child| !invalid.contains(child)))
+        })
+        .map(|group_id| (*group_id).to_owned())
+        .collect()
+}
+
+fn item_group_definition_references(definition: &ItemGroupDefinitionV1) -> BTreeSet<&str> {
+    definition
+        .graph
+        .nodes
+        .iter()
+        .flat_map(|node| &node.entries)
+        .flat_map(|entry| {
+            let target = match &entry.target {
+                ItemGroupTargetV1::Group(group_id) => Some(group_id.as_str()),
+                ItemGroupTargetV1::Item(_) | ItemGroupTargetV1::Node(_) => None,
+            };
+            target
+                .into_iter()
+                .chain(entry.contents.iter().filter_map(|source| {
+                    let ItemGroupContentsSourceV1::Group(group_id) = source else {
+                        return None;
+                    };
+                    (!is_reserved_item_group_dressing_marker(group_id)).then_some(group_id.as_str())
+                }))
+        })
+        .collect()
+}
+
+fn invalid_item_group_root_entries(
+    catalog: &[ItemGroupDefinitionV1],
+    frontier: &[String],
+) -> BTreeMap<String, Vec<String>> {
+    let definitions = catalog
+        .iter()
+        .map(|definition| (definition.group_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    frontier
+        .iter()
+        .filter_map(|group_id| {
+            let definition = definitions.get(group_id.as_str())?;
+            if definition.graph.nodes.len() != 1 {
+                return None;
+            }
+            let invalid = definition.graph.nodes[0]
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    let mut isolated = (*definition).clone();
+                    isolated.graph.nodes[0].entries = vec![entry.clone()];
+                    let isolated_references = item_group_definition_references(&isolated);
+                    let mut closure_ids = BTreeSet::from([isolated.group_id.as_str()]);
+                    let mut pending = isolated_references.into_iter().collect::<Vec<_>>();
+                    while let Some(reference) = pending.pop() {
+                        if !closure_ids.insert(reference) {
+                            continue;
+                        }
+                        if let Some(dependency) = definitions.get(reference) {
+                            pending.extend(item_group_definition_references(dependency));
+                        }
+                    }
+                    let closure = closure_ids
+                        .iter()
+                        .filter_map(|id| {
+                            if *id == isolated.group_id {
+                                Some(isolated.clone())
+                            } else {
+                                definitions.get(id).copied().cloned()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    (!item_group_catalog_is_valid(&closure)).then(|| {
+                        let target = match &entry.target {
+                            ItemGroupTargetV1::Item(item) => item.prototype.type_id.as_str(),
+                            ItemGroupTargetV1::Group(group_id) => group_id.as_str(),
+                            ItemGroupTargetV1::Node(_) => "<local-node>",
+                        };
+                        format!("{index}:{target}")
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!invalid.is_empty()).then(|| (group_id.clone(), invalid))
+        })
+        .collect()
+}
+
+pub(super) fn merge_item_group_catalogs(
+    catalogs: impl IntoIterator<Item = Vec<ItemGroupDefinitionV1>>,
+) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
+    let mut merged = BTreeMap::new();
+    for definition in catalogs.into_iter().flatten() {
+        match merged.get(&definition.group_id) {
+            Some(existing) if existing != &definition => {
+                return Err(format!(
+                    "runtime item group {} normalized inconsistently across closures",
+                    definition.group_id
+                )
+                .into());
+            }
+            Some(_) => {}
+            None => {
+                merged.insert(definition.group_id.clone(), definition);
+            }
+        }
+    }
+    let merged = merged.into_values().collect::<Vec<_>>();
+    if !item_group_catalog_is_valid(&merged) {
+        return Err("merged runtime item-group catalog is invalid for the current protocol".into());
+    }
+    Ok(merged)
 }
 
 fn runtime_item_group_definition(
@@ -1078,7 +1481,7 @@ fn runtime_item_group_item_inner(
     default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
     let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
-    let mut prototype = craft_item_prototype(
+    let mut prototype = craft_item_group_prototype(
         item,
         default_instance_charges(item),
         content.items,
@@ -1101,7 +1504,7 @@ fn runtime_item_group_item_inner(
     if charges.is_some() && !charges_supported {
         return Err(format!("item group item {} cannot retain charge modifiers", item.id).into());
     }
-    let contents_insertion_supported = item_group_contents_insertion_supported(item, &prototype);
+    let contents_insertion_supported = runtime_item_pocket_projection_is_lossless(item, &prototype);
     let mut initial_variables = item
         .variables
         .iter()
@@ -1115,6 +1518,46 @@ fn runtime_item_group_item_inner(
             (key.clone(), value)
         })
         .collect::<BTreeMap<_, _>>();
+    if let Some(shelf_life_turns) =
+        runtime_item_temperature_capability(item, content.materials)?.rot_shelf_life_turns
+    {
+        let shelf_life_turns =
+            i64::try_from(shelf_life_turns).map_err(|_| "item rot shelf life exceeded i64")?;
+        for (key, value) in [
+            (
+                ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE,
+                ItemVariableValueV1::Integer(shelf_life_turns),
+            ),
+            (ITEM_ROT_TURNS_VARIABLE, ItemVariableValueV1::Integer(0)),
+        ] {
+            if initial_variables.insert(key.to_owned(), value).is_some() {
+                return Err(format!(
+                    "item group item {} collides with reserved rot metadata",
+                    item.id
+                )
+                .into());
+            }
+        }
+    }
+    for pocket in &item.spawn_pockets {
+        if pocket.insulation_f32_bits == 1.0_f32.to_bits() {
+            continue;
+        }
+        let key = item_pocket_insulation_variable_key(pocket.pocket_index);
+        if initial_variables
+            .insert(
+                key.clone(),
+                ItemVariableValueV1::Integer(i64::from(pocket.insulation_f32_bits)),
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "item group item {} collides with reserved pocket insulation metadata {key}",
+                item.id
+            )
+            .into());
+        }
+    }
     if let Some(corpse_source) = corpse_source
         && initial_variables
             .insert(
@@ -1405,35 +1848,48 @@ fn runtime_default_ammunition_prototype(
     Ok(ammunition)
 }
 
-fn item_group_contents_insertion_supported(
+pub(super) fn runtime_item_pocket_projection_is_lossless(
     item: &ItemDefinition,
     prototype: &CraftItemPrototypeV1,
 ) -> bool {
-    item.pockets.iter().all(|raw| {
-        if raw.strict_integral_magazine().is_some() {
-            return prototype
-                .integral_magazines
-                .iter()
-                .any(|pocket| pocket.pocket_index == raw.pocket_index);
-        }
-        if raw.strict_magazine_well() {
-            return prototype
-                .magazine_wells
-                .iter()
-                .any(|pocket| pocket.pocket_index == raw.pocket_index);
-        }
-        if raw.strict_ammunition_container().is_some() {
-            return prototype.ammunition_containers.iter().any(|pocket| {
-                pocket.pocket_index == raw.pocket_index && pocket.spawn_rules.is_none()
-            });
-        }
-        if raw.strict_spawn_pocket().is_some() {
-            return prototype.ammunition_containers.iter().any(|pocket| {
-                pocket.pocket_index == raw.pocket_index && pocket.spawn_rules.is_some()
-            });
-        }
-        false
-    })
+    if item.pockets.is_empty() {
+        return true;
+    }
+    item.pockets
+        .iter()
+        .any(|raw| raw.pocket_type != PocketTypeDefinition::Software)
+        && item.pockets.iter().all(|raw| {
+            if raw.pocket_type == PocketTypeDefinition::Software {
+                // The pinned best-pocket path never selects the obsolete SOFTWARE
+                // kind. Estorable payloads select E_FILE_STORAGE explicitly, so a
+                // retained e-file projection remains exact in legacy mixed USB
+                // layouts without pretending to implement SOFTWARE itself.
+                return true;
+            }
+            if raw.strict_integral_magazine().is_some() {
+                return prototype
+                    .integral_magazines
+                    .iter()
+                    .any(|pocket| pocket.pocket_index == raw.pocket_index);
+            }
+            if raw.strict_magazine_well() {
+                return prototype
+                    .magazine_wells
+                    .iter()
+                    .any(|pocket| pocket.pocket_index == raw.pocket_index);
+            }
+            if raw.strict_ammunition_container().is_some() {
+                return prototype.ammunition_containers.iter().any(|pocket| {
+                    pocket.pocket_index == raw.pocket_index && pocket.spawn_rules.is_none()
+                });
+            }
+            if raw.strict_spawn_pocket().is_some() {
+                return prototype.ammunition_containers.iter().any(|pocket| {
+                    pocket.pocket_index == raw.pocket_index && pocket.spawn_rules.is_some()
+                });
+            }
+            false
+        })
 }
 
 fn validate_charge_item_constructor_state(
@@ -1592,58 +2048,71 @@ fn runtime_item_variants(
         )
         .into());
     }
-    item.variants
-        .iter()
-        .map(|variant| {
-            if !variant.unsupported_fields.is_empty() {
-                return Err(format!(
-                    "item-group item {} variant {} requires unsupported fields {:?}",
-                    item.id, variant.id, variant.unsupported_fields
-                )
-                .into());
-            }
-            // Pinned item-type finalization fills missing variant text from
-            // the finalized base item before instances select a variant.
-            let name = variant
-                .name
-                .clone()
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| item.name.clone());
-            let alternate_description = variant
-                .description
-                .clone()
-                .filter(|description| !description.is_empty())
-                .unwrap_or_else(|| item.description.clone());
-            let description = if variant.append {
-                format!("{}  {alternate_description}", item.description)
-            } else {
-                alternate_description
-            };
-            let description_expansion = variant
-                .expand_description_snippets
-                .then(|| runtime_description_expansion(&description, snippets))
-                .transpose()?;
-            Ok(ItemGroupVariantOptionV1 {
-                variant: ItemVariantV1 {
-                    id: variant.id.clone(),
-                    name,
-                    description,
-                    symbol: variant
-                        .symbol
-                        .clone()
-                        .unwrap_or_else(|| item.symbol.clone()),
-                    color: variant.color.clone().unwrap_or_else(|| item.color.clone()),
-                    ascii_picture: variant
-                        .ascii_picture
-                        .clone()
-                        .filter(|ascii_picture| !ascii_picture.is_empty())
-                        .unwrap_or_else(|| item.ascii_picture.clone()),
-                },
-                weight: variant.weight,
-                description_expansion,
-            })
-        })
-        .collect()
+    let mut normalized = Vec::<ItemGroupVariantOptionV1>::new();
+    let mut first_by_id = BTreeMap::<String, usize>::new();
+    for variant in &item.variants {
+        if !variant.unsupported_fields.is_empty() {
+            return Err(format!(
+                "item-group item {} variant {} requires unsupported fields {:?}",
+                item.id, variant.id, variant.unsupported_fields
+            )
+            .into());
+        }
+        if let Some(index) = first_by_id.get(&variant.id).copied() {
+            // Upstream's weighted constructor stores every source occurrence
+            // by ID, then set_itype_variant resolves that ID to the first
+            // matching finalized option. Merge only the weights so duplicate
+            // metadata that can never be selected does not enter canonical
+            // state.
+            normalized[index].weight = normalized[index]
+                .weight
+                .checked_add(variant.weight)
+                .ok_or_else(|| format!("item {} variant weight overflow", item.id))?;
+            continue;
+        }
+        // Pinned item-type finalization fills missing variant text from the
+        // finalized base item before instances select a variant.
+        let name = variant
+            .name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| item.name.clone());
+        let alternate_description = variant
+            .description
+            .clone()
+            .filter(|description| !description.is_empty())
+            .unwrap_or_else(|| item.description.clone());
+        let description = if variant.append {
+            format!("{}  {alternate_description}", item.description)
+        } else {
+            alternate_description
+        };
+        let description_expansion = variant
+            .expand_description_snippets
+            .then(|| runtime_description_expansion(&description, snippets))
+            .transpose()?;
+        first_by_id.insert(variant.id.clone(), normalized.len());
+        normalized.push(ItemGroupVariantOptionV1 {
+            variant: ItemVariantV1 {
+                id: variant.id.clone(),
+                name,
+                description,
+                symbol: variant
+                    .symbol
+                    .clone()
+                    .unwrap_or_else(|| item.symbol.clone()),
+                color: variant.color.clone().unwrap_or_else(|| item.color.clone()),
+                ascii_picture: variant
+                    .ascii_picture
+                    .clone()
+                    .filter(|ascii_picture| !ascii_picture.is_empty())
+                    .unwrap_or_else(|| item.ascii_picture.clone()),
+            },
+            weight: variant.weight,
+            description_expansion,
+        });
+    }
+    Ok(normalized)
 }
 
 fn runtime_description_expansion(
@@ -1734,13 +2203,6 @@ fn validate_item_group_item_spawn(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if item.id == "null" {
         return Err("item-group null leaves do not materialize an item upstream".into());
-    }
-    if item.flags.contains("CORPSE") {
-        return Err(format!(
-            "item group corpse {} requires unimplemented 24-hour rot state",
-            item.id
-        )
-        .into());
     }
     const CONSTRUCTOR_STATE_FIELDS: &[&str] = &["countdown_interval", "relic_data"];
     if let Some(field) = CONSTRUCTOR_STATE_FIELDS
@@ -2025,6 +2487,7 @@ mod tests {
                 item_restrictions: BTreeSet::from([String::from(SPAWN_POCKET_SINGLE_ITEM_MARKER)]),
                 flag_restrictions: BTreeSet::new(),
                 access_moves: 100,
+                insulation_f32_bits: 1.0_f32.to_bits(),
                 rigid: true,
                 watertight: false,
                 transparent: false,
@@ -2094,10 +2557,11 @@ mod tests {
         assert!(runtime_item_tracks_temperature(&material_backed, &materials).is_err());
 
         let mut perishable = supported.clone();
-        perishable
-            .unsupported_fields
-            .insert(String::from("spoils_in"));
-        assert!(runtime_item_tracks_temperature(&perishable, &materials).is_err());
+        perishable.spoilage_lifetime_seconds = 86_400;
+        let perishable_capability = runtime_item_temperature_capability(&perishable, &materials)
+            .expect("materialless perishable state should normalize");
+        assert!(perishable_capability.tracks_temperature);
+        assert_eq!(perishable_capability.rot_shelf_life_turns, Some(86_400));
 
         let mut custom_freezing = supported;
         custom_freezing.freezing_point_millicelsius = -30_000;
@@ -2151,6 +2615,50 @@ mod tests {
             "base description  alternate description"
         );
         assert_eq!(variants[2].variant.ascii_picture, "alternate_art");
+    }
+
+    #[test]
+    fn duplicate_variant_ids_merge_weight_into_the_first_finalized_option() {
+        let item = ItemDefinition {
+            id: String::from("duplicate_variant_item"),
+            name: String::from("base name"),
+            description: String::from("base description"),
+            symbol: String::from("?"),
+            color: String::from("white"),
+            variant_type: String::from("generic"),
+            variants: vec![
+                ItemVariantDefinition {
+                    id: String::from("duplicate"),
+                    description: Some(String::from("first reachable description")),
+                    weight: 2,
+                    ..ItemVariantDefinition::default()
+                },
+                ItemVariantDefinition {
+                    id: String::from("other"),
+                    weight: 5,
+                    ..ItemVariantDefinition::default()
+                },
+                ItemVariantDefinition {
+                    id: String::from("duplicate"),
+                    description: Some(String::from("unreachable duplicate description")),
+                    weight: 7,
+                    ..ItemVariantDefinition::default()
+                },
+            ],
+            ..ItemDefinition::default()
+        };
+
+        let variants = runtime_item_variants(&item, &DescriptionSnippetRegistry::default())
+            .expect("duplicate finalized IDs should retain upstream first-match semantics");
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].variant.id, "duplicate");
+        assert_eq!(
+            variants[0].variant.description,
+            "first reachable description"
+        );
+        assert_eq!(variants[0].weight, 9);
+        assert_eq!(variants[1].variant.id, "other");
+        assert_eq!(variants[1].weight, 5);
     }
 
     #[test]
@@ -2266,7 +2774,7 @@ mod tests {
             containment: Default::default(),
         };
         let no_pockets = ItemDefinition::default();
-        assert!(item_group_contents_insertion_supported(
+        assert!(runtime_item_pocket_projection_is_lossless(
             &no_pockets,
             &empty_prototype(),
         ));
@@ -2284,7 +2792,7 @@ mod tests {
             }],
             ..ItemDefinition::default()
         };
-        assert!(!item_group_contents_insertion_supported(
+        assert!(!runtime_item_pocket_projection_is_lossless(
             &unsupported,
             &empty_prototype(),
         ));
@@ -2305,7 +2813,7 @@ mod tests {
             }],
             ..ItemDefinition::default()
         };
-        assert!(!item_group_contents_insertion_supported(
+        assert!(!runtime_item_pocket_projection_is_lossless(
             &multi_ammo_integral,
             &empty_prototype(),
         ));
@@ -2323,7 +2831,7 @@ mod tests {
             }],
             ..ItemDefinition::default()
         };
-        assert!(!item_group_contents_insertion_supported(
+        assert!(!runtime_item_pocket_projection_is_lossless(
             &lost_well,
             &empty_prototype(),
         ));
@@ -2352,7 +2860,7 @@ mod tests {
             reloadable: true,
             unloadable: true,
         }];
-        assert!(item_group_contents_insertion_supported(
+        assert!(runtime_item_pocket_projection_is_lossless(
             &one_ammo_integral,
             &projected,
         ));

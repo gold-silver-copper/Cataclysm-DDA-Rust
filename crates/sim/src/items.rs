@@ -2,21 +2,22 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     AmmunitionContainerPocketSnapshotV1, CraftItemPrototypeV1, CreatureCorpseSnapshotV1,
-    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
+    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_ROT_TURNS_VARIABLE,
+    ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
     ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS, IntegralMagazinePocketSnapshotV1,
-    ItemComponentSnapshotV1, ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1,
-    ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1, ItemGroupContainerV1,
-    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupGraphV1,
-    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
-    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1,
-    ItemId, ItemSnapshot, ItemSnippetV1, ItemTemperatureStateV1, ItemVariableValueV1,
-    ItemVariantV1, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH,
-    MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_RAW_DAMAGE, MAX_ITEM_VARIABLES,
-    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
+    ItemComponentSnapshotV1, ItemContainmentProfileV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1,
+    ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1,
+    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
+    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
+    ItemGroupVariantOptionV1, ItemId, ItemSnapshot, ItemSnippetV1, ItemTemperatureStateV1,
+    ItemVariableValueV1, ItemVariantV1, MAX_CRAFT_RECIPE_ID_BYTES, MAX_EXPANDED_DESCRIPTION_BYTES,
+    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_RAW_DAMAGE,
+    MAX_ITEM_VARIABLES, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
     RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, decode_item_group_dressing_marker,
     initial_item_temperature_state, is_reserved_item_group_dressing_marker,
     item_containment_single_charge_volume_milliliters, item_containment_volume_milliliters,
-    item_containment_weight_milligrams,
+    item_containment_weight_milligrams, item_rot_state, item_rot_variables_are_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -59,7 +60,30 @@ pub(super) struct ItemInstance {
 
 impl ItemInstance {
     pub(super) fn process_temperature(&mut self, current_tick: SimTick) -> Result<(), SimError> {
-        process_temperature_state(&mut self.temperature, current_tick)?;
+        self.process_temperature_and_rot(current_tick, false)
+            .map(|_| ())
+    }
+
+    pub(super) fn process_temperature_and_rot(
+        &mut self,
+        current_tick: SimTick,
+        removable: bool,
+    ) -> Result<bool, SimError> {
+        self.process_temperature_and_rot_with_insulation(current_tick, removable, 1.0)
+    }
+
+    fn process_temperature_and_rot_with_insulation(
+        &mut self,
+        current_tick: SimTick,
+        removable: bool,
+        parent_insulation: f32,
+    ) -> Result<bool, SimError> {
+        let rotten_away = process_item_temperature_and_rot_state(
+            &mut self.temperature,
+            &mut self.variables,
+            current_tick,
+            parent_insulation,
+        )?;
         if let Some(components) = &mut self.component_provenance {
             for component in components {
                 process_component_temperature(component, current_tick)?;
@@ -67,20 +91,64 @@ impl ItemInstance {
         }
         for pocket in &mut self.integral_magazines {
             if let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() {
-                process_item_snapshot_temperature(ammunition, current_tick)?;
+                let remove = process_item_snapshot_temperature_and_rot(
+                    ammunition,
+                    current_tick,
+                    removable,
+                    parent_insulation,
+                )?;
+                if remove {
+                    pocket.loaded_ammunition = None;
+                }
             }
         }
         for well in &mut self.magazine_wells {
             if let Some(magazine) = well.installed_magazine.as_deref_mut() {
-                process_item_snapshot_temperature(magazine, current_tick)?;
+                let remove = process_item_snapshot_temperature_and_rot(
+                    magazine,
+                    current_tick,
+                    removable,
+                    parent_insulation,
+                )?;
+                if remove {
+                    well.installed_magazine = None;
+                }
             }
         }
+        let pocket_insulations = self
+            .ammunition_containers
+            .iter()
+            .map(|pocket| {
+                (
+                    pocket.pocket_index,
+                    cdda_protocol::item_pocket_insulation(&self.variables, pocket.pocket_index)
+                        .unwrap_or(1.0)
+                        .max(parent_insulation),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         for pocket in &mut self.ammunition_containers {
-            for content in &mut pocket.contents {
-                process_item_snapshot_temperature(content, current_tick)?;
+            let insulation = *pocket_insulations
+                .get(&pocket.pocket_index)
+                .ok_or(SimError::InvalidItem)?;
+            let mut index = 0;
+            while index < pocket.contents.len() {
+                if process_item_snapshot_temperature_and_rot(
+                    pocket
+                        .contents
+                        .get_mut(index)
+                        .ok_or(SimError::InvalidItem)?,
+                    current_tick,
+                    removable,
+                    insulation,
+                )? {
+                    pocket.contents.remove(index);
+                } else {
+                    index += 1;
+                }
             }
         }
-        Ok(())
+        Ok(removable && rotten_away)
     }
 
     pub(super) fn force_fit_if_variable_size(&mut self) {
@@ -384,16 +452,16 @@ impl ItemInstance {
 fn process_temperature_state(
     state: &mut Option<ItemTemperatureStateV1>,
     current_tick: SimTick,
-) -> Result<(), SimError> {
+) -> Result<Option<u64>, SimError> {
     let Some(state) = state else {
-        return Ok(());
+        return Ok(None);
     };
     let elapsed = current_tick
         .0
         .checked_sub(state.last_check_tick.0)
         .ok_or(SimError::InvalidItem)?;
     if elapsed < ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS {
-        return Ok(());
+        return Ok(None);
     }
     match (
         state.temperature_millikelvin,
@@ -417,35 +485,194 @@ fn process_temperature_state(
         _ => return Err(SimError::InvalidItem),
     }
     state.last_check_tick = current_tick;
-    Ok(())
+    Ok(Some(elapsed / SimTick::HZ))
+}
+
+const NORMAL_AMBIENT_HOURLY_ROT_TURNS: u64 = 4_099;
+const SECONDS_PER_HOUR: u64 = 60 * 60;
+const STATIC_CORPSE_REMOVAL_TURNS: u64 = 10 * 24 * 60 * 60;
+
+/// Exact integer projection of the pinned 20 C rot curve. Upstream produces
+/// 683 turns for ten minutes and 4,099 for one hour; normal runtime cadence is
+/// ten minutes, so repeated checks retain the same per-call truncation.
+#[must_use]
+pub fn normal_ambient_rot_increment_turns(elapsed_seconds: u64) -> Option<u64> {
+    elapsed_seconds
+        .checked_mul(NORMAL_AMBIENT_HOURLY_ROT_TURNS)?
+        .checked_div(SECONDS_PER_HOUR)
+}
+
+#[must_use]
+pub fn rot_has_rotten_away(
+    shelf_life_turns: u64,
+    rot_turns: u64,
+    static_corpse: bool,
+) -> Option<bool> {
+    let threshold = if static_corpse {
+        STATIC_CORPSE_REMOVAL_TURNS
+    } else {
+        shelf_life_turns.checked_mul(2)?
+    };
+    Some(rot_turns > threshold)
+}
+
+pub(super) fn item_rot_metadata_is_valid(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    comestible_type: &str,
+    containment: &ItemContainmentProfileV1,
+    has_temperature: bool,
+    raw_damage: u16,
+) -> bool {
+    if !item_rot_variables_are_valid(variables) {
+        return false;
+    }
+    let corpse = containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+        .is_ok();
+    let corpse_source = variables.get(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE);
+    match item_rot_state(variables) {
+        Some((shelf_life_turns, _)) if corpse => {
+            has_temperature
+                && raw_damage == MAX_ITEM_RAW_DAMAGE
+                && shelf_life_turns == ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS
+                && matches!(
+                    corpse_source,
+                    Some(ItemVariableValueV1::String(source))
+                        if !source.is_empty()
+                            && source.len() <= MAX_CRAFT_RECIPE_ID_BYTES
+                            && source.chars().all(|character| !character.is_control())
+                )
+        }
+        Some(_) => has_temperature && !comestible_type.is_empty() && corpse_source.is_none(),
+        None => {
+            corpse_source.is_none() && !corpse && (!has_temperature || !comestible_type.is_empty())
+        }
+    }
+}
+
+fn process_item_temperature_and_rot_state(
+    temperature: &mut Option<ItemTemperatureStateV1>,
+    variables: &mut BTreeMap<String, ItemVariableValueV1>,
+    current_tick: SimTick,
+    insulation: f32,
+) -> Result<bool, SimError> {
+    if !insulation.is_finite() || insulation <= 0.0 {
+        return Err(SimError::InvalidItem);
+    }
+    let elapsed_seconds = process_temperature_state(temperature, current_tick)?;
+    if !item_rot_variables_are_valid(variables) {
+        return Err(SimError::InvalidItem);
+    }
+    let Some((shelf_life_turns, previous_rot_turns)) = item_rot_state(variables) else {
+        return Ok(false);
+    };
+    let Some(elapsed_seconds) = elapsed_seconds else {
+        return Ok(false);
+    };
+    let static_corpse = variables.contains_key(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE);
+    if !static_corpse
+        && rot_has_rotten_away(shelf_life_turns, previous_rot_turns, false)
+            .ok_or(SimError::NumericOverflow)?
+    {
+        return Ok(true);
+    }
+    let increment =
+        normal_ambient_rot_increment_turns(elapsed_seconds).ok_or(SimError::NumericOverflow)?;
+    let rot_turns = previous_rot_turns
+        .checked_add(increment)
+        .ok_or(SimError::NumericOverflow)?;
+    let rot_turns_i64 = i64::try_from(rot_turns).map_err(|_| SimError::NumericOverflow)?;
+    let Some(ItemVariableValueV1::Integer(stored_rot)) = variables.get_mut(ITEM_ROT_TURNS_VARIABLE)
+    else {
+        return Err(SimError::InvalidItem);
+    };
+    *stored_rot = rot_turns_i64;
+    rot_has_rotten_away(shelf_life_turns, rot_turns, static_corpse).ok_or(SimError::NumericOverflow)
 }
 
 pub(super) fn process_item_snapshot_temperature(
     item: &mut ItemSnapshot,
     current_tick: SimTick,
 ) -> Result<(), SimError> {
-    process_temperature_state(&mut item.temperature, current_tick)?;
+    process_item_snapshot_temperature_and_rot(item, current_tick, false, 1.0).map(|_| ())
+}
+
+fn process_item_snapshot_temperature_and_rot(
+    item: &mut ItemSnapshot,
+    current_tick: SimTick,
+    removable: bool,
+    parent_insulation: f32,
+) -> Result<bool, SimError> {
+    let rotten_away = process_item_temperature_and_rot_state(
+        &mut item.temperature,
+        &mut item.variables,
+        current_tick,
+        parent_insulation,
+    )?;
     if let Some(components) = &mut item.component_provenance {
         for component in components {
             process_component_temperature(component, current_tick)?;
         }
     }
     for pocket in &mut item.integral_magazines {
-        if let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut() {
-            process_item_snapshot_temperature(ammunition, current_tick)?;
+        if let Some(ammunition) = pocket.loaded_ammunition.as_deref_mut()
+            && process_item_snapshot_temperature_and_rot(
+                ammunition,
+                current_tick,
+                removable,
+                parent_insulation,
+            )?
+        {
+            pocket.loaded_ammunition = None;
         }
     }
     for well in &mut item.magazine_wells {
-        if let Some(magazine) = well.installed_magazine.as_deref_mut() {
-            process_item_snapshot_temperature(magazine, current_tick)?;
+        if let Some(magazine) = well.installed_magazine.as_deref_mut()
+            && process_item_snapshot_temperature_and_rot(
+                magazine,
+                current_tick,
+                removable,
+                parent_insulation,
+            )?
+        {
+            well.installed_magazine = None;
         }
     }
+    let pocket_insulations = item
+        .ammunition_containers
+        .iter()
+        .map(|pocket| {
+            (
+                pocket.pocket_index,
+                cdda_protocol::item_pocket_insulation(&item.variables, pocket.pocket_index)
+                    .unwrap_or(1.0)
+                    .max(parent_insulation),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     for pocket in &mut item.ammunition_containers {
-        for content in &mut pocket.contents {
-            process_item_snapshot_temperature(content, current_tick)?;
+        let insulation = *pocket_insulations
+            .get(&pocket.pocket_index)
+            .ok_or(SimError::InvalidItem)?;
+        let mut index = 0;
+        while index < pocket.contents.len() {
+            if process_item_snapshot_temperature_and_rot(
+                pocket
+                    .contents
+                    .get_mut(index)
+                    .ok_or(SimError::InvalidItem)?,
+                current_tick,
+                removable,
+                insulation,
+            )? {
+                pocket.contents.remove(index);
+            } else {
+                index += 1;
+            }
         }
     }
-    Ok(())
+    Ok(removable && rotten_away)
 }
 
 pub(super) fn item_temperature_timestamps_are_valid(
@@ -505,7 +732,12 @@ fn process_component_temperature(
     component: &mut ItemComponentSnapshotV1,
     current_tick: SimTick,
 ) -> Result<(), SimError> {
-    process_temperature_state(&mut component.temperature, current_tick)?;
+    process_item_temperature_and_rot_state(
+        &mut component.temperature,
+        &mut component.variables,
+        current_tick,
+        1.0,
+    )?;
     if let Some(children) = &mut component.component_provenance {
         for child in children {
             process_component_temperature(child, current_tick)?;
@@ -1223,6 +1455,9 @@ pub struct ItemGroupStaticCorpseProjection {
     pub wrapper_type: String,
     pub wrapper_raw_damage: u16,
     pub wrapper_damage_level: u16,
+    pub wrapper_pocket_forbidden: bool,
+    pub wrapper_pocket_unloadable: bool,
+    pub unloadable_content_count: usize,
     pub content_types: Vec<String>,
     pub content_raw_damage: Vec<u16>,
     pub content_damage_levels: Vec<u16>,
@@ -1483,10 +1718,22 @@ pub fn item_group_static_corpse_projection(
         .pocket_contents
         .get(&pocket_index)
         .ok_or(SimError::InvalidItem)?;
+    let pocket = planned
+        .prototype
+        .ammunition_containers
+        .iter()
+        .find(|pocket| pocket.pocket_index == pocket_index)
+        .ok_or(SimError::InvalidItem)?;
     Ok(ItemGroupStaticCorpseProjection {
         wrapper_type: planned.prototype.type_id,
         wrapper_raw_damage: planned.raw_damage,
         wrapper_damage_level: cdda_protocol::item_damage_level(planned.raw_damage),
+        wrapper_pocket_forbidden: pocket
+            .spawn_rules
+            .as_ref()
+            .is_some_and(|rules| rules.forbidden),
+        wrapper_pocket_unloadable: pocket.unloadable,
+        unloadable_content_count: if pocket.unloadable { contents.len() } else { 0 },
         content_types: contents
             .iter()
             .map(|content| content.prototype.type_id.clone())
@@ -3383,6 +3630,100 @@ mod tests {
         );
     }
 
+    fn perishable_item(shelf_life_turns: i64) -> ItemInstance {
+        let mut item =
+            item_from_craft_prototype(ItemId::new(1, 90), &temperature_prototype(), SimTick(0));
+        item.variables.insert(
+            cdda_protocol::ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(shelf_life_turns),
+        );
+        item.variables.insert(
+            ITEM_ROT_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(0),
+        );
+        item
+    }
+
+    #[test]
+    fn normal_ambient_rot_matches_exact_upstream_intervals_and_boundaries() {
+        assert_eq!(normal_ambient_rot_increment_turns(10 * 60), Some(683));
+        assert_eq!(normal_ambient_rot_increment_turns(60 * 60), Some(4_099));
+        assert_eq!(rot_has_rotten_away(86_400, 172_800, false), Some(false));
+        assert_eq!(rot_has_rotten_away(86_400, 172_801, false), Some(true));
+        assert_eq!(rot_has_rotten_away(86_400, 864_000, true), Some(false));
+        assert_eq!(rot_has_rotten_away(86_400, 864_001, true), Some(true));
+
+        let mut item = perishable_item(86_400);
+        assert!(!item
+            .process_temperature_and_rot(
+                SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                true,
+            )
+            .expect("ten-minute rot should process"));
+        assert_eq!(item_rot_state(&item.variables), Some((86_400, 683)));
+
+        let mut carried = perishable_item(86_400);
+        carried.variables.insert(
+            ITEM_ROT_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(172_800),
+        );
+        assert!(
+            !carried
+                .process_temperature_and_rot(
+                    SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                    false,
+                )
+                .expect("carried rotten food should remain physical")
+        );
+        assert_eq!(item_rot_state(&carried.variables), Some((86_400, 173_483)));
+
+        let mut ground = perishable_item(86_400);
+        ground.variables.insert(
+            ITEM_ROT_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(172_800),
+        );
+        assert!(ground
+            .process_temperature_and_rot(
+                SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                true,
+            )
+            .expect("ground rotten food should be removable"));
+    }
+
+    #[test]
+    fn nested_ground_rot_removes_only_the_rotten_owned_content() {
+        let mut outer = item_from_craft_prototype(
+            ItemId::new(1, 91),
+            &leaf_item("lunchbox").prototype,
+            SimTick(0),
+        );
+        let mut content = perishable_item(86_400);
+        content.variables.insert(
+            ITEM_ROT_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(172_800),
+        );
+        outer
+            .ammunition_containers
+            .push(AmmunitionContainerPocketSnapshotV1 {
+                pocket_index: 0,
+                pocket_id: String::from("CONTAINER"),
+                capacities: Vec::new(),
+                rigid: true,
+                access_moves: 100,
+                reloadable: false,
+                unloadable: true,
+                spawn_state: None,
+                contents: vec![content.snapshot()],
+            });
+        assert!(!outer
+            .process_temperature_and_rot(
+                SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                true,
+            )
+            .expect("outer container should process nested rot"));
+        assert!(outer.ammunition_containers[0].contents.is_empty());
+    }
+
     #[test]
     fn temperature_processing_walks_physical_container_contents() {
         let birth_tick = SimTick(77);
@@ -3399,6 +3740,11 @@ mod tests {
             false,
         )];
         let mut owner = item_from_craft_prototype(ItemId::new(1, 1), &owner_prototype, birth_tick);
+        let insulation_key = cdda_protocol::item_pocket_insulation_variable_key(0);
+        owner.variables.insert(
+            insulation_key.clone(),
+            ItemVariableValueV1::Integer(i64::from(10.0_f32.to_bits())),
+        );
         owner.ammunition_containers[0].contents.push(child);
         assert!(item_temperature_timestamps_are_valid(
             &owner.snapshot(),
@@ -3421,6 +3767,11 @@ mod tests {
             ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN
         );
         assert_eq!(child_state.last_check_tick, processing_tick);
+        assert_eq!(
+            cdda_protocol::item_pocket_insulation(&owner.variables, 0),
+            Some(10.0),
+        );
+        assert!(owner.variables.contains_key(&insulation_key));
     }
 
     fn variant(id: &str, weight: u32) -> ItemGroupVariantOptionV1 {

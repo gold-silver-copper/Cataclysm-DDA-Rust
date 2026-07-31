@@ -108,13 +108,15 @@ impl StartLocationDefinition {
         self.city_sizes.minimum > 0 || self.city_distance.maximum < 180
     }
 
-    /// Selection can run before city generation only when city constraints,
-    /// mapgen parameters, and map-preparation/player-placement flags are absent.
+    /// Selection can run before city generation only when city constraints and
+    /// mapgen parameters are absent and every placement flag is already
+    /// represented. `ALLOW_OUTSIDE` only relaxes the indoor-tile requirement;
+    /// the canonical first-available selector already accepts outdoor tiles.
     #[must_use]
     pub fn is_runtime_selectable_without_cities(&self) -> bool {
         !self.requires_city()
             && self.allowed_z_levels.contains(0)
-            && self.flags.is_empty()
+            && self.flags.iter().all(|flag| flag == "ALLOW_OUTSIDE")
             && self
                 .targets
                 .iter()
@@ -726,7 +728,7 @@ mod tests {
         let field = registry
             .get("sloc_field")
             .expect("field start should exist");
-        assert!(!field.is_runtime_selectable_without_cities());
+        assert!(field.is_runtime_selectable_without_cities());
         assert_eq!(field.flags, BTreeSet::from([String::from("ALLOW_OUTSIDE")]));
         assert_eq!(field.targets.len(), 1);
         assert_eq!(field.targets[0].overmap_terrain, "field");

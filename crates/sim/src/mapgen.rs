@@ -1,10 +1,10 @@
 use cdda_protocol::{
-    ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1, WorldPosition,
-    WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
-    WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_omt_identity_at,
-    worldgen_omt_matches, worldgen_overmap_contains,
+    ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1,
+    MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, WorldPosition, WorldgenCatalogV1,
+    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
+    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -21,31 +21,23 @@ const OMT_TILE_COUNT: usize = OMT_TILE_WIDTH * OMT_TILE_WIDTH;
 pub(super) fn catalog_fits_one_id_reservation(
     catalog: &WorldgenCatalogV1,
     item_groups: &[ItemGroupDefinitionV1],
-    radius_submaps: i32,
+    _radius_submaps: i32,
 ) -> bool {
-    let Some(omt_cells_per_axis) = u64::try_from(radius_submaps)
-        .ok()
-        .and_then(|radius| radius.checked_add(1))
-    else {
-        return false;
-    };
-    let Some(maximum_new_omts) = omt_cells_per_axis.checked_mul(omt_cells_per_axis) else {
-        return false;
-    };
+    // Every placement must fit atomically. The aggregate worst case is not a
+    // useful admission bound for low-chance production groups: planning uses
+    // actual deterministic rolls, caps the complete bubble before mutation,
+    // and the allocator still rejects any exhausted reservation at commit.
     catalog.omt_generators.iter().all(|generator| {
         generator.templates.iter().all(|template| {
-            let maximum_per_omt = template.cells.iter().try_fold(0_u64, |total, cell| {
-                let outputs = cell.item_group.as_ref().map_or(Some(0), |placement| {
+            template.cells.iter().all(|cell| {
+                cell.item_group.as_ref().is_none_or(|placement| {
                     item_group_source_max_outputs(
                         &ItemGroupSourceV1::Group(placement.group_id.clone()),
                         item_groups,
                     )
-                })?;
-                total.checked_add(outputs)
-            });
-            maximum_per_omt
-                .and_then(|maximum| maximum.checked_mul(maximum_new_omts))
-                .is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
+                    .is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
+                })
+            })
         })
     })
 }
@@ -456,21 +448,35 @@ fn resolve_terrain(
     target: &WorldgenTerrainTargetV1,
     rng: &mut ChaCha8Rng,
 ) -> Result<cdda_protocol::TerrainTileSnapshot, SimError> {
-    let prototype_index = match target {
-        WorldgenTerrainTargetV1::Prototype(index) => *index,
+    let (mut prototype_index, mut resolution_depth) = match target {
+        WorldgenTerrainTargetV1::Prototype(index) => (*index, 0_usize),
         WorldgenTerrainTargetV1::Regional(index) => {
             let table = catalog
                 .regional_terrain
                 .get(usize::from(*index))
                 .ok_or(SimError::InvalidTerrain)?;
-            choose_prototype(&table.choices, rng)?
+            (choose_prototype(&table.choices, rng)?, 1)
         }
     };
-    catalog
-        .terrain_prototypes
-        .get(usize::from(prototype_index))
-        .cloned()
-        .ok_or(SimError::InvalidTerrain)
+    loop {
+        let prototype = catalog
+            .terrain_prototypes
+            .get(usize::from(prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let Ok(regional_index) = catalog.regional_terrain.binary_search_by(|table| {
+            table
+                .regional_id
+                .as_str()
+                .cmp(prototype.terrain_id.as_str())
+        }) else {
+            return Ok(prototype.clone());
+        };
+        if resolution_depth >= MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH {
+            return Err(SimError::InvalidTerrain);
+        }
+        resolution_depth += 1;
+        prototype_index = choose_prototype(&catalog.regional_terrain[regional_index].choices, rng)?;
+    }
 }
 
 fn choose_prototype(
@@ -498,27 +504,42 @@ fn resolve_furniture(
     target: &WorldgenFurnitureTargetV1,
     rng: &mut ChaCha8Rng,
 ) -> Result<Option<FurnitureTileSnapshot>, SimError> {
-    let target = match target {
+    let (mut target, mut resolution_depth) = match target {
         WorldgenFurnitureTargetV1::None => return Ok(None),
-        WorldgenFurnitureTargetV1::Prototype(index) => {
-            WorldgenFurniturePrototypeTargetV1::Prototype(*index)
-        }
+        WorldgenFurnitureTargetV1::Prototype(index) => (
+            WorldgenFurniturePrototypeTargetV1::Prototype(*index),
+            0_usize,
+        ),
         WorldgenFurnitureTargetV1::Regional(index) => {
             let table = catalog
                 .regional_furniture
                 .get(usize::from(*index))
                 .ok_or(SimError::InvalidFurniture)?;
-            choose_furniture_prototype(&table.choices, rng)?
+            (choose_furniture_prototype(&table.choices, rng)?, 1)
         }
     };
-    match target {
-        WorldgenFurniturePrototypeTargetV1::None => Ok(None),
-        WorldgenFurniturePrototypeTargetV1::Prototype(index) => catalog
+    loop {
+        let WorldgenFurniturePrototypeTargetV1::Prototype(index) = target else {
+            return Ok(None);
+        };
+        let prototype = catalog
             .furniture_prototypes
             .get(usize::from(index))
-            .cloned()
-            .map(Some)
-            .ok_or(SimError::InvalidFurniture),
+            .ok_or(SimError::InvalidFurniture)?;
+        let Ok(regional_index) = catalog.regional_furniture.binary_search_by(|table| {
+            table
+                .regional_id
+                .as_str()
+                .cmp(prototype.furniture_id.as_str())
+        }) else {
+            return Ok(Some(prototype.clone()));
+        };
+        if resolution_depth >= MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH {
+            return Err(SimError::InvalidFurniture);
+        }
+        resolution_depth += 1;
+        target =
+            choose_furniture_prototype(&catalog.regional_furniture[regional_index].choices, rng)?;
     }
 }
 

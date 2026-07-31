@@ -2090,6 +2090,7 @@ name = "cdda-server"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "cdda-conformance",
  "cdda-content",
  "cdda-net",
  "cdda-persistence",

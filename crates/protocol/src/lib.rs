@@ -11,6 +11,8 @@ mod item_groups;
 
 pub use item_groups::{
     ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_GROUP_DRESSING_MARKER_PREFIX,
+    ITEM_POCKET_INSULATION_VARIABLE_PREFIX, ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE,
+    ITEM_ROT_TURNS_VARIABLE, ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS,
     ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
     ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G, ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
@@ -27,7 +29,9 @@ pub use item_groups::{
     decode_item_group_dressing_marker, encode_item_group_dressing_marker,
     initial_item_temperature_state, is_reserved_item_group_dressing_marker,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_group_sources_are_valid, item_snippet_is_valid,
+    item_group_source_max_outputs, item_group_sources_are_valid, item_pocket_insulation,
+    item_pocket_insulation_variable_key, item_pocket_insulation_variables_are_valid,
+    item_rot_state, item_rot_variables_are_valid, item_snippet_is_valid,
     item_temperature_state_matches_phase, item_variant_is_valid,
     spawn_pocket_external_volume_milliliters, spawn_pocket_has_item_restrictions,
     spawn_pocket_is_single_item, valid_item_variables,
@@ -129,6 +133,7 @@ pub const MAX_WORLDGEN_FURNITURE_PROTOTYPES: usize = 1_024;
 pub const MAX_WORLDGEN_REGIONAL_TABLES: usize = 256;
 pub const MAX_WORLDGEN_REGIONAL_CHOICES: usize = 256;
 pub const MAX_WORLDGEN_REGIONAL_CHOICES_TOTAL: usize = 8_192;
+pub const MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH: usize = 32;
 pub const MAX_WORLDGEN_OMT_GENERATORS: usize = 512;
 pub const MAX_WORLDGEN_TEMPLATES_PER_OMT: usize = 32;
 pub const MAX_WORLDGEN_TEMPLATES: usize = 512;
@@ -2739,9 +2744,10 @@ pub struct FurnitureTileSnapshot {
     pub floor_bedding_warmth: i32,
 }
 
-/// A weighted concrete prototype reference used by a regional terrain table.
-/// Choice order is canonical and intentionally retained because it determines
-/// deterministic weighted-ticket intervals.
+/// A weighted prototype reference used by a regional terrain table. A
+/// prototype whose terrain ID names another regional table is a retained
+/// pseudo-terrain edge and causes a fresh weighted roll. Choice order is
+/// canonical because it determines deterministic ticket intervals.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenWeightedPrototypeV1 {
     pub prototype_index: u16,
@@ -3975,16 +3981,44 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
     if !item.tracks_temperature && item.thermal_properties.is_some() {
         return false;
     }
+    let static_corpse = item.tracks_temperature
+        && item
+            .containment
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+            .is_ok();
+    let mut variables = BTreeMap::new();
+    if static_corpse {
+        variables.insert(
+            ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
+            ItemVariableValueV1::String(String::from("prototype_corpse")),
+        );
+        variables.insert(
+            ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(
+                i64::try_from(ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS).unwrap_or(i64::MAX),
+            ),
+        );
+        variables.insert(
+            ITEM_ROT_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(0),
+        );
+    }
+    let raw_damage = if static_corpse {
+        MAX_ITEM_RAW_DAMAGE
+    } else {
+        0
+    };
     let snapshot = ItemSnapshot {
         id: ItemId::new(1, 1),
         type_id: item.type_id.clone(),
         charges: item.charges,
-        damage: 0,
-        raw_damage: 0,
+        damage: item_damage_level(raw_damage),
+        raw_damage,
         fitted: initial_item_fit_state(&item.containment),
         variant: None,
         snippet: None,
-        variables: BTreeMap::new(),
+        variables,
         melee_damage_milli: item.melee_damage_milli.clone(),
         calories: item.calories,
         quench: item.quench,
@@ -4255,6 +4289,96 @@ fn valid_worldgen_regional_furniture_table(
         })
 }
 
+fn valid_worldgen_regional_graph(edges: &[Vec<usize>]) -> bool {
+    fn longest_path(
+        index: usize,
+        edges: &[Vec<usize>],
+        visiting: &mut [bool],
+        resolved: &mut [Option<usize>],
+    ) -> Option<usize> {
+        if let Some(depth) = *resolved.get(index)? {
+            return Some(depth);
+        }
+        let active = visiting.get_mut(index)?;
+        if *active {
+            return None;
+        }
+        *active = true;
+        let mut depth = 1_usize;
+        for child in edges.get(index)? {
+            depth = depth.max(longest_path(*child, edges, visiting, resolved)?.checked_add(1)?);
+            if depth > MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH {
+                return None;
+            }
+        }
+        visiting[index] = false;
+        resolved[index] = Some(depth);
+        Some(depth)
+    }
+
+    let mut resolved = vec![None; edges.len()];
+    (0..edges.len()).all(|index| {
+        longest_path(index, edges, &mut vec![false; edges.len()], &mut resolved).is_some()
+    })
+}
+
+fn valid_worldgen_regional_terrain_graph(catalog: &WorldgenCatalogV1) -> bool {
+    let lookup = catalog
+        .regional_terrain
+        .iter()
+        .enumerate()
+        .map(|(index, table)| (table.regional_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let edges = catalog
+        .regional_terrain
+        .iter()
+        .map(|table| {
+            table
+                .choices
+                .iter()
+                .filter_map(|choice| {
+                    catalog
+                        .terrain_prototypes
+                        .get(usize::from(choice.prototype_index))
+                        .and_then(|prototype| lookup.get(prototype.terrain_id.as_str()))
+                        .copied()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    valid_worldgen_regional_graph(&edges)
+}
+
+fn valid_worldgen_regional_furniture_graph(catalog: &WorldgenCatalogV1) -> bool {
+    let lookup = catalog
+        .regional_furniture
+        .iter()
+        .enumerate()
+        .map(|(index, table)| (table.regional_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let edges = catalog
+        .regional_furniture
+        .iter()
+        .map(|table| {
+            table
+                .choices
+                .iter()
+                .filter_map(|choice| {
+                    let WorldgenFurniturePrototypeTargetV1::Prototype(index) = choice.target else {
+                        return None;
+                    };
+                    catalog
+                        .furniture_prototypes
+                        .get(usize::from(index))
+                        .and_then(|prototype| lookup.get(prototype.furniture_id.as_str()))
+                        .copied()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    valid_worldgen_regional_graph(&edges)
+}
+
 fn valid_worldgen_cell_shape(cell: &WorldgenCellV1, catalog: &WorldgenCatalogV1) -> bool {
     !cell.terrain.is_empty()
         && cell.terrain.len() <= MAX_WORLDGEN_CELL_CHOICES
@@ -4358,7 +4482,10 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         };
         regional_choice_count = total;
     }
-    if regional_choice_count > MAX_WORLDGEN_REGIONAL_CHOICES_TOTAL {
+    if regional_choice_count > MAX_WORLDGEN_REGIONAL_CHOICES_TOTAL
+        || !valid_worldgen_regional_terrain_graph(catalog)
+        || !valid_worldgen_regional_furniture_graph(catalog)
+    {
         return false;
     }
 
@@ -4640,6 +4767,38 @@ fn valid_item_snapshot(item: &ItemSnapshot) -> bool {
     valid_item_snapshot_at(item, 0)
 }
 
+fn valid_item_rot_metadata(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    comestible_type: &str,
+    containment: &ItemContainmentProfileV1,
+    has_temperature: bool,
+    raw_damage: u16,
+) -> bool {
+    if !item_rot_variables_are_valid(variables) {
+        return false;
+    }
+    let corpse = containment
+        .flags
+        .binary_search_by(|flag| flag.as_str().cmp("CORPSE"))
+        .is_ok();
+    let corpse_source = variables.get(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE);
+    match item_rot_state(variables) {
+        Some((shelf_life_turns, _)) if corpse => {
+            has_temperature
+                && raw_damage == MAX_ITEM_RAW_DAMAGE
+                && shelf_life_turns == ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS
+                && matches!(
+                    corpse_source,
+                    Some(ItemVariableValueV1::String(source)) if valid_recipe_id(source)
+                )
+        }
+        Some(_) => has_temperature && !comestible_type.is_empty() && corpse_source.is_none(),
+        None => {
+            corpse_source.is_none() && !corpse && (!has_temperature || !comestible_type.is_empty())
+        }
+    }
+}
+
 fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
     if depth > MAX_ITEM_COMPONENT_DEPTH {
         return false;
@@ -4684,7 +4843,19 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
             .temperature
             .as_ref()
             .is_none_or(|temperature| temperature.current_phase == item.containment.phase)
-        && (item.temperature.is_none() || !item.comestible_type.is_empty())
+        && valid_item_rot_metadata(
+            &item.variables,
+            &item.comestible_type,
+            &item.containment,
+            item.temperature.is_some(),
+            item.raw_damage,
+        )
+        && item_pocket_insulation_variables_are_valid(
+            &item.variables,
+            item.ammunition_containers
+                .iter()
+                .map(|pocket| pocket.pocket_index),
+        )
         && item.ammunition_type.len() <= 64
         && item
             .ammunition_type
@@ -5467,7 +5638,20 @@ fn valid_item_component(
             .temperature
             .as_ref()
             .is_none_or(|temperature| temperature.current_phase == component.containment.phase)
-        && (component.temperature.is_none() || !component.comestible_type.is_empty())
+        && valid_item_rot_metadata(
+            &component.variables,
+            &component.comestible_type,
+            &component.containment,
+            component.temperature.is_some(),
+            component.raw_damage,
+        )
+        && item_pocket_insulation_variables_are_valid(
+            &component.variables,
+            component
+                .ammunition_containers
+                .iter()
+                .map(|pocket| pocket.pocket_index),
+        )
         && component.ammunition_type.len() <= 64
         && component
             .ammunition_type
@@ -6389,6 +6573,47 @@ mod tests {
         let decoded: WorldgenCatalogV1 =
             postcard::from_bytes(&encoded).expect("worldgen catalog should decode");
         assert_eq!(decoded, catalog);
+    }
+
+    #[test]
+    fn regional_graph_validation_is_bounded_for_shared_dags_and_cycles() {
+        let bounded_chain = (0..MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH)
+            .map(|index| {
+                (index + 1 < MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH)
+                    .then_some(index + 1)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(valid_worldgen_regional_graph(&bounded_chain));
+
+        let mut over_depth = bounded_chain.clone();
+        over_depth.push(Vec::new());
+        over_depth[MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH - 1]
+            .push(MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH);
+        assert!(!valid_worldgen_regional_graph(&over_depth));
+
+        let layer_width = MAX_WORLDGEN_REGIONAL_TABLES / MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH;
+        let shared_dag = (0..MAX_WORLDGEN_REGIONAL_TABLES)
+            .map(|index| {
+                let next_layer = index / layer_width + 1;
+                if next_layer < MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH {
+                    let start = next_layer * layer_width;
+                    (start..start + layer_width).collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            valid_worldgen_regional_graph(&shared_dag),
+            "the dense layered DAG must validate in linear graph time"
+        );
+
+        let mut cycle = vec![vec![1], vec![2], vec![0]];
+        assert!(!valid_worldgen_regional_graph(&cycle));
+        cycle[2].clear();
+        assert!(valid_worldgen_regional_graph(&cycle));
     }
 
     #[test]

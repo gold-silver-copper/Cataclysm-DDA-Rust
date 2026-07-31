@@ -17,21 +17,37 @@ use cdda_protocol::{
 
 use super::{furniture_tile, terrain_tile};
 
-/// Retains the previously runnable LMOE bootstrap inside the new bounded,
-/// coordinate-owned representation. Real regional field population cannot be
-/// admitted until its complete item-group modifier closure is supported.
+/// Retains the characterized LMOE layout for direct mapgen/start-selection
+/// tests. Production worlds use `bootstrap_regional_field_overmap`.
+#[cfg(test)]
 pub(super) fn bootstrap_lmoe_overmap(
     terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenOvermapLayoutV1, Box<dyn std::error::Error>> {
-    let lmoe = terrain
-        .get_identity("lmoe_north")
-        .ok_or("pinned overmap-terrain catalog is missing lmoe_north")?;
+    bootstrap_uniform_overmap(terrain, "lmoe_north")
+}
+
+/// Production pre-city layout for the regional-field milestone. Every OMT is
+/// a real pinned `field` identity and therefore executes the production field
+/// mapgen, regional terrain/furniture tables, and field item-group closure.
+pub(super) fn bootstrap_regional_field_overmap(
+    terrain: &OvermapTerrainRegistry,
+) -> Result<WorldgenOvermapLayoutV1, Box<dyn std::error::Error>> {
+    bootstrap_uniform_overmap(terrain, "field")
+}
+
+fn bootstrap_uniform_overmap(
+    terrain: &OvermapTerrainRegistry,
+    identity_id: &str,
+) -> Result<WorldgenOvermapLayoutV1, Box<dyn std::error::Error>> {
+    let source = terrain
+        .get_identity(identity_id)
+        .ok_or_else(|| format!("pinned overmap-terrain catalog is missing {identity_id}"))?;
     let identity = WorldgenOmtIdentityV1 {
-        full_id: lmoe.full_id.clone(),
-        type_id: lmoe.type_id.clone(),
-        subtype_id: lmoe.subtype_id.clone(),
-        generator_id: lmoe.generator_id.clone(),
-        rotation: lmoe.rotation,
+        full_id: source.full_id.clone(),
+        type_id: source.type_id.clone(),
+        subtype_id: source.subtype_id.clone(),
+        generator_id: source.generator_id.clone(),
+        rotation: source.rotation,
     };
     Ok(WorldgenOvermapLayoutV1 {
         origin_x: -90,
@@ -207,7 +223,7 @@ pub(super) fn runtime_mapgen_worldgen(
                     .map(|choice| {
                         Ok(WorldgenWeightedPrototypeV1 {
                             prototype_index: *terrain_indices.get(&choice.id).ok_or(
-                                "worldgen v2 cannot encode recursive regional terrain choices",
+                                "reachable regional terrain target disappeared from the prototype closure",
                             )?,
                             weight: choice.weight,
                         })
@@ -233,7 +249,7 @@ pub(super) fn runtime_mapgen_worldgen(
                         } else {
                             WorldgenFurniturePrototypeTargetV1::Prototype(
                                 *furniture_indices.get(&choice.id).ok_or(
-                                    "worldgen v2 cannot encode recursive regional furniture choices",
+                                    "reachable regional furniture target disappeared from the prototype closure",
                                 )?,
                             )
                         };
@@ -291,18 +307,15 @@ fn collect_runtime_terrain_choice(
     regional: &mut BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for id in choice.ids() {
-        if let Some(table) = regions.terrain_table(id) {
-            regional.insert(id.to_owned());
-            for replacement in &table.choices {
-                if regions.terrain_table(&replacement.id).is_some() {
-                    return Err(format!(
-                        "worldgen v2 cannot encode recursive regional terrain {} -> {}",
-                        id, replacement.id
-                    )
-                    .into());
-                }
-                concrete.insert(replacement.id.clone());
-            }
+        if regions.terrain_table(id).is_some() {
+            collect_runtime_regional_terrain_closure(
+                id,
+                regions,
+                terrain,
+                concrete,
+                regional,
+                &mut BTreeSet::new(),
+            )?;
         } else {
             let definition = terrain
                 .get(id)
@@ -313,6 +326,53 @@ fn collect_runtime_terrain_choice(
             concrete.insert(id.to_owned());
         }
     }
+    Ok(())
+}
+
+fn collect_runtime_regional_terrain_closure(
+    id: &str,
+    regions: &DefaultRegionTerrainFurnitureRegistry,
+    terrain: &TerrainRegistry,
+    concrete: &mut BTreeSet<String>,
+    regional: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if regional.contains(id) {
+        return Ok(());
+    }
+    if !visiting.insert(id.to_owned()) {
+        return Err(format!("recursive regional terrain cycle reached {id}").into());
+    }
+    let table = regions
+        .terrain_table(id)
+        .ok_or_else(|| format!("regional terrain table {id} disappeared"))?;
+    for replacement in &table.choices {
+        let definition = terrain.get(&replacement.id).ok_or_else(|| {
+            format!(
+                "regional terrain {} references missing terrain {}",
+                id, replacement.id
+            )
+        })?;
+        concrete.insert(replacement.id.clone());
+        if regions.terrain_table(&replacement.id).is_some() {
+            collect_runtime_regional_terrain_closure(
+                &replacement.id,
+                regions,
+                terrain,
+                concrete,
+                regional,
+                visiting,
+            )?;
+        } else if definition.flags.contains("REGION_PSEUDO") {
+            return Err(format!(
+                "regional terrain {} reaches pseudo terrain {} without a default table",
+                id, replacement.id
+            )
+            .into());
+        }
+    }
+    visiting.remove(id);
+    regional.insert(id.to_owned());
     Ok(())
 }
 
@@ -327,21 +387,15 @@ fn collect_runtime_furniture_choice(
         if id == "f_null" {
             continue;
         }
-        if let Some(table) = regions.furniture_table(id) {
-            regional.insert(id.to_owned());
-            for replacement in &table.choices {
-                if replacement.id == "f_null" {
-                    continue;
-                }
-                if regions.furniture_table(&replacement.id).is_some() {
-                    return Err(format!(
-                        "worldgen v2 cannot encode recursive regional furniture {} -> {}",
-                        id, replacement.id
-                    )
-                    .into());
-                }
-                concrete.insert(replacement.id.clone());
-            }
+        if regions.furniture_table(id).is_some() {
+            collect_runtime_regional_furniture_closure(
+                id,
+                regions,
+                furniture,
+                concrete,
+                regional,
+                &mut BTreeSet::new(),
+            )?;
         } else {
             let definition = furniture
                 .get(id)
@@ -352,6 +406,56 @@ fn collect_runtime_furniture_choice(
             concrete.insert(id.to_owned());
         }
     }
+    Ok(())
+}
+
+fn collect_runtime_regional_furniture_closure(
+    id: &str,
+    regions: &DefaultRegionTerrainFurnitureRegistry,
+    furniture: &FurnitureRegistry,
+    concrete: &mut BTreeSet<String>,
+    regional: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if regional.contains(id) {
+        return Ok(());
+    }
+    if !visiting.insert(id.to_owned()) {
+        return Err(format!("recursive regional furniture cycle reached {id}").into());
+    }
+    let table = regions
+        .furniture_table(id)
+        .ok_or_else(|| format!("regional furniture table {id} disappeared"))?;
+    for replacement in &table.choices {
+        if replacement.id == "f_null" {
+            continue;
+        }
+        let definition = furniture.get(&replacement.id).ok_or_else(|| {
+            format!(
+                "regional furniture {} references missing furniture {}",
+                id, replacement.id
+            )
+        })?;
+        concrete.insert(replacement.id.clone());
+        if regions.furniture_table(&replacement.id).is_some() {
+            collect_runtime_regional_furniture_closure(
+                &replacement.id,
+                regions,
+                furniture,
+                concrete,
+                regional,
+                visiting,
+            )?;
+        } else if definition.flags.contains("REGION_PSEUDO") {
+            return Err(format!(
+                "regional furniture {} reaches pseudo furniture {} without a default table",
+                id, replacement.id
+            )
+            .into());
+        }
+    }
+    visiting.remove(id);
+    regional.insert(id.to_owned());
     Ok(())
 }
 

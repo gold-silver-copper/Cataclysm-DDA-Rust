@@ -138,6 +138,9 @@ struct ItemGroupOracleObservationV1 {
     default_containers: Vec<ItemGroupDefaultContainerTraceV1>,
     flexible_wrappers: Vec<ItemGroupFlexibleWrapperTraceV1>,
     temperature_constructors: Vec<ItemGroupTemperatureConstructorTraceV1>,
+    #[serde(default)]
+    rot_family: Vec<ItemGroupRotTraceV1>,
+    insulated_container: ItemGroupInsulatedContainerTraceV1,
     named_snippet_categories: Vec<ItemGroupNamedSnippetCategoryTraceV1>,
     multi_pocket_wrappers: Vec<ItemGroupMultiPocketTraceV1>,
     containers: Vec<ItemGroupContainerObservationV1>,
@@ -470,6 +473,69 @@ struct ItemGroupTemperatureConstructorTraceV1 {
     frozen: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupRotTraceV1 {
+    case_id: String,
+    item_type: String,
+    corpse: bool,
+    goes_bad: bool,
+    shelf_life_turns: i64,
+    rot_after_ten_minutes: i64,
+    rot_after_one_hour: i64,
+    removal_threshold_turns: i64,
+    removed_at_threshold: bool,
+    removed_after_threshold: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemGroupInsulatedContainerTraceV1 {
+    item_type: String,
+    pocket_index: u16,
+    insulation_milli: i32,
+}
+
+const ITEM_GROUP_ROT_CASES: [(&str, &str, bool, i64); 22] = [
+    ("food_apple", "apple", false, 576_000),
+    ("food_banana", "banana", false, 432_000),
+    ("food_cheeseburger", "cheeseburger", false, 129_600),
+    ("food_fish_sandwich", "fish_sandwich", false, 86_400),
+    ("food_hamburger", "hamburger", false, 129_600),
+    ("food_orange", "orange", false, 1_814_400),
+    ("food_sandwich_cheese", "sandwich_cheese", false, 129_600),
+    (
+        "food_sandwich_cucumber",
+        "sandwich_cucumber",
+        false,
+        129_600,
+    ),
+    ("food_sandwich_deluxe", "sandwich_deluxe", false, 115_200),
+    ("food_sandwich_jam", "sandwich_jam", false, 133_200),
+    (
+        "food_sandwich_jam_butter",
+        "sandwich_jam_butter",
+        false,
+        133_200,
+    ),
+    ("food_sandwich_pb", "sandwich_pb", false, 129_600),
+    ("food_sandwich_pbf", "sandwich_pbf", false, 129_600),
+    ("food_sandwich_pbh", "sandwich_pbh", false, 129_600),
+    ("food_sandwich_pbj", "sandwich_pbj", false, 129_600),
+    ("food_sandwich_pbm", "sandwich_pbm", false, 129_600),
+    ("food_sandwich_reuben", "sandwich_reuben", false, 115_200),
+    ("food_sandwich_t", "sandwich_t", false, 129_600),
+    ("food_sandwich_veggy", "sandwich_veggy", false, 172_800),
+    ("corpse_child_calm", "corpse_child_calm", true, 86_400),
+    (
+        "corpse_generic_female",
+        "corpse_generic_female",
+        true,
+        86_400,
+    ),
+    ("corpse_generic_male", "corpse_generic_male", true, 86_400),
+];
+
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ItemGroupDefaultContainerTraceV1 {
@@ -698,6 +764,9 @@ struct ItemGroupCorpseTraceV1 {
     wrapper_type: String,
     wrapper_raw_damage: i32,
     wrapper_damage_level: i32,
+    wrapper_pocket_forbidden: bool,
+    wrapper_pocket_no_unload: bool,
+    unloadable_content_count: usize,
     content_types: Vec<String>,
     content_raw_damage: Vec<i32>,
     content_damage_levels: Vec<i32>,
@@ -708,6 +777,9 @@ struct ItemGroupCorpseDirectTraceV1 {
     wrapper_type: String,
     wrapper_raw_damage: i32,
     wrapper_damage_level: i32,
+    wrapper_pocket_forbidden: bool,
+    wrapper_pocket_no_unload: bool,
+    unloadable_content_count: usize,
     content_types: Vec<String>,
     content_raw_damage: Vec<i32>,
     content_damage_levels: Vec<i32>,
@@ -719,6 +791,9 @@ impl ItemGroupCorpseTraceV1 {
             wrapper_type: self.wrapper_type.clone(),
             wrapper_raw_damage: self.wrapper_raw_damage,
             wrapper_damage_level: self.wrapper_damage_level,
+            wrapper_pocket_forbidden: self.wrapper_pocket_forbidden,
+            wrapper_pocket_no_unload: self.wrapper_pocket_no_unload,
+            unloadable_content_count: self.unloadable_content_count,
             content_types: self.content_types.clone(),
             content_raw_damage: self.content_raw_damage.clone(),
             content_damage_levels: self.content_damage_levels.clone(),
@@ -996,6 +1071,16 @@ pub(crate) fn check(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Er
                 "item constructor temperature state",
                 &observation.temperature_constructors,
                 &rust_item_group_temperature_constructor_observation(workspace)?,
+            )?;
+            compare_direct_observation(
+                "item rot shelf life, ambient increments, and removal boundaries",
+                &observation.rot_family,
+                &rust_item_group_rot_observation(workspace)?,
+            )?;
+            compare_direct_observation(
+                "item-group insulated container metadata",
+                &observation.insulated_container,
+                &rust_item_group_insulated_container_observation(workspace)?,
             )?;
             compare_direct_observation(
                 "item-group charge-capacity sentinels",
@@ -2191,6 +2276,42 @@ fn validate_item_group_observation(
         )
         .into());
     }
+    if observation.rot_family.len() != ITEM_GROUP_ROT_CASES.len()
+        || observation.rot_family.iter().zip(ITEM_GROUP_ROT_CASES).any(
+            |(actual, (case_id, item_type, corpse, shelf_life_turns))| {
+                let removal_threshold_turns = if corpse {
+                    10 * 24 * 60 * 60
+                } else {
+                    shelf_life_turns * 2
+                };
+                actual.case_id != case_id
+                    || actual.item_type != item_type
+                    || actual.corpse != corpse
+                    || !actual.goes_bad
+                    || actual.shelf_life_turns != shelf_life_turns
+                    || actual.rot_after_ten_minutes != 683
+                    || actual.rot_after_one_hour != 4_099
+                    || actual.removal_threshold_turns != removal_threshold_turns
+                    || actual.removed_at_threshold
+                    || !actual.removed_after_threshold
+            },
+        )
+    {
+        return Err(format!(
+            "item rot characterization is incomplete: {:?}",
+            observation.rot_family
+        )
+        .into());
+    }
+    if observation.insulated_container
+        != (ItemGroupInsulatedContainerTraceV1 {
+            item_type: String::from("thermos"),
+            pocket_index: 0,
+            insulation_milli: 10_000,
+        })
+    {
+        return Err("item-group insulated-container characterization is incomplete".into());
+    }
     let expected_named_snippets = [
         (
             "months_old_news",
@@ -2356,6 +2477,9 @@ fn validate_item_group_observation(
                     || trace.wrapper_type.is_empty()
                     || trace.wrapper_raw_damage != 4_000
                     || trace.wrapper_damage_level != 5
+                    || !trace.wrapper_pocket_forbidden
+                    || trace.wrapper_pocket_no_unload
+                    || trace.unloadable_content_count != trace.content_types.len()
                     || trace.content_types.is_empty()
                     || trace.content_types.len() != trace.content_raw_damage.len()
                     || trace.content_types.len() != trace.content_damage_levels.len()
@@ -3576,7 +3700,7 @@ fn rust_item_group_static_corpse_observation(
                 rigid: false,
                 access_moves: 100,
                 reloadable: false,
-                unloadable: false,
+                unloadable: true,
                 spawn_rules: Some(SpawnPocketRulesV1 {
                     kind: SpawnPocketKindV1::Container,
                     max_contains_volume_milliliters: 1,
@@ -3612,6 +3736,9 @@ fn rust_item_group_static_corpse_observation(
                 wrapper_type: projection.wrapper_type,
                 wrapper_raw_damage: i32::from(projection.wrapper_raw_damage),
                 wrapper_damage_level: i32::from(projection.wrapper_damage_level),
+                wrapper_pocket_forbidden: projection.wrapper_pocket_forbidden,
+                wrapper_pocket_no_unload: !projection.wrapper_pocket_unloadable,
+                unloadable_content_count: projection.unloadable_content_count,
                 content_types: projection.content_types,
                 content_raw_damage: projection
                     .content_raw_damage
@@ -3736,6 +3863,113 @@ fn rust_item_group_temperature_constructor_observation(
     })
     .collect::<Result<Vec<_>, String>>()
     .map_err(Into::into)
+}
+
+fn rust_item_group_rot_observation(
+    workspace: &Path,
+) -> Result<Vec<ItemGroupRotTraceV1>, Box<dyn std::error::Error>> {
+    let manifest_path = workspace.join("vendor/cdda-content-manifest.json");
+    let manifest = ContentManifest::load(&manifest_path)?;
+    let content_root = manifest_path
+        .parent()
+        .ok_or("pinned content manifest has no parent directory")?;
+    let mods = ModCatalog::load(&manifest, content_root)?;
+    let enabled = mods.recommended_new_world()?;
+    let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    ITEM_GROUP_ROT_CASES
+        .into_iter()
+        .map(
+            |(case_id, item_type, corpse, expected_shelf_life)| -> Result<
+                _,
+                Box<dyn std::error::Error>,
+            > {
+            let item = items
+                .get(item_type)
+                .ok_or_else(|| format!("pinned rot item {item_type} disappeared"))?;
+            let actual_corpse = item.flags.contains("CORPSE");
+            let shelf_life_turns = if actual_corpse {
+                i64::try_from(cdda_protocol::ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS)?
+            } else {
+                i64::try_from(item.spoilage_lifetime_seconds)?
+            };
+            if actual_corpse != corpse || shelf_life_turns != expected_shelf_life {
+                return Err(format!(
+                    "pinned rot item {item_type} changed family or shelf life"
+                )
+                .into());
+            }
+            let removal_threshold_turns = if corpse {
+                10 * 24 * 60 * 60
+            } else {
+                shelf_life_turns
+                    .checked_mul(2)
+                    .ok_or("rot threshold overflow")?
+            };
+            let removal_threshold_u64 = u64::try_from(removal_threshold_turns)?;
+            Ok(ItemGroupRotTraceV1 {
+                case_id: case_id.to_owned(),
+                item_type: item_type.to_owned(),
+                corpse,
+                goes_bad: true,
+                shelf_life_turns,
+                rot_after_ten_minutes: i64::try_from(
+                    cdda_sim::normal_ambient_rot_increment_turns(10 * 60)
+                        .ok_or("ten-minute rot overflow")?,
+                )?,
+                rot_after_one_hour: i64::try_from(
+                    cdda_sim::normal_ambient_rot_increment_turns(60 * 60)
+                        .ok_or("one-hour rot overflow")?,
+                )?,
+                removal_threshold_turns,
+                removed_at_threshold: cdda_sim::rot_has_rotten_away(
+                    u64::try_from(shelf_life_turns)?,
+                    removal_threshold_u64,
+                    corpse,
+                )
+                .ok_or("rot threshold overflow")?,
+                removed_after_threshold: cdda_sim::rot_has_rotten_away(
+                    u64::try_from(shelf_life_turns)?,
+                    removal_threshold_u64
+                        .checked_add(1)
+                        .ok_or("rot threshold overflow")?,
+                    corpse,
+                )
+                .ok_or("rot threshold overflow")?,
+            })
+            },
+        )
+        .collect()
+}
+
+fn rust_item_group_insulated_container_observation(
+    workspace: &Path,
+) -> Result<ItemGroupInsulatedContainerTraceV1, Box<dyn std::error::Error>> {
+    let manifest_path = workspace.join("vendor/cdda-content-manifest.json");
+    let manifest = ContentManifest::load(&manifest_path)?;
+    let content_root = manifest_path
+        .parent()
+        .ok_or("pinned content manifest has no parent directory")?;
+    let mods = ModCatalog::load(&manifest, content_root)?;
+    let enabled = mods.recommended_new_world()?;
+    let items = ItemRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    let thermos = items
+        .get("thermos")
+        .ok_or("pinned item catalog has no thermos")?;
+    let [pocket] = thermos.spawn_pockets.as_slice() else {
+        return Err("pinned thermos must retain exactly one strict spawn pocket".into());
+    };
+    let mut variables = BTreeMap::new();
+    variables.insert(
+        cdda_protocol::item_pocket_insulation_variable_key(pocket.pocket_index),
+        ItemVariableValueV1::Integer(i64::from(pocket.insulation_f32_bits)),
+    );
+    let insulation = cdda_protocol::item_pocket_insulation(&variables, pocket.pocket_index)
+        .ok_or("thermos insulation did not round-trip through typed variables")?;
+    Ok(ItemGroupInsulatedContainerTraceV1 {
+        item_type: thermos.id.clone(),
+        pocket_index: pocket.pocket_index,
+        insulation_milli: (insulation * 1_000.0).round() as i32,
+    })
 }
 
 fn rust_item_group_tool_charge_case_with_replacement(

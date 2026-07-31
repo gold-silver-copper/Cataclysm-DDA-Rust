@@ -622,7 +622,7 @@
           "occurrences": 5835
         },
         "freezing_point": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 143
         },
         "fruit": {
@@ -1114,11 +1114,11 @@
           "occurrences": 1
         },
         "source_monster": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 6
         },
         "spoils_in": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 862
         },
         "stack_size": {
@@ -1943,7 +1943,7 @@
           "occurrences": 44
         },
         "weight": {
-          "support": "unimplemented",
+          "support": "loader_implemented",
           "occurrences": 1448
         },
         "zombify_into": {

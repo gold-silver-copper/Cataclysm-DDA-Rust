@@ -21,6 +21,13 @@ pub const SPAWN_POCKET_SINGLE_ITEM_MARKER: &str = "__CDDA_SINGLE_ITEM_POCKET__";
 /// admission must additionally retain the corpse's rot state.
 pub const ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE: &str = "__CDDA_CORPSE_SOURCE_MONSTER_V1__";
 
+/// Reserved canonical variables that retain rot within Protocol 95's existing
+/// typed item-variable map. Values use upstream one-second turns.
+pub const ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE: &str = "__CDDA_ROT_SHELF_LIFE_TURNS_V1__";
+pub const ITEM_ROT_TURNS_VARIABLE: &str = "__CDDA_ROT_TURNS_V1__";
+pub const ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS: u64 = 24 * 60 * 60;
+pub const ITEM_POCKET_INSULATION_VARIABLE_PREFIX: &str = "__CDDA_POCKET_INSULATION_F32_BITS_V1_";
+
 #[must_use]
 pub fn spawn_pocket_is_single_item(rules: &SpawnPocketRulesV1) -> bool {
     rules
@@ -1188,6 +1195,26 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
     let corpse_source = item
         .initial_variables
         .get(ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE);
+    let rot_state = item_rot_state(&item.initial_variables);
+    let rot_metadata_valid = item_rot_variables_are_valid(&item.initial_variables)
+        && match rot_state {
+            Some((shelf_life_turns, rot_turns)) => {
+                item.prototype.tracks_temperature
+                    && rot_turns == 0
+                    && if corpse_flag {
+                        shelf_life_turns == ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS
+                            && item.maximum_raw_damage == MAX_ITEM_RAW_DAMAGE
+                            && matches!(
+                                corpse_source,
+                                Some(ItemVariableValueV1::String(source))
+                                    if valid_recipe_id(source)
+                            )
+                    } else {
+                        !item.prototype.comestible_type.is_empty() && corpse_source.is_none()
+                    }
+            }
+            None => corpse_source.is_none() && !corpse_flag,
+        };
     valid_craft_item_prototype(&item.prototype)
         && matches!(item.maximum_raw_damage, 0 | MAX_ITEM_RAW_DAMAGE)
         && valid_item_group_variants(&item.variants)
@@ -1197,11 +1224,14 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
             .is_none_or(item_description_expansion_is_valid)
         && valid_item_snippets(&item.snippets)
         && valid_item_variables(&item.initial_variables)
-        && match corpse_source {
-            Some(ItemVariableValueV1::String(source)) => corpse_flag && valid_recipe_id(source),
-            Some(ItemVariableValueV1::Integer(_)) => false,
-            None => !corpse_flag,
-        }
+        && item_pocket_insulation_variables_are_valid(
+            &item.initial_variables,
+            item.prototype
+                .ammunition_containers
+                .iter()
+                .map(|pocket| pocket.pocket_index),
+        )
+        && rot_metadata_valid
         && (!generates_description
             || item.initial_variables.contains_key("description")
             || item.initial_variables.len() < MAX_ITEM_VARIABLES)
@@ -1237,7 +1267,14 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
         })
         && match item.charge_capacity {
             ItemGroupChargeCapacityV1::None => true,
-            ItemGroupChargeCapacityV1::AmmunitionStorage => item.tool_charge_storage.is_some(),
+            ItemGroupChargeCapacityV1::AmmunitionStorage => {
+                item.tool_charge_storage.is_some()
+                    || (item.charges.is_none()
+                        && !item.charges_supported
+                        && !item.modifier_side_effects_supported
+                        && (!item.prototype.integral_magazines.is_empty()
+                            || !item.prototype.magazine_wells.is_empty()))
+            }
             ItemGroupChargeCapacityV1::ModifierContainer => {
                 item.tool_charge_storage.is_none()
                     && item.prototype.ranged_weapon.is_none()
@@ -1457,6 +1494,81 @@ pub fn valid_item_variables(variables: &BTreeMap<String, ItemVariableValueV1>) -
                     }
                 }
         })
+}
+
+#[must_use]
+pub fn item_rot_variables_are_valid(variables: &BTreeMap<String, ItemVariableValueV1>) -> bool {
+    let shelf_life = variables.get(ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE);
+    let rot = variables.get(ITEM_ROT_TURNS_VARIABLE);
+    match (shelf_life, rot) {
+        (None, None) => true,
+        (
+            Some(ItemVariableValueV1::Integer(shelf_life)),
+            Some(ItemVariableValueV1::Integer(rot)),
+        ) => *shelf_life > 0 && *rot >= 0,
+        _ => false,
+    }
+}
+
+#[must_use]
+pub fn item_rot_state(variables: &BTreeMap<String, ItemVariableValueV1>) -> Option<(u64, u64)> {
+    if !item_rot_variables_are_valid(variables) {
+        return None;
+    }
+    let ItemVariableValueV1::Integer(shelf_life) =
+        variables.get(ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE)?
+    else {
+        return None;
+    };
+    let ItemVariableValueV1::Integer(rot) = variables.get(ITEM_ROT_TURNS_VARIABLE)? else {
+        return None;
+    };
+    Some((u64::try_from(*shelf_life).ok()?, u64::try_from(*rot).ok()?))
+}
+
+#[must_use]
+pub fn item_pocket_insulation_variable_key(pocket_index: u16) -> String {
+    format!("{ITEM_POCKET_INSULATION_VARIABLE_PREFIX}{pocket_index}")
+}
+
+#[must_use]
+pub fn item_pocket_insulation(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    pocket_index: u16,
+) -> Option<f32> {
+    let ItemVariableValueV1::Integer(bits) =
+        variables.get(&item_pocket_insulation_variable_key(pocket_index))?
+    else {
+        return None;
+    };
+    let value = f32::from_bits(u32::try_from(*bits).ok()?);
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+#[must_use]
+pub fn item_pocket_insulation_variables_are_valid(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    pocket_indices: impl IntoIterator<Item = u16>,
+) -> bool {
+    let pocket_indices = pocket_indices.into_iter().collect::<BTreeSet<_>>();
+    variables.iter().all(|(key, value)| {
+        let Some(index) = key.strip_prefix(ITEM_POCKET_INSULATION_VARIABLE_PREFIX) else {
+            return true;
+        };
+        let Ok(index) = index.parse::<u16>() else {
+            return false;
+        };
+        key == &item_pocket_insulation_variable_key(index)
+            && pocket_indices.contains(&index)
+            && matches!(
+                value,
+                ItemVariableValueV1::Integer(bits)
+                    if u32::try_from(*bits).ok().is_some_and(|bits| {
+                        let insulation = f32::from_bits(bits);
+                        insulation.is_finite() && insulation > 0.0
+                    })
+            )
+    })
 }
 
 #[must_use]
@@ -2098,6 +2210,41 @@ mod tests {
         });
         detachable.charge_capacity = ItemGroupChargeCapacityV1::AmmunitionStorage;
         assert!(valid_item_group_item(&detachable));
+
+        let mut unresolved_empty_tool = detachable.clone();
+        unresolved_empty_tool.tool_charge_storage = None;
+        unresolved_empty_tool.charges_supported = false;
+        unresolved_empty_tool.modifier_side_effects_supported = false;
+        assert!(
+            valid_item_group_item(&unresolved_empty_tool),
+            "an unmodified tool may spawn empty when its optional detachable dressing is unavailable"
+        );
+        assert!(item_group_catalog_is_valid(&[test_group(
+            "unresolved_empty_tool",
+            test_entry(ItemGroupTargetV1::Item(Box::new(
+                unresolved_empty_tool.clone()
+            ))),
+        )]));
+        let mut unsupported_modifier = test_entry(ItemGroupTargetV1::Item(Box::new(
+            unresolved_empty_tool.clone(),
+        )));
+        unsupported_modifier.raw_damage = Some(InclusiveU16RangeV1 {
+            minimum: 0,
+            maximum: 0,
+        });
+        assert!(
+            !item_group_catalog_is_valid(&[test_group(
+                "unresolved_modified_tool",
+                unsupported_modifier,
+            )]),
+            "the same unresolved tool must stay fail closed when an item modifier is present"
+        );
+        unresolved_empty_tool.charges = Some(ItemGroupChargeRangeV1 {
+            minimum: 0,
+            maximum: 1,
+        });
+        assert!(!valid_item_group_item(&unresolved_empty_tool));
+
         let child = test_group(
             "charge_child",
             test_entry(ItemGroupTargetV1::Item(Box::new(detachable))),
@@ -2484,11 +2631,25 @@ mod tests {
             .containment
             .flags
             .push(String::from("CORPSE"));
+        corpse.prototype.tracks_temperature = true;
+        corpse.maximum_raw_damage = MAX_ITEM_RAW_DAMAGE;
         assert!(!valid_item_group_item(&corpse));
 
         corpse.initial_variables.insert(
             ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE.to_owned(),
             ItemVariableValueV1::String(String::from("mon_child")),
+        );
+        assert!(!valid_item_group_item(&corpse));
+        corpse.initial_variables.insert(
+            ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(
+                i64::try_from(ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS)
+                    .expect("corpse shelf life should fit"),
+            ),
+        );
+        corpse.initial_variables.insert(
+            ITEM_ROT_TURNS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(0),
         );
         assert!(valid_item_group_item(&corpse));
 
@@ -2501,5 +2662,44 @@ mod tests {
 
         corpse.prototype.containment.flags.clear();
         assert!(!valid_item_group_item(&corpse));
+    }
+
+    #[test]
+    fn pocket_insulation_metadata_is_exact_and_bound_to_a_real_pocket() {
+        let mut item = *valid_test_container("insulated").item;
+        let key = item_pocket_insulation_variable_key(0);
+        item.initial_variables.insert(
+            key.clone(),
+            ItemVariableValueV1::Integer(i64::from(10.0_f32.to_bits())),
+        );
+        assert_eq!(
+            item_pocket_insulation(&item.initial_variables, 0),
+            Some(10.0)
+        );
+        assert!(valid_item_group_item(&item));
+
+        let mut unknown_pocket = item.clone();
+        let value = unknown_pocket
+            .initial_variables
+            .remove(&key)
+            .expect("insulation fixture should exist");
+        unknown_pocket
+            .initial_variables
+            .insert(item_pocket_insulation_variable_key(1), value);
+        assert!(!valid_item_group_item(&unknown_pocket));
+
+        let mut non_finite = item.clone();
+        non_finite.initial_variables.insert(
+            key,
+            ItemVariableValueV1::Integer(i64::from(f32::NAN.to_bits())),
+        );
+        assert!(!valid_item_group_item(&non_finite));
+
+        let mut malformed = item;
+        malformed.initial_variables.insert(
+            format!("{ITEM_POCKET_INSULATION_VARIABLE_PREFIX}00"),
+            ItemVariableValueV1::Integer(i64::from(1.0_f32.to_bits())),
+        );
+        assert!(!valid_item_group_item(&malformed));
     }
 }
