@@ -732,7 +732,7 @@ impl WorldState {
             .get(&primary_target)
             .is_none_or(|actor| actor.hp <= 0)
             || ranged_distance(origin, center) > profile.range
-            || !self.has_clear_shot(origin, center)
+            || !self.spell_blast_line_is_passable(origin, center)
         {
             return Ok(false);
         }
@@ -748,7 +748,7 @@ impl WorldState {
                 };
                 let position = WorldPosition { x, y, z: center.z };
                 if ranged_distance(center, position) > u32::from(profile.spell_aoe)
-                    || !self.has_clear_shot(center, position)
+                    || !self.spell_blast_line_is_passable(center, position)
                     || !self.chunks.contains_key(&position.chunk_and_local().0)
                 {
                     continue;
@@ -858,6 +858,39 @@ impl WorldState {
         Ok(true)
     }
 
+    fn spell_blast_line_is_passable(&self, origin: WorldPosition, target: WorldPosition) -> bool {
+        if origin.z != target.z {
+            return false;
+        }
+        if origin == target {
+            return self.is_passable(origin);
+        }
+        let (mut x, mut y) = (origin.x, origin.y);
+        let dx = (i64::from(target.x) - i64::from(x)).abs();
+        let step_x = if x < target.x { 1 } else { -1 };
+        let dy = -(i64::from(target.y) - i64::from(y)).abs();
+        let step_y = if y < target.y { 1 } else { -1 };
+        let mut error = dx + dy;
+        loop {
+            let doubled = error * 2;
+            if doubled >= dy {
+                error += dy;
+                x += step_x;
+            }
+            if doubled <= dx {
+                error += dx;
+                y += step_y;
+            }
+            let position = WorldPosition { x, y, z: origin.z };
+            if !self.is_passable(position) {
+                return false;
+            }
+            if position == target {
+                return true;
+            }
+        }
+    }
+
     fn apply_creature_spell_field(
         &mut self,
         position: WorldPosition,
@@ -865,8 +898,8 @@ impl WorldState {
         rng: &mut impl Rng,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        let variance = u64::from(profile.spell_field_intensity)
-            .checked_mul(u64::from(profile.spell_field_intensity_variance_millionths))
+        let variance = u32::from(profile.spell_field_intensity)
+            .checked_mul(profile.spell_field_intensity_variance_millionths)
             .and_then(|value| value.checked_div(1_000_000))
             .and_then(|value| i32::try_from(value).ok())
             .ok_or(SimError::NumericOverflow)?;
@@ -876,6 +909,7 @@ impl WorldState {
         if intensity <= 0 {
             return Ok(());
         }
+        let intensity = u16::try_from(intensity).map_err(|_| SimError::NumericOverflow)?;
         if profile.spell_field_chance > 1
             && roll_inclusive_u32(1, profile.spell_field_chance, rng)? != 1
         {
@@ -885,7 +919,7 @@ impl WorldState {
         let intensity = self.add_field_with_age(
             position,
             &profile.spell_field_type_id,
-            u8::try_from(intensity).map_err(|_| SimError::NumericOverflow)?,
+            intensity,
             initial_age,
         )?;
         events.push(self.make_event(WorldEventKind::FieldIntensityChanged {

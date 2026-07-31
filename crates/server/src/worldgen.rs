@@ -1259,14 +1259,19 @@ fn runtime_monster_spell_profile(
         field_intensity
             .zip(variance)
             .and_then(|(field_intensity, variance)| {
-                let variance_delta = u64::from(field_intensity)
-                    .checked_mul(u64::from(variance))?
-                    .checked_div(1_000_000)?;
-                let maximum_intensity =
-                    u8::try_from(u64::from(field_intensity).checked_add(variance_delta)?).ok()?;
                 let definition = fields.get(&spell.field_type_id)?;
+                let maximum_registered_intensity =
+                    u16::try_from(definition.intensity_levels.len()).ok()?;
+                let variance_delta = u32::from(field_intensity)
+                    .checked_mul(variance)?
+                    .checked_div(1_000_000)?;
+                let maximum_rolled_intensity =
+                    u16::from(field_intensity).checked_add(u16::try_from(variance_delta).ok()?)?;
+                let maximum_effective_intensity =
+                    u8::try_from(maximum_rolled_intensity.min(maximum_registered_intensity))
+                        .ok()?;
                 (definition.unsupported_fields.is_empty()
-                    && definition.contact_effects_supported_at(maximum_intensity))
+                    && definition.contact_effects_supported_at(maximum_effective_intensity))
                 .then_some((field_intensity, variance))
             })
     };

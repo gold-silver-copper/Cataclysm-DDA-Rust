@@ -5131,14 +5131,14 @@ impl WorldState {
         field_type_id: &str,
         intensity: u8,
     ) -> Result<u8, SimError> {
-        self.add_field_with_age(position, field_type_id, intensity, 0)
+        self.add_field_with_age(position, field_type_id, u16::from(intensity), 0)
     }
 
     pub(crate) fn add_field_with_age(
         &mut self,
         position: WorldPosition,
         field_type_id: &str,
-        intensity: u8,
+        intensity: u16,
         initial_age_seconds: i64,
     ) -> Result<u8, SimError> {
         if intensity == 0 {
@@ -5148,7 +5148,9 @@ impl WorldState {
             .field_types
             .get(field_type_id)
             .ok_or(SimError::InvalidField)?;
-        let maximum = field_type.intensity_levels.len();
+        let maximum =
+            u16::try_from(field_type.intensity_levels.len()).map_err(|_| SimError::InvalidField)?;
+        let intensity = u8::try_from(intensity.min(maximum)).map_err(|_| SimError::InvalidField)?;
         let maximum = u8::try_from(maximum).map_err(|_| SimError::InvalidField)?;
         let supported_levels = field_type
             .intensity_levels
