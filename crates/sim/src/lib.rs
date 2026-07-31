@@ -2842,6 +2842,10 @@ fn valid_actor_schedule(
 ) -> bool {
     if !anatomy::actor_anatomy_state_is_valid(anatomy, &snapshot.body_parts, snapshot.hp)
         || !cdda_protocol::actor_effects_are_valid(anatomy, &snapshot.effects, current_tick)
+        || snapshot
+            .effects
+            .iter()
+            .any(|effect| !cdda_protocol::actor_effect_modifiers_are_valid(&effect.modifiers))
         || !cdda_protocol::actor_eoc_variables_are_valid(&snapshot.eoc_variables)
         || !cdda_protocol::actor_eoc_schedule_is_valid(
             &snapshot.scheduled_eocs,
@@ -3329,6 +3333,7 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
                 || effect.intensity == 0
                 || effect.intensity > 1_000_000
                 || effect.expires_at_tick == SimTick(0)
+                || !cdda_protocol::actor_effect_modifiers_are_valid(&effect.modifiers)
         })
         || !cdda_protocol::actor_eoc_variables_are_valid(&snapshot.eoc_variables)
         || snapshot.ammunition.len() > 256
@@ -3783,20 +3788,19 @@ fn actor_effective_perception(actor: &Actor) -> u16 {
     })
 }
 
-fn actor_effective_speed(actor: &Actor) -> u16 {
-    let speed = actor
-        .effects
-        .iter()
-        .fold(i64::from(actor.speed), |speed, effect| {
-            speed.saturating_add(i64::from(effect.modifiers.speed))
-        });
-    u16::try_from(speed.clamp(1, i64::from(ACTOR_ACTION_THRESHOLD)))
-        .expect("clamped actor speed fits u16")
+fn actor_effective_speed(actor: &Actor) -> u32 {
+    let speed_bonus = actor.effects.iter().fold(0_i64, |bonus, effect| {
+        bonus.saturating_add(i64::from(effect.modifiers.speed))
+    });
+    let base_speed = i64::from(actor.speed);
+    let minimum_speed_bonus = -(base_speed.saturating_mul(3) / 4);
+    u32::try_from(base_speed.saturating_add(speed_bonus.max(minimum_speed_bonus)))
+        .unwrap_or(u32::MAX)
 }
 
-fn actor_limb_score_multiplier_millionths(actor: &Actor, score_id: &str) -> u32 {
+fn actor_limb_score_multiplier_millionths(actor: &Actor, score_id: &str) -> u64 {
     const SCALE: u128 = 1_000_000;
-    const MAXIMUM: u128 = 10_000_000;
+    const MAXIMUM: u128 = u64::MAX as u128;
     let multiplier = actor.effects.iter().fold(SCALE, |combined, effect| {
         let factor = effect
             .modifiers
@@ -3812,7 +3816,7 @@ fn actor_limb_score_multiplier_millionths(actor: &Actor, score_id: &str) -> u32 
             .unwrap_or(MAXIMUM)
             .min(MAXIMUM)
     });
-    u32::try_from(multiplier).expect("bounded limb-score multiplier fits u32")
+    u64::try_from(multiplier).expect("bounded limb-score multiplier fits u64")
 }
 
 fn pinned_melee_attack_speed_moves(
@@ -4002,7 +4006,7 @@ fn craft_proficiency_time_malus_millionths(
 }
 
 fn craft_progress_for_tick(
-    speed: u16,
+    speed: u32,
     malus_millionths: u64,
     prior_remainder_millionths: u32,
 ) -> Result<(u64, u32), SimError> {
@@ -7759,25 +7763,41 @@ impl WorldState {
         let Some(to_cost) = self.tile_movement_cost(to) else {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         };
-        let base_cost = from_cost
+        let base_cost_moves = from_cost
             .checked_add(to_cost)
             .and_then(|cost| cost.checked_mul(axis_multiplier))
             .map(|cost| cost / 2)
-            .and_then(|cost| cost.checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE))
             .ok_or(SimError::NumericOverflow)?;
-        let move_speed = self
-            .actors
-            .get(&actor_id)
-            .map(|actor| actor_limb_score_multiplier_millionths(actor, "move_speed"))
-            .ok_or(SimError::UnknownActor)?;
-        if move_speed == 0 {
-            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
-        }
-        i128::from(base_cost)
-            .checked_mul(1_000_000)
-            .and_then(|cost| cost.checked_add(i128::from(move_speed) - 1))
-            .and_then(|cost| cost.checked_div(i128::from(move_speed)))
-            .and_then(|cost| i64::try_from(cost.max(1)).ok())
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        const LIMB_SCORE_SCALE: u128 = 1_000_000;
+        const MAXIMUM_INVERSE_LIMB_SCORE: u128 = 100 * LIMB_SCORE_SCALE;
+        let inverse_limb_score = |score: u64| -> Result<u128, SimError> {
+            if score == 0 {
+                return Ok(MAXIMUM_INVERSE_LIMB_SCORE);
+            }
+            LIMB_SCORE_SCALE
+                .checked_mul(LIMB_SCORE_SCALE)
+                .and_then(|numerator| numerator.checked_div(u128::from(score)))
+                .map(|inverse| inverse.min(MAXIMUM_INVERSE_LIMB_SCORE))
+                .ok_or(SimError::NumericOverflow)
+        };
+        let footing_inverse =
+            inverse_limb_score(actor_limb_score_multiplier_millionths(actor, "footing"))?;
+        let move_speed_inverse =
+            inverse_limb_score(actor_limb_score_multiplier_millionths(actor, "move_speed"))?;
+        let limb_run_cost_multiplier = move_speed_inverse
+            .checked_mul(2)
+            .and_then(|move_speed| move_speed.checked_add(footing_inverse))
+            .and_then(|combined| combined.checked_div(3))
+            .ok_or(SimError::NumericOverflow)?;
+        let modified_cost_moves = u128::try_from(base_cost_moves)
+            .ok()
+            .and_then(|cost| cost.checked_mul(limb_run_cost_multiplier))
+            .and_then(|cost| cost.checked_div(LIMB_SCORE_SCALE))
+            .and_then(|cost| i64::try_from(cost).ok())
+            .ok_or(SimError::NumericOverflow)?;
+        modified_cost_moves
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
             .ok_or(SimError::NumericOverflow)
     }
 
@@ -14694,7 +14714,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV102");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV103");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

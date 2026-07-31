@@ -123,6 +123,9 @@ pub struct MonsterSpecialAttackDefinition {
     pub damage: Vec<MonsterMeleeDamageUnitDefinition>,
     pub effects: Vec<MonsterAttackEffectDefinition>,
     pub effects_require_damage: bool,
+    pub attack_amount_minimum: u16,
+    pub attack_amount_maximum: u16,
+    pub spread_damage: bool,
     pub infection_chance_millionths: u32,
     pub leap_minimum_range_milli: u32,
     pub leap_maximum_range_milli: u32,
@@ -177,6 +180,15 @@ impl MonsterSpecialAttackDefinition {
             && self.maximum_damage_multiplier_millionths
                 >= self.minimum_damage_multiplier_millionths
             && self.minimum_damage_multiplier_millionths >= 0
+            && self.attack_amount_minimum > 0
+            && self.attack_amount_minimum <= self.attack_amount_maximum
+            && self.attack_amount_maximum <= 64
+            && (matches!(
+                self.kind,
+                MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite
+            ) || (self.attack_amount_minimum == 1
+                && self.attack_amount_maximum == 1
+                && !self.spread_damage))
             && self
                 .damage
                 .iter()
@@ -774,6 +786,9 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         }],
         effects: Vec::new(),
         effects_require_damage: true,
+        attack_amount_minimum: 1,
+        attack_amount_maximum: 1,
+        spread_damage: false,
         infection_chance_millionths: 0,
         leap_minimum_range_milli: 0,
         leap_maximum_range_milli: 0,
@@ -1027,6 +1042,38 @@ fn parse_special_attack(
         let (effects, deferred) = parse_monster_effects(value, source, "special_attacks.effects")?;
         attack.effects = effects;
         attack.unsupported_fields.extend(deferred);
+    }
+    if let Some(value) = fields.get("attack_amount") {
+        let range = value
+            .as_array()
+            .filter(|range| range.len() == 2)
+            .ok_or_else(|| invalid(source, "special_attacks.attack_amount"))?;
+        let minimum = u16::try_from(parse_u32(
+            &range[0],
+            source,
+            "special_attacks.attack_amount.minimum",
+        )?)
+        .map_err(|_| invalid(source, "special_attacks.attack_amount.minimum"))?;
+        let maximum = u16::try_from(parse_u32(
+            &range[1],
+            source,
+            "special_attacks.attack_amount.maximum",
+        )?)
+        .map_err(|_| invalid(source, "special_attacks.attack_amount.maximum"))?;
+        attack.attack_amount_minimum = minimum;
+        attack.attack_amount_maximum = maximum;
+        attack.unsupported_fields.remove("attack_amount");
+        if minimum == 0 || minimum > maximum || maximum > 64 {
+            attack
+                .unsupported_fields
+                .insert(String::from("attack_amount.bounds"));
+        }
+    }
+    if let Some(value) = fields.get("spread_damage") {
+        attack.spread_damage = value
+            .as_bool()
+            .ok_or_else(|| invalid(source, "special_attacks.spread_damage"))?;
+        attack.unsupported_fields.remove("spread_damage");
     }
     if let Some(value) = fields.get("condition") {
         attack.unsupported_fields.remove("condition");
@@ -1632,16 +1679,7 @@ fn parse_special_attack(
             .unsupported_fields
             .insert(String::from("effects_require_organic"));
     }
-    if fields.get("attack_amount").is_some_and(|value| {
-        value.as_array().is_none_or(|range| {
-            range.len() != 2 || range[0].as_i64() != Some(1) || range[1].as_i64() != Some(1)
-        })
-    }) {
-        attack
-            .unsupported_fields
-            .insert(String::from("attack_amount"));
-    }
-    for (field, expected) in [("spread_damage", false), ("grab", false)] {
+    for (field, expected) in [("grab", false)] {
         if fields
             .get(field)
             .is_some_and(|value| value.as_bool() != Some(expected))

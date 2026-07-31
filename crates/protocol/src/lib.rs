@@ -91,7 +91,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 126;
+pub const PROTOCOL_VERSION: u16 = 127;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3303,6 +3303,10 @@ pub struct WorldgenMonsterProjectileOnHitEffectV1 {
     pub effect_id: String,
     pub duration_seconds: u64,
     pub intensity: u32,
+    pub maximum_accumulated_duration_seconds: u32,
+    pub duration_add_percent: u16,
+    pub blocked_by_effect_ids: Vec<String>,
+    pub modifiers: ActorEffectModifiersV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3330,6 +3334,9 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub damage: Vec<WorldgenMonsterMeleeDamageUnitV1>,
     pub effects: Vec<WorldgenMonsterAttackEffectV1>,
     pub effects_require_damage: bool,
+    pub attack_amount_minimum: u16,
+    pub attack_amount_maximum: u16,
+    pub spread_damage: bool,
     pub infection_chance_millionths: u32,
     /// Leap distances are thousandths of one map tile.
     pub leap_minimum_range_milli: u32,
@@ -3413,6 +3420,20 @@ pub struct WorldgenMonsterAttackEffectV1 {
     pub duration_maximum_turns: u32,
     pub intensity_minimum: u32,
     pub intensity_maximum: u32,
+    pub maximum_accumulated_duration_turns: u32,
+    pub duration_add_percent: u16,
+    /// IDs of active effects that block this application, sorted uniquely.
+    pub blocked_by_effect_ids: Vec<String>,
+    /// One entry for every source-rollable intensity, in ascending requested
+    /// intensity order. Each entry retains the clamped effect intensity and
+    /// its resolved modifiers.
+    pub intensity_applications: Vec<WorldgenMonsterEffectIntensityApplicationV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterEffectIntensityApplicationV1 {
+    pub intensity: u32,
+    pub modifiers: ActorEffectModifiersV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -5564,6 +5585,16 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         && attack.maximum_damage_multiplier_millionths <= 1_000_000_000
                         && valid_worldgen_monster_damage(&attack.damage)
                         && valid_worldgen_monster_effects(&attack.effects)
+                        && attack.attack_amount_minimum > 0
+                        && attack.attack_amount_minimum <= attack.attack_amount_maximum
+                        && attack.attack_amount_maximum <= 64
+                        && (matches!(
+                            attack.kind,
+                            WorldgenMonsterSpecialAttackKindV1::Melee
+                                | WorldgenMonsterSpecialAttackKindV1::Bite
+                        ) || (attack.attack_amount_minimum == 1
+                            && attack.attack_amount_maximum == 1
+                            && !attack.spread_damage))
                         && attack.condition.as_ref().is_none_or(eoc_condition_is_valid)
                         && attack.eoc_ids.len() <= MAX_EOC_REFERENCES
                         && attack
@@ -5678,6 +5709,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.gun_target_moving_vehicles
                                     && attack.damage.is_empty()
                                     && attack.effects.is_empty()
+                                    && attack.attack_amount_minimum == 1
+                                    && attack.attack_amount_maximum == 1
+                                    && !attack.spread_damage
                                     && attack.condition.is_none()
                                     && attack.eoc_ids.is_empty()
                                     && attack.leap_maximum_range_milli > 0
@@ -5741,6 +5775,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.maximum_damage_multiplier_millionths == 0
                                     && attack.damage.is_empty()
                                     && attack.effects.is_empty()
+                                    && attack.attack_amount_minimum == 1
+                                    && attack.attack_amount_maximum == 1
+                                    && !attack.spread_damage
                                     && attack.infection_chance_millionths == 0
                                     && attack.leap_minimum_range_milli == 0
                                     && attack.leap_maximum_range_milli == 0
@@ -6025,6 +6062,18 @@ fn valid_worldgen_monster_projectile_effects(
                     valid_worldgen_id(&on_hit.effect_id)
                         && (1..=1_000_000_000).contains(&on_hit.duration_seconds)
                         && (1..=1_000_000).contains(&on_hit.intensity)
+                        && on_hit.maximum_accumulated_duration_seconds > 0
+                        && on_hit.duration_add_percent <= 1_000
+                        && on_hit.blocked_by_effect_ids.len() <= 64
+                        && on_hit
+                            .blocked_by_effect_ids
+                            .windows(2)
+                            .all(|pair| pair[0] < pair[1])
+                        && on_hit
+                            .blocked_by_effect_ids
+                            .iter()
+                            .all(|effect_id| valid_worldgen_id(effect_id))
+                        && actor_effect_modifiers_are_valid(&on_hit.modifiers)
                 })
         })
 }
@@ -6096,6 +6145,29 @@ fn valid_worldgen_monster_effects(effects: &[WorldgenMonsterAttackEffectV1]) -> 
                 && effect.intensity_minimum > 0
                 && effect.intensity_minimum <= effect.intensity_maximum
                 && effect.intensity_maximum <= 1_000_000
+                && effect.maximum_accumulated_duration_turns > 0
+                && effect.duration_add_percent <= 1_000
+                && effect.blocked_by_effect_ids.len() <= 64
+                && effect
+                    .blocked_by_effect_ids
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && effect
+                    .blocked_by_effect_ids
+                    .iter()
+                    .all(|effect_id| valid_worldgen_id(effect_id))
+                && usize::try_from(
+                    effect
+                        .intensity_maximum
+                        .saturating_sub(effect.intensity_minimum)
+                        .saturating_add(1),
+                )
+                .is_ok_and(|count| count <= 64 && effect.intensity_applications.len() == count)
+                && effect.intensity_applications.iter().all(|application| {
+                    application.intensity > 0
+                        && application.intensity <= 1_000_000
+                        && actor_effect_modifiers_are_valid(&application.modifiers)
+                })
         })
 }
 

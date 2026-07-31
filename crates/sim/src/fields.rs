@@ -158,6 +158,11 @@ impl WorldState {
             {
                 continue;
             }
+            let duration_turns = roll_inclusive_unordered(
+                effect.minimum_duration_turns,
+                effect.maximum_duration_turns,
+                &mut rng,
+            )?;
             let blocked = self.actors.get(&actor_id).is_some_and(|actor| {
                 actor.effects.iter().any(|active| {
                     active.expires_at_tick > current_tick
@@ -167,62 +172,61 @@ impl WorldState {
                             .is_ok()
                 })
             });
-            if blocked {
-                continue;
-            }
-            // Upstream accepts zero-duration field definitions, but a newly
-            // applied effect must survive until at least the next action tick
-            // to be observable and to remain a valid canonical snapshot.
-            let duration_turns = roll_inclusive_unordered(
-                effect.minimum_duration_turns,
-                effect.maximum_duration_turns,
-                &mut rng,
-            )?
-            .max(1);
             let duration_ticks = u64::from(duration_turns)
                 .checked_mul(SimTick::HZ)
                 .ok_or(SimError::NumericOverflow)?;
             let maximum_duration_ticks = u64::from(effect.maximum_accumulated_duration_turns)
                 .checked_mul(SimTick::HZ)
                 .ok_or(SimError::NumericOverflow)?;
-            let actor = self
-                .actors
-                .get_mut(&actor_id)
-                .ok_or(SimError::UnknownActor)?;
-            if let Some(existing) = actor.effects.iter_mut().find(|existing| {
-                existing.effect_id == effect.effect_id
-                    && existing.body_part_id == effect.body_part_id
-            }) {
-                existing.intensity = effect.intensity;
-                existing.modifiers = effect.modifiers.clone();
-                let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
-                let added = u128::from(duration_ticks)
-                    .checked_mul(u128::from(effect.duration_add_percent))
-                    .and_then(|value| value.checked_div(100))
-                    .and_then(|value| u64::try_from(value).ok())
-                    .ok_or(SimError::NumericOverflow)?;
-                existing.expires_at_tick = SimTick(
-                    current_tick
-                        .0
-                        .saturating_add(remaining.saturating_add(added).min(maximum_duration_ticks))
-                        .min(u64::MAX - 1),
-                );
-            } else {
-                if actor.effects.len() >= 1_024 {
-                    return Err(SimError::InvalidField);
+            if !blocked && duration_turns > 0 {
+                let actor = self
+                    .actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?;
+                if let Some(existing) = actor.effects.iter_mut().find(|existing| {
+                    existing.effect_id == effect.effect_id
+                        && existing.body_part_id == effect.body_part_id
+                }) {
+                    existing.intensity = effect.intensity;
+                    existing.modifiers = effect.modifiers.clone();
+                    if existing.expires_at_tick.0 != u64::MAX {
+                        let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
+                        let added_turns = u128::from(duration_turns)
+                            .checked_mul(u128::from(effect.duration_add_percent))
+                            .and_then(|value| value.checked_div(100))
+                            .and_then(|value| u64::try_from(value).ok())
+                            .ok_or(SimError::NumericOverflow)?;
+                        let added_ticks = added_turns
+                            .checked_mul(SimTick::HZ)
+                            .ok_or(SimError::NumericOverflow)?;
+                        existing.expires_at_tick = SimTick(
+                            current_tick
+                                .0
+                                .saturating_add(
+                                    remaining
+                                        .saturating_add(added_ticks)
+                                        .min(maximum_duration_ticks),
+                                )
+                                .min(u64::MAX - 1),
+                        );
+                    }
+                } else {
+                    if actor.effects.len() >= 1_024 {
+                        return Err(SimError::InvalidField);
+                    }
+                    actor.effects.push(ActorEffectSnapshotV1 {
+                        effect_id: effect.effect_id.clone(),
+                        body_part_id: effect.body_part_id.clone(),
+                        intensity: effect.intensity,
+                        expires_at_tick: SimTick(
+                            current_tick
+                                .0
+                                .checked_add(duration_ticks.min(maximum_duration_ticks))
+                                .ok_or(SimError::NumericOverflow)?,
+                        ),
+                        modifiers: effect.modifiers.clone(),
+                    });
                 }
-                actor.effects.push(ActorEffectSnapshotV1 {
-                    effect_id: effect.effect_id.clone(),
-                    body_part_id: effect.body_part_id.clone(),
-                    intensity: effect.intensity,
-                    expires_at_tick: SimTick(
-                        current_tick
-                            .0
-                            .checked_add(duration_ticks.min(maximum_duration_ticks))
-                            .ok_or(SimError::NumericOverflow)?,
-                    ),
-                    modifiers: effect.modifiers.clone(),
-                });
             }
             events.push(self.make_event(WorldEventKind::ActorAffectedByField {
                 actor_id,

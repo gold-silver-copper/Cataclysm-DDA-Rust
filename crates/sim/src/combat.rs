@@ -90,7 +90,7 @@ pub(super) fn can_dodge_at_stamina(stamina: u32, maximum: u32) -> bool {
 pub(super) fn dodge_roll(
     dexterity: u16,
     dodge_skill: u8,
-    speed: u16,
+    speed: u32,
     stamina: u32,
     maximum_stamina: u32,
 ) -> i64 {
@@ -163,7 +163,7 @@ impl WorldState {
         .map(|(outcome, was_sleeping, _)| (outcome, was_sleeping))
     }
 
-    fn damage_actor_components_at(
+    pub(super) fn damage_actor_components_at(
         &mut self,
         target: ActorId,
         selected: usize,

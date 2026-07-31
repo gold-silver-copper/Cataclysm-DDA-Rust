@@ -2,22 +2,23 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cdda_content::{
     AmmunitionEffectRegistry, CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry,
-    FieldTypeRegistry, FurnitureRegistry, ItemRegistry, MapgenCoordinateRange, MapgenIdChoice,
-    MapgenRegistry, MonsterGroupRegistry, MonsterGroupTarget, MonsterRegistry,
-    MonsterSpecialAttackKind, OvermapSpecialDefinition, OvermapSpecialRegistry,
-    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition, SpellRegistry,
-    StartLocationDefinition, StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice,
-    StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
+    EffectTypeRegistry, FieldTypeRegistry, FurnitureRegistry, ItemRegistry, MapgenCoordinateRange,
+    MapgenIdChoice, MapgenRegistry, MonsterAttackEffectDefinition, MonsterGroupRegistry,
+    MonsterGroupTarget, MonsterRegistry, MonsterSpecialAttackKind, OvermapSpecialDefinition,
+    OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    RiverSettingsDefinition, SpellRegistry, StartLocationDefinition, StrictMapgenAreaItemPlacement,
+    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
     TerrainRegistry,
 };
 use cdda_protocol::{
-    EocDefinitionV1, ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1,
-    WorldgenCatalogV1, WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1,
-    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
-    WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
-    WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1, WorldgenMonsterGroupEntryV1,
+    ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1, EocDefinitionV1, ItemGroupDefinitionV1,
+    WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1, WorldgenCellV1,
+    WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
+    WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
+    WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
+    WorldgenMonsterEffectIntensityApplicationV1, WorldgenMonsterGroupEntryV1,
     WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterGunRangeV1,
     WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1,
     WorldgenMonsterProjectileEffectV1, WorldgenMonsterProjectileFieldEffectV1,
@@ -504,6 +505,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub item_groups: &'a [ItemGroupDefinitionV1],
     pub items: &'a ItemRegistry,
     pub ammunition_effects: &'a AmmunitionEffectRegistry,
+    pub effect_types: &'a EffectTypeRegistry,
     pub fields: &'a FieldTypeRegistry,
     pub monsters: &'a MonsterRegistry,
     pub spells: &'a SpellRegistry,
@@ -532,6 +534,99 @@ struct RuntimeMonsterGunProfile {
     target_moving_vehicles: bool,
 }
 
+fn runtime_monster_attack_effect(
+    effect: &MonsterAttackEffectDefinition,
+    effect_types: &EffectTypeRegistry,
+    requires_cut_or_stab_damage: bool,
+) -> Option<WorldgenMonsterAttackEffectV1> {
+    let count = effect
+        .intensity
+        .1
+        .checked_sub(effect.intensity.0)?
+        .checked_add(1)?;
+    if count > 64 {
+        return None;
+    }
+    let mut applications = Vec::with_capacity(usize::try_from(count).ok()?);
+    let mut maximum_accumulated_duration_turns = None;
+    let mut duration_add_percent = None;
+    let mut blocked_by_effect_ids = None;
+    for requested_intensity in effect.intensity.0..=effect.intensity.1 {
+        let resolved = effect_types.resolve_application(&effect.effect_id, requested_intensity)?;
+        let maximum_duration = u32::try_from(resolved.maximum_duration_seconds).ok()?;
+        if maximum_duration == 0
+            || resolved.duration_add_percent > 1_000
+            || resolved.intensity == 0
+            || resolved.intensity > 1_000_000
+        {
+            return None;
+        }
+        if maximum_accumulated_duration_turns
+            .replace(maximum_duration)
+            .is_some_and(|previous| previous != maximum_duration)
+            || duration_add_percent
+                .replace(resolved.duration_add_percent)
+                .is_some_and(|previous| previous != resolved.duration_add_percent)
+            || blocked_by_effect_ids
+                .replace(resolved.blocked_by_effect_ids.clone())
+                .is_some_and(|previous| previous != resolved.blocked_by_effect_ids)
+        {
+            return None;
+        }
+        let modifiers = ActorEffectModifiersV1 {
+            strength: resolved.strength_modifier,
+            dexterity: resolved.dexterity_modifier,
+            intelligence: resolved.intelligence_modifier,
+            perception: resolved.perception_modifier,
+            speed: resolved.speed_modifier,
+            limb_scores: resolved
+                .limb_score_multipliers
+                .into_iter()
+                .map(
+                    |(score_id, multiplier_millionths)| ActorEffectLimbScoreModifierV1 {
+                        score_id,
+                        multiplier_millionths,
+                    },
+                )
+                .collect(),
+        };
+        if !cdda_protocol::actor_effect_modifiers_are_valid(&modifiers) {
+            return None;
+        }
+        applications.push(WorldgenMonsterEffectIntensityApplicationV1 {
+            intensity: resolved.intensity,
+            modifiers,
+        });
+    }
+    let blocked_by_effect_ids = blocked_by_effect_ids?;
+    if blocked_by_effect_ids.len() > 64
+        || blocked_by_effect_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || blocked_by_effect_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 512 || id.chars().any(char::is_control))
+    {
+        return None;
+    }
+    Some(WorldgenMonsterAttackEffectV1 {
+        effect_id: effect.effect_id.clone(),
+        chance_millionths: effect.chance_millionths,
+        permanent: effect.permanent,
+        affect_hit_body_part: effect.affect_hit_body_part,
+        requires_cut_or_stab_damage,
+        body_part_id: effect.body_part_id.clone(),
+        duration_minimum_turns: effect.duration_turns.0,
+        duration_maximum_turns: effect.duration_turns.1,
+        intensity_minimum: effect.intensity.0,
+        intensity_maximum: effect.intensity.1,
+        maximum_accumulated_duration_turns: maximum_accumulated_duration_turns?,
+        duration_add_percent: duration_add_percent?,
+        blocked_by_effect_ids,
+        intensity_applications: applications,
+    })
+}
+
 #[derive(Clone)]
 struct RuntimeMonsterSpellProfile {
     summoned_monster_type_id: String,
@@ -556,6 +651,7 @@ fn runtime_monster_gun_profile(
     items: &ItemRegistry,
     starting_ammunition: &BTreeMap<String, u32>,
     ammunition_effects: &AmmunitionEffectRegistry,
+    effect_types: &EffectTypeRegistry,
     fields: &FieldTypeRegistry,
 ) -> Result<Option<RuntimeMonsterGunProfile>, Box<dyn std::error::Error>> {
     if attack.kind != MonsterSpecialAttackKind::Gun {
@@ -632,9 +728,12 @@ fn runtime_monster_gun_profile(
         )
         .cloned()
         .collect::<BTreeSet<_>>();
-    let Some(projectile_effect_profiles) =
-        runtime_monster_projectile_effects(&projectile_effects, ammunition_effects, fields)
-    else {
+    let Some(projectile_effect_profiles) = runtime_monster_projectile_effects(
+        &projectile_effects,
+        ammunition_effects,
+        effect_types,
+        fields,
+    ) else {
         return Ok(None);
     };
     let has_fixed_damage = projectile_effects.contains("NO_DAMAGE_SCALING");
@@ -812,6 +911,7 @@ fn runtime_monster_gun_work_is_bounded(
 fn runtime_monster_projectile_effects(
     effect_ids: &BTreeSet<String>,
     registry: &AmmunitionEffectRegistry,
+    effect_types: &EffectTypeRegistry,
     fields: &FieldTypeRegistry,
 ) -> Option<Vec<WorldgenMonsterProjectileEffectV1>> {
     const SUPPORTED_HARDCODED: &[&str] =
@@ -867,6 +967,53 @@ fn runtime_monster_projectile_effects(
                 check_passable: field.check_passable,
             }
         };
+        let on_hit_effects = definition
+            .on_hit_effects
+            .iter()
+            .map(|effect| {
+                let resolved =
+                    effect_types.resolve_application(&effect.effect_id, effect.intensity)?;
+                let maximum_accumulated_duration_seconds =
+                    u32::try_from(resolved.maximum_duration_seconds).ok()?;
+                let modifiers = ActorEffectModifiersV1 {
+                    strength: resolved.strength_modifier,
+                    dexterity: resolved.dexterity_modifier,
+                    intelligence: resolved.intelligence_modifier,
+                    perception: resolved.perception_modifier,
+                    speed: resolved.speed_modifier,
+                    limb_scores: resolved
+                        .limb_score_multipliers
+                        .into_iter()
+                        .map(
+                            |(score_id, multiplier_millionths)| ActorEffectLimbScoreModifierV1 {
+                                score_id,
+                                multiplier_millionths,
+                            },
+                        )
+                        .collect(),
+                };
+                (maximum_accumulated_duration_seconds > 0
+                    && resolved.duration_add_percent <= 1_000
+                    && resolved.blocked_by_effect_ids.len() <= 64
+                    && resolved
+                        .blocked_by_effect_ids
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1])
+                    && resolved.blocked_by_effect_ids.iter().all(|id| {
+                        !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+                    })
+                    && cdda_protocol::actor_effect_modifiers_are_valid(&modifiers))
+                .then_some(WorldgenMonsterProjectileOnHitEffectV1 {
+                    effect_id: effect.effect_id.clone(),
+                    duration_seconds: effect.duration_seconds,
+                    intensity: resolved.intensity,
+                    maximum_accumulated_duration_seconds,
+                    duration_add_percent: resolved.duration_add_percent,
+                    blocked_by_effect_ids: resolved.blocked_by_effect_ids,
+                    modifiers,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
         profiles.push(WorldgenMonsterProjectileEffectV1 {
             effect_id: effect_id.clone(),
             trigger_chance_percent: definition.trigger_chance_percent,
@@ -880,15 +1027,7 @@ fn runtime_monster_projectile_effects(
                 .iter()
                 .map(|definition| field(definition, 0))
                 .collect(),
-            on_hit_effects: definition
-                .on_hit_effects
-                .iter()
-                .map(|effect| WorldgenMonsterProjectileOnHitEffectV1 {
-                    effect_id: effect.effect_id.clone(),
-                    duration_seconds: effect.duration_seconds,
-                    intensity: effect.intensity,
-                })
-                .collect(),
+            on_hit_effects,
         });
         if profiles.len() > 64 {
             return None;
@@ -1149,6 +1288,7 @@ fn runtime_monster_catalog(
     monsters: &MonsterRegistry,
     items: &ItemRegistry,
     ammunition_effects: &AmmunitionEffectRegistry,
+    effect_types: &EffectTypeRegistry,
     fields: &FieldTypeRegistry,
     spells: &SpellRegistry,
     creature_eoc_ids: &BTreeSet<String>,
@@ -1319,25 +1459,8 @@ fn runtime_monster_catalog(
             if !attack_effects_supported {
                 deferred_behavior_fields.insert(String::from("attack_effs"));
             }
-            let mut attack_effects = attack_effects_supported
-                .then(|| {
-                    monster
-                        .attack_effects
-                        .iter()
-                        .map(|effect| WorldgenMonsterAttackEffectV1 {
-                            effect_id: effect.effect_id.clone(),
-                            chance_millionths: effect.chance_millionths,
-                            permanent: effect.permanent,
-                            affect_hit_body_part: effect.affect_hit_body_part,
-                            requires_cut_or_stab_damage: false,
-                            body_part_id: effect.body_part_id.clone(),
-                            duration_minimum_turns: effect.duration_turns.0,
-                            duration_maximum_turns: effect.duration_turns.1,
-                            intensity_minimum: effect.intensity.0,
-                            intensity_maximum: effect.intensity.1,
-                        })
-                        .collect::<Vec<_>>()
-                })
+            let mut attack_effect_definitions = attack_effects_supported
+                .then(|| monster.attack_effects.clone())
                 .unwrap_or_default();
             for (flag, effect_id, duration_turns) in [
                 ("VENOM", "poison", 180),
@@ -1345,20 +1468,36 @@ fn runtime_monster_catalog(
                 ("PARALYZEVENOM", "paralyzepoison", 600),
             ] {
                 if monster.flags.contains(flag) {
-                    attack_effects.push(WorldgenMonsterAttackEffectV1 {
+                    attack_effect_definitions.push(MonsterAttackEffectDefinition {
                         effect_id: effect_id.to_owned(),
                         chance_millionths: 1_000_000,
                         permanent: false,
                         affect_hit_body_part: false,
-                        requires_cut_or_stab_damage: true,
                         body_part_id: None,
-                        duration_minimum_turns: duration_turns,
-                        duration_maximum_turns: duration_turns,
-                        intensity_minimum: 1,
-                        intensity_maximum: 1,
+                        duration_turns: (duration_turns, duration_turns),
+                        intensity: (1, 1),
                     });
                 }
             }
+            let attack_effects = attack_effects_supported
+                .then(|| {
+                    attack_effect_definitions
+                        .iter()
+                        .enumerate()
+                        .map(|(index, effect)| {
+                            runtime_monster_attack_effect(
+                                effect,
+                                effect_types,
+                                index >= monster.attack_effects.len(),
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .flatten();
+            if attack_effects.is_none() {
+                deferred_behavior_fields.insert(String::from("attack_effs.effect_type"));
+            }
+            let attack_effects = attack_effects.unwrap_or_default();
             let creature_eoc_context_is_supported =
                 |attack: &cdda_content::MonsterSpecialAttackDefinition| {
                     attack
@@ -1390,6 +1529,7 @@ fn runtime_monster_catalog(
                     items,
                     &monster.starting_ammunition,
                     ammunition_effects,
+                    effect_types,
                     fields,
                 )? {
                     gun_profiles.insert(attack.id.clone(), profile);
@@ -1415,6 +1555,46 @@ fn runtime_monster_catalog(
                     ));
                 }
             }
+            let mut special_effect_profiles = BTreeMap::new();
+            for attack in monster.special_attacks.values().filter(|attack| {
+                attack.is_fully_supported() && creature_eoc_context_is_supported(attack)
+            }) {
+                let spell_status = spell_profiles.get(&attack.id).and_then(|profile| {
+                    (!profile.status_effect_id.is_empty()).then(|| MonsterAttackEffectDefinition {
+                        effect_id: profile.status_effect_id.clone(),
+                        chance_millionths: 1_000_000,
+                        permanent: false,
+                        affect_hit_body_part: false,
+                        body_part_id: None,
+                        duration_turns: (
+                            profile.minimum_duration_turns,
+                            profile.maximum_duration_turns,
+                        ),
+                        intensity: (1, 1),
+                    })
+                });
+                let compiled = spell_status.as_ref().map_or_else(
+                    || {
+                        attack
+                            .effects
+                            .iter()
+                            .map(|effect| {
+                                runtime_monster_attack_effect(effect, effect_types, false)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    },
+                    |effect| {
+                        runtime_monster_attack_effect(effect, effect_types, false)
+                            .map(|effect| vec![effect])
+                    },
+                );
+                if let Some(compiled) = compiled {
+                    special_effect_profiles.insert(attack.id.clone(), compiled);
+                } else {
+                    deferred_behavior_fields
+                        .insert(format!("special_attacks.{}.effect_type", attack.id));
+                }
+            }
             let special_attacks = monster
                 .special_attacks
                 .values()
@@ -1425,6 +1605,7 @@ fn runtime_monster_catalog(
                             || gun_profiles.contains_key(&attack.id))
                         && (attack.kind != MonsterSpecialAttackKind::Spell
                             || spell_profiles.contains_key(&attack.id))
+                        && special_effect_profiles.contains_key(&attack.id)
                 })
                 .map(|attack| {
                     let kind = match attack.kind {
@@ -1509,45 +1690,14 @@ fn runtime_monster_catalog(
                                 }
                             },
                         ),
-                        effects: spell_profile.map_or_else(
-                            || {
-                                attack
-                                    .effects
-                                    .iter()
-                                    .map(|effect| WorldgenMonsterAttackEffectV1 {
-                                        effect_id: effect.effect_id.clone(),
-                                        chance_millionths: effect.chance_millionths,
-                                        permanent: effect.permanent,
-                                        affect_hit_body_part: effect.affect_hit_body_part,
-                                        requires_cut_or_stab_damage: false,
-                                        body_part_id: effect.body_part_id.clone(),
-                                        duration_minimum_turns: effect.duration_turns.0,
-                                        duration_maximum_turns: effect.duration_turns.1,
-                                        intensity_minimum: effect.intensity.0,
-                                        intensity_maximum: effect.intensity.1,
-                                    })
-                                    .collect()
-                            },
-                            |profile| {
-                                if profile.status_effect_id.is_empty() {
-                                    Vec::new()
-                                } else {
-                                    vec![WorldgenMonsterAttackEffectV1 {
-                                        effect_id: profile.status_effect_id.clone(),
-                                        chance_millionths: 1_000_000,
-                                        permanent: false,
-                                        affect_hit_body_part: false,
-                                        requires_cut_or_stab_damage: false,
-                                        body_part_id: None,
-                                        duration_minimum_turns: profile.minimum_duration_turns,
-                                        duration_maximum_turns: profile.maximum_duration_turns,
-                                        intensity_minimum: 1,
-                                        intensity_maximum: 1,
-                                    }]
-                                }
-                            },
-                        ),
+                        effects: special_effect_profiles
+                            .get(&attack.id)
+                            .cloned()
+                            .unwrap_or_default(),
                         effects_require_damage: attack.effects_require_damage,
+                        attack_amount_minimum: attack.attack_amount_minimum,
+                        attack_amount_maximum: attack.attack_amount_maximum,
+                        spread_damage: attack.spread_damage,
                         infection_chance_millionths: attack.infection_chance_millionths,
                         leap_minimum_range_milli: attack.leap_minimum_range_milli,
                         leap_maximum_range_milli: attack.leap_maximum_range_milli,
@@ -1940,6 +2090,7 @@ pub(super) fn runtime_mapgen_worldgen(
         item_groups,
         items,
         ammunition_effects,
+        effect_types,
         fields,
         monsters,
         spells,
@@ -2101,6 +2252,7 @@ pub(super) fn runtime_mapgen_worldgen(
             monsters,
             items,
             ammunition_effects,
+            effect_types,
             fields,
             spells,
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
@@ -3194,6 +3346,7 @@ mod tests {
                 item_groups: &runtime_groups,
                 items: &items,
                 ammunition_effects: &AmmunitionEffectRegistry::default(),
+                effect_types: &EffectTypeRegistry::default(),
                 fields: &FieldTypeRegistry::default(),
                 monsters: &monsters,
                 spells: &spells,

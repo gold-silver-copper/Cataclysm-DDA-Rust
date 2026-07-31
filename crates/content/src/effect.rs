@@ -41,6 +41,7 @@ struct EffectTypeDefinition {
     id: String,
     maximum_duration_seconds: u64,
     maximum_intensity: u32,
+    maximum_effective_intensity: u32,
     duration_add_percent: u16,
     strength: ScaledModifier,
     dexterity: ScaledModifier,
@@ -99,6 +100,11 @@ impl EffectTypeRegistry {
             return None;
         }
         let intensity = requested_intensity.min(definition.maximum_intensity);
+        let modifier_intensity = if definition.maximum_effective_intensity == 0 {
+            intensity
+        } else {
+            intensity.min(definition.maximum_effective_intensity)
+        };
         let mut combined = BTreeMap::<String, u128>::new();
         for modifier in &definition.limb_scores {
             let factor = i128::from(modifier.multiplier_millionths).checked_add(
@@ -121,11 +127,11 @@ impl EffectTypeRegistry {
             maximum_duration_seconds: definition.maximum_duration_seconds,
             duration_add_percent: definition.duration_add_percent,
             intensity,
-            strength_modifier: definition.strength.resolve(intensity)?,
-            dexterity_modifier: definition.dexterity.resolve(intensity)?,
-            intelligence_modifier: definition.intelligence.resolve(intensity)?,
-            perception_modifier: definition.perception.resolve(intensity)?,
-            speed_modifier: definition.speed.resolve(intensity)?,
+            strength_modifier: definition.strength.resolve(modifier_intensity)?,
+            dexterity_modifier: definition.dexterity.resolve(modifier_intensity)?,
+            intelligence_modifier: definition.intelligence.resolve(modifier_intensity)?,
+            perception_modifier: definition.perception.resolve(modifier_intensity)?,
+            speed_modifier: definition.speed.resolve(modifier_intensity)?,
             limb_score_multipliers,
             blocked_by_effect_ids: self
                 .effects
@@ -184,6 +190,7 @@ fn parse_effect_type(id: &str, object: &Map<String, Value>, source: &str) -> Eff
         .get("max_duration")
         .map_or(Some(DEFAULT_MAX_DURATION_SECONDS), parse_duration_seconds);
     let maximum_intensity = optional_u32(object.get("max_intensity"), 1);
+    let maximum_effective_intensity = optional_u32(object.get("max_effective_intensity"), 0);
     let duration_add_percent = optional_u16(object.get("dur_add_perc"), 100);
     let intensity_duration_factor = object
         .get("int_dur_factor")
@@ -206,6 +213,7 @@ fn parse_effect_type(id: &str, object: &Map<String, Value>, source: &str) -> Eff
         .map_or(Some(false), Value::as_bool);
     let blocks_effects = string_set(object.get("blocks_effects"));
     let removes_effects = string_set(object.get("removes_effects"));
+    let flags = string_set(object.get("flags"));
     let modifier_maps_supported = ["base_mods", "scaling_mods"].into_iter().all(|field| {
         object.get(field).is_none_or(|value| {
             value.as_object().is_some_and(|modifiers| {
@@ -231,12 +239,16 @@ fn parse_effect_type(id: &str, object: &Map<String, Value>, source: &str) -> Eff
             == Some(false);
     supported &= maximum_duration_seconds.is_some()
         && maximum_intensity.is_some_and(|value| value > 0)
+        && maximum_effective_intensity.is_some_and(|value| {
+            value == 0 || maximum_intensity.is_some_and(|maximum| value <= maximum)
+        })
         && duration_add_percent.is_some()
         && intensity_duration_factor == Some(0)
         && !disallowed_nonempty
         && main_parts_only == Some(false)
         && blocks_effects.is_some()
         && removes_effects.as_ref().is_some_and(BTreeSet::is_empty)
+        && flags.is_some()
         && modifier_maps_supported
         && intensity_decay_supported;
     let (strength, strength_supported) = parse_modifier(object, "str_mod", source);
@@ -245,18 +257,24 @@ fn parse_effect_type(id: &str, object: &Map<String, Value>, source: &str) -> Eff
     let (perception, perception_supported) = parse_modifier(object, "per_mod", source);
     let (speed, speed_supported) = parse_modifier(object, "speed_mod", source);
     let (limb_scores, limb_scores_supported) = parse_limb_scores(object, source);
+    let flags_supported = flags.as_ref().is_some_and(|flags| {
+        flags.iter().all(|flag| flag == "EFFECT_LIMB_SCORE_MOD")
+            && (limb_scores.is_empty() || flags.contains("EFFECT_LIMB_SCORE_MOD"))
+    });
     supported &= strength_supported
         && dexterity_supported
         && intelligence_supported
         && perception_supported
         && speed_supported
-        && limb_scores_supported;
+        && limb_scores_supported
+        && flags_supported;
     let mut blocking_targets = blocks_effects.unwrap_or_default();
     blocking_targets.extend(removes_effects.unwrap_or_default());
     EffectTypeDefinition {
         id: id.to_owned(),
         maximum_duration_seconds: maximum_duration_seconds.unwrap_or_default(),
         maximum_intensity: maximum_intensity.unwrap_or_default(),
+        maximum_effective_intensity: maximum_effective_intensity.unwrap_or_default(),
         duration_add_percent: duration_add_percent.unwrap_or_default(),
         strength,
         dexterity,

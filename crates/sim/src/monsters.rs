@@ -346,9 +346,18 @@ impl WorldState {
             )?;
             let intensity =
                 roll_inclusive_u32(effect.intensity_minimum, effect.intensity_maximum, rng)?;
-            if duration_turns == 0 || intensity == 0 {
+            if (duration_turns == 0 && !effect.permanent) || intensity == 0 {
                 continue;
             }
+            let application_index = intensity
+                .checked_sub(effect.intensity_minimum)
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or(SimError::InvalidCreature)?;
+            let application = effect
+                .intensity_applications
+                .get(application_index)
+                .ok_or(SimError::InvalidCreature)?;
+            let intensity = application.intensity;
             let body_part_id = if effect.affect_hit_body_part {
                 Some(hit_body_part_id.to_owned())
             } else {
@@ -363,23 +372,50 @@ impl WorldState {
             }) {
                 continue;
             }
-            let duration_ticks = u64::from(duration_turns)
+            let blocked = self.actors.get(&target).is_some_and(|actor| {
+                actor.effects.iter().any(|active| {
+                    active.expires_at_tick > self.tick
+                        && effect
+                            .blocked_by_effect_ids
+                            .binary_search(&active.effect_id)
+                            .is_ok()
+                })
+            });
+            if blocked {
+                continue;
+            }
+            let duration_ticks = u64::from(duration_turns.max(u32::from(effect.permanent)))
                 .checked_mul(SimTick::HZ)
                 .ok_or(SimError::NumericOverflow)?;
+            let maximum_duration_ticks = u64::from(effect.maximum_accumulated_duration_turns)
+                .checked_mul(SimTick::HZ)
+                .ok_or(SimError::NumericOverflow)?;
+            let current_tick = self.tick;
             let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
             if let Some(existing) = actor.effects.iter_mut().find(|existing| {
                 existing.effect_id == effect.effect_id && existing.body_part_id == body_part_id
             }) {
                 existing.intensity = intensity;
+                existing.modifiers = application.modifiers.clone();
                 existing.expires_at_tick =
                     if effect.permanent || existing.expires_at_tick == SimTick(u64::MAX) {
                         SimTick(u64::MAX)
                     } else {
+                        let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
+                        let added_turns = u128::from(duration_turns)
+                            .checked_mul(u128::from(effect.duration_add_percent))
+                            .and_then(|value| value.checked_div(100))
+                            .and_then(|value| u64::try_from(value).ok())
+                            .ok_or(SimError::NumericOverflow)?;
+                        let added = added_turns
+                            .checked_mul(SimTick::HZ)
+                            .ok_or(SimError::NumericOverflow)?;
                         SimTick(
-                            existing
-                                .expires_at_tick
+                            current_tick
                                 .0
-                                .saturating_add(duration_ticks)
+                                .saturating_add(
+                                    remaining.saturating_add(added).min(maximum_duration_ticks),
+                                )
                                 .min(u64::MAX - 1),
                         )
                     };
@@ -391,9 +427,14 @@ impl WorldState {
                     expires_at_tick: if effect.permanent {
                         SimTick(u64::MAX)
                     } else {
-                        SimTick(self.tick.0.saturating_add(duration_ticks).min(u64::MAX - 1))
+                        SimTick(
+                            current_tick
+                                .0
+                                .saturating_add(duration_ticks.min(maximum_duration_ticks))
+                                .min(u64::MAX - 1),
+                        )
                     },
-                    modifiers: Default::default(),
+                    modifiers: application.modifiers.clone(),
                 });
                 actor.effects.sort_by(|left, right| {
                     (&left.effect_id, &left.body_part_id)
@@ -1300,8 +1341,20 @@ impl WorldState {
         let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
         for projectile_effect in &profile.gun_projectile_effects {
             for on_hit in &projectile_effect.on_hit_effects {
+                if actor.effects.iter().any(|active| {
+                    active.expires_at_tick > current_tick
+                        && on_hit
+                            .blocked_by_effect_ids
+                            .binary_search(&active.effect_id)
+                            .is_ok()
+                }) {
+                    continue;
+                }
                 let duration_ticks = on_hit
                     .duration_seconds
+                    .checked_mul(SimTick::HZ)
+                    .ok_or(SimError::NumericOverflow)?;
+                let maximum_duration_ticks = u64::from(on_hit.maximum_accumulated_duration_seconds)
                     .checked_mul(SimTick::HZ)
                     .ok_or(SimError::NumericOverflow)?;
                 if let Some(effect) = actor.effects.iter_mut().find(|effect| {
@@ -1309,12 +1362,22 @@ impl WorldState {
                         && effect.body_part_id.as_deref() == Some(body_part_id)
                 }) {
                     effect.intensity = on_hit.intensity;
+                    effect.modifiers = on_hit.modifiers.clone();
+                    let remaining = effect.expires_at_tick.0.saturating_sub(current_tick.0);
+                    let added_seconds = u128::from(on_hit.duration_seconds)
+                        .checked_mul(u128::from(on_hit.duration_add_percent))
+                        .and_then(|value| value.checked_div(100))
+                        .and_then(|value| u64::try_from(value).ok())
+                        .ok_or(SimError::NumericOverflow)?;
+                    let added = added_seconds
+                        .checked_mul(SimTick::HZ)
+                        .ok_or(SimError::NumericOverflow)?;
                     effect.expires_at_tick = SimTick(
-                        effect
-                            .expires_at_tick
+                        current_tick
                             .0
-                            .max(current_tick.0)
-                            .saturating_add(duration_ticks)
+                            .saturating_add(
+                                remaining.saturating_add(added).min(maximum_duration_ticks),
+                            )
                             .min(u64::MAX - 1),
                     );
                 } else if actor.effects.len() < 1_024 {
@@ -1325,10 +1388,10 @@ impl WorldState {
                         expires_at_tick: SimTick(
                             current_tick
                                 .0
-                                .saturating_add(duration_ticks)
+                                .saturating_add(duration_ticks.min(maximum_duration_ticks))
                                 .min(u64::MAX - 1),
                         ),
-                        modifiers: Default::default(),
+                        modifiers: on_hit.modifiers.clone(),
                     });
                 }
             }
@@ -1553,11 +1616,25 @@ impl WorldState {
             &[source.as_u128(), target.as_u128()],
             turn_sequence,
         );
+        let attack_amount = roll_inclusive_u32(
+            u32::from(profile.attack_amount_minimum),
+            u32::from(profile.attack_amount_maximum),
+            &mut rng,
+        )?;
+        let selected_parts = if profile.spread_damage {
+            (0..self.actor_anatomy.parts.len()).collect()
+        } else {
+            (0..attack_amount)
+                .map(|_| crate::anatomy::select_body_part_index(&self.actor_anatomy, &mut rng))
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let multiplier = roll_inclusive_i32(
             profile.minimum_damage_multiplier_millionths,
             profile.maximum_damage_multiplier_millionths,
             &mut rng,
         )?;
+        let attack_amount_i32 =
+            i32::try_from(selected_parts.len()).map_err(|_| SimError::NumericOverflow)?;
         let damage = profile
             .damage
             .iter()
@@ -1570,6 +1647,7 @@ impl WorldState {
                     damage_multiplier_millionths: i128::from(unit.damage_multiplier_millionths)
                         .checked_mul(i128::from(multiplier))
                         .and_then(|value| value.checked_div(1_000_000))
+                        .and_then(|value| value.checked_div(i128::from(attack_amount_i32)))
                         .and_then(|value| i32::try_from(value).ok())
                         .ok_or(SimError::NumericOverflow)?,
                     constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
@@ -1578,13 +1656,27 @@ impl WorldState {
                 })
             })
             .collect::<Result<Vec<_>, SimError>>()?;
-        let (outcome, was_sleeping, cut_or_stab_damage) =
-            self.damage_actor_components(target, &damage, &mut rng)?;
+        let mut outcomes = Vec::with_capacity(selected_parts.len());
+        let mut was_sleeping = false;
+        let mut dealt_cut_or_stab_damage = false;
+        for selected in selected_parts {
+            let (outcome, hit_was_sleeping, hit_cut_or_stab_damage) =
+                self.damage_actor_components_at(target, selected, &damage, &mut rng)?;
+            was_sleeping |= hit_was_sleeping;
+            dealt_cut_or_stab_damage |= hit_cut_or_stab_damage > 0;
+            outcomes.push(outcome);
+        }
+        let mut outcome = outcomes.pop().ok_or(SimError::InvalidCreature)?;
+        outcome.amount = outcomes.iter().try_fold(outcome.amount, |total, hit| {
+            total
+                .checked_add(hit.amount)
+                .ok_or(SimError::NumericOverflow)
+        })?;
         if outcome.amount > 0 || !profile.effects_require_damage {
             self.apply_monster_attack_effects(
                 target,
                 &outcome.body_part_id,
-                cut_or_stab_damage > 0,
+                dealt_cut_or_stab_damage,
                 &profile.effects,
                 &mut rng,
             )?;

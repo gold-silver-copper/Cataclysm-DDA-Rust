@@ -938,6 +938,7 @@ fn open_world(
             item_groups: &item_group_catalog,
             items,
             ammunition_effects: content.ammunition_effects,
+            effect_types: effects,
             fields,
             monsters,
             spells,
@@ -5304,6 +5305,8 @@ mod tests {
             .expect("skills should load");
         let fields = FieldTypeRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("field types should load");
+        let effects = EffectTypeRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+            .expect("effect types should load");
         let bash_profiles =
             BashDamageProfileRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("bash profiles should load");
@@ -5403,8 +5406,9 @@ mod tests {
             .expect("starter firearm loudness should finalize"),
             70
         );
-        let blood = runtime_field_type(fields.get("fd_blood").expect("blood should load"))
-            .expect("blood should normalize");
+        let blood =
+            runtime_field_type(fields.get("fd_blood").expect("blood should load"), &effects)
+                .expect("blood should normalize");
         assert_eq!(blood.field_type_id, "fd_blood");
         assert_eq!(blood.half_life_seconds, 2 * 24 * 60 * 60);
         assert_eq!(blood.intensity_levels.len(), 3);
@@ -5502,6 +5506,7 @@ mod tests {
                 item_groups: &wall_catalog,
                 items: &items,
                 ammunition_effects: &AmmunitionEffectRegistry::default(),
+                effect_types: &EffectTypeRegistry::default(),
                 fields: &fields,
                 monsters: &monsters,
                 spells: &spells,
@@ -5539,6 +5544,7 @@ mod tests {
                     item_groups: &wall_catalog,
                     items: &items,
                     ammunition_effects: &AmmunitionEffectRegistry::default(),
+                    effect_types: &EffectTypeRegistry::default(),
                     fields: &fields,
                     monsters: &monsters,
                     spells: &spells,
@@ -5865,8 +5871,11 @@ mod tests {
         for field_type_id in ["fd_dust", "fd_splinters"] {
             bash_validation
                 .register_field_type(
-                    runtime_field_type(fields.get(field_type_id).expect("bash field should load"))
-                        .expect("bash field should normalize"),
+                    runtime_field_type(
+                        fields.get(field_type_id).expect("bash field should load"),
+                        &effects,
+                    )
+                    .expect("bash field should normalize"),
                 )
                 .expect("bash field should register");
         }

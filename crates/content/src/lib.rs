@@ -97,8 +97,8 @@ pub use material::{
     ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,
 };
 pub use monster::{
-    MonsterDefinition, MonsterRegistry, MonsterRegistryError, MonsterSpecialAttackDefinition,
-    MonsterSpecialAttackKind,
+    MonsterAttackEffectDefinition, MonsterDefinition, MonsterRegistry, MonsterRegistryError,
+    MonsterSpecialAttackDefinition, MonsterSpecialAttackKind,
 };
 pub use monster_group::{
     MAX_MONSTER_GROUP_ENTRIES, MAX_MONSTER_GROUP_FREQUENCY, MAX_MONSTER_GROUP_PACK_SIZE,
