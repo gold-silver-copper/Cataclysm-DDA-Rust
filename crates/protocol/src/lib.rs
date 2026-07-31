@@ -115,7 +115,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 129;
+pub const PROTOCOL_VERSION: u16 = 130;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2935,6 +2935,8 @@ pub struct VisibleCreatureSnapshot {
     pub type_id: String,
     pub position: WorldPosition,
     pub hp: i32,
+    /// Current HP may exceed the new type's maximum after a pinned
+    /// `poly_keep_hp` transformation.
     pub max_hp: i32,
 }
 
@@ -3410,6 +3412,9 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_summoned_monster_type_id: String,
     /// Self-centered spells do not require an actor target or line of sight.
     pub spell_target_self: bool,
+    /// Pinned `NO_PROJECTILE`: blast targeting and area propagation ignore
+    /// impassable terrain instead of moving the epicenter to the collision.
+    pub spell_no_projectile: bool,
     pub spell_minimum_summons: u16,
     pub spell_maximum_summons: u16,
     pub spell_random_summons: bool,
@@ -5710,9 +5715,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && (1..=64).contains(&attack.spell_minimum_summons)
                                 && attack.spell_minimum_summons <= attack.spell_maximum_summons
                                 && attack.spell_maximum_summons <= 64
-                                && (attack.spell_random_summons
-                                    || attack.spell_minimum_summons
-                                        == attack.spell_maximum_summons)
+                                && !attack.spell_random_summons
+                                && attack.spell_minimum_summons == attack.spell_maximum_summons
                                 && (1..=32).contains(&attack.spell_aoe)
                                 && attack.minimum_damage_multiplier_millionths == 0
                                 && attack.maximum_damage_multiplier_millionths == 0
@@ -5720,27 +5724,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.effects.is_empty()
                                 && attack.eoc_ids.is_empty()
                                 && no_field;
-                            let typed_damage = attack.spell_summoned_monster_type_id.is_empty()
-                                && !attack.spell_target_self
-                                && attack.spell_minimum_summons == 0
-                                && attack.spell_maximum_summons == 0
-                                && !attack.spell_random_summons
-                                && (1_000_000..=1_000_000_000)
-                                    .contains(&attack.minimum_damage_multiplier_millionths)
-                                && attack.minimum_damage_multiplier_millionths % 1_000_000 == 0
-                                && attack.maximum_damage_multiplier_millionths % 1_000_000 == 0
-                                && attack.damage.len() == 1
-                                && attack.damage[0].amount_milli == 1_000
-                                && attack.damage[0].armor_penetration_milli == 0
-                                && attack.damage[0].armor_multiplier_millionths == 1_000_000
-                                && attack.damage[0].damage_multiplier_millionths == 1_000_000
-                                && attack.damage[0].constant_armor_multiplier_millionths
-                                    == 1_000_000
-                                && attack.damage[0].constant_damage_multiplier_millionths
-                                    == 1_000_000
-                                && attack.effects.is_empty()
-                                && attack.eoc_ids.is_empty()
-                                && (no_field || field);
+                            // Typed spell damage still lacks pinned defense,
+                            // body-part selection, and RNG-order semantics.
+                            let typed_damage = false;
                             let status_effect = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -5756,12 +5742,15 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && !attack.effects[0].requires_cut_or_stab_damage
                                 && attack.effects[0].body_part_id.is_none()
                                 && attack.effects[0].duration_minimum_turns > 0
+                                && attack.effects[0].duration_minimum_turns
+                                    == attack.effects[0].duration_maximum_turns
                                 && attack.effects[0].intensity_minimum == 1
                                 && attack.effects[0].intensity_maximum == 1
                                 && attack.eoc_ids.is_empty()
                                 && (no_field || field);
                             let eoc = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
+                                && !attack.spell_targets_ground
                                 && attack.spell_minimum_summons == 0
                                 && attack.spell_maximum_summons == 0
                                 && !attack.spell_random_summons
@@ -5775,6 +5764,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         } else {
                             attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
+                                && !attack.spell_no_projectile
                                 && attack.spell_minimum_summons == 0
                                 && attack.spell_maximum_summons == 0
                                 && !attack.spell_random_summons
@@ -5851,6 +5841,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_prefer
                                     && !attack.leap_random
                                     && !attack.leap_ignore_destination_danger
+                                    && attack.kind == WorldgenMonsterSpecialAttackKindV1::Melee
+                                    && attack.range == 1
                             }
                             WorldgenMonsterSpecialAttackKindV1::Eoc => {
                                 attack.gun_type_id.is_empty()
@@ -5892,71 +5884,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_ignore_destination_danger
                                     && !attack.eoc_ids.is_empty()
                             }
-                            WorldgenMonsterSpecialAttackKindV1::Gun => {
-                                attack.accuracy.is_none()
-                                    && !attack.no_adjacent
-                                    && !attack.dodgeable
-                                    && attack.minimum_damage_multiplier_millionths == 0
-                                    && attack.maximum_damage_multiplier_millionths == 0
-                                    && (attack.damage.iter().any(|unit| unit.amount_milli != 0)
-                                        || attack.gun_projectile_effects.iter().any(|effect| {
-                                            !effect.area_fields.is_empty()
-                                                || !effect.trail_fields.is_empty()
-                                                || !effect.on_hit_effects.is_empty()
-                                        }))
-                                    && attack.effects.is_empty()
-                                    && !attack.effects_require_damage
-                                    && attack.infection_chance_millionths == 0
-                                    && attack.leap_minimum_range_milli == 0
-                                    && attack.leap_maximum_range_milli == 0
-                                    && attack.leap_minimum_consider_range_milli == 0
-                                    && attack.leap_maximum_consider_range_milli == 0
-                                    && !attack.leap_allow_no_target
-                                    && !attack.leap_prefer
-                                    && !attack.leap_random
-                                    && !attack.leap_ignore_destination_danger
-                                    && attack.eoc_ids.is_empty()
-                                    && valid_worldgen_id(&attack.gun_type_id)
-                                    && (attack.gun_ammunition_type_id.is_empty()
-                                        || (valid_worldgen_id(&attack.gun_ammunition_type_id)
-                                            && prototype
-                                                .starting_ammunition
-                                                .get(&attack.gun_ammunition_type_id)
-                                                .is_some_and(|amount| *amount > 0)))
-                                    && !attack.gun_ranges.is_empty()
-                                    && (1..=1_000).contains(&attack.gun_item_range)
-                                    && (1..=1_000_000).contains(&attack.gun_dispersion)
-                                    && attack.gun_targeting_cost_moves <= 1_000_000_000
-                                    && attack.gun_targeting_timeout_turns <= 1_000_000_000
-                                    && attack.gun_targeting_timeout_extend_turns.unsigned_abs()
-                                        <= 1_000_000_000
-                                    && attack.gun_targeting_sound.len() <= 512
-                                    && !attack.gun_targeting_sound.chars().any(char::is_control)
-                                    && valid_worldgen_monster_projectile_effects(
-                                        &attack.gun_projectile_effects,
-                                    )
-                                    && (attack.damage.iter().all(|unit| unit.amount_milli == 0)
-                                        || attack.gun_no_damage_scaling)
-                                    && attack.gun_ranges.windows(2).all(|ranges| {
-                                        (ranges[0].minimum, ranges[0].maximum)
-                                            < (ranges[1].minimum, ranges[1].maximum)
-                                    })
-                                    && attack.gun_ranges.iter().all(|range| {
-                                        range.minimum <= range.maximum
-                                            && range.maximum <= attack.range
-                                            && range.maximum <= attack.gun_item_range
-                                            && valid_worldgen_id(&range.mode_id)
-                                            && (1..=100).contains(&range.shot_count)
-                                    })
-                                    && worldgen_monster_gun_work_is_bounded(attack)
-                                    && attack.range
-                                        == attack
-                                            .gun_ranges
-                                            .iter()
-                                            .map(|range| range.maximum)
-                                            .max()
-                                            .unwrap_or(0)
-                            }
+                            // The represented gun profile is retained for a
+                            // future pinned ballistic kernel, but is fail-closed.
+                            WorldgenMonsterSpecialAttackKindV1::Gun => false,
                             WorldgenMonsterSpecialAttackKindV1::Polymorph => {
                                 attack.move_cost_moves == 0
                                     && attack.accuracy.is_none()
@@ -6086,7 +6016,11 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                     .binary_search_by(|candidate| {
                         candidate.base.monster_type_id.as_str().cmp(dependency)
                     })
-                    .is_err()
+                    .ok()
+                    .and_then(|index| catalog.monster_prototypes.get(index))
+                    .is_none_or(|dependency| {
+                        prototype.runtime_spawnable && !dependency.runtime_spawnable
+                    })
             })
         })
     }) {
@@ -6134,85 +6068,6 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
         edges.push(group_edges);
     }
     valid_worldgen_bounded_graph(&edges, MAX_WORLDGEN_MONSTER_GROUP_DEPTH)
-}
-
-fn valid_worldgen_monster_projectile_effects(
-    effects: &[WorldgenMonsterProjectileEffectV1],
-) -> bool {
-    effects.len() <= 64
-        && effects
-            .windows(2)
-            .all(|pair| pair[0].effect_id < pair[1].effect_id)
-        && effects.iter().all(|effect| {
-            valid_worldgen_id(&effect.effect_id)
-                && effect.trigger_chance_percent <= 100
-                && effect.area_fields.len() <= 64
-                && effect.trail_fields.len() <= 64
-                && effect.area_fields.iter().all(|field| {
-                    valid_worldgen_id(&field.field_type_id)
-                        && field.intensity_minimum <= field.intensity_maximum
-                        && field.chance_percent <= 100
-                        && field.radius <= 64
-                })
-                && effect.trail_fields.iter().all(|field| {
-                    valid_worldgen_id(&field.field_type_id)
-                        && field.intensity_minimum <= field.intensity_maximum
-                        && field.chance_percent <= 100
-                        && field.radius == 0
-                        && !field.check_passable
-                })
-                && effect.on_hit_effects.len() <= 64
-                && effect.on_hit_effects.iter().all(|on_hit| {
-                    valid_worldgen_id(&on_hit.effect_id)
-                        && (1..=1_000_000_000).contains(&on_hit.duration_seconds)
-                        && (1..=1_000_000).contains(&on_hit.intensity)
-                        && on_hit.maximum_accumulated_duration_seconds > 0
-                        && on_hit.duration_add_percent <= 1_000
-                        && on_hit.blocked_by_effect_ids.len() <= 64
-                        && on_hit
-                            .blocked_by_effect_ids
-                            .windows(2)
-                            .all(|pair| pair[0] < pair[1])
-                        && on_hit
-                            .blocked_by_effect_ids
-                            .iter()
-                            .all(|effect_id| valid_worldgen_id(effect_id))
-                        && actor_effect_modifiers_are_valid(&on_hit.modifiers)
-                })
-        })
-}
-
-fn worldgen_monster_gun_work_is_bounded(attack: &WorldgenMonsterSpecialAttackV1) -> bool {
-    let Some(maximum_shots) = attack
-        .gun_ranges
-        .iter()
-        .map(|range| u64::from(range.shot_count))
-        .max()
-    else {
-        return false;
-    };
-    let Some(per_shot) = attack
-        .gun_projectile_effects
-        .iter()
-        .try_fold(1_u64, |total, effect| {
-            let trails = u64::try_from(effect.trail_fields.len())
-                .ok()?
-                .checked_mul(u64::from(attack.gun_item_range))?;
-            let area = effect.area_fields.iter().try_fold(0_u64, |area, field| {
-                let diameter = u64::from(field.radius).checked_mul(2)?.checked_add(1)?;
-                area.checked_add(diameter.checked_mul(diameter)?)
-            })?;
-            total
-                .checked_add(trails)?
-                .checked_add(area)?
-                .checked_add(u64::try_from(effect.on_hit_effects.len()).ok()?)
-        })
-    else {
-        return false;
-    };
-    per_shot
-        .checked_mul(maximum_shots)
-        .is_some_and(|work| work <= 100_000)
 }
 
 fn valid_worldgen_monster_damage(units: &[WorldgenMonsterMeleeDamageUnitV1]) -> bool {
@@ -8245,7 +8100,6 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
                     .all(|character| !character.is_control())
                 && creature.max_hp > 0
                 && creature.hp > 0
-                && creature.hp <= creature.max_hp
         })
 }
 

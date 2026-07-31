@@ -114,6 +114,77 @@ pub(super) fn select_body_part_index(
     Ok(selected)
 }
 
+pub(super) fn select_body_part_index_for_hit(
+    anatomy: &AnatomyDefinitionV1,
+    hit_spread: i32,
+    rng: &mut impl Rng,
+) -> Result<usize, SimError> {
+    if hit_spread <= 0 {
+        return select_body_part_index(anatomy, rng);
+    }
+    if !anatomy_definition_is_valid(anatomy) {
+        return Err(SimError::InvalidActorAnatomy);
+    }
+    let mut binary_weights = Vec::with_capacity(anatomy.parts.len());
+    for part in &anatomy.parts {
+        let hit_size = part.hit_size_millionths as f32 / cdda_protocol::ANATOMY_SCALE as f32;
+        let hit_difficulty =
+            part.hit_difficulty_millionths as f32 / cdda_protocol::ANATOMY_SCALE as f32;
+        let weight = hit_size * libm::powf(hit_spread as f32, hit_difficulty);
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(SimError::InvalidActorAnatomy);
+        }
+        let bits = weight.to_bits();
+        let encoded_exponent = ((bits >> 23) & 0xff) as i32;
+        let fraction = bits & 0x7f_ffff;
+        let (mut significand, mut exponent) = if encoded_exponent == 0 {
+            (fraction, -149)
+        } else {
+            ((1 << 23) | fraction, encoded_exponent - 127 - 23)
+        };
+        if significand == 0 {
+            return Err(SimError::InvalidActorAnatomy);
+        }
+        let trailing = significand.trailing_zeros();
+        significand >>= trailing;
+        exponent = exponent
+            .checked_add(i32::try_from(trailing).map_err(|_| SimError::NumericOverflow)?)
+            .ok_or(SimError::NumericOverflow)?;
+        binary_weights.push((u128::from(significand), exponent));
+    }
+    let minimum_exponent = binary_weights
+        .iter()
+        .map(|(_significand, exponent)| *exponent)
+        .min()
+        .ok_or(SimError::InvalidActorAnatomy)?;
+    let weights = binary_weights
+        .into_iter()
+        .map(|(significand, exponent)| {
+            let shift = u32::try_from(exponent - minimum_exponent)
+                .map_err(|_| SimError::NumericOverflow)?;
+            significand
+                .checked_shl(shift)
+                .ok_or(SimError::NumericOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let total = weights.iter().try_fold(0_u128, |total, weight| {
+        total.checked_add(*weight).ok_or(SimError::NumericOverflow)
+    })?;
+    let total = u64::try_from(total).map_err(|_| SimError::NumericOverflow)?;
+    if total == 0 {
+        return Err(SimError::InvalidActorAnatomy);
+    }
+    let mut ticket = rng.next_u64() % total;
+    for (index, weight) in weights.into_iter().enumerate() {
+        let weight = u64::try_from(weight).map_err(|_| SimError::NumericOverflow)?;
+        if ticket < weight {
+            return Ok(index);
+        }
+        ticket -= weight;
+    }
+    Err(SimError::InvalidActorAnatomy)
+}
+
 pub(super) fn apply_damage_to_part(
     anatomy: &AnatomyDefinitionV1,
     parts: &mut [ActorBodyPartSnapshotV1],

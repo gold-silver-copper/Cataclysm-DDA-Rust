@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 blake3.workspace = true
 cdda-protocol = { path = "../protocol" }
+libm.workspace = true
 postcard.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true

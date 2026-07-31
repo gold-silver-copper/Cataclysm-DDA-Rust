@@ -658,8 +658,12 @@ fn creature_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
         | EocEffectV1::RemoveTargetEffects { .. }
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. } => true,
-        EocEffectV1::AddEffect { body_part_id, .. }
-        | EocEffectV1::RemoveEffects { body_part_id, .. } => body_part_id.is_none(),
+        EocEffectV1::AddEffect {
+            effect_id,
+            body_part_id,
+            ..
+        } => body_part_id.is_none() && creature_runtime_effect_is_supported(effect_id),
+        EocEffectV1::RemoveEffects { body_part_id, .. } => body_part_id.is_none(),
         EocEffectV1::MathAssignment { target, value, .. } => {
             matches!(target, EocMathAssignmentTargetV1::ActorVariable(_))
                 && creature_eoc_math_is_supported(value)
@@ -679,6 +683,24 @@ fn creature_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
         | EocEffectV1::AssignMission { .. }
         | EocEffectV1::FinishMission { .. } => false,
     })
+}
+
+fn creature_runtime_effect_is_supported(effect_id: &str) -> bool {
+    !matches!(
+        effect_id,
+        "beartrap"
+            | "crushed"
+            | "downed"
+            | "grabbed"
+            | "heavysnare"
+            | "in_pit"
+            | "lightsnare"
+            | "psi_stunned"
+            | "stunned"
+            | "tied"
+            | "webbed"
+            | "worked_on"
+    )
 }
 
 fn creature_eoc_math_is_supported(expression: &EocMathExpressionV1) -> bool {

@@ -672,6 +672,7 @@ struct RuntimeMonsterSpellProfile {
     maximum_duration_turns: u32,
     eoc_id: String,
     target_self: bool,
+    no_projectile: bool,
     minimum_summons: u16,
     maximum_summons: u16,
     random_summons: bool,
@@ -1162,11 +1163,16 @@ fn runtime_monster_spell_profile(
         )
     })?;
     let summon = spell.supports_hostile_permanent_summoning();
-    let typed_damage = spell.supports_hostile_typed_damage();
+    let typed_damage = false;
     let status_effect = spell.supports_hostile_status_effect();
     let effect_on_condition = spell.supports_hostile_effect_on_condition()
-        && creature_eoc_ids.contains(&spell.effect_str);
+        && creature_eoc_ids.contains(&spell.effect_str)
+        && !spell.valid_targets.contains("ground");
     if (!summon && !typed_damage && !status_effect && !effect_on_condition)
+        || !spell.flags.contains("SILENT")
+        || !spell.flags.contains("NO_EXPLOSION_SFX")
+        || spell.flags.contains("RANDOM_DAMAGE")
+        || spell.flags.contains("RANDOM_DURATION")
         || attack.spell_min_level > 1_000
         || attack
             .spell_max_level
@@ -1349,6 +1355,7 @@ fn runtime_monster_spell_profile(
             .then(|| spell.effect_str.clone())
             .unwrap_or_default(),
         target_self,
+        no_projectile: spell.flags.contains("NO_PROJECTILE"),
         minimum_summons: summon
             .then(|| u16::try_from(minimum_damage))
             .transpose()?
@@ -1492,7 +1499,7 @@ fn runtime_monster_catalog(
         .enumerate()
         .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
         .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
-    let monster_prototypes = monster_ids
+    let mut monster_prototypes = monster_ids
         .iter()
         .map(|id| {
             let monster = monsters
@@ -1544,6 +1551,13 @@ fn runtime_monster_catalog(
                 .iter()
                 .cloned()
                 .collect::<BTreeSet<_>>();
+            deferred_behavior_fields.extend(
+                monster
+                    .special_attacks
+                    .values()
+                    .filter(|attack| !attack.is_fully_supported())
+                    .map(|attack| format!("special_attacks.{}", attack.id)),
+            );
             if !melee_damage_supported {
                 deferred_behavior_fields.insert(String::from("melee_damage"));
             }
@@ -1829,6 +1843,8 @@ fn runtime_monster_catalog(
                             .map(|profile| profile.summoned_monster_type_id.clone())
                             .unwrap_or_default(),
                         spell_target_self: spell_profile.is_some_and(|profile| profile.target_self),
+                        spell_no_projectile: spell_profile
+                            .is_some_and(|profile| profile.no_projectile),
                         spell_minimum_summons: spell_profile
                             .map_or(0, |profile| profile.minimum_summons),
                         spell_maximum_summons: spell_profile
@@ -1919,6 +1935,65 @@ fn runtime_monster_catalog(
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    loop {
+        let spawnability = monster_prototypes
+            .iter()
+            .map(|prototype| {
+                (
+                    prototype.base.monster_type_id.as_str(),
+                    prototype.runtime_spawnable,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let blocked = monster_prototypes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, prototype)| {
+                if !prototype.runtime_spawnable {
+                    return None;
+                }
+                prototype.special_attacks.iter().find_map(|attack| {
+                    let dependency = match attack.kind {
+                        WorldgenMonsterSpecialAttackKindV1::Polymorph => {
+                            Some(attack.polymorph_monster_type_id.as_str())
+                        }
+                        WorldgenMonsterSpecialAttackKindV1::Spell
+                            if !attack.spell_summoned_monster_type_id.is_empty() =>
+                        {
+                            Some(attack.spell_summoned_monster_type_id.as_str())
+                        }
+                        WorldgenMonsterSpecialAttackKindV1::Melee
+                        | WorldgenMonsterSpecialAttackKindV1::Bite
+                        | WorldgenMonsterSpecialAttackKindV1::Leap
+                        | WorldgenMonsterSpecialAttackKindV1::Eoc
+                        | WorldgenMonsterSpecialAttackKindV1::Gun
+                        | WorldgenMonsterSpecialAttackKindV1::Spell => None,
+                    }?;
+                    spawnability
+                        .get(dependency)
+                        .is_some_and(|spawnable| !*spawnable)
+                        .then(|| {
+                            (
+                                index,
+                                format!("special_attacks.{}.runtime_dependency", attack.attack_id),
+                            )
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        if blocked.is_empty() {
+            break;
+        }
+        for (index, field) in blocked {
+            let prototype = monster_prototypes
+                .get_mut(index)
+                .ok_or("monster dependency propagation lost its prototype")?;
+            prototype.runtime_spawnable = false;
+            prototype.deferred_behavior_fields.push(field);
+            prototype.deferred_behavior_fields.sort();
+            prototype.deferred_behavior_fields.dedup();
+        }
+    }
     let group_indices = group_ids
         .iter()
         .enumerate()

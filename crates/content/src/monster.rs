@@ -1021,6 +1021,56 @@ fn parse_special_attack(
                 .ok_or_else(|| invalid(source, &format!("special_attacks.{field}")))?;
         }
     }
+    if matches!(
+        kind,
+        MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite
+    ) {
+        let inherits_melee = base.is_some_and(|base| {
+            matches!(
+                base.kind,
+                MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite
+            )
+        });
+        let uncanny_dodgeable = fields
+            .get("uncanny_dodgeable")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, "special_attacks.uncanny_dodgeable"))
+            })
+            .transpose()?
+            .unwrap_or_else(|| {
+                if inherits_melee {
+                    attack.unsupported_fields.contains("uncanny_dodgeable")
+                } else {
+                    attack.dodgeable
+                }
+            });
+        let blockable = fields
+            .get("blockable")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, "special_attacks.blockable"))
+            })
+            .transpose()?
+            .unwrap_or_else(|| !inherits_melee || attack.unsupported_fields.contains("blockable"));
+        if uncanny_dodgeable {
+            attack
+                .unsupported_fields
+                .insert(String::from("uncanny_dodgeable"));
+        } else {
+            attack.unsupported_fields.remove("uncanny_dodgeable");
+        }
+        if blockable {
+            attack.unsupported_fields.insert(String::from("blockable"));
+        } else {
+            attack.unsupported_fields.remove("blockable");
+        }
+    } else {
+        attack.unsupported_fields.remove("uncanny_dodgeable");
+        attack.unsupported_fields.remove("blockable");
+    }
     if let Some(value) = fields.get("min_mul") {
         attack.minimum_damage_multiplier_millionths =
             parse_scaled_number(value, 1_000_000, source, "special_attacks.min_mul")?;
@@ -1694,6 +1744,31 @@ fn parse_special_attack(
         attack
             .unsupported_fields
             .insert(String::from("throw_strength"));
+    }
+    if matches!(
+        kind,
+        MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite
+    ) && attack.range > 1
+    {
+        attack
+            .unsupported_fields
+            .insert(String::from("ranged_melee_path"));
+    } else {
+        attack.unsupported_fields.remove("ranged_melee_path");
+    }
+    if kind == MonsterSpecialAttackKind::Bite {
+        attack
+            .unsupported_fields
+            .insert(String::from("bite_wound_progression"));
+    } else {
+        attack.unsupported_fields.remove("bite_wound_progression");
+    }
+    if kind == MonsterSpecialAttackKind::Gun {
+        attack
+            .unsupported_fields
+            .insert(String::from("firearm_ballistics"));
+    } else {
+        attack.unsupported_fields.remove("firearm_ballistics");
     }
     if attack.range == 0
         || attack.maximum_damage_multiplier_millionths < attack.minimum_damage_multiplier_millionths

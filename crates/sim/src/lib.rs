@@ -3347,6 +3347,21 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
         || snapshot.effects.iter().any(|effect| {
             effect.body_part_id.is_some()
                 || validate_item_type_id(&effect.effect_id).is_err()
+                || matches!(
+                    effect.effect_id.as_str(),
+                    "beartrap"
+                        | "crushed"
+                        | "downed"
+                        | "grabbed"
+                        | "heavysnare"
+                        | "in_pit"
+                        | "lightsnare"
+                        | "psi_stunned"
+                        | "stunned"
+                        | "tied"
+                        | "webbed"
+                        | "worked_on"
+                )
                 || effect.intensity == 0
                 || effect.intensity > 1_000_000
                 || effect.expires_at_tick == SimTick(0)
@@ -15106,7 +15121,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV105");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV106");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

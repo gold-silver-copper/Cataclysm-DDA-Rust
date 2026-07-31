@@ -2114,6 +2114,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cdda-protocol",
+ "libm",
  "postcard",
  "rand_chacha",
  "rand_core",

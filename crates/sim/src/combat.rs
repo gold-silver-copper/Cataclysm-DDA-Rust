@@ -24,6 +24,8 @@ pub(super) struct ActorDamageUnit {
     pub armor_penetration_milli: i32,
     pub armor_multiplier_millionths: i32,
     pub damage_multiplier_millionths: i32,
+    pub damage_multiplier_adjustment_millionths: i32,
+    pub damage_multiplier_divisor: u32,
     pub constant_armor_multiplier_millionths: i32,
     pub constant_damage_multiplier_millionths: i32,
 }
@@ -36,6 +38,8 @@ impl ActorDamageUnit {
             armor_penetration_milli: 0,
             armor_multiplier_millionths: 1_000_000,
             damage_multiplier_millionths: 1_000_000,
+            damage_multiplier_adjustment_millionths: 1_000_000,
+            damage_multiplier_divisor: 1,
             constant_armor_multiplier_millionths: 1_000_000,
             constant_damage_multiplier_millionths: 1_000_000,
         }
@@ -229,10 +233,24 @@ impl WorldState {
                     }
                 }
             }
-            let adjusted_milli = multiply_damage_multiplier(
-                multiply_damage_multiplier(remaining_milli, unit.damage_multiplier_millionths)?,
-                unit.constant_damage_multiplier_millionths,
-            )?;
+            let multiplier_denominator = DAMAGE_MULTIPLIER_SCALE
+                .checked_mul(DAMAGE_MULTIPLIER_SCALE)
+                .and_then(|value| value.checked_mul(DAMAGE_MULTIPLIER_SCALE))
+                .and_then(|value| value.checked_mul(i128::from(unit.damage_multiplier_divisor)))
+                .ok_or(SimError::NumericOverflow)?;
+            if unit.damage_multiplier_divisor == 0 {
+                return Err(SimError::NumericOverflow);
+            }
+            let adjusted_milli = remaining_milli
+                .checked_mul(i128::from(unit.damage_multiplier_millionths))
+                .and_then(|value| {
+                    value.checked_mul(i128::from(unit.damage_multiplier_adjustment_millionths))
+                })
+                .and_then(|value| {
+                    value.checked_mul(i128::from(unit.constant_damage_multiplier_millionths))
+                })
+                .and_then(|value| value.checked_div(multiplier_denominator))
+                .ok_or(SimError::NumericOverflow)?;
             // Pinned deal_damage_handle_type truncates each adjusted component
             // to an integer before summing the atomic hit.
             let dealt = u16::try_from((adjusted_milli / 1_000).max(0))

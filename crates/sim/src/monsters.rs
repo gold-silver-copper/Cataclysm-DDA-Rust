@@ -8,6 +8,7 @@ use cdda_protocol::{
     WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
 };
 use rand_core::Rng;
+use std::collections::BTreeSet;
 
 use crate::{
     SimError, UNARMED_DAMAGE, WorldState, combat::ActorDamageUnit, horizontal_distance_squared,
@@ -96,60 +97,101 @@ pub(super) fn special_state_matches_catalog(
     catalog: Option<&WorldgenCatalogV1>,
     snapshot: &CreatureSnapshot,
 ) -> bool {
-    let expected = catalog
-        .and_then(|catalog| {
-            catalog
-                .monster_prototypes
-                .binary_search_by(|prototype| {
-                    prototype
-                        .base
-                        .monster_type_id
-                        .as_str()
-                        .cmp(&snapshot.type_id)
-                })
-                .ok()
-                .and_then(|index| catalog.monster_prototypes.get(index))
-        })
-        .map(|prototype| {
-            prototype
-                .special_attacks
-                .iter()
-                .map(|attack| attack.attack_id.as_str())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let prototype = catalog.and_then(|catalog| {
+        catalog
+            .monster_prototypes
+            .binary_search_by(|prototype| {
+                prototype
+                    .base
+                    .monster_type_id
+                    .as_str()
+                    .cmp(&snapshot.type_id)
+            })
+            .ok()
+            .and_then(|index| catalog.monster_prototypes.get(index))
+    });
+    let Some(prototype) = prototype else {
+        return catalog.is_none()
+            && snapshot.special_attacks.is_empty()
+            && snapshot.ammunition.is_empty()
+            && snapshot.corpse.is_none();
+    };
+    if !prototype.runtime_spawnable {
+        return false;
+    }
+    let expected = prototype
+        .special_attacks
+        .iter()
+        .map(|attack| attack.attack_id.as_str())
+        .collect::<Vec<_>>();
     let attacks_match = snapshot
         .special_attacks
         .iter()
         .map(|attack| attack.attack_id.as_str())
         .eq(expected);
-    let ammunition_matches = catalog
-        .and_then(|catalog| {
-            catalog
-                .monster_prototypes
-                .binary_search_by(|prototype| {
-                    prototype
-                        .base
-                        .monster_type_id
-                        .as_str()
-                        .cmp(&snapshot.type_id)
+    let base = &prototype.base;
+    let corpse_matches = if prototype.leaves_corpse {
+        snapshot.corpse.as_ref() == Some(base)
+    } else {
+        snapshot.corpse.is_none()
+    };
+    let mut possible_ammunition_sources = BTreeSet::from([snapshot.type_id.clone()]);
+    loop {
+        let previous_len = possible_ammunition_sources.len();
+        for candidate in catalog
+            .into_iter()
+            .flat_map(|catalog| &catalog.monster_prototypes)
+            .filter(|candidate| candidate.runtime_spawnable)
+        {
+            if candidate.special_attacks.iter().any(|attack| {
+                attack.kind == WorldgenMonsterSpecialAttackKindV1::Polymorph
+                    && possible_ammunition_sources
+                        .contains(attack.polymorph_monster_type_id.as_str())
+            }) {
+                possible_ammunition_sources.insert(candidate.base.monster_type_id.clone());
+            }
+        }
+        if possible_ammunition_sources.len() == previous_len {
+            break;
+        }
+    }
+    let ammunition_matches = catalog.into_iter().any(|catalog| {
+        catalog.monster_prototypes.iter().any(|candidate| {
+            candidate.runtime_spawnable
+                && possible_ammunition_sources.contains(candidate.base.monster_type_id.as_str())
+                && snapshot.ammunition.len() == candidate.starting_ammunition.len()
+                && snapshot.ammunition.iter().all(|(item_id, amount)| {
+                    candidate
+                        .starting_ammunition
+                        .get(item_id)
+                        .is_some_and(|initial| amount <= initial)
                 })
-                .ok()
-                .and_then(|index| catalog.monster_prototypes.get(index))
         })
-        .map_or_else(
-            || snapshot.ammunition.is_empty(),
-            |prototype| {
-                snapshot.ammunition.len() == prototype.starting_ammunition.len()
-                    && snapshot.ammunition.iter().all(|(item_id, amount)| {
-                        prototype
-                            .starting_ammunition
-                            .get(item_id)
-                            .is_some_and(|initial| amount <= initial)
-                    })
-            },
-        );
-    attacks_match && ammunition_matches
+    });
+    attacks_match
+        && ammunition_matches
+        && snapshot.max_hp == base.max_hp
+        && snapshot.attack_cost_moves == base.attack_cost_moves
+        && snapshot.melee_skill == base.melee_skill
+        && snapshot.dodge == base.dodge
+        && snapshot.size == base.size
+        && snapshot.melee_dice == base.melee_dice
+        && snapshot.melee_dice_sides == base.melee_dice_sides
+        && snapshot.can_see == base.can_see
+        && snapshot.vision_day == base.vision_day
+        && snapshot.vision_night == base.vision_night
+        && snapshot.stumbles == base.stumbles
+        && snapshot.bashes == base.bashes
+        && snapshot.group_bash == base.group_bash
+        && snapshot.hears == base.hears
+        && snapshot.good_hearing == base.good_hearing
+        && snapshot.clumsy_attacks == base.clumsy_attacks
+        && snapshot.immobile == base.immobile
+        && snapshot.pacifist == base.pacifist
+        && snapshot.can_open_doors == base.can_open_doors
+        && snapshot.path_settings == base.path_settings
+        && snapshot.blood_field_type_id == base.blood_field_type_id
+        && corpse_matches
 }
 
 impl WorldState {
@@ -275,6 +317,8 @@ impl WorldState {
                 armor_penetration_milli: unit.armor_penetration_milli,
                 armor_multiplier_millionths: unit.armor_multiplier_millionths,
                 damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                damage_multiplier_adjustment_millionths: 1_000_000,
+                damage_multiplier_divisor: 1,
                 constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
                 constant_damage_multiplier_millionths: unit.constant_damage_multiplier_millionths,
             })
@@ -295,6 +339,8 @@ impl WorldState {
                 armor_penetration_milli: prototype.melee_dice_armor_penetration_milli,
                 armor_multiplier_millionths: 1_000_000,
                 damage_multiplier_millionths: 1_000_000,
+                damage_multiplier_adjustment_millionths: 1_000_000,
+                damage_multiplier_divisor: 1,
                 constant_armor_multiplier_millionths: 1_000_000,
                 constant_damage_multiplier_millionths: 1_000_000,
             });
@@ -486,6 +532,17 @@ impl WorldState {
         turn_sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<i64, SimError> {
+        if self.creatures.get(&source).is_some_and(|creature| {
+            creature.effects.iter().any(|effect| {
+                effect.expires_at_tick > self.tick
+                    && matches!(
+                        effect.effect_id.as_str(),
+                        "stunned" | "psi_stunned" | "downed" | "webbed"
+                    )
+            })
+        }) {
+            return Ok(0);
+        }
         let profiles = self
             .creature_prototype(source)?
             .map(|prototype| prototype.special_attacks.clone())
@@ -719,7 +776,7 @@ impl WorldState {
         sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<bool, SimError> {
-        let Some((primary_target, center)) = visible_target else {
+        let Some((primary_target, intended_target)) = visible_target else {
             return Ok(false);
         };
         let origin = self
@@ -731,11 +788,20 @@ impl WorldState {
             .actors
             .get(&primary_target)
             .is_none_or(|actor| actor.hp <= 0)
-            || ranged_distance(origin, center) > profile.range
-            || !self.spell_blast_line_is_passable(origin, center)
+            || ranged_distance(origin, intended_target) > profile.range
         {
             return Ok(false);
         }
+        let center = if profile.spell_aoe == 0 {
+            let Some(epicenter) =
+                self.spell_blast_epicenter(origin, intended_target, profile.spell_no_projectile)
+            else {
+                return Ok(false);
+            };
+            epicenter
+        } else {
+            intended_target
+        };
         let radius = i32::from(profile.spell_aoe);
         let mut area = Vec::new();
         for offset_x in -radius..=radius {
@@ -748,7 +814,8 @@ impl WorldState {
                 };
                 let position = WorldPosition { x, y, z: center.z };
                 if ranged_distance(center, position) > u32::from(profile.spell_aoe)
-                    || !self.spell_blast_line_is_passable(center, position)
+                    || (!profile.spell_no_projectile
+                        && !self.spell_blast_line_is_passable(center, position))
                     || !self.chunks.contains_key(&position.chunk_and_local().0)
                 {
                     continue;
@@ -808,11 +875,9 @@ impl WorldState {
                         amount_milli: unit.amount_milli,
                         armor_penetration_milli: unit.armor_penetration_milli,
                         armor_multiplier_millionths: unit.armor_multiplier_millionths,
-                        damage_multiplier_millionths: i128::from(unit.damage_multiplier_millionths)
-                            .checked_mul(i128::from(multiplier))
-                            .and_then(|value| value.checked_div(1_000_000))
-                            .and_then(|value| i32::try_from(value).ok())
-                            .ok_or(SimError::NumericOverflow)?,
+                        damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                        damage_multiplier_adjustment_millionths: multiplier,
+                        damage_multiplier_divisor: 1,
                         constant_armor_multiplier_millionths: unit
                             .constant_armor_multiplier_millionths,
                         constant_damage_multiplier_millionths: unit
@@ -867,7 +932,7 @@ impl WorldState {
             return false;
         }
         if origin == target {
-            return self.is_passable(origin);
+            return true;
         }
         let (mut x, mut y) = (origin.x, origin.y);
         let dx = (i64::from(target.x) - i64::from(x)).abs();
@@ -892,6 +957,46 @@ impl WorldState {
             if position == target {
                 return true;
             }
+        }
+    }
+
+    fn spell_blast_epicenter(
+        &self,
+        origin: WorldPosition,
+        target: WorldPosition,
+        no_projectile: bool,
+    ) -> Option<WorldPosition> {
+        if origin.z != target.z {
+            return None;
+        }
+        if no_projectile || origin == target {
+            return Some(target);
+        }
+        let (mut x, mut y) = (origin.x, origin.y);
+        let dx = (i64::from(target.x) - i64::from(x)).abs();
+        let step_x = if x < target.x { 1 } else { -1 };
+        let dy = -(i64::from(target.y) - i64::from(y)).abs();
+        let step_y = if y < target.y { 1 } else { -1 };
+        let mut error = dx + dy;
+        let mut previous = None;
+        loop {
+            let doubled = error * 2;
+            if doubled >= dy {
+                error += dy;
+                x += step_x;
+            }
+            if doubled <= dx {
+                error += dx;
+                y += step_y;
+            }
+            let position = WorldPosition { x, y, z: origin.z };
+            if !self.is_passable(position) {
+                return Some(previous.unwrap_or(position));
+            }
+            if position == target {
+                return Some(position);
+            }
+            previous = Some(position);
         }
     }
 
@@ -955,11 +1060,21 @@ impl WorldState {
             };
             if self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
                 || ranged_distance(origin, target_position) > profile.range
-                || !self.has_clear_shot(origin, target_position)
             {
                 return Ok(false);
             }
-            target_position
+            if profile.spell_aoe == 0 {
+                let Some(epicenter) = self.spell_blast_epicenter(
+                    origin,
+                    target_position,
+                    profile.spell_no_projectile,
+                ) else {
+                    return Ok(false);
+                };
+                epicenter
+            } else {
+                target_position
+            }
         };
         let prototype = self
             .worldgen
@@ -1136,7 +1251,6 @@ impl WorldState {
                 enabled: true,
             })
             .collect();
-        creature.ammunition = target.starting_ammunition;
         creature.blood_field_type_id = target.base.blood_field_type_id.clone();
         creature.corpse = target.leaves_corpse.then(|| target.base.clone());
         events.push(self.make_event(WorldEventKind::CreaturePolymorphed {
@@ -1339,6 +1453,8 @@ impl WorldState {
                     armor_penetration_milli: unit.armor_penetration_milli,
                     armor_multiplier_millionths: unit.armor_multiplier_millionths,
                     damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                    damage_multiplier_adjustment_millionths: 1_000_000,
+                    damage_multiplier_divisor: 1,
                     constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
                     constant_damage_multiplier_millionths: unit
                         .constant_damage_multiplier_millionths,
@@ -1776,8 +1892,15 @@ impl WorldState {
             });
             selected
         } else {
+            let hit_spread = i32::try_from(spread).map_err(|_| SimError::NumericOverflow)?;
             (0..attack_amount)
-                .map(|_| crate::anatomy::select_body_part_index(&self.actor_anatomy, &mut rng))
+                .map(|_| {
+                    crate::anatomy::select_body_part_index_for_hit(
+                        &self.actor_anatomy,
+                        hit_spread,
+                        &mut rng,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?
         };
         let multiplier = roll_inclusive_i32(
@@ -1785,8 +1908,8 @@ impl WorldState {
             profile.maximum_damage_multiplier_millionths,
             &mut rng,
         )?;
-        let attack_amount_i32 =
-            i32::try_from(selected_parts.len()).map_err(|_| SimError::NumericOverflow)?;
+        let attack_amount_u32 =
+            u32::try_from(selected_parts.len()).map_err(|_| SimError::NumericOverflow)?;
         let damage = profile
             .damage
             .iter()
@@ -1796,12 +1919,9 @@ impl WorldState {
                     amount_milli: unit.amount_milli,
                     armor_penetration_milli: unit.armor_penetration_milli,
                     armor_multiplier_millionths: unit.armor_multiplier_millionths,
-                    damage_multiplier_millionths: i128::from(unit.damage_multiplier_millionths)
-                        .checked_mul(i128::from(multiplier))
-                        .and_then(|value| value.checked_div(1_000_000))
-                        .and_then(|value| value.checked_div(i128::from(attack_amount_i32)))
-                        .and_then(|value| i32::try_from(value).ok())
-                        .ok_or(SimError::NumericOverflow)?,
+                    damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                    damage_multiplier_adjustment_millionths: multiplier,
+                    damage_multiplier_divisor: attack_amount_u32,
                     constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
                     constant_damage_multiplier_millionths: unit
                         .constant_damage_multiplier_millionths,
