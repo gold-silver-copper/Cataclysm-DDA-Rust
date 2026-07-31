@@ -140,7 +140,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 135;
+pub const PROTOCOL_VERSION: u16 = 136;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3543,6 +3543,44 @@ pub struct WorldgenMonsterProjectileEffectV1 {
     pub on_hit_effects: Vec<WorldgenMonsterProjectileOnHitEffectV1>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenMonsterSpellShapeV1 {
+    Blast,
+    Line,
+    Cone,
+}
+
+/// One compiled child from a pinned spell's depth-first `extra_effects`
+/// program. The enclosing special attack retains the primary spell payload;
+/// children carry the same authoritative effect inputs without another
+/// cooldown or casting cost.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterExtraSpellEffectV1 {
+    pub target_self: bool,
+    pub shape: WorldgenMonsterSpellShapeV1,
+    pub no_projectile: bool,
+    pub ignore_walls: bool,
+    pub minimum_damage_multiplier_millionths: i32,
+    pub maximum_damage_multiplier_millionths: i32,
+    pub damage: Vec<WorldgenMonsterMeleeDamageUnitV1>,
+    pub effects: Vec<WorldgenMonsterAttackEffectV1>,
+    pub eoc_ids: Vec<String>,
+    pub summoned_monster_type_id: String,
+    pub minimum_summons: u16,
+    pub maximum_summons: u16,
+    pub random_summons: bool,
+    pub range: u32,
+    pub aoe: u16,
+    pub field_type_id: String,
+    pub field_chance: u32,
+    pub field_intensity: u8,
+    pub field_intensity_variance_millionths: u32,
+    pub field_duration_turns: u32,
+    pub targets_hostile: bool,
+    pub targets_ground: bool,
+    pub targets_self: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenMonsterSpecialAttackV1 {
     pub attack_id: String,
@@ -3586,6 +3624,7 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     /// Concrete hostile monster prototype emitted by a compiled permanent
     /// summon spell. Empty for every other special kind.
     pub spell_summoned_monster_type_id: String,
+    pub spell_shape: WorldgenMonsterSpellShapeV1,
     /// Self-centered spells do not require an actor target or line of sight.
     pub spell_target_self: bool,
     /// Pinned `NO_PROJECTILE`: blast targeting does not move the epicenter to
@@ -3596,7 +3635,7 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_minimum_summons: u16,
     pub spell_maximum_summons: u16,
     pub spell_random_summons: bool,
-    pub spell_aoe: u8,
+    pub spell_aoe: u16,
     /// Optional field created on every valid tile in the spell area.
     pub spell_field_type_id: String,
     pub spell_field_chance: u32,
@@ -3606,6 +3645,12 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_targets_hostile: bool,
     pub spell_targets_ground: bool,
     pub spell_targets_self: bool,
+    pub spell_extra_effects_first: bool,
+    /// Pinned depth-first execution order after applying each spell's
+    /// `EXTRA_EFFECTS_FIRST` flag. Trigger messages and `once_in` are not part
+    /// of `spell::cast_extra_spell_effects` and therefore do not enter this
+    /// runtime representation.
+    pub spell_extra_effects: Vec<WorldgenMonsterExtraSpellEffectV1>,
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
     /// Empty for ammo-free pseudo guns; otherwise the concrete item ID whose
@@ -5976,6 +6021,105 @@ fn valid_worldgen_individual_monster_placement(
         && valid_worldgen_coordinate_range(placement.y)
 }
 
+fn valid_worldgen_monster_extra_spell_effect(effect: &WorldgenMonsterExtraSpellEffectV1) -> bool {
+    let shape_is_valid = match effect.shape {
+        WorldgenMonsterSpellShapeV1::Blast => effect.aoe <= 32,
+        WorldgenMonsterSpellShapeV1::Line => effect.aoe <= 32,
+        WorldgenMonsterSpellShapeV1::Cone => (1..=360).contains(&effect.aoe),
+    };
+    let no_field = effect.field_type_id.is_empty()
+        && effect.field_chance == 0
+        && effect.field_intensity == 0
+        && effect.field_intensity_variance_millionths == 0
+        && effect.field_duration_turns == 0;
+    let field = valid_worldgen_id(&effect.field_type_id)
+        && (1..=1_000_000).contains(&effect.field_chance)
+        && effect.field_intensity > 0
+        && effect.field_intensity_variance_millionths <= 1_000_000
+        && effect.field_duration_turns <= 10_000_000;
+    let summon = valid_worldgen_id(&effect.summoned_monster_type_id)
+        && (1..=64).contains(&effect.minimum_summons)
+        && effect.minimum_summons <= effect.maximum_summons
+        && effect.maximum_summons <= 64
+        && effect.minimum_damage_multiplier_millionths == 0
+        && effect.maximum_damage_multiplier_millionths == 0
+        && effect.damage.is_empty()
+        && effect.effects.is_empty()
+        && effect.eoc_ids.is_empty()
+        && effect.targets_ground
+        && !effect.targets_hostile
+        && no_field;
+    let typed_damage = effect.summoned_monster_type_id.is_empty()
+        && !effect.target_self
+        && effect.minimum_summons == 0
+        && effect.maximum_summons == 0
+        && !effect.random_summons
+        && effect.minimum_damage_multiplier_millionths > 0
+        && effect.minimum_damage_multiplier_millionths
+            <= effect.maximum_damage_multiplier_millionths
+        && effect.maximum_damage_multiplier_millionths <= 1_000_000_000
+        && !effect.damage.is_empty()
+        && effect.effects.is_empty()
+        && effect.eoc_ids.is_empty()
+        && (effect.targets_hostile || field);
+    let status = effect.summoned_monster_type_id.is_empty()
+        && !effect.target_self
+        && effect.minimum_summons == 0
+        && effect.maximum_summons == 0
+        && !effect.random_summons
+        && effect.minimum_damage_multiplier_millionths == 0
+        && effect.maximum_damage_multiplier_millionths == 0
+        && effect.damage.is_empty()
+        && effect.effects.len() == 1
+        && effect.effects[0].chance_millionths == 1_000_000
+        && !effect.effects[0].permanent
+        && !effect.effects[0].affect_hit_body_part
+        && !effect.effects[0].requires_cut_or_stab_damage
+        && effect.effects[0].body_part_id.is_none()
+        && effect.effects[0].duration_minimum_turns > 0
+        && effect.effects[0].duration_minimum_turns <= effect.effects[0].duration_maximum_turns
+        && effect.effects[0].intensity_minimum == 1
+        && effect.effects[0].intensity_maximum == 1
+        && effect.eoc_ids.is_empty()
+        && effect.targets_hostile
+        && !effect.targets_ground
+        && !effect.targets_self;
+    let eoc = effect.summoned_monster_type_id.is_empty()
+        && !effect.target_self
+        && effect.minimum_summons == 0
+        && effect.maximum_summons == 0
+        && !effect.random_summons
+        && effect.minimum_damage_multiplier_millionths == 0
+        && effect.maximum_damage_multiplier_millionths == 0
+        && effect.damage.is_empty()
+        && effect.effects.is_empty()
+        && !effect.eoc_ids.is_empty()
+        && effect.targets_hostile
+        && !effect.targets_ground
+        && !effect.targets_self;
+    let field_only = effect.summoned_monster_type_id.is_empty()
+        && effect.minimum_summons == 0
+        && effect.maximum_summons == 0
+        && !effect.random_summons
+        && effect.minimum_damage_multiplier_millionths == 0
+        && effect.maximum_damage_multiplier_millionths == 0
+        && effect.damage.is_empty()
+        && effect.effects.is_empty()
+        && effect.eoc_ids.is_empty()
+        && effect.targets_ground
+        && field;
+    shape_is_valid
+        && ((effect.target_self && effect.range == 0) || (!effect.target_self && effect.range > 0))
+        && effect.range <= 1_000
+        && (effect.targets_hostile || effect.targets_ground || effect.targets_self)
+        && valid_worldgen_monster_damage(&effect.damage)
+        && valid_worldgen_monster_effects(&effect.effects)
+        && effect.eoc_ids.len() <= MAX_EOC_REFERENCES
+        && effect.eoc_ids.iter().all(|id| valid_worldgen_id(id))
+        && (no_field || field)
+        && (summon || typed_damage || status || eoc || field_only)
+}
+
 fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
     if catalog.monster_prototypes.len() > MAX_WORLDGEN_MONSTER_PROTOTYPES
         || catalog.monster_groups.len() > MAX_WORLDGEN_MONSTER_GROUPS
@@ -6054,9 +6198,17 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && !attack.polymorph_keep_aggression
                         })
                         && (if matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Spell) {
-                            let common = attack.spell_aoe <= 32
+                            let shape_is_valid = match attack.spell_shape {
+                                WorldgenMonsterSpellShapeV1::Blast => attack.spell_aoe <= 32,
+                                WorldgenMonsterSpellShapeV1::Line => attack.spell_aoe <= 32,
+                                WorldgenMonsterSpellShapeV1::Cone => {
+                                    (1..=360).contains(&attack.spell_aoe)
+                                }
+                            };
+                            let common = shape_is_valid
                                 && ((attack.spell_target_self && attack.range == 0)
                                     || (!attack.spell_target_self && attack.range > 0))
+                                && attack.range <= 1_000
                                 && (attack.spell_targets_hostile
                                     || attack.spell_targets_ground
                                     || attack.spell_targets_self);
@@ -6074,9 +6226,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && (1..=64).contains(&attack.spell_minimum_summons)
                                 && attack.spell_minimum_summons <= attack.spell_maximum_summons
                                 && attack.spell_maximum_summons <= 64
-                                && !attack.spell_random_summons
-                                && attack.spell_minimum_summons == attack.spell_maximum_summons
-                                && (1..=32).contains(&attack.spell_aoe)
+                                && (1..=360).contains(&attack.spell_aoe)
                                 && attack.minimum_damage_multiplier_millionths == 0
                                 && attack.maximum_damage_multiplier_millionths == 0
                                 && attack.damage.is_empty()
@@ -6085,9 +6235,18 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.spell_targets_ground
                                 && !attack.spell_targets_hostile
                                 && no_field;
-                            // Typed spell damage still lacks pinned defense,
-                            // body-part selection, and RNG-order semantics.
-                            let typed_damage = false;
+                            let typed_damage = attack.spell_summoned_monster_type_id.is_empty()
+                                && !attack.spell_target_self
+                                && attack.spell_minimum_summons == 0
+                                && attack.spell_maximum_summons == 0
+                                && !attack.spell_random_summons
+                                && attack.minimum_damage_multiplier_millionths > 0
+                                && attack.minimum_damage_multiplier_millionths
+                                    <= attack.maximum_damage_multiplier_millionths
+                                && !attack.damage.is_empty()
+                                && attack.effects.is_empty()
+                                && attack.eoc_ids.is_empty()
+                                && (attack.spell_targets_hostile || field);
                             let status_effect = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -6104,11 +6263,10 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.effects[0].body_part_id.is_none()
                                 && attack.effects[0].duration_minimum_turns > 0
                                 && attack.effects[0].duration_minimum_turns
-                                    == attack.effects[0].duration_maximum_turns
+                                    <= attack.effects[0].duration_maximum_turns
                                 && attack.effects[0].intensity_minimum == 1
                                 && attack.effects[0].intensity_maximum == 1
                                 && attack.eoc_ids.is_empty()
-                                && attack.spell_aoe == 0
                                 && attack.spell_targets_hostile
                                 && !attack.spell_targets_ground
                                 && !attack.spell_targets_self
@@ -6124,11 +6282,27 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.damage.is_empty()
                                 && attack.effects.is_empty()
                                 && !attack.eoc_ids.is_empty()
-                                && attack.spell_aoe == 0
                                 && attack.spell_targets_hostile
                                 && !attack.spell_targets_self
                                 && no_field;
-                            common && (summon || typed_damage || status_effect || eoc)
+                            let field_only = attack.spell_summoned_monster_type_id.is_empty()
+                                && attack.spell_minimum_summons == 0
+                                && attack.spell_maximum_summons == 0
+                                && !attack.spell_random_summons
+                                && attack.minimum_damage_multiplier_millionths == 0
+                                && attack.maximum_damage_multiplier_millionths == 0
+                                && attack.damage.is_empty()
+                                && attack.effects.is_empty()
+                                && attack.eoc_ids.is_empty()
+                                && attack.spell_targets_ground
+                                && field;
+                            common
+                                && attack.spell_extra_effects.len() <= 256
+                                && attack
+                                    .spell_extra_effects
+                                    .iter()
+                                    .all(|effect| valid_worldgen_monster_extra_spell_effect(effect))
+                                && (summon || typed_damage || status_effect || eoc || field_only)
                         } else {
                             attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
@@ -6146,6 +6320,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && !attack.spell_targets_hostile
                                 && !attack.spell_targets_ground
                                 && !attack.spell_targets_self
+                                && attack.spell_shape == WorldgenMonsterSpellShapeV1::Blast
+                                && !attack.spell_extra_effects_first
+                                && attack.spell_extra_effects.is_empty()
                         })
                         && attack.gun_ranges.len() <= 64
                         && attack.infection_chance_millionths <= 1_000_000
@@ -6368,21 +6545,31 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
     }
     if catalog.monster_prototypes.iter().any(|prototype| {
         prototype.special_attacks.iter().any(|attack| {
-            let dependency = match attack.kind {
+            let dependencies = match attack.kind {
                 WorldgenMonsterSpecialAttackKindV1::Polymorph => {
-                    Some(&attack.polymorph_monster_type_id)
+                    vec![attack.polymorph_monster_type_id.as_str()]
                 }
                 WorldgenMonsterSpecialAttackKindV1::Spell => {
-                    (!attack.spell_summoned_monster_type_id.is_empty())
-                        .then_some(&attack.spell_summoned_monster_type_id)
+                    let mut dependencies = attack
+                        .spell_extra_effects
+                        .iter()
+                        .filter_map(|effect| {
+                            (!effect.summoned_monster_type_id.is_empty())
+                                .then_some(effect.summoned_monster_type_id.as_str())
+                        })
+                        .collect::<Vec<_>>();
+                    if !attack.spell_summoned_monster_type_id.is_empty() {
+                        dependencies.push(attack.spell_summoned_monster_type_id.as_str());
+                    }
+                    dependencies
                 }
                 WorldgenMonsterSpecialAttackKindV1::Melee
                 | WorldgenMonsterSpecialAttackKindV1::Bite
                 | WorldgenMonsterSpecialAttackKindV1::Leap
                 | WorldgenMonsterSpecialAttackKindV1::Eoc
-                | WorldgenMonsterSpecialAttackKindV1::Gun => None,
+                | WorldgenMonsterSpecialAttackKindV1::Gun => Vec::new(),
             };
-            dependency.is_some_and(|dependency| {
+            dependencies.into_iter().any(|dependency| {
                 catalog
                     .monster_prototypes
                     .binary_search_by(|candidate| {

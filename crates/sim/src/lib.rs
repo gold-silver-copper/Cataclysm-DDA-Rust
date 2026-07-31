@@ -5346,6 +5346,14 @@ impl WorldState {
                         .any(|field| !self.field_types.contains_key(&field.field_type_id))
                         || (!attack.spell_field_type_id.is_empty()
                             && !self.field_types.contains_key(&attack.spell_field_type_id))
+                        || attack.spell_extra_effects.iter().any(|effect| {
+                            effect
+                                .eoc_ids
+                                .iter()
+                                .any(|eoc_id| !creature_spell_eoc_ids.contains(eoc_id))
+                                || (!effect.field_type_id.is_empty()
+                                    && !self.field_types.contains_key(&effect.field_type_id))
+                        })
                 })
             })
             || !mapgen::catalog_fits_one_id_reservation(
@@ -14936,6 +14944,31 @@ impl WorldState {
             .cloned()
             .map(|definition| (definition.eoc_id.clone(), definition))
             .collect();
+        let creature_spell_eoc_ids =
+            cdda_protocol::creature_spell_eoc_supported_ids(&snapshot.eoc_definitions);
+        if snapshot.worldgen.as_ref().is_some_and(|catalog| {
+            catalog.monster_prototypes.iter().any(|prototype| {
+                prototype.special_attacks.iter().any(|attack| {
+                    (attack.kind == cdda_protocol::WorldgenMonsterSpecialAttackKindV1::Spell
+                        && attack
+                            .eoc_ids
+                            .iter()
+                            .any(|eoc_id| !creature_spell_eoc_ids.contains(eoc_id)))
+                        || (!attack.spell_field_type_id.is_empty()
+                            && !field_types.contains_key(&attack.spell_field_type_id))
+                        || attack.spell_extra_effects.iter().any(|effect| {
+                            effect
+                                .eoc_ids
+                                .iter()
+                                .any(|eoc_id| !creature_spell_eoc_ids.contains(eoc_id))
+                                || (!effect.field_type_id.is_empty()
+                                    && !field_types.contains_key(&effect.field_type_id))
+                        })
+                })
+            })
+        }) {
+            return Err(SimError::InvalidSnapshot);
+        }
         let eoc_item_use_types = snapshot
             .eoc_item_use_types
             .iter()
@@ -15577,7 +15610,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV110");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV111");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

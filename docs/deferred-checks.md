@@ -57,6 +57,11 @@ Run only when the user explicitly requests a verification checkpoint.
   ground/hostile area filtering, stacking, and negative-age decay delay; and
   combat scenarios at protocol 128/schema 106, CanonicalStateV104,
   canonical-event-V26.
+- Monster-spell program checkpoint: run pinned depth-first extra-spell level and
+  ordering traces plus exact blast, wrapped-Bresenham line, and one-degree cone
+  area comparisons; production admission; canonical fixtures; recovery/replay;
+  and two-client observation at protocol 136/schema 113,
+  CanonicalStateV111/CanonicalEventsV30.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
   possible-value selection traces, strict

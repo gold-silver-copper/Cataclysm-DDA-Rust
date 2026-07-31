@@ -47,6 +47,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "sound_ambient",
     "sound_id",
     "sound_variant",
+    "extra_effects",
     "skill",
     "teachable",
 ];
@@ -94,6 +95,9 @@ pub struct SpellDefinition {
     pub maximum_field_intensity: i32,
     pub field_intensity_increment_millionths: i64,
     pub field_intensity_variance_millionths: i64,
+    /// Source-ordered pinned `fake_spell` children. Runtime admission resolves
+    /// this graph as a bounded depth-first effect program.
+    pub extra_effects: Vec<SpellExtraEffectDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -130,13 +134,30 @@ impl Default for SpellDefinition {
             maximum_field_intensity: 0,
             field_intensity_increment_millionths: 0,
             field_intensity_variance_millionths: 0,
+            extra_effects: Vec::new(),
             unsupported_fields: BTreeSet::new(),
             source: String::new(),
         }
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpellExtraEffectDefinition {
+    pub spell_id: String,
+    pub hit_self: bool,
+    pub once_in: i32,
+    pub minimum_level: i32,
+    pub maximum_level: Option<i32>,
+    pub trigger_message: String,
+    pub npc_trigger_message: String,
+    pub deferred_fields: BTreeSet<String>,
+}
+
 impl SpellDefinition {
+    fn area_shape_is_supported(&self) -> bool {
+        matches!(self.shape.as_str(), "blast" | "line" | "cone")
+    }
+
     fn attack_field_is_supported(&self) -> bool {
         if self.field_type_id.is_empty() {
             return self.field_chance == 1
@@ -163,6 +184,7 @@ impl SpellDefinition {
             "SILENT",
             "NO_PROJECTILE",
             "IGNORE_WALLS",
+            "EXTRA_EFFECTS_FIRST",
         ];
         const ALLOWED_TARGETS: &[&str] = &["ground", "self"];
         self.unsupported_fields.is_empty()
@@ -203,25 +225,26 @@ impl SpellDefinition {
             "NO_EXPLOSION_SFX",
             "SILENT",
             "IGNORE_WALLS",
+            "EXTRA_EFFECTS_FIRST",
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Attack
-            && self.shape == "blast"
+            && self.area_shape_is_supported()
             && !self.damage_type_id.is_empty()
             && self.effect_str.is_empty()
             && self
                 .flags
                 .iter()
                 .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
-            && self.flags.contains("NO_PROJECTILE")
             && self
                 .valid_targets
                 .iter()
-                .all(|target| matches!(target.as_str(), "ground" | "hostile"))
+                .all(|target| matches!(target.as_str(), "ground" | "hostile" | "self"))
             && self
                 .valid_targets
                 .iter()
-                .any(|target| matches!(target.as_str(), "ground" | "hostile"))
+                .any(|target| matches!(target.as_str(), "ground" | "hostile" | "self"))
+            && (self.valid_targets.contains("hostile") || !self.field_type_id.is_empty())
             && self.maximum_level >= 0
             && self.minimum_damage > 0
             && self.maximum_damage > 0
@@ -244,10 +267,11 @@ impl SpellDefinition {
             "NO_EXPLOSION_SFX",
             "SILENT",
             "IGNORE_WALLS",
+            "EXTRA_EFFECTS_FIRST",
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Attack
-            && self.shape == "blast"
+            && self.area_shape_is_supported()
             && self.damage_type_id.is_empty()
             && !self.effect_str.is_empty()
             && self.minimum_damage == 0
@@ -261,16 +285,14 @@ impl SpellDefinition {
             && self.maximum_level >= 0
             && self.minimum_range > 0
             && self.maximum_range > 0
-            && self.minimum_aoe == 0
-            && self.maximum_aoe == 0
+            && self.minimum_aoe >= 0
+            && self.maximum_aoe >= 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
             && self.minimum_duration_moves > 0
             && self.maximum_duration_moves > 0
             && self.minimum_duration_moves % 100 == 0
             && self.maximum_duration_moves % 100 == 0
-            && (!self.flags.contains("RANDOM_DURATION")
-                || self.minimum_duration_moves == self.maximum_duration_moves)
             && self.attack_field_is_supported()
     }
 
@@ -281,10 +303,11 @@ impl SpellDefinition {
             "IGNORE_WALLS",
             "NO_EXPLOSION_SFX",
             "SILENT",
+            "EXTRA_EFFECTS_FIRST",
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::EffectOnCondition
-            && self.shape == "blast"
+            && self.area_shape_is_supported()
             && self.damage_type_id.is_empty()
             && !self.effect_str.is_empty()
             && self.minimum_damage == 0
@@ -298,13 +321,53 @@ impl SpellDefinition {
             && self.maximum_level >= 0
             && self.minimum_range > 0
             && self.maximum_range > 0
-            && self.minimum_aoe == 0
-            && self.maximum_aoe == 0
+            && self.minimum_aoe >= 0
+            && self.maximum_aoe >= 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
             && self.minimum_duration_moves == 0
             && self.maximum_duration_moves == 0
             && self.field_type_id.is_empty()
+    }
+
+    #[must_use]
+    pub fn supports_hostile_field_attack(&self) -> bool {
+        const ALLOWED_FLAGS: &[&str] = &[
+            "NO_PROJECTILE",
+            "IGNORE_WALLS",
+            "NO_EXPLOSION_SFX",
+            "SILENT",
+            "NO_HANDS",
+            "NO_LEGS",
+            "EXTRA_EFFECTS_FIRST",
+        ];
+        self.unsupported_fields.is_empty()
+            && self.effect == SpellEffectKind::Attack
+            && self.area_shape_is_supported()
+            && self.damage_type_id.is_empty()
+            && self.effect_str.is_empty()
+            && self.minimum_damage == 0
+            && self.maximum_damage == 0
+            && self
+                .flags
+                .iter()
+                .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
+            && self
+                .valid_targets
+                .iter()
+                .all(|target| matches!(target.as_str(), "ground" | "hostile" | "self"))
+            && self.valid_targets.contains("ground")
+            && self.maximum_level >= 0
+            && self.minimum_range > 0
+            && self.maximum_range > 0
+            && self.minimum_aoe >= 0
+            && self.maximum_aoe >= 0
+            && self.base_casting_time_moves >= 0
+            && self.final_casting_time_moves >= 0
+            && self.minimum_duration_moves >= 0
+            && self.maximum_duration_moves >= 0
+            && !self.field_type_id.is_empty()
+            && self.attack_field_is_supported()
     }
 }
 
@@ -505,6 +568,9 @@ fn apply_fields(
             }
         }
     }
+    if let Some(value) = object.get("extra_effects") {
+        spell.extra_effects = parse_extra_effects(value, &source)?;
+    }
     for (field, target) in [
         ("min_damage", &mut spell.minimum_damage),
         ("max_damage", &mut spell.maximum_damage),
@@ -583,6 +649,83 @@ fn apply_fields(
         }
     }
     Ok(())
+}
+
+fn parse_extra_effects(
+    value: &Value,
+    source: &str,
+) -> Result<Vec<SpellExtraEffectDefinition>, SpellRegistryError> {
+    const FIELDS: &[&str] = &[
+        "id",
+        "hit_self",
+        "once_in",
+        "message",
+        "npc_message",
+        "max_level",
+        "min_level",
+    ];
+    let values = value
+        .as_array()
+        .ok_or_else(|| invalid(source, "extra_effects"))?;
+    if values.len() > 64 {
+        return Err(invalid(source, "extra_effects"));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let field = |member: &str| format!("extra_effects[{index}].{member}");
+            let object = value
+                .as_object()
+                .ok_or_else(|| invalid(source, "extra_effects"))?;
+            let spell_id = parse_id(object.get("id"), source, &field("id"))?;
+            let hit_self = object.get("hit_self").map_or(Ok(false), |value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, &field("hit_self")))
+            })?;
+            let once_in = object
+                .get("once_in")
+                .map_or(Ok(1), |value| parse_i32(value, source, &field("once_in")))?;
+            let minimum_level = object
+                .get("min_level")
+                .map_or(Ok(0), |value| parse_i32(value, source, &field("min_level")))?;
+            let maximum_level = object
+                .get("max_level")
+                .map(|value| parse_i32(value, source, &field("max_level")))
+                .transpose()?
+                .and_then(|value| (value != -1).then_some(value));
+            let message = |member: &str| -> Result<String, SpellRegistryError> {
+                object
+                    .get(member)
+                    .map_or(Ok(String::new()), |value| match value {
+                        Value::String(text) => Ok(text.clone()),
+                        Value::Object(translation) => ["str", "str_sp", "str_pl"]
+                            .into_iter()
+                            .find_map(|key| translation.get(key).and_then(Value::as_str))
+                            .map(str::to_owned)
+                            .ok_or_else(|| invalid(source, &field(member))),
+                        _ => Err(invalid(source, &field(member))),
+                    })
+            };
+            Ok(SpellExtraEffectDefinition {
+                spell_id,
+                hit_self,
+                once_in,
+                minimum_level,
+                maximum_level,
+                trigger_message: message("message")?,
+                npc_trigger_message: message("npc_message")?,
+                deferred_fields: object
+                    .keys()
+                    .filter(|member| {
+                        !member.starts_with("//") && !FIELDS.contains(&member.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 fn parse_string_set(

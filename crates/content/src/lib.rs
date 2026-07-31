@@ -156,7 +156,9 @@ pub use snippet::{
     DescriptionSnippetCategory, DescriptionSnippetChoice, DescriptionSnippetRegistry,
     DescriptionSnippetRegistryError,
 };
-pub use spell::{SpellDefinition, SpellEffectKind, SpellRegistry, SpellRegistryError};
+pub use spell::{
+    SpellDefinition, SpellEffectKind, SpellExtraEffectDefinition, SpellRegistry, SpellRegistryError,
+};
 pub use start_location::{
     DEFAULT_START_LOCATION_MAX_Z, DEFAULT_START_LOCATION_MIN_Z, InclusiveI32Interval,
     MAX_START_LOCATION_FLAGS, MAX_START_LOCATION_ID_BYTES, MAX_START_LOCATION_NAME_BYTES,

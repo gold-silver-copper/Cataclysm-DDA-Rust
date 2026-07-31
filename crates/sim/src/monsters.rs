@@ -4,11 +4,13 @@ use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, BookStudyInterruptionReason, ConstructionInterruptionReason,
     CreatureId, CreatureSnapshot, CreatureSpecialAttackStateV1, DisassemblyInterruptionReason,
     SimTick, WorldEvent, WorldEventKind, WorldPosition, WorldgenCatalogV1,
-    WorldgenMonsterAttackEffectV1, WorldgenMonsterProjectileFieldEffectV1,
-    WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
+    WorldgenMonsterAttackEffectV1, WorldgenMonsterExtraSpellEffectV1,
+    WorldgenMonsterProjectileFieldEffectV1, WorldgenMonsterPrototypeV1,
+    WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
+    WorldgenMonsterSpellShapeV1,
 };
 use rand_core::Rng;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
     SimError, UNARMED_DAMAGE, WorldState, combat::ActorDamageUnit, horizontal_distance_squared,
@@ -22,6 +24,146 @@ pub(super) enum CreatureAttitude {
     Ignore,
     Follow,
     Attack,
+}
+
+#[derive(Clone, Copy)]
+enum CreatureSpellProfile<'a> {
+    Primary(&'a WorldgenMonsterSpecialAttackV1),
+    Extra(&'a WorldgenMonsterExtraSpellEffectV1),
+}
+
+impl<'a> CreatureSpellProfile<'a> {
+    fn shape(self) -> WorldgenMonsterSpellShapeV1 {
+        match self {
+            Self::Primary(profile) => profile.spell_shape,
+            Self::Extra(profile) => profile.shape,
+        }
+    }
+
+    fn target_self(self) -> bool {
+        match self {
+            Self::Primary(profile) => profile.spell_target_self,
+            Self::Extra(profile) => profile.target_self,
+        }
+    }
+
+    fn no_projectile(self) -> bool {
+        match self {
+            Self::Primary(profile) => profile.spell_no_projectile,
+            Self::Extra(profile) => profile.no_projectile,
+        }
+    }
+
+    fn ignore_walls(self) -> bool {
+        match self {
+            Self::Primary(profile) => profile.spell_ignore_walls,
+            Self::Extra(profile) => profile.ignore_walls,
+        }
+    }
+
+    fn range(self) -> u32 {
+        match self {
+            Self::Primary(profile) => profile.range,
+            Self::Extra(profile) => profile.range,
+        }
+    }
+
+    fn aoe(self) -> u16 {
+        match self {
+            Self::Primary(profile) => profile.spell_aoe,
+            Self::Extra(profile) => profile.aoe,
+        }
+    }
+
+    fn damage_bounds(self) -> (i32, i32) {
+        match self {
+            Self::Primary(profile) => (
+                profile.minimum_damage_multiplier_millionths,
+                profile.maximum_damage_multiplier_millionths,
+            ),
+            Self::Extra(profile) => (
+                profile.minimum_damage_multiplier_millionths,
+                profile.maximum_damage_multiplier_millionths,
+            ),
+        }
+    }
+
+    fn damage(self) -> &'a [cdda_protocol::WorldgenMonsterMeleeDamageUnitV1] {
+        match self {
+            Self::Primary(profile) => &profile.damage,
+            Self::Extra(profile) => &profile.damage,
+        }
+    }
+
+    fn effects(self) -> &'a [WorldgenMonsterAttackEffectV1] {
+        match self {
+            Self::Primary(profile) => &profile.effects,
+            Self::Extra(profile) => &profile.effects,
+        }
+    }
+
+    fn eoc_ids(self) -> &'a [String] {
+        match self {
+            Self::Primary(profile) => &profile.eoc_ids,
+            Self::Extra(profile) => &profile.eoc_ids,
+        }
+    }
+
+    fn summoned_monster_type_id(self) -> &'a str {
+        match self {
+            Self::Primary(profile) => &profile.spell_summoned_monster_type_id,
+            Self::Extra(profile) => &profile.summoned_monster_type_id,
+        }
+    }
+
+    fn summon_bounds(self) -> (u16, u16, bool) {
+        match self {
+            Self::Primary(profile) => (
+                profile.spell_minimum_summons,
+                profile.spell_maximum_summons,
+                profile.spell_random_summons,
+            ),
+            Self::Extra(profile) => (
+                profile.minimum_summons,
+                profile.maximum_summons,
+                profile.random_summons,
+            ),
+        }
+    }
+
+    fn field(self) -> (&'a str, u32, u8, u32, u32) {
+        match self {
+            Self::Primary(profile) => (
+                &profile.spell_field_type_id,
+                profile.spell_field_chance,
+                profile.spell_field_intensity,
+                profile.spell_field_intensity_variance_millionths,
+                profile.spell_field_duration_turns,
+            ),
+            Self::Extra(profile) => (
+                &profile.field_type_id,
+                profile.field_chance,
+                profile.field_intensity,
+                profile.field_intensity_variance_millionths,
+                profile.field_duration_turns,
+            ),
+        }
+    }
+
+    fn targets(self) -> (bool, bool, bool) {
+        match self {
+            Self::Primary(profile) => (
+                profile.spell_targets_hostile,
+                profile.spell_targets_ground,
+                profile.spell_targets_self,
+            ),
+            Self::Extra(profile) => (
+                profile.targets_hostile,
+                profile.targets_ground,
+                profile.targets_self,
+            ),
+        }
+    }
 }
 
 pub(super) fn creature_attitude(
@@ -142,6 +284,126 @@ fn projectile_line(origin: WorldPosition, endpoint: WorldPosition) -> Vec<WorldP
         }
     }
     positions
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RelativeSpellPoint {
+    x: i32,
+    y: i32,
+}
+
+impl RelativeSpellPoint {
+    const ZERO: Self = Self { x: 0, y: 0 };
+
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            x: self.x.checked_add(other.x)?,
+            y: self.y.checked_add(other.y)?,
+        })
+    }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(Self {
+            x: self.x.checked_sub(other.x)?,
+            y: self.y.checked_sub(other.y)?,
+        })
+    }
+}
+
+fn relative_spell_line(endpoint: RelativeSpellPoint) -> Vec<RelativeSpellPoint> {
+    projectile_line(
+        WorldPosition { x: 0, y: 0, z: 0 },
+        WorldPosition {
+            x: endpoint.x,
+            y: endpoint.y,
+            z: 0,
+        },
+    )
+    .into_iter()
+    .map(|position| RelativeSpellPoint {
+        x: position.x,
+        y: position.y,
+    })
+    .collect()
+}
+
+fn spell_line_side(a: RelativeSpellPoint, b: RelativeSpellPoint, c: RelativeSpellPoint) -> i8 {
+    let cross = (i64::from(b.x) - i64::from(a.x)) * (i64::from(c.y) - i64::from(a.y))
+        - (i64::from(b.y) - i64::from(a.y)) * (i64::from(c.x) - i64::from(a.x));
+    cross.signum() as i8
+}
+
+fn spell_line_between_or_on(
+    a0: RelativeSpellPoint,
+    a1: RelativeSpellPoint,
+    direction: RelativeSpellPoint,
+    point: RelativeSpellPoint,
+) -> bool {
+    let Some(a0_end) = a0.checked_add(direction) else {
+        return false;
+    };
+    let Some(a1_end) = a1.checked_add(direction) else {
+        return false;
+    };
+    spell_line_side(a0, a0_end, point) != 1 && spell_line_side(a1, a1_end, point) != -1
+}
+
+#[derive(Clone)]
+struct SpellLineIterator<'a> {
+    delta_line: &'a [RelativeSpellPoint],
+    current_origin: RelativeSpellPoint,
+    delta: RelativeSpellPoint,
+    index: usize,
+}
+
+impl SpellLineIterator<'_> {
+    fn get(&self) -> Option<RelativeSpellPoint> {
+        self.current_origin
+            .checked_add(*self.delta_line.get(self.index)?)
+    }
+
+    fn next(&mut self) -> Option<()> {
+        self.index = (self.index + 1) % self.delta_line.len();
+        if self.index == 0 {
+            self.current_origin = self.current_origin.checked_add(self.delta)?;
+        }
+        Some(())
+    }
+
+    fn previous(&mut self) -> Option<()> {
+        if self.index == 0 {
+            self.current_origin = self.current_origin.checked_sub(self.delta)?;
+        }
+        self.index = (self.index + self.delta_line.len() - 1) % self.delta_line.len();
+        Some(())
+    }
+
+    fn reset(&mut self, origin: RelativeSpellPoint) {
+        self.current_origin = origin;
+        self.index = 0;
+    }
+}
+
+fn move_spell_line_to_boundary(
+    line: &mut SpellLineIterator<'_>,
+    perpendicular: RelativeSpellPoint,
+    while_on_clockwise_side: bool,
+    forward: bool,
+) -> Result<(), SimError> {
+    for _ in 0..=4_096 {
+        let current = line.get().ok_or(SimError::NumericOverflow)?;
+        let on_clockwise_side =
+            spell_line_side(RelativeSpellPoint::ZERO, perpendicular, current) == 1;
+        if on_clockwise_side != while_on_clockwise_side {
+            return Ok(());
+        }
+        if forward {
+            line.next().ok_or(SimError::NumericOverflow)?;
+        } else {
+            line.previous().ok_or(SimError::NumericOverflow)?;
+        }
+    }
+    Err(SimError::InvalidCreature)
 }
 
 pub(super) fn special_state_matches_catalog(
@@ -882,25 +1144,13 @@ impl WorldState {
                     // polymorph clears the current turn's moves.
                     return Ok(0);
                 }
-                WorldgenMonsterSpecialAttackKindV1::Spell => {
-                    if profile.spell_summoned_monster_type_id.is_empty() {
-                        self.execute_creature_spell_attack(
-                            source,
-                            visible_target,
-                            profile,
-                            sequence,
-                            events,
-                        )?
-                    } else {
-                        self.execute_creature_summon_spell(
-                            source,
-                            visible_target,
-                            profile,
-                            sequence,
-                            events,
-                        )?
-                    }
-                }
+                WorldgenMonsterSpecialAttackKindV1::Spell => self.execute_creature_spell_program(
+                    source,
+                    visible_target,
+                    profile,
+                    sequence,
+                    events,
+                )?,
             };
             if !used {
                 continue;
@@ -928,7 +1178,7 @@ impl WorldState {
         Ok(total_cost)
     }
 
-    fn execute_creature_spell_attack(
+    fn execute_creature_spell_program(
         &mut self,
         source: CreatureId,
         visible_target: Option<(ActorId, WorldPosition)>,
@@ -936,89 +1186,122 @@ impl WorldState {
         sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<bool, SimError> {
-        let Some((primary_target, intended_target)) = visible_target else {
-            return Ok(false);
-        };
         let origin = self
             .creatures
             .get(&source)
             .ok_or(SimError::UnknownCreature)?
             .position;
-        if self
-            .actors
-            .get(&primary_target)
-            .is_none_or(|actor| actor.hp <= 0)
-            || horizontal_euclidean_distance_floor(origin, intended_target)? > profile.range
-        {
-            return Ok(false);
-        }
-        let center = if profile.spell_aoe == 0 {
-            let Some(epicenter) =
-                self.spell_blast_epicenter(origin, intended_target, profile.spell_no_projectile)
-            else {
+        let intended_target = if profile.spell_target_self {
+            origin
+        } else {
+            let Some((target, target_position)) = visible_target else {
                 return Ok(false);
             };
-            epicenter
-        } else {
-            intended_target
-        };
-        let radius = i32::from(profile.spell_aoe);
-        let mut area = Vec::new();
-        for offset_x in -radius..=radius {
-            for offset_y in -radius..=radius {
-                let Some(x) = center.x.checked_add(offset_x) else {
-                    continue;
-                };
-                let Some(y) = center.y.checked_add(offset_y) else {
-                    continue;
-                };
-                let position = WorldPosition { x, y, z: center.z };
-                if horizontal_euclidean_distance_floor(center, position)?
-                    > u32::from(profile.spell_aoe)
-                    || (!profile.spell_ignore_walls
-                        && !self.spell_blast_line_is_passable(center, position))
-                    || !self.chunks.contains_key(&position.chunk_and_local().0)
-                {
-                    continue;
-                }
-                if self.spell_area_position_is_valid(source, position, profile) {
-                    area.push(position);
-                }
+            if self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
+                || horizontal_euclidean_distance_floor(origin, target_position)? > profile.range
+            {
+                return Ok(false);
             }
-        }
-        area.sort_unstable();
-        area.dedup();
+            target_position
+        };
         let mut rng = self.named_rng(
-            b"creature-special-spell-attack",
+            b"creature-special-spell-program",
             &[source.as_u128()],
             sequence,
         );
+        if profile.spell_extra_effects_first {
+            for (index, extra) in profile.spell_extra_effects.iter().enumerate() {
+                self.execute_creature_spell_effect(
+                    source,
+                    intended_target,
+                    CreatureSpellProfile::Extra(extra),
+                    sequence.wrapping_add(index as u64 + 1),
+                    &mut rng,
+                    events,
+                )?;
+            }
+        }
+        self.execute_creature_spell_effect(
+            source,
+            intended_target,
+            CreatureSpellProfile::Primary(profile),
+            sequence,
+            &mut rng,
+            events,
+        )?;
+        if !profile.spell_extra_effects_first {
+            for (index, extra) in profile.spell_extra_effects.iter().enumerate() {
+                self.execute_creature_spell_effect(
+                    source,
+                    intended_target,
+                    CreatureSpellProfile::Extra(extra),
+                    sequence.wrapping_add(index as u64 + 1),
+                    &mut rng,
+                    events,
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
+    fn execute_creature_spell_effect(
+        &mut self,
+        source: CreatureId,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+        sequence: u64,
+        rng: &mut impl Rng,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if profile.summoned_monster_type_id().is_empty() {
+            self.execute_creature_spell_attack(
+                source,
+                intended_target,
+                profile,
+                sequence,
+                rng,
+                events,
+            )
+        } else {
+            self.execute_creature_summon_spell(source, intended_target, profile, rng, events)
+        }
+    }
+
+    fn execute_creature_spell_attack(
+        &mut self,
+        source: CreatureId,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+        sequence: u64,
+        rng: &mut impl Rng,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let area = self.creature_spell_area(source, intended_target, profile)?;
         for position in area {
-            if !profile.spell_field_type_id.is_empty() {
-                self.apply_creature_spell_field(position, profile, &mut rng, events)?;
+            let (field_type_id, _, _, _, _) = profile.field();
+            if !field_type_id.is_empty() {
+                self.apply_creature_spell_field(position, profile, rng, events)?;
             }
             let Some(target) = self.actor_at(position) else {
                 continue;
             };
-            if !profile.eoc_ids.is_empty() {
+            if !profile.eoc_ids().is_empty() {
                 let _ =
-                    self.apply_creature_spell_eocs(source, target, &profile.eoc_ids, sequence)?;
+                    self.apply_creature_spell_eocs(source, target, profile.eoc_ids(), sequence)?;
                 continue;
             }
-            if profile.damage.is_empty() {
-                self.apply_monster_attack_effects(target, "", false, &profile.effects, &mut rng)?;
+            if profile.damage().is_empty() {
+                self.apply_monster_attack_effects(target, "", false, profile.effects(), rng)?;
                 continue;
             }
-            let damage_points = roll_inclusive_i32(
-                profile.minimum_damage_multiplier_millionths / 1_000_000,
-                profile.maximum_damage_multiplier_millionths / 1_000_000,
-                &mut rng,
-            )?;
+            let (minimum_damage, maximum_damage) = profile.damage_bounds();
+            let damage_points =
+                roll_inclusive_i32(minimum_damage / 1_000_000, maximum_damage / 1_000_000, rng)?;
             let multiplier = damage_points
                 .checked_mul(1_000_000)
                 .ok_or(SimError::NumericOverflow)?;
             let damage = profile
-                .damage
+                .damage()
                 .iter()
                 .map(|unit| {
                     Ok(ActorDamageUnit {
@@ -1037,14 +1320,14 @@ impl WorldState {
                 })
                 .collect::<Result<Vec<_>, SimError>>()?;
             let (outcome, was_sleeping, _cut_or_stab_damage) =
-                self.damage_actor_components(target, &damage, &mut rng)?;
-            if !profile.effects.is_empty() {
+                self.damage_actor_components(target, &damage, rng)?;
+            if !profile.effects().is_empty() {
                 self.apply_monster_attack_effects(
                     target,
                     &outcome.body_part_id,
                     false,
-                    &profile.effects,
-                    &mut rng,
+                    profile.effects(),
+                    rng,
                 )?;
             }
             events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
@@ -1075,7 +1358,388 @@ impl WorldState {
                 }
             }
         }
-        Ok(true)
+        Ok(())
+    }
+
+    fn creature_spell_area(
+        &self,
+        source: CreatureId,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+    ) -> Result<Vec<WorldPosition>, SimError> {
+        let origin = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?
+            .position;
+        let intended_target = if profile.target_self() {
+            origin
+        } else {
+            intended_target
+        };
+        if origin.z != intended_target.z {
+            return Ok(Vec::new());
+        }
+        let raw_area = match profile.shape() {
+            WorldgenMonsterSpellShapeV1::Blast => {
+                self.creature_blast_spell_area(origin, intended_target, profile)?
+            }
+            WorldgenMonsterSpellShapeV1::Line => {
+                self.creature_line_spell_area(origin, intended_target, profile)?
+            }
+            WorldgenMonsterSpellShapeV1::Cone => {
+                self.creature_cone_spell_area(origin, intended_target, profile)?
+            }
+        };
+        Ok(raw_area
+            .into_iter()
+            .filter(|position| self.chunks.contains_key(&position.chunk_and_local().0))
+            .filter(|position| self.spell_area_position_is_valid(source, *position, profile))
+            .collect())
+    }
+
+    fn creature_blast_spell_area(
+        &self,
+        origin: WorldPosition,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+    ) -> Result<BTreeSet<WorldPosition>, SimError> {
+        let center = if profile.aoe() == 0 {
+            let Some(epicenter) =
+                self.spell_blast_epicenter(origin, intended_target, profile.no_projectile())
+            else {
+                return Ok(BTreeSet::new());
+            };
+            epicenter
+        } else {
+            intended_target
+        };
+        let radius = i32::from(profile.aoe());
+        let mut area = BTreeSet::new();
+        for offset_x in -radius..=radius {
+            for offset_y in -radius..=radius {
+                let Some(x) = center.x.checked_add(offset_x) else {
+                    continue;
+                };
+                let Some(y) = center.y.checked_add(offset_y) else {
+                    continue;
+                };
+                let position = WorldPosition { x, y, z: center.z };
+                if horizontal_euclidean_distance_floor(center, position)?
+                    <= u32::from(profile.aoe())
+                    && (profile.ignore_walls()
+                        || self.spell_blast_line_is_passable(center, position))
+                {
+                    area.insert(position);
+                }
+            }
+        }
+        Ok(area)
+    }
+
+    fn creature_cone_spell_area(
+        &self,
+        origin: WorldPosition,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+    ) -> Result<BTreeSet<WorldPosition>, SimError> {
+        if origin == intended_target {
+            return Ok(BTreeSet::new());
+        }
+        let delta_x = f64::from(intended_target.x) - f64::from(origin.x);
+        let delta_y = f64::from(intended_target.y) - f64::from(origin.y);
+        let initial_angle = delta_y.atan2(delta_x).to_degrees().rem_euclid(360.0);
+        let half_width = f64::from(profile.aoe()) / 2.0;
+        let start_angle = initial_angle - half_width;
+        let end_angle = initial_angle + half_width;
+        let mut targets = BTreeSet::new();
+        let mut endpoints = BTreeSet::new();
+        let mut angle = start_angle;
+        while angle <= end_angle {
+            let radians = angle.to_radians();
+            for range in 1..=profile.range() {
+                let range = f64::from(range);
+                let relative_x = (range * radians.cos()) as i32;
+                let relative_y = (range * radians.sin()) as i32;
+                let Some(x) = origin.x.checked_add(relative_x) else {
+                    continue;
+                };
+                let Some(y) = origin.y.checked_add(relative_y) else {
+                    continue;
+                };
+                let position = WorldPosition { x, y, z: origin.z };
+                if profile.ignore_walls() {
+                    targets.insert(position);
+                } else {
+                    endpoints.insert(position);
+                }
+            }
+            angle += 1.0;
+        }
+        if !profile.ignore_walls() {
+            for endpoint in endpoints {
+                for position in projectile_line(origin, endpoint) {
+                    if !self.is_passable(position) {
+                        break;
+                    }
+                    targets.insert(position);
+                }
+            }
+        }
+        targets.remove(&origin);
+        Ok(targets)
+    }
+
+    fn creature_line_spell_area(
+        &self,
+        origin: WorldPosition,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+    ) -> Result<BTreeSet<WorldPosition>, SimError> {
+        let delta = RelativeSpellPoint {
+            x: intended_target
+                .x
+                .checked_sub(origin.x)
+                .ok_or(SimError::NumericOverflow)?,
+            y: intended_target
+                .y
+                .checked_sub(origin.y)
+                .ok_or(SimError::NumericOverflow)?,
+        };
+        let distance = delta.x.unsigned_abs().max(delta.y.unsigned_abs());
+        if distance == 0 {
+            return Ok(BTreeSet::new());
+        }
+        let delta_perpendicular = RelativeSpellPoint {
+            x: delta.y.checked_neg().ok_or(SimError::NumericOverflow)?,
+            y: delta.x,
+        };
+        let axis_delta = if delta.x.unsigned_abs() > delta.y.unsigned_abs() {
+            RelativeSpellPoint { x: delta.x, y: 0 }
+        } else {
+            RelativeSpellPoint { x: 0, y: delta.y }
+        };
+        let clockwise_perpendicular_axis = RelativeSpellPoint {
+            x: axis_delta
+                .y
+                .checked_neg()
+                .ok_or(SimError::NumericOverflow)?,
+            y: axis_delta.x,
+        };
+        let unit_clockwise_perpendicular_axis = RelativeSpellPoint {
+            x: clockwise_perpendicular_axis.x.signum(),
+            y: clockwise_perpendicular_axis.y.signum(),
+        };
+        let counterclockwise_length = i32::from(profile.aoe() / 2);
+        let clockwise_length = i32::from(profile.aoe()) - counterclockwise_length;
+        let delta_side = spell_line_side(RelativeSpellPoint::ZERO, axis_delta, delta);
+        let mut path_to_target = relative_spell_line(delta);
+        path_to_target.pop();
+        path_to_target.insert(0, RelativeSpellPoint::ZERO);
+        let mut base_line = SpellLineIterator {
+            delta_line: &path_to_target,
+            current_origin: RelativeSpellPoint::ZERO,
+            delta,
+            index: 0,
+        };
+        let mut result = BTreeSet::new();
+        self.build_creature_spell_line(
+            base_line.clone(),
+            origin,
+            delta,
+            delta_perpendicular,
+            profile.ignore_walls(),
+            &mut result,
+        )?;
+        let clockwise_leg = relative_spell_line(RelativeSpellPoint {
+            x: unit_clockwise_perpendicular_axis.x * clockwise_length,
+            y: unit_clockwise_perpendicular_axis.y * clockwise_length,
+        });
+        let counterclockwise_leg = relative_spell_line(RelativeSpellPoint {
+            x: unit_clockwise_perpendicular_axis.x * -counterclockwise_length,
+            y: unit_clockwise_perpendicular_axis.y * -counterclockwise_length,
+        });
+        match delta_side {
+            0 => {
+                for point in &clockwise_leg {
+                    base_line.reset(*point);
+                    if !self.creature_spell_line_point_is_passable(
+                        origin,
+                        *point,
+                        profile.ignore_walls(),
+                    ) {
+                        break;
+                    }
+                    self.build_creature_spell_line(
+                        base_line.clone(),
+                        origin,
+                        delta,
+                        delta_perpendicular,
+                        profile.ignore_walls(),
+                        &mut result,
+                    )?;
+                }
+                for point in &counterclockwise_leg {
+                    base_line.reset(*point);
+                    if !self.creature_spell_line_point_is_passable(
+                        origin,
+                        *point,
+                        profile.ignore_walls(),
+                    ) {
+                        break;
+                    }
+                    self.build_creature_spell_line(
+                        base_line.clone(),
+                        origin,
+                        delta,
+                        delta_perpendicular,
+                        profile.ignore_walls(),
+                        &mut result,
+                    )?;
+                }
+            }
+            1 => {
+                for point in &counterclockwise_leg {
+                    base_line.reset(*point);
+                    move_spell_line_to_boundary(&mut base_line, delta_perpendicular, true, true)?;
+                    if !self.creature_spell_line_point_is_passable(
+                        origin,
+                        *point,
+                        profile.ignore_walls(),
+                    ) {
+                        break;
+                    }
+                    self.build_creature_spell_line(
+                        base_line.clone(),
+                        origin,
+                        delta,
+                        delta_perpendicular,
+                        profile.ignore_walls(),
+                        &mut result,
+                    )?;
+                }
+                for point in &clockwise_leg {
+                    base_line.reset(*point);
+                    move_spell_line_to_boundary(&mut base_line, delta_perpendicular, false, false)?;
+                    base_line.next().ok_or(SimError::NumericOverflow)?;
+                    if !self.creature_spell_line_point_is_passable(
+                        origin,
+                        *point,
+                        profile.ignore_walls(),
+                    ) {
+                        break;
+                    }
+                    self.build_creature_spell_line(
+                        base_line.clone(),
+                        origin,
+                        delta,
+                        delta_perpendicular,
+                        profile.ignore_walls(),
+                        &mut result,
+                    )?;
+                }
+            }
+            -1 => {
+                for point in &counterclockwise_leg {
+                    base_line.reset(*point);
+                    move_spell_line_to_boundary(&mut base_line, delta_perpendicular, false, false)?;
+                    base_line.next().ok_or(SimError::NumericOverflow)?;
+                    if !self.creature_spell_line_point_is_passable(
+                        origin,
+                        *point,
+                        profile.ignore_walls(),
+                    ) {
+                        break;
+                    }
+                    self.build_creature_spell_line(
+                        base_line.clone(),
+                        origin,
+                        delta,
+                        delta_perpendicular,
+                        profile.ignore_walls(),
+                        &mut result,
+                    )?;
+                }
+                for point in &clockwise_leg {
+                    base_line.reset(*point);
+                    move_spell_line_to_boundary(&mut base_line, delta_perpendicular, true, true)?;
+                    if !self.creature_spell_line_point_is_passable(
+                        origin,
+                        *point,
+                        profile.ignore_walls(),
+                    ) {
+                        break;
+                    }
+                    self.build_creature_spell_line(
+                        base_line.clone(),
+                        origin,
+                        delta,
+                        delta_perpendicular,
+                        profile.ignore_walls(),
+                        &mut result,
+                    )?;
+                }
+            }
+            _ => return Err(SimError::InvalidCreature),
+        }
+        result.remove(&origin);
+        Ok(result)
+    }
+
+    fn build_creature_spell_line(
+        &self,
+        mut line: SpellLineIterator<'_>,
+        source: WorldPosition,
+        delta: RelativeSpellPoint,
+        delta_perpendicular: RelativeSpellPoint,
+        ignore_walls: bool,
+        result: &mut BTreeSet<WorldPosition>,
+    ) -> Result<(), SimError> {
+        for _ in 0..=4_096 {
+            let Some(relative) = line.get() else {
+                return Err(SimError::NumericOverflow);
+            };
+            if !spell_line_between_or_on(
+                RelativeSpellPoint::ZERO,
+                delta,
+                delta_perpendicular,
+                relative,
+            ) {
+                return Ok(());
+            }
+            let Some(position) = self.creature_spell_line_absolute_position(source, relative)
+            else {
+                return Ok(());
+            };
+            if !ignore_walls && !self.is_passable(position) {
+                return Ok(());
+            }
+            result.insert(position);
+            line.next().ok_or(SimError::NumericOverflow)?;
+        }
+        Err(SimError::InvalidCreature)
+    }
+
+    fn creature_spell_line_point_is_passable(
+        &self,
+        source: WorldPosition,
+        relative: RelativeSpellPoint,
+        ignore_walls: bool,
+    ) -> bool {
+        self.creature_spell_line_absolute_position(source, relative)
+            .is_some_and(|position| ignore_walls || self.is_passable(position))
+    }
+
+    fn creature_spell_line_absolute_position(
+        &self,
+        source: WorldPosition,
+        relative: RelativeSpellPoint,
+    ) -> Option<WorldPosition> {
+        Some(WorldPosition {
+            x: source.x.checked_add(relative.x)?,
+            y: source.y.checked_add(relative.y)?,
+            z: source.z,
+        })
     }
 
     fn spell_blast_line_is_passable(&self, origin: WorldPosition, target: WorldPosition) -> bool {
@@ -1091,14 +1755,15 @@ impl WorldState {
         &self,
         source: CreatureId,
         position: WorldPosition,
-        profile: &WorldgenMonsterSpecialAttackV1,
+        profile: CreatureSpellProfile<'_>,
     ) -> bool {
+        let (targets_hostile, targets_ground, targets_self) = profile.targets();
         if self
             .creatures
             .get(&source)
             .is_some_and(|creature| creature.position == position)
         {
-            return profile.spell_targets_self;
+            return targets_self;
         }
         if self
             .creatures
@@ -1112,12 +1777,12 @@ impl WorldState {
             .values()
             .find(|actor| actor.position == position)
         {
-            return actor.hp > 0 && profile.spell_targets_hostile;
+            return actor.hp > 0 && targets_hostile;
         }
         if self.npcs.values().any(|npc| npc.position == position) {
             return false;
         }
-        profile.spell_targets_ground
+        targets_ground
     }
 
     fn summoned_creature_can_enter(
@@ -1175,37 +1840,32 @@ impl WorldState {
     fn apply_creature_spell_field(
         &mut self,
         position: WorldPosition,
-        profile: &WorldgenMonsterSpecialAttackV1,
+        profile: CreatureSpellProfile<'_>,
         rng: &mut impl Rng,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        let variance = u32::from(profile.spell_field_intensity)
-            .checked_mul(profile.spell_field_intensity_variance_millionths)
+        let (field_type_id, field_chance, field_intensity, field_variance, field_duration) =
+            profile.field();
+        let variance = u32::from(field_intensity)
+            .checked_mul(field_variance)
             .and_then(|value| value.checked_div(1_000_000))
             .and_then(|value| i32::try_from(value).ok())
             .ok_or(SimError::NumericOverflow)?;
-        let intensity = i32::from(profile.spell_field_intensity)
+        let intensity = i32::from(field_intensity)
             .checked_add(roll_inclusive_i32(-variance, variance, rng)?)
             .ok_or(SimError::NumericOverflow)?;
         if intensity <= 0 {
             return Ok(());
         }
         let intensity = u16::try_from(intensity).map_err(|_| SimError::NumericOverflow)?;
-        if profile.spell_field_chance > 1
-            && roll_inclusive_u32(1, profile.spell_field_chance, rng)? != 1
-        {
+        if field_chance > 1 && roll_inclusive_u32(1, field_chance, rng)? != 1 {
             return Ok(());
         }
-        let initial_age = -i64::from(profile.spell_field_duration_turns);
-        let intensity = self.add_field_with_age(
-            position,
-            &profile.spell_field_type_id,
-            intensity,
-            initial_age,
-        )?;
+        let initial_age = -i64::from(field_duration);
+        let intensity = self.add_field_with_age(position, field_type_id, intensity, initial_age)?;
         events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
             position,
-            field_type_id: profile.spell_field_type_id.clone(),
+            field_type_id: field_type_id.to_owned(),
             intensity,
         })?);
         Ok(())
@@ -1214,40 +1874,11 @@ impl WorldState {
     fn execute_creature_summon_spell(
         &mut self,
         source: CreatureId,
-        visible_target: Option<(ActorId, WorldPosition)>,
-        profile: &WorldgenMonsterSpecialAttackV1,
-        sequence: u64,
+        intended_target: WorldPosition,
+        profile: CreatureSpellProfile<'_>,
+        rng: &mut impl Rng,
         events: &mut Vec<WorldEvent>,
-    ) -> Result<bool, SimError> {
-        let origin = self
-            .creatures
-            .get(&source)
-            .ok_or(SimError::UnknownCreature)?
-            .position;
-        let center = if profile.spell_target_self {
-            origin
-        } else {
-            let Some((target, target_position)) = visible_target else {
-                return Ok(false);
-            };
-            if self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
-                || horizontal_euclidean_distance_floor(origin, target_position)? > profile.range
-            {
-                return Ok(false);
-            }
-            if profile.spell_aoe == 0 {
-                let Some(epicenter) = self.spell_blast_epicenter(
-                    origin,
-                    target_position,
-                    profile.spell_no_projectile,
-                ) else {
-                    return Ok(false);
-                };
-                epicenter
-            } else {
-                target_position
-            }
-        };
+    ) -> Result<(), SimError> {
         let prototype = self
             .worldgen
             .as_ref()
@@ -1259,7 +1890,7 @@ impl WorldState {
                             .base
                             .monster_type_id
                             .as_str()
-                            .cmp(&profile.spell_summoned_monster_type_id)
+                            .cmp(profile.summoned_monster_type_id())
                     })
                     .ok()
                     .and_then(|index| catalog.monster_prototypes.get(index))
@@ -1267,40 +1898,14 @@ impl WorldState {
             .cloned()
             .ok_or(SimError::InvalidCreature)?;
         if !prototype.runtime_spawnable {
-            return Ok(false);
+            return Ok(());
         }
-        let radius = i32::from(profile.spell_aoe);
-        let mut candidates = Vec::new();
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                let Some(x) = center.x.checked_add(dx) else {
-                    continue;
-                };
-                let Some(y) = center.y.checked_add(dy) else {
-                    continue;
-                };
-                let position = WorldPosition { x, y, z: center.z };
-                if horizontal_euclidean_distance_floor(center, position)?
-                    <= u32::from(profile.spell_aoe)
-                    && (profile.spell_ignore_walls
-                        || self.spell_blast_line_is_passable(center, position))
-                    && self.chunks.contains_key(&position.chunk_and_local().0)
-                    && self.spell_area_position_is_valid(source, position, profile)
-                {
-                    candidates.push(position);
-                }
-            }
-        }
-        candidates.sort_unstable();
-        let mut rng = self.named_rng(b"creature-special-summon", &[source.as_u128()], sequence);
-        let requested = if profile.spell_random_summons {
-            roll_inclusive_u32(
-                u32::from(profile.spell_minimum_summons),
-                u32::from(profile.spell_maximum_summons),
-                &mut rng,
-            )?
+        let mut candidates = self.creature_spell_area(source, intended_target, profile)?;
+        let (minimum_summons, maximum_summons, random_summons) = profile.summon_bounds();
+        let requested = if random_summons {
+            roll_inclusive_u32(u32::from(minimum_summons), u32::from(maximum_summons), rng)?
         } else {
-            u32::from(profile.spell_minimum_summons)
+            u32::from(minimum_summons)
         };
         let mut remaining = requested;
         while remaining > 0 && !candidates.is_empty() {
@@ -1320,7 +1925,7 @@ impl WorldState {
                 position,
             })?);
         }
-        Ok(true)
+        Ok(())
     }
 
     fn execute_creature_polymorph(

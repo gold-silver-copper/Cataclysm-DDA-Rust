@@ -683,6 +683,7 @@ fn runtime_monster_attack_effect(
 
 #[derive(Clone)]
 struct RuntimeMonsterSpellProfile {
+    shape: cdda_protocol::WorldgenMonsterSpellShapeV1,
     summoned_monster_type_id: String,
     damage_type_id: String,
     minimum_damage: u16,
@@ -698,7 +699,7 @@ struct RuntimeMonsterSpellProfile {
     maximum_summons: u16,
     random_summons: bool,
     range: u32,
-    aoe: u8,
+    aoe: u16,
     casting_time_moves: u32,
     field_type_id: String,
     field_chance: u32,
@@ -708,6 +709,114 @@ struct RuntimeMonsterSpellProfile {
     targets_hostile: bool,
     targets_ground: bool,
     targets_self: bool,
+    extra_effects_first: bool,
+    extra_effects: Vec<RuntimeMonsterSpellProfile>,
+}
+
+fn runtime_spell_summoned_monster_ids(
+    profile: &RuntimeMonsterSpellProfile,
+    output: &mut BTreeSet<String>,
+) {
+    if !profile.summoned_monster_type_id.is_empty() {
+        output.insert(profile.summoned_monster_type_id.clone());
+    }
+    for child in &profile.extra_effects {
+        runtime_spell_summoned_monster_ids(child, output);
+    }
+}
+
+fn runtime_spell_damage(
+    profile: &RuntimeMonsterSpellProfile,
+) -> Vec<cdda_protocol::WorldgenMonsterMeleeDamageUnitV1> {
+    if profile.damage_type_id.is_empty() {
+        Vec::new()
+    } else {
+        vec![cdda_protocol::WorldgenMonsterMeleeDamageUnitV1 {
+            damage_type_id: profile.damage_type_id.clone(),
+            amount_milli: 1_000,
+            armor_penetration_milli: 0,
+            armor_multiplier_millionths: 1_000_000,
+            damage_multiplier_millionths: 1_000_000,
+            constant_armor_multiplier_millionths: 1_000_000,
+            constant_damage_multiplier_millionths: 1_000_000,
+        }]
+    }
+}
+
+fn runtime_spell_effects(
+    profile: &RuntimeMonsterSpellProfile,
+    effect_types: &EffectTypeRegistry,
+) -> Option<Vec<cdda_protocol::WorldgenMonsterAttackEffectV1>> {
+    if profile.status_effect_id.is_empty() {
+        return Some(Vec::new());
+    }
+    runtime_monster_attack_effect(
+        &MonsterAttackEffectDefinition {
+            effect_id: profile.status_effect_id.clone(),
+            chance_millionths: 1_000_000,
+            permanent: false,
+            affect_hit_body_part: false,
+            body_part_id: None,
+            duration_turns: (
+                profile.minimum_duration_turns,
+                profile.maximum_duration_turns,
+            ),
+            intensity: (1, 1),
+        },
+        effect_types,
+        false,
+    )
+    .map(|effect| vec![effect])
+}
+
+fn flatten_runtime_spell_program(
+    profile: &RuntimeMonsterSpellProfile,
+    effect_types: &EffectTypeRegistry,
+    output: &mut Vec<cdda_protocol::WorldgenMonsterExtraSpellEffectV1>,
+) -> Option<()> {
+    if profile.extra_effects_first {
+        for child in &profile.extra_effects {
+            flatten_runtime_spell_program(child, effect_types, output)?;
+        }
+    }
+    output.push(cdda_protocol::WorldgenMonsterExtraSpellEffectV1 {
+        target_self: profile.target_self,
+        shape: profile.shape,
+        no_projectile: profile.no_projectile,
+        ignore_walls: profile.ignore_walls,
+        minimum_damage_multiplier_millionths: i32::from(profile.minimum_damage)
+            .checked_mul(1_000_000)?,
+        maximum_damage_multiplier_millionths: i32::from(profile.maximum_damage)
+            .checked_mul(1_000_000)?,
+        damage: runtime_spell_damage(profile),
+        effects: runtime_spell_effects(profile, effect_types)?,
+        eoc_ids: (!profile.eoc_id.is_empty())
+            .then(|| vec![profile.eoc_id.clone()])
+            .unwrap_or_default(),
+        summoned_monster_type_id: profile.summoned_monster_type_id.clone(),
+        minimum_summons: profile.minimum_summons,
+        maximum_summons: profile.maximum_summons,
+        random_summons: profile.random_summons,
+        range: profile.range,
+        aoe: profile.aoe,
+        field_type_id: profile.field_type_id.clone(),
+        field_chance: profile.field_chance,
+        field_intensity: profile.field_intensity,
+        field_intensity_variance_millionths: profile.field_intensity_variance_millionths,
+        field_duration_turns: profile.field_duration_turns,
+        targets_hostile: profile.targets_hostile,
+        targets_ground: profile.targets_ground,
+        targets_self: profile.targets_self,
+    });
+    if output.len() > 256 {
+        return None;
+    }
+    if !profile.extra_effects_first {
+        for child in &profile.extra_effects {
+            flatten_runtime_spell_program(child, effect_types, output)?;
+        }
+    }
+    Some(())
 }
 
 fn runtime_monster_gun_profile(
@@ -1184,42 +1293,108 @@ fn runtime_monster_spell_profile(
             attack.spell_id
         )
     })?;
-    let summon = spell.supports_hostile_permanent_summoning();
-    let typed_damage = false;
-    let status_effect = spell.supports_hostile_status_effect();
-    let effect_on_condition = spell.supports_hostile_effect_on_condition()
-        && creature_spell_eoc_ids.contains(&spell.effect_str);
-    if (!summon && !typed_damage && !status_effect && !effect_on_condition)
-        || !spell.flags.contains("SILENT")
-        || !spell.flags.contains("NO_EXPLOSION_SFX")
-        || spell.flags.contains("RANDOM_DAMAGE")
-        || spell.flags.contains("RANDOM_DURATION")
-        || attack.spell_min_level > 1_000
+    if attack.spell_min_level > 1_000
         || attack
             .spell_max_level
-            .is_some_and(|maximum| maximum > 1_000)
-        || attack
-            .spell_max_level
-            .is_some_and(|maximum| maximum != attack.spell_min_level)
-        || attack.spell_min_level > u32::try_from(spell.maximum_level.max(0))?
+            .is_some_and(|maximum| maximum > 1_000 || maximum != attack.spell_min_level)
     {
         return Ok(None);
     }
     let target_self = attack.spell_hit_self || attack.spell_allow_no_target;
-    if (!summon && target_self)
-        || (!target_self
-            && !spell.valid_targets.contains("hostile")
-            && !spell.valid_targets.contains("ground"))
-        || (target_self
-            && attack.condition.as_ref().is_some_and(|condition| {
-                cdda_protocol::eoc_condition_requires_target_context(
-                    &crate::eocs::runtime_condition(condition),
-                )
-            }))
+    if target_self
+        && attack.condition.as_ref().is_some_and(|condition| {
+            cdda_protocol::eoc_condition_requires_target_context(&crate::eocs::runtime_condition(
+                condition,
+            ))
+        })
     {
         return Ok(None);
     }
-    let level = attack.spell_min_level;
+    let configured_limit = attack
+        .spell_max_level
+        .map(i32::try_from)
+        .transpose()?
+        .unwrap_or(spell.maximum_level);
+    let effective_level = if configured_limit > 0 {
+        attack.spell_min_level.min(u32::try_from(configured_limit)?)
+    } else {
+        attack.spell_min_level
+    };
+    let mut stack = BTreeSet::new();
+    let mut node_count = 0_usize;
+    runtime_monster_spell_program(
+        spell,
+        effective_level,
+        target_self,
+        spells,
+        fields,
+        creature_spell_eoc_ids,
+        &mut stack,
+        &mut node_count,
+        0,
+    )
+}
+
+fn runtime_monster_spell_program(
+    spell: &cdda_content::SpellDefinition,
+    level: u32,
+    target_self: bool,
+    spells: &SpellRegistry,
+    fields: &FieldTypeRegistry,
+    creature_spell_eoc_ids: &BTreeSet<String>,
+    stack: &mut BTreeSet<String>,
+    node_count: &mut usize,
+    depth: usize,
+) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
+    *node_count = (*node_count).saturating_add(1);
+    if depth > 16 || *node_count > 257 || !stack.insert(spell.id.clone()) {
+        return Ok(None);
+    }
+    let result = runtime_monster_spell_program_inner(
+        spell,
+        level,
+        target_self,
+        spells,
+        fields,
+        creature_spell_eoc_ids,
+        stack,
+        node_count,
+        depth,
+    );
+    stack.remove(&spell.id);
+    result
+}
+
+fn runtime_monster_spell_program_inner(
+    spell: &cdda_content::SpellDefinition,
+    level: u32,
+    target_self: bool,
+    spells: &SpellRegistry,
+    fields: &FieldTypeRegistry,
+    creature_spell_eoc_ids: &BTreeSet<String>,
+    stack: &mut BTreeSet<String>,
+    node_count: &mut usize,
+    depth: usize,
+) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
+    let summon = spell.supports_hostile_permanent_summoning();
+    let typed_damage = spell.supports_hostile_typed_damage();
+    let status_effect = spell.supports_hostile_status_effect();
+    let effect_on_condition = spell.supports_hostile_effect_on_condition()
+        && creature_spell_eoc_ids.contains(&spell.effect_str);
+    let field_attack = spell.supports_hostile_field_attack();
+    if (!summon && !typed_damage && !status_effect && !effect_on_condition && !field_attack)
+        || !spell.flags.contains("SILENT")
+        || !spell.flags.contains("NO_EXPLOSION_SFX")
+    {
+        return Ok(None);
+    }
+    if (target_self && !spell.valid_targets.contains("self"))
+        || (!target_self
+            && !spell.valid_targets.contains("hostile")
+            && !spell.valid_targets.contains("ground"))
+    {
+        return Ok(None);
+    }
     let leveled_damage = finalized_spell_stat(
         spell.minimum_damage,
         spell.maximum_damage,
@@ -1301,7 +1476,6 @@ fn runtime_monster_spell_profile(
             && (minimum_duration_moves..=1_000_000_000).contains(&maximum_duration_moves)
             && minimum_duration_moves % 100 == 0
             && maximum_duration_moves % 100 == 0
-            && (!random_duration || minimum_duration_moves == maximum_duration_moves)
     } else if spell.field_type_id.is_empty() {
         minimum_duration_moves == 0 && maximum_duration_moves == 0
     } else {
@@ -1339,17 +1513,25 @@ fn runtime_monster_spell_profile(
     if !amount_is_bounded
         || !duration_is_bounded
         || !(0..=1_000).contains(&range)
-        || !(0..=32).contains(&aoe)
+        || !(0..=360).contains(&aoe)
         || !(0..=1_000_000_000).contains(&casting_time)
         || (target_self && range != 0)
         || (!target_self && range == 0)
         || (summon && aoe == 0)
-        || ((status_effect || effect_on_condition) && aoe != 0)
+        || (spell.shape == "blast" && (status_effect || effect_on_condition) && aoe != 0)
+        || (spell.shape == "line" && aoe > 32)
+        || (spell.shape == "cone" && aoe == 0)
         || ((typed_damage || status_effect || effect_on_condition) && target_self)
     {
         return Ok(None);
     }
-    Ok(Some(RuntimeMonsterSpellProfile {
+    let mut profile = RuntimeMonsterSpellProfile {
+        shape: match spell.shape.as_str() {
+            "blast" => cdda_protocol::WorldgenMonsterSpellShapeV1::Blast,
+            "line" => cdda_protocol::WorldgenMonsterSpellShapeV1::Line,
+            "cone" => cdda_protocol::WorldgenMonsterSpellShapeV1::Cone,
+            _ => return Ok(None),
+        },
         summoned_monster_type_id: summon.then(|| spell.effect_str.clone()).unwrap_or_default(),
         damage_type_id: typed_damage
             .then(|| spell.damage_type_id.clone())
@@ -1389,7 +1571,7 @@ fn runtime_monster_spell_profile(
             .unwrap_or(0),
         random_summons: summon && random_damage,
         range: u32::try_from(range)?,
-        aoe: u8::try_from(aoe)?,
+        aoe: u16::try_from(aoe)?,
         casting_time_moves: u32::try_from(casting_time)?,
         field_type_id: spell.field_type_id.clone(),
         field_chance: field_profile.map_or(0, |_| spell.field_chance),
@@ -1402,7 +1584,52 @@ fn runtime_monster_spell_profile(
         targets_hostile: spell.valid_targets.contains("hostile"),
         targets_ground: spell.valid_targets.contains("ground"),
         targets_self: spell.valid_targets.contains("self"),
-    }))
+        extra_effects_first: spell.flags.contains("EXTRA_EFFECTS_FIRST"),
+        extra_effects: Vec::new(),
+    };
+    for extra in &spell.extra_effects {
+        if !extra.deferred_fields.is_empty()
+            || extra.minimum_level < 0
+            || extra.maximum_level.is_some_and(|maximum| maximum < -1)
+            || extra.trigger_message.len() > 16 * 1_024
+            || extra.npc_trigger_message.len() > 16 * 1_024
+        {
+            return Ok(None);
+        }
+        let child = spells.get(&extra.spell_id).ok_or_else(|| {
+            format!(
+                "SPELL {} references unknown extra_effect {}",
+                spell.id, extra.spell_id
+            )
+        })?;
+        let child_maximum = extra.maximum_level.unwrap_or(child.maximum_level);
+        let minimum_override = i32::try_from(level)?.max(extra.minimum_level);
+        let child_level = if minimum_override > child_maximum && child_maximum > 0 {
+            child_maximum
+        } else {
+            minimum_override
+        };
+        let child_level = u32::try_from(child_level.max(0))?;
+        let Some(child) = runtime_monster_spell_program(
+            child,
+            child_level,
+            extra.hit_self,
+            spells,
+            fields,
+            creature_spell_eoc_ids,
+            stack,
+            node_count,
+            depth + 1,
+        )?
+        else {
+            return Ok(None);
+        };
+        profile.extra_effects.push(child);
+        if profile.extra_effects.len() > 64 {
+            return Ok(None);
+        }
+    }
+    Ok(Some(profile))
 }
 
 fn runtime_monster_catalog(
@@ -1486,36 +1713,42 @@ fn runtime_monster_catalog(
             .values()
             .filter(|attack| attack.is_fully_supported())
         {
-            let target_id = match attack.kind {
+            let target_ids = match attack.kind {
                 MonsterSpecialAttackKind::Polymorph => {
-                    Some(attack.polymorph_monster_type_id.clone())
+                    vec![attack.polymorph_monster_type_id.clone()]
                 }
                 MonsterSpecialAttackKind::Spell => {
-                    runtime_monster_spell_profile(attack, spells, fields, creature_spell_eoc_ids)?
-                        .and_then(|profile| {
-                            (!profile.summoned_monster_type_id.is_empty())
-                                .then_some(profile.summoned_monster_type_id)
-                        })
+                    let Some(profile) = runtime_monster_spell_profile(
+                        attack,
+                        spells,
+                        fields,
+                        creature_spell_eoc_ids,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let mut ids = BTreeSet::new();
+                    runtime_spell_summoned_monster_ids(&profile, &mut ids);
+                    ids.into_iter().collect()
                 }
                 MonsterSpecialAttackKind::Melee
                 | MonsterSpecialAttackKind::Bite
                 | MonsterSpecialAttackKind::Leap
                 | MonsterSpecialAttackKind::Eoc
                 | MonsterSpecialAttackKind::Gun
-                | MonsterSpecialAttackKind::Unsupported => None,
+                | MonsterSpecialAttackKind::Unsupported => Vec::new(),
             };
-            let Some(target_id) = target_id else {
-                continue;
-            };
-            if monsters.get(&target_id).is_none() {
-                return Err(format!(
-                    "monster {} special actor references unknown MONSTER {target_id}",
-                    monster.id
-                )
-                .into());
-            }
-            if monster_ids.insert(target_id.clone()) {
-                monster_dependencies.push_back(target_id);
+            for target_id in target_ids {
+                if monsters.get(&target_id).is_none() {
+                    return Err(format!(
+                        "monster {} special actor references unknown MONSTER {target_id}",
+                        monster.id
+                    )
+                    .into());
+                }
+                if monster_ids.insert(target_id.clone()) {
+                    monster_dependencies.push_back(target_id);
+                }
             }
         }
     }
@@ -1793,6 +2026,17 @@ fn runtime_monster_catalog(
                     };
                     let gun_profile = gun_profiles.get(&attack.id);
                     let spell_profile = spell_profiles.get(&attack.id);
+                    let mut spell_extra_effects = Vec::new();
+                    if let Some(profile) = spell_profile {
+                        for child in &profile.extra_effects {
+                            flatten_runtime_spell_program(
+                                child,
+                                effect_types,
+                                &mut spell_extra_effects,
+                            )
+                            .ok_or("unsupported compiled extra spell effect")?;
+                        }
+                    }
                     Ok(WorldgenMonsterSpecialAttackV1 {
                         attack_id: attack.id.clone(),
                         kind,
@@ -1903,6 +2147,10 @@ fn runtime_monster_catalog(
                         spell_summoned_monster_type_id: spell_profile
                             .map(|profile| profile.summoned_monster_type_id.clone())
                             .unwrap_or_default(),
+                        spell_shape: spell_profile.map_or(
+                            cdda_protocol::WorldgenMonsterSpellShapeV1::Blast,
+                            |profile| profile.shape,
+                        ),
                         spell_target_self: spell_profile.is_some_and(|profile| profile.target_self),
                         spell_no_projectile: spell_profile
                             .is_some_and(|profile| profile.no_projectile),
@@ -1931,6 +2179,9 @@ fn runtime_monster_catalog(
                             .is_some_and(|profile| profile.targets_ground),
                         spell_targets_self: spell_profile
                             .is_some_and(|profile| profile.targets_self),
+                        spell_extra_effects_first: spell_profile
+                            .is_some_and(|profile| profile.extra_effects_first),
+                        spell_extra_effects,
                         gun_type_id: gun_profile
                             .map(|_| attack.gun_type_id.clone())
                             .unwrap_or_default(),
@@ -2020,25 +2271,37 @@ fn runtime_monster_catalog(
                     return None;
                 }
                 prototype.special_attacks.iter().find_map(|attack| {
-                    let dependency = match attack.kind {
+                    let dependencies = match attack.kind {
                         WorldgenMonsterSpecialAttackKindV1::Polymorph => {
-                            Some(attack.polymorph_monster_type_id.as_str())
+                            vec![attack.polymorph_monster_type_id.as_str()]
                         }
-                        WorldgenMonsterSpecialAttackKindV1::Spell
-                            if !attack.spell_summoned_monster_type_id.is_empty() =>
-                        {
-                            Some(attack.spell_summoned_monster_type_id.as_str())
+                        WorldgenMonsterSpecialAttackKindV1::Spell => {
+                            let mut dependencies = attack
+                                .spell_extra_effects
+                                .iter()
+                                .filter_map(|effect| {
+                                    (!effect.summoned_monster_type_id.is_empty())
+                                        .then_some(effect.summoned_monster_type_id.as_str())
+                                })
+                                .collect::<Vec<_>>();
+                            if !attack.spell_summoned_monster_type_id.is_empty() {
+                                dependencies.push(attack.spell_summoned_monster_type_id.as_str());
+                            }
+                            dependencies
                         }
                         WorldgenMonsterSpecialAttackKindV1::Melee
                         | WorldgenMonsterSpecialAttackKindV1::Bite
                         | WorldgenMonsterSpecialAttackKindV1::Leap
                         | WorldgenMonsterSpecialAttackKindV1::Eoc
-                        | WorldgenMonsterSpecialAttackKindV1::Gun
-                        | WorldgenMonsterSpecialAttackKindV1::Spell => None,
-                    }?;
-                    spawnability
-                        .get(dependency)
-                        .is_some_and(|spawnable| !*spawnable)
+                        | WorldgenMonsterSpecialAttackKindV1::Gun => Vec::new(),
+                    };
+                    dependencies
+                        .into_iter()
+                        .any(|dependency| {
+                            spawnability
+                                .get(dependency)
+                                .is_some_and(|spawnable| !*spawnable)
+                        })
                         .then(|| {
                             (
                                 index,

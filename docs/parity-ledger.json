@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 128,
-  "persistence_schema_version": 106,
+  "protocol_version": 136,
+  "persistence_schema_version": 113,
   "replay_format_version": 3,
   "active_milestone": "monsters",
   "completion_gate": [
@@ -488,7 +488,7 @@
         { "id": "resolved-effect-type-applications-for-melee-spell-and-projectile-statuses", "state": "implementation_complete_verification_deferred" },
         { "id": "bounded-shared-roll-multi-strike-and-spread-damage-melee-and-bite-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "blast-field-producing-spell-special-actors", "state": "implementation_complete_verification_deferred" },
-        { "id": "extra-spell-chains-and-line-cone-shapes", "state": "planned" }
+        { "id": "extra-spell-chains-and-line-cone-shapes", "state": "implementation_complete_verification_deferred" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],
