@@ -38,14 +38,47 @@ pub enum EocConditionV1 {
     HasEffect {
         effect_id: String,
         body_part_id: Option<String>,
+        minimum_intensity: u32,
+    },
+    HasAnyEffect {
+        effect_ids: Vec<String>,
+        body_part_id: Option<String>,
+        minimum_intensity: u32,
     },
     /// CDDA `compare_string`: true when any two resolved values match.
     CompareString(Vec<EocStringValueV1>),
     /// CDDA `compare_string_match_all`: true when every value matches.
     CompareStringAll(Vec<EocStringValueV1>),
+    HasItem {
+        item_type_id: String,
+        minimum_count: u32,
+        minimum_charges: u32,
+    },
+    HasWeapon,
+    IsWearing {
+        item_type_id: String,
+    },
+    HasProficiency {
+        proficiency_id: String,
+    },
+    KnowsRecipe {
+        recipe_id: String,
+    },
+    StatAtLeast {
+        stat: EocActorStatV1,
+        minimum: i32,
+    },
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EocActorStatV1 {
+    Strength,
+    Dexterity,
+    Intelligence,
+    Perception,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -223,11 +256,31 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
         EocConditionV1::HasEffect {
             effect_id,
             body_part_id,
+            ..
         } => valid_id(effect_id) && body_part_id.as_deref().is_none_or(valid_id),
+        EocConditionV1::HasAnyEffect {
+            effect_ids,
+            body_part_id,
+            ..
+        } => {
+            (1..=MAX_EOC_REFERENCES).contains(&effect_ids.len())
+                && effect_ids.iter().all(|effect_id| valid_id(effect_id))
+                && body_part_id.as_deref().is_none_or(valid_id)
+        }
         EocConditionV1::CompareString(values) | EocConditionV1::CompareStringAll(values) => {
             (2..=MAX_EOC_REFERENCES).contains(&values.len())
                 && values.iter().all(valid_string_value)
         }
+        EocConditionV1::HasItem {
+            item_type_id,
+            minimum_count,
+            minimum_charges,
+        } => valid_id(item_type_id) && (*minimum_count > 0 || *minimum_charges > 0),
+        EocConditionV1::HasWeapon => true,
+        EocConditionV1::IsWearing { item_type_id } => valid_id(item_type_id),
+        EocConditionV1::HasProficiency { proficiency_id } => valid_id(proficiency_id),
+        EocConditionV1::KnowsRecipe { recipe_id } => valid_id(recipe_id),
+        EocConditionV1::StatAtLeast { .. } => true,
         EocConditionV1::Not(condition) => valid_condition(condition, depth + 1, nodes),
         EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => {
             !conditions.is_empty()

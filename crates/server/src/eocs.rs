@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    EffectOnConditionDefinition, EffectOnConditionRegistry, EocConditionDefinition,
-    EocDelayDefinition, EocEffectDefinition, EocStringValueDefinition, ItemRegistry,
+    EffectOnConditionDefinition, EffectOnConditionRegistry, EocActorStatDefinition,
+    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition, EocStringValueDefinition,
+    ItemRegistry, ProficiencyRegistry, RecipeRegistry,
 };
 use cdda_protocol::{
-    AnatomyDefinitionV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
+    AnatomyDefinitionV1, EocActorStatV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
     EocItemUseTypeV1, EocStringValueV1, eoc_catalog_is_valid,
 };
 
@@ -13,6 +14,8 @@ pub(super) fn runtime_eoc_catalog(
     registry: &EffectOnConditionRegistry,
     items: &ItemRegistry,
     anatomy: &AnatomyDefinitionV1,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
 ) -> Result<(Vec<EocDefinitionV1>, Vec<EocItemUseTypeV1>), Box<dyn std::error::Error>> {
     let mut definitions = registry
         .iter()
@@ -43,6 +46,7 @@ pub(super) fn runtime_eoc_catalog(
     }
     definitions.retain(|_id, definition| {
         runtime_eoc_body_parts_are_supported(&runtime_eoc_definition(definition), anatomy)
+            && eoc_references_are_supported(definition, items, proficiencies, recipes)
     });
 
     loop {
@@ -103,6 +107,85 @@ pub(super) fn runtime_eoc_catalog(
     Ok((runtime_definitions, item_use_types))
 }
 
+fn eoc_references_are_supported(
+    definition: &EffectOnConditionDefinition,
+    items: &ItemRegistry,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
+) -> bool {
+    definition.condition.as_ref().is_none_or(|condition| {
+        condition_references_are_supported(condition, items, proficiencies, recipes)
+    }) && definition
+        .deactivate_condition
+        .as_ref()
+        .is_none_or(|condition| {
+            condition_references_are_supported(condition, items, proficiencies, recipes)
+        })
+        && effects_references_are_supported(&definition.effects, items, proficiencies, recipes)
+        && effects_references_are_supported(
+            &definition.false_effects,
+            items,
+            proficiencies,
+            recipes,
+        )
+}
+
+fn condition_references_are_supported(
+    condition: &EocConditionDefinition,
+    items: &ItemRegistry,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
+) -> bool {
+    match condition {
+        EocConditionDefinition::HasItem { item_type_id, .. }
+        | EocConditionDefinition::IsWearing { item_type_id } => items.get(item_type_id).is_some(),
+        EocConditionDefinition::HasProficiency { proficiency_id } => {
+            proficiencies.get(proficiency_id).is_some()
+        }
+        EocConditionDefinition::KnowsRecipe { recipe_id } => recipes.get(recipe_id).is_some(),
+        EocConditionDefinition::Not(condition) => {
+            condition_references_are_supported(condition, items, proficiencies, recipes)
+        }
+        EocConditionDefinition::And(conditions) | EocConditionDefinition::Or(conditions) => {
+            conditions.iter().all(|condition| {
+                condition_references_are_supported(condition, items, proficiencies, recipes)
+            })
+        }
+        EocConditionDefinition::Constant(_)
+        | EocConditionDefinition::HasEffect { .. }
+        | EocConditionDefinition::HasAnyEffect { .. }
+        | EocConditionDefinition::CompareString(_)
+        | EocConditionDefinition::CompareStringAll(_)
+        | EocConditionDefinition::HasWeapon
+        | EocConditionDefinition::StatAtLeast { .. } => true,
+    }
+}
+
+fn effects_references_are_supported(
+    effects: &[EocEffectDefinition],
+    items: &ItemRegistry,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
+) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectDefinition::Conditional {
+            condition,
+            then_effects,
+            else_effects,
+        } => {
+            condition_references_are_supported(condition, items, proficiencies, recipes)
+                && effects_references_are_supported(then_effects, items, proficiencies, recipes)
+                && effects_references_are_supported(else_effects, items, proficiencies, recipes)
+        }
+        EocEffectDefinition::Message { .. }
+        | EocEffectDefinition::AddEffect { .. }
+        | EocEffectDefinition::RemoveEffects { .. }
+        | EocEffectDefinition::SetActorVariable { .. }
+        | EocEffectDefinition::RemoveActorVariable { .. }
+        | EocEffectDefinition::RunEocs { .. } => true,
+    })
+}
+
 fn runtime_eoc_body_parts_are_supported(
     definition: &EocDefinitionV1,
     anatomy: &AnatomyDefinitionV1,
@@ -136,8 +219,15 @@ fn runtime_condition_body_parts_are_supported(
     match condition {
         EocConditionV1::Constant(_)
         | EocConditionV1::CompareString(_)
-        | EocConditionV1::CompareStringAll(_) => true,
-        EocConditionV1::HasEffect { body_part_id, .. } => valid_part(body_part_id),
+        | EocConditionV1::CompareStringAll(_)
+        | EocConditionV1::HasItem { .. }
+        | EocConditionV1::HasWeapon
+        | EocConditionV1::IsWearing { .. }
+        | EocConditionV1::HasProficiency { .. }
+        | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::StatAtLeast { .. } => true,
+        EocConditionV1::HasEffect { body_part_id, .. }
+        | EocConditionV1::HasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => {
             runtime_condition_body_parts_are_supported(condition, valid_part)
         }
@@ -202,9 +292,20 @@ fn runtime_condition(condition: &EocConditionDefinition) -> EocConditionV1 {
         EocConditionDefinition::HasEffect {
             effect_id,
             body_part_id,
+            minimum_intensity,
         } => EocConditionV1::HasEffect {
             effect_id: effect_id.clone(),
             body_part_id: body_part_id.clone(),
+            minimum_intensity: *minimum_intensity,
+        },
+        EocConditionDefinition::HasAnyEffect {
+            effect_ids,
+            body_part_id,
+            minimum_intensity,
+        } => EocConditionV1::HasAnyEffect {
+            effect_ids: effect_ids.clone(),
+            body_part_id: body_part_id.clone(),
+            minimum_intensity: *minimum_intensity,
         },
         EocConditionDefinition::CompareString(values) => EocConditionV1::CompareString(
             values
@@ -232,6 +333,36 @@ fn runtime_condition(condition: &EocConditionDefinition) -> EocConditionV1 {
                 })
                 .collect(),
         ),
+        EocConditionDefinition::HasItem {
+            item_type_id,
+            minimum_count,
+            minimum_charges,
+        } => EocConditionV1::HasItem {
+            item_type_id: item_type_id.clone(),
+            minimum_count: *minimum_count,
+            minimum_charges: *minimum_charges,
+        },
+        EocConditionDefinition::HasWeapon => EocConditionV1::HasWeapon,
+        EocConditionDefinition::IsWearing { item_type_id } => EocConditionV1::IsWearing {
+            item_type_id: item_type_id.clone(),
+        },
+        EocConditionDefinition::HasProficiency { proficiency_id } => {
+            EocConditionV1::HasProficiency {
+                proficiency_id: proficiency_id.clone(),
+            }
+        }
+        EocConditionDefinition::KnowsRecipe { recipe_id } => EocConditionV1::KnowsRecipe {
+            recipe_id: recipe_id.clone(),
+        },
+        EocConditionDefinition::StatAtLeast { stat, minimum } => EocConditionV1::StatAtLeast {
+            stat: match stat {
+                EocActorStatDefinition::Strength => EocActorStatV1::Strength,
+                EocActorStatDefinition::Dexterity => EocActorStatV1::Dexterity,
+                EocActorStatDefinition::Intelligence => EocActorStatV1::Intelligence,
+                EocActorStatDefinition::Perception => EocActorStatV1::Perception,
+            },
+            minimum: *minimum,
+        },
         EocConditionDefinition::Not(condition) => {
             EocConditionV1::Not(Box::new(runtime_condition(condition)))
         }

@@ -122,6 +122,8 @@ struct RuntimeWorldContent<'a> {
     snippets: &'a DescriptionSnippetRegistry,
     items: &'a ItemRegistry,
     eocs: &'a EffectOnConditionRegistry,
+    proficiencies: &'a ProficiencyRegistry,
+    recipes: &'a RecipeRegistry,
     materials: &'a MaterialRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
@@ -451,6 +453,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             snippets: &snippets,
             items: &items,
             eocs: &eocs,
+            proficiencies: &proficiencies,
+            recipes: &recipes,
             materials: &materials,
             item_groups: &item_groups,
             monsters: &monsters,
@@ -792,7 +796,13 @@ fn open_world(
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let eocs = content.eocs;
-    let eoc_catalog = runtime_eoc_catalog(eocs, items, &actor_anatomy)?;
+    let eoc_catalog = runtime_eoc_catalog(
+        eocs,
+        items,
+        &actor_anatomy,
+        content.proficiencies,
+        content.recipes,
+    )?;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
     let monster_groups = content.monster_groups;

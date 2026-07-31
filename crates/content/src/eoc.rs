@@ -29,12 +29,45 @@ pub enum EocConditionDefinition {
     HasEffect {
         effect_id: String,
         body_part_id: Option<String>,
+        minimum_intensity: u32,
+    },
+    HasAnyEffect {
+        effect_ids: Vec<String>,
+        body_part_id: Option<String>,
+        minimum_intensity: u32,
     },
     CompareString(Vec<EocStringValueDefinition>),
     CompareStringAll(Vec<EocStringValueDefinition>),
+    HasItem {
+        item_type_id: String,
+        minimum_count: u32,
+        minimum_charges: u32,
+    },
+    HasWeapon,
+    IsWearing {
+        item_type_id: String,
+    },
+    HasProficiency {
+        proficiency_id: String,
+    },
+    KnowsRecipe {
+        recipe_id: String,
+    },
+    StatAtLeast {
+        stat: EocActorStatDefinition,
+        minimum: i32,
+    },
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EocActorStatDefinition {
+    Strength,
+    Dexterity,
+    Intelligence,
+    Perception,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -403,6 +436,9 @@ fn parse_condition(
     if let Some(value) = value.as_bool() {
         return Some(EocConditionDefinition::Constant(value));
     }
+    if value.as_str() == Some("u_has_weapon") {
+        return Some(EocConditionDefinition::HasWeapon);
+    }
     let Some(object) = value.as_object() else {
         unsupported.insert(path.to_owned());
         return None;
@@ -475,15 +511,118 @@ fn parse_condition(
             });
         }
     }
+    if let Some(item) = object.get("u_has_item") {
+        if object.len() != 1 {
+            unsupported.insert(path.to_owned());
+            return None;
+        }
+        let Some(item_type_id) = item.as_str().filter(|id| valid_id(id)) else {
+            unsupported.insert(format!("{path}.u_has_item"));
+            return None;
+        };
+        return Some(EocConditionDefinition::HasItem {
+            item_type_id: item_type_id.to_owned(),
+            minimum_count: 1,
+            minimum_charges: 0,
+        });
+    }
+    if let Some(requirement) = object.get("u_has_items") {
+        if object.len() != 1 {
+            unsupported.insert(path.to_owned());
+            return None;
+        }
+        let Some(requirement) = requirement.as_object() else {
+            unsupported.insert(format!("{path}.u_has_items"));
+            return None;
+        };
+        if requirement
+            .keys()
+            .any(|field| !matches!(field.as_str(), "item" | "count" | "charges"))
+        {
+            unsupported.insert(format!("{path}.u_has_items"));
+            return None;
+        }
+        let Some(item_type_id) = requirement
+            .get("item")
+            .and_then(Value::as_str)
+            .filter(|id| valid_id(id))
+        else {
+            unsupported.insert(format!("{path}.u_has_items.item"));
+            return None;
+        };
+        let minimum_count = requirement.get("count").map_or(Some(0), parse_u32_literal);
+        let minimum_charges = requirement
+            .get("charges")
+            .map_or(Some(0), parse_u32_literal);
+        let (Some(minimum_count), Some(minimum_charges)) = (minimum_count, minimum_charges) else {
+            unsupported.insert(format!("{path}.u_has_items"));
+            return None;
+        };
+        if (minimum_count == 0 && minimum_charges == 0)
+            || (!requirement.contains_key("count") && !requirement.contains_key("charges"))
+        {
+            unsupported.insert(format!("{path}.u_has_items"));
+            return None;
+        }
+        return Some(EocConditionDefinition::HasItem {
+            item_type_id: item_type_id.to_owned(),
+            minimum_count,
+            minimum_charges,
+        });
+    }
+    for field in ["u_is_wearing", "u_has_proficiency", "u_know_recipe"] {
+        if let Some(value) = object.get(field) {
+            if object.len() != 1 {
+                unsupported.insert(path.to_owned());
+                return None;
+            }
+            let Some(id) = value.as_str().filter(|id| valid_id(id)) else {
+                unsupported.insert(format!("{path}.{field}"));
+                return None;
+            };
+            return Some(match field {
+                "u_is_wearing" => EocConditionDefinition::IsWearing {
+                    item_type_id: id.to_owned(),
+                },
+                "u_has_proficiency" => EocConditionDefinition::HasProficiency {
+                    proficiency_id: id.to_owned(),
+                },
+                "u_know_recipe" => EocConditionDefinition::KnowsRecipe {
+                    recipe_id: id.to_owned(),
+                },
+                _ => unreachable!(),
+            });
+        }
+    }
+    for (field, stat) in [
+        ("u_has_strength", EocActorStatDefinition::Strength),
+        ("u_has_dexterity", EocActorStatDefinition::Dexterity),
+        ("u_has_intelligence", EocActorStatDefinition::Intelligence),
+        ("u_has_perception", EocActorStatDefinition::Perception),
+    ] {
+        if let Some(value) = object.get(field) {
+            if object.len() != 1 {
+                unsupported.insert(path.to_owned());
+                return None;
+            }
+            let Some(minimum) = value.as_i64().and_then(|value| i32::try_from(value).ok()) else {
+                unsupported.insert(format!("{path}.{field}"));
+                return None;
+            };
+            return Some(EocConditionDefinition::StatAtLeast { stat, minimum });
+        }
+    }
     if let Some(effect) = object.get("u_has_effect") {
         let Some(effect_id) = effect.as_str().filter(|id| valid_id(id)) else {
             unsupported.insert(format!("{path}.u_has_effect"));
             return None;
         };
-        if object
-            .keys()
-            .any(|field| !matches!(field.as_str(), "u_has_effect" | "bodypart" | "target_part"))
-        {
+        if object.keys().any(|field| {
+            !matches!(
+                field.as_str(),
+                "u_has_effect" | "bodypart" | "target_part" | "intensity"
+            )
+        }) {
             unsupported.insert(path.to_owned());
             return None;
         }
@@ -496,9 +635,58 @@ fn parse_condition(
             unsupported.insert(path.to_owned());
             return None;
         }
+        let Some(minimum_intensity) = object.get("intensity").map_or(Some(0), parse_u32_literal)
+        else {
+            unsupported.insert(format!("{path}.intensity"));
+            return None;
+        };
         return Some(EocConditionDefinition::HasEffect {
             effect_id: effect_id.to_owned(),
             body_part_id,
+            minimum_intensity,
+        });
+    }
+    if let Some(effects) = object.get("u_has_any_effect") {
+        if object.keys().any(|field| {
+            !matches!(
+                field.as_str(),
+                "u_has_any_effect" | "bodypart" | "target_part" | "intensity"
+            )
+        }) {
+            unsupported.insert(path.to_owned());
+            return None;
+        }
+        let Some(effect_ids) = effects
+            .as_array()
+            .filter(|effects| (1..=MAX_EOC_STRING_VALUES).contains(&effects.len()))
+            .and_then(|effects| {
+                effects
+                    .iter()
+                    .map(|effect| effect.as_str().filter(|id| valid_id(id)).map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+            })
+        else {
+            unsupported.insert(format!("{path}.u_has_any_effect"));
+            return None;
+        };
+        let body_part_id = object
+            .get("bodypart")
+            .or_else(|| object.get("target_part"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if body_part_id.as_deref().is_some_and(|id| !valid_id(id)) {
+            unsupported.insert(path.to_owned());
+            return None;
+        }
+        let Some(minimum_intensity) = object.get("intensity").map_or(Some(0), parse_u32_literal)
+        else {
+            unsupported.insert(format!("{path}.intensity"));
+            return None;
+        };
+        return Some(EocConditionDefinition::HasAnyEffect {
+            effect_ids,
+            body_part_id,
+            minimum_intensity,
         });
     }
     unsupported.insert(path.to_owned());
@@ -806,6 +994,10 @@ fn parse_duration_turns(value: &Value) -> Option<(u32, bool)> {
     };
     let turns = (number * multiplier).round();
     (turns > 0.0 && turns <= f64::from(u32::MAX)).then(|| (turns as u32, false))
+}
+
+fn parse_u32_literal(value: &Value) -> Option<u32> {
+    value.as_u64().and_then(|value| u32::try_from(value).ok())
 }
 
 fn parse_delay(value: &Value) -> Option<EocDelayDefinition> {

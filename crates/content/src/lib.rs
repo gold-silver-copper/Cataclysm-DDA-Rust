@@ -42,8 +42,8 @@ pub use construction::{
 };
 pub use eoc::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EffectOnConditionRegistryError,
-    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition, EocStringValueDefinition,
-    MAX_EOC_TREE_DEPTH,
+    EocActorStatDefinition, EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,
+    EocStringValueDefinition, MAX_EOC_TREE_DEPTH,
 };
 pub use field::{
     FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry, FieldTypeRegistryError,

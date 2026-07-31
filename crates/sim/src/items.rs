@@ -65,6 +65,104 @@ pub(super) struct ItemInstance {
     pub(super) containment: cdda_protocol::ItemContainmentProfileV1,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct InventoryTypeSummary {
+    pub(super) amount: u64,
+    pub(super) charges: u64,
+    pub(super) count_by_charges: bool,
+}
+
+pub(super) fn summarize_inventory_by_type<'a>(
+    items: impl Iterator<Item = &'a ItemInstance>,
+) -> BTreeMap<String, InventoryTypeSummary> {
+    let mut inventory = BTreeMap::new();
+    for item in items {
+        summarize_item_instance(item, &mut inventory);
+    }
+    inventory
+}
+
+fn summarize_item_instance(
+    item: &ItemInstance,
+    inventory: &mut BTreeMap<String, InventoryTypeSummary>,
+) {
+    summarize_item(
+        &item.type_id,
+        item.charges,
+        item.containment.count_by_charges,
+        inventory,
+    );
+    for ammunition in item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+    {
+        summarize_item_snapshot(ammunition, inventory);
+    }
+    for magazine in item
+        .magazine_wells
+        .iter()
+        .filter_map(|well| well.installed_magazine.as_deref())
+    {
+        summarize_item_snapshot(magazine, inventory);
+    }
+    for content in item
+        .ammunition_containers
+        .iter()
+        .flat_map(|pocket| &pocket.contents)
+    {
+        summarize_item_snapshot(content, inventory);
+    }
+}
+
+fn summarize_item_snapshot(
+    item: &ItemSnapshot,
+    inventory: &mut BTreeMap<String, InventoryTypeSummary>,
+) {
+    summarize_item(
+        &item.type_id,
+        item.charges,
+        item.containment.count_by_charges,
+        inventory,
+    );
+    for ammunition in item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+    {
+        summarize_item_snapshot(ammunition, inventory);
+    }
+    for magazine in item
+        .magazine_wells
+        .iter()
+        .filter_map(|well| well.installed_magazine.as_deref())
+    {
+        summarize_item_snapshot(magazine, inventory);
+    }
+    for content in item
+        .ammunition_containers
+        .iter()
+        .flat_map(|pocket| &pocket.contents)
+    {
+        summarize_item_snapshot(content, inventory);
+    }
+}
+
+fn summarize_item(
+    type_id: &str,
+    charges: i32,
+    count_by_charges: bool,
+    inventory: &mut BTreeMap<String, InventoryTypeSummary>,
+) {
+    let entry = inventory.entry(type_id.to_owned()).or_default();
+    let charges = u64::try_from(charges.max(0)).unwrap_or(0);
+    entry.amount = entry
+        .amount
+        .saturating_add(if count_by_charges { charges } else { 1 });
+    entry.charges = entry.charges.saturating_add(charges);
+    entry.count_by_charges |= count_by_charges;
+}
+
 impl ItemInstance {
     pub(super) fn process_temperature(&mut self, current_tick: SimTick) -> Result<(), SimError> {
         self.process_temperature_and_rot(current_tick, false)

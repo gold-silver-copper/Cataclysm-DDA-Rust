@@ -3,15 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
-    ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocConditionV1,
-    EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1, ItemId,
-    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, ScheduledEocV1, SimTick, WorldEvent,
+    ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocActorStatV1,
+    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1,
+    ItemId, MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, ScheduledEocV1, SimTick, WorldEvent,
     WorldEventKind, eoc_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
 
-use crate::{SimError, WorldState, inclusive_rng_u64};
+use crate::{
+    SimError, WorldState, inclusive_rng_u64,
+    items::{InventoryTypeSummary, summarize_inventory_by_type},
+};
 
 const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
 const MAX_EOC_OPERATIONS_PER_COMMAND: usize = 16_384;
@@ -71,6 +74,7 @@ impl WorldState {
         }
 
         let mut execution = EocExecution {
+            actor: eoc_actor_context(actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
@@ -181,6 +185,7 @@ impl WorldState {
                     .ok_or(SimError::InvalidItem)?;
                 let entry = actor.scheduled_eocs.remove(index);
                 let execution = EocExecution {
+                    actor: eoc_actor_context(actor),
                     effects: actor.effects.clone(),
                     variables: actor.eoc_variables.clone(),
                     next_schedule_sequence: actor.next_eoc_schedule_sequence,
@@ -211,6 +216,7 @@ impl WorldState {
                     match definition.deactivate_condition.as_ref() {
                         Some(condition) => match evaluate_condition(
                             condition,
+                            &execution.actor,
                             &execution.effects,
                             &execution.variables,
                             &mut execution.operations,
@@ -261,6 +267,7 @@ impl WorldState {
         actor_id: ActorId,
     ) -> Result<(u64, Vec<ScheduledEocV1>), SimError> {
         let mut execution = EocExecution {
+            actor: EocActorContext::default(),
             effects: Vec::new(),
             variables: BTreeMap::new(),
             next_schedule_sequence: 0,
@@ -314,6 +321,7 @@ impl WorldState {
         for (actor_id, eoc_id) in candidates {
             let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
             let mut execution = EocExecution {
+                actor: eoc_actor_context(actor),
                 effects: actor.effects.clone(),
                 variables: actor.eoc_variables.clone(),
                 next_schedule_sequence: actor.next_eoc_schedule_sequence,
@@ -340,6 +348,7 @@ impl WorldState {
                 .ok_or(SimError::InvalidItem)?;
             let Ok(still_deactivated) = evaluate_condition(
                 deactivate_condition,
+                &execution.actor,
                 &execution.effects,
                 &execution.variables,
                 &mut execution.operations,
@@ -370,6 +379,7 @@ impl WorldState {
 }
 
 struct EocExecution {
+    actor: EocActorContext,
     effects: Vec<ActorEffectSnapshotV1>,
     variables: BTreeMap<String, String>,
     next_schedule_sequence: u64,
@@ -380,6 +390,43 @@ struct EocExecution {
     operations: usize,
     tick: SimTick,
     rng: ChaCha8Rng,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EocActorContext {
+    inventory: BTreeMap<String, InventoryTypeSummary>,
+    worn_item_types: BTreeSet<String>,
+    has_weapon: bool,
+    learned_recipes: BTreeSet<String>,
+    learned_proficiencies: BTreeSet<String>,
+    base_strength: i32,
+    base_dexterity: i32,
+    base_intelligence: i32,
+    base_perception: i32,
+}
+
+fn eoc_actor_context(actor: &crate::Actor) -> EocActorContext {
+    EocActorContext {
+        inventory: summarize_inventory_by_type(actor.inventory.values()),
+        worn_item_types: actor
+            .worn
+            .iter()
+            .filter_map(|item_id| actor.inventory.get(item_id))
+            .map(|item| item.type_id.clone())
+            .collect(),
+        has_weapon: actor.wielded.is_some(),
+        learned_recipes: actor.learned_recipes.clone(),
+        learned_proficiencies: actor
+            .proficiencies
+            .iter()
+            .filter(|(_id, proficiency)| proficiency.learned)
+            .map(|(id, _proficiency)| id.clone())
+            .collect(),
+        base_strength: i32::from(actor.base_strength),
+        base_dexterity: i32::from(actor.base_dexterity),
+        base_intelligence: i32::from(actor.base_intelligence),
+        base_perception: i32::from(actor.base_perception),
+    }
 }
 
 fn execute_eoc(
@@ -400,6 +447,7 @@ fn execute_eoc(
     let condition_matches = match definition.condition.as_ref() {
         Some(condition) => evaluate_condition(
             condition,
+            &execution.actor,
             &execution.effects,
             &execution.variables,
             &mut execution.operations,
@@ -417,6 +465,7 @@ fn execute_eoc(
 
 fn evaluate_condition(
     condition: &EocConditionV1,
+    actor: &EocActorContext,
     effects: &[ActorEffectSnapshotV1],
     variables: &BTreeMap<String, String>,
     operations: &mut usize,
@@ -430,8 +479,21 @@ fn evaluate_condition(
         EocConditionV1::HasEffect {
             effect_id,
             body_part_id,
+            minimum_intensity,
         } => effects.iter().any(|effect| {
             effect.effect_id == *effect_id
+                && effect.intensity >= *minimum_intensity
+                && body_part_id
+                    .as_ref()
+                    .is_none_or(|body_part_id| effect.body_part_id.as_ref() == Some(body_part_id))
+        }),
+        EocConditionV1::HasAnyEffect {
+            effect_ids,
+            body_part_id,
+            minimum_intensity,
+        } => effects.iter().any(|effect| {
+            effect_ids.contains(&effect.effect_id)
+                && effect.intensity >= *minimum_intensity
                 && body_part_id
                     .as_ref()
                     .is_none_or(|body_part_id| effect.body_part_id.as_ref() == Some(body_part_id))
@@ -463,13 +525,42 @@ fn evaluate_condition(
             let first = values.next().ok_or(SimError::InvalidItem)?;
             values.all(|value| value == first)
         }
+        EocConditionV1::HasItem {
+            item_type_id,
+            minimum_count,
+            minimum_charges,
+        } => actor.inventory.get(item_type_id).is_some_and(|entry| {
+            let count_matches = if *minimum_charges == 0 && entry.count_by_charges {
+                entry.charges >= u64::from(*minimum_count)
+            } else {
+                entry.amount >= u64::from(*minimum_count)
+            };
+            let charges_match =
+                *minimum_charges == 0 || entry.charges >= u64::from(*minimum_charges);
+            count_matches && charges_match
+        }),
+        EocConditionV1::HasWeapon => actor.has_weapon,
+        EocConditionV1::IsWearing { item_type_id } => actor.worn_item_types.contains(item_type_id),
+        EocConditionV1::HasProficiency { proficiency_id } => {
+            actor.learned_proficiencies.contains(proficiency_id)
+        }
+        EocConditionV1::KnowsRecipe { recipe_id } => actor.learned_recipes.contains(recipe_id),
+        EocConditionV1::StatAtLeast { stat, minimum } => {
+            let actual = match stat {
+                EocActorStatV1::Strength => actor.base_strength,
+                EocActorStatV1::Dexterity => actor.base_dexterity,
+                EocActorStatV1::Intelligence => actor.base_intelligence,
+                EocActorStatV1::Perception => actor.base_perception,
+            };
+            actual >= *minimum
+        }
         EocConditionV1::Not(condition) => {
-            !evaluate_condition(condition, effects, variables, operations)?
+            !evaluate_condition(condition, actor, effects, variables, operations)?
         }
         EocConditionV1::And(conditions) => {
             let mut matches = true;
             for condition in conditions {
-                if !evaluate_condition(condition, effects, variables, operations)? {
+                if !evaluate_condition(condition, actor, effects, variables, operations)? {
                     matches = false;
                     break;
                 }
@@ -479,7 +570,7 @@ fn evaluate_condition(
         EocConditionV1::Or(conditions) => {
             let mut matches = false;
             for condition in conditions {
-                if evaluate_condition(condition, effects, variables, operations)? {
+                if evaluate_condition(condition, actor, effects, variables, operations)? {
                     matches = true;
                     break;
                 }
@@ -565,6 +656,7 @@ fn execute_effects(
             } => {
                 let selected = if evaluate_condition(
                     condition,
+                    &execution.actor,
                     &execution.effects,
                     &execution.variables,
                     &mut execution.operations,
@@ -714,8 +806,15 @@ fn condition_body_parts_are_valid(
     match condition {
         EocConditionV1::Constant(_)
         | EocConditionV1::CompareString(_)
-        | EocConditionV1::CompareStringAll(_) => true,
-        EocConditionV1::HasEffect { body_part_id, .. } => valid_part(body_part_id),
+        | EocConditionV1::CompareStringAll(_)
+        | EocConditionV1::HasItem { .. }
+        | EocConditionV1::HasWeapon
+        | EocConditionV1::IsWearing { .. }
+        | EocConditionV1::HasProficiency { .. }
+        | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::StatAtLeast { .. } => true,
+        EocConditionV1::HasEffect { body_part_id, .. }
+        | EocConditionV1::HasAnyEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => condition_body_parts_are_valid(condition, valid_part),
         EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => conditions
             .iter()

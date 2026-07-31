@@ -23,11 +23,12 @@ pub use anatomy::{
     wearable_armor_type_is_valid,
 };
 pub use eocs::{
-    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1,
-    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_DEFINITIONS, MAX_EOC_EFFECTS,
-    MAX_EOC_ITEM_USE_TYPES, MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES, MAX_EOC_TREE_DEPTH,
-    MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES, ScheduledEocV1, actor_eoc_schedule_is_valid,
-    actor_eoc_variables_are_valid, actor_inactive_recurring_eocs_are_valid, eoc_catalog_is_valid,
+    EocActorStatV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1,
+    EocStringValueV1, MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_DEFINITIONS,
+    MAX_EOC_EFFECTS, MAX_EOC_ITEM_USE_TYPES, MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES,
+    MAX_EOC_TREE_DEPTH, MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES, ScheduledEocV1,
+    actor_eoc_schedule_is_valid, actor_eoc_variables_are_valid,
+    actor_inactive_recurring_eocs_are_valid, eoc_catalog_is_valid,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -85,7 +86,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 111;
+pub const PROTOCOL_VERSION: u16 = 112;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
