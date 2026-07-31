@@ -5535,15 +5535,39 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && !attack.polymorph_keep_aggression
                         })
                         && (if matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Spell) {
-                            valid_worldgen_id(&attack.spell_summoned_monster_type_id)
+                            let common = attack.spell_aoe <= 32
+                                && ((attack.spell_target_self && attack.range == 0)
+                                    || (!attack.spell_target_self && attack.range > 0));
+                            let summon = valid_worldgen_id(&attack.spell_summoned_monster_type_id)
                                 && (1..=64).contains(&attack.spell_minimum_summons)
                                 && attack.spell_minimum_summons <= attack.spell_maximum_summons
                                 && attack.spell_maximum_summons <= 64
                                 && (attack.spell_random_summons
-                                    || attack.spell_minimum_summons == attack.spell_maximum_summons)
+                                    || attack.spell_minimum_summons
+                                        == attack.spell_maximum_summons)
                                 && (1..=32).contains(&attack.spell_aoe)
-                                && ((attack.spell_target_self && attack.range == 0)
-                                    || (!attack.spell_target_self && attack.range > 0))
+                                && attack.minimum_damage_multiplier_millionths == 0
+                                && attack.maximum_damage_multiplier_millionths == 0
+                                && attack.damage.is_empty();
+                            let typed_damage = attack.spell_summoned_monster_type_id.is_empty()
+                                && !attack.spell_target_self
+                                && attack.spell_minimum_summons == 0
+                                && attack.spell_maximum_summons == 0
+                                && !attack.spell_random_summons
+                                && (1_000_000..=1_000_000_000)
+                                    .contains(&attack.minimum_damage_multiplier_millionths)
+                                && attack.minimum_damage_multiplier_millionths % 1_000_000 == 0
+                                && attack.maximum_damage_multiplier_millionths % 1_000_000 == 0
+                                && attack.damage.len() == 1
+                                && attack.damage[0].amount_milli == 1_000
+                                && attack.damage[0].armor_penetration_milli == 0
+                                && attack.damage[0].armor_multiplier_millionths == 1_000_000
+                                && attack.damage[0].damage_multiplier_millionths == 1_000_000
+                                && attack.damage[0].constant_armor_multiplier_millionths
+                                    == 1_000_000
+                                && attack.damage[0].constant_damage_multiplier_millionths
+                                    == 1_000_000;
+                            common && (summon || typed_damage)
                         } else {
                             attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
@@ -5758,9 +5782,6 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 attack.accuracy.is_none()
                                     && !attack.no_adjacent
                                     && !attack.dodgeable
-                                    && attack.minimum_damage_multiplier_millionths == 0
-                                    && attack.maximum_damage_multiplier_millionths == 0
-                                    && attack.damage.is_empty()
                                     && attack.effects.is_empty()
                                     && !attack.effects_require_damage
                                     && attack.infection_chance_millionths == 0
@@ -5834,7 +5855,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                     Some(&attack.polymorph_monster_type_id)
                 }
                 WorldgenMonsterSpecialAttackKindV1::Spell => {
-                    Some(&attack.spell_summoned_monster_type_id)
+                    (!attack.spell_summoned_monster_type_id.is_empty())
+                        .then_some(&attack.spell_summoned_monster_type_id)
                 }
                 WorldgenMonsterSpecialAttackKindV1::Melee
                 | WorldgenMonsterSpecialAttackKindV1::Bite

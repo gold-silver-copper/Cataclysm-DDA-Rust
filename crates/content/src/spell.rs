@@ -21,6 +21,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "min_damage",
     "max_damage",
     "damage_increment",
+    "damage_type",
     "max_level",
     "min_range",
     "max_range",
@@ -47,6 +48,7 @@ pub(crate) fn field_is_implemented(field: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpellEffectKind {
+    Attack,
     Summon,
     Unsupported,
 }
@@ -59,9 +61,10 @@ pub struct SpellDefinition {
     pub shape: String,
     pub valid_targets: BTreeSet<String>,
     pub flags: BTreeSet<String>,
-    pub minimum_summons: i32,
-    pub maximum_summons: i32,
-    pub summon_increment_millionths: i64,
+    pub minimum_damage: i32,
+    pub maximum_damage: i32,
+    pub damage_increment_millionths: i64,
+    pub damage_type_id: String,
     pub maximum_level: i32,
     pub minimum_range: i32,
     pub maximum_range: i32,
@@ -85,9 +88,10 @@ impl Default for SpellDefinition {
             shape: String::new(),
             valid_targets: BTreeSet::new(),
             flags: BTreeSet::new(),
-            minimum_summons: 0,
-            maximum_summons: 0,
-            summon_increment_millionths: 0,
+            minimum_damage: 0,
+            maximum_damage: 0,
+            damage_increment_millionths: 0,
+            damage_type_id: String::new(),
             maximum_level: 0,
             minimum_range: 0,
             maximum_range: 0,
@@ -131,10 +135,48 @@ impl SpellDefinition {
                 .iter()
                 .all(|target| ALLOWED_TARGETS.contains(&target.as_str()))
             && self.maximum_level >= 0
-            && self.minimum_summons > 0
-            && self.maximum_summons > 0
+            && self.damage_type_id.is_empty()
+            && self.minimum_damage > 0
+            && self.maximum_damage > 0
             && self.minimum_range >= 0
             && self.maximum_range >= 0
+            && self.minimum_aoe >= 0
+            && self.maximum_aoe >= 0
+            && self.base_casting_time_moves >= 0
+            && self.final_casting_time_moves >= 0
+    }
+
+    #[must_use]
+    pub fn supports_hostile_typed_damage(&self) -> bool {
+        const ALLOWED_FLAGS: &[&str] = &[
+            "RANDOM_DAMAGE",
+            "NO_PROJECTILE",
+            "NO_EXPLOSION_SFX",
+            "SILENT",
+        ];
+        self.unsupported_fields.is_empty()
+            && self.effect == SpellEffectKind::Attack
+            && self.shape == "blast"
+            && !self.damage_type_id.is_empty()
+            && self.summoned_monster_type_id.is_empty()
+            && self
+                .flags
+                .iter()
+                .all(|flag| ALLOWED_FLAGS.contains(&flag.as_str()))
+            && self.flags.contains("NO_PROJECTILE")
+            && self
+                .valid_targets
+                .iter()
+                .all(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self
+                .valid_targets
+                .iter()
+                .any(|target| matches!(target.as_str(), "ground" | "hostile"))
+            && self.maximum_level >= 0
+            && self.minimum_damage > 0
+            && self.maximum_damage > 0
+            && self.minimum_range > 0
+            && self.maximum_range > 0
             && self.minimum_aoe >= 0
             && self.maximum_aoe >= 0
             && self.base_casting_time_moves >= 0
@@ -276,6 +318,7 @@ fn apply_fields(
     let source = spell.source.clone();
     if let Some(value) = object.get("effect") {
         spell.effect = match value.as_str() {
+            Some("attack") => SpellEffectKind::Attack,
             Some("summon") => SpellEffectKind::Summon,
             Some(_) => SpellEffectKind::Unsupported,
             None => return Err(invalid(&source, "effect")),
@@ -283,6 +326,9 @@ fn apply_fields(
     }
     if let Some(value) = object.get("effect_str") {
         spell.summoned_monster_type_id = parse_id(Some(value), &source, "effect_str")?;
+    }
+    if let Some(value) = object.get("damage_type") {
+        spell.damage_type_id = parse_id(Some(value), &source, "damage_type")?;
     }
     if let Some(value) = object.get("shape") {
         spell.shape = parse_id(Some(value), &source, "shape")?;
@@ -294,8 +340,8 @@ fn apply_fields(
         spell.flags = parse_string_set(value, &source, "flags")?;
     }
     for (field, target) in [
-        ("min_damage", &mut spell.minimum_summons),
-        ("max_damage", &mut spell.maximum_summons),
+        ("min_damage", &mut spell.minimum_damage),
+        ("max_damage", &mut spell.maximum_damage),
         ("max_level", &mut spell.maximum_level),
         ("min_range", &mut spell.minimum_range),
         ("max_range", &mut spell.maximum_range),
@@ -309,7 +355,7 @@ fn apply_fields(
         }
     }
     for (field, target) in [
-        ("damage_increment", &mut spell.summon_increment_millionths),
+        ("damage_increment", &mut spell.damage_increment_millionths),
         ("range_increment", &mut spell.range_increment_millionths),
         ("aoe_increment", &mut spell.aoe_increment_millionths),
         (

@@ -45,8 +45,10 @@ Run only when the user explicitly requests a verification checkpoint.
   variable conditions/mutations, no-target root rejection, target-context
   reference closure, permanent hostile summon SPELL inheritance/stat scaling,
   self/hostile targeting, bounded deterministic placement, transitive summoned
-  prototype closure, stable IDs and authoritative summon events, and combat
-  scenarios at protocol 125/schema 103, CanonicalStateV101,
+  prototype closure, stable IDs and authoritative summon events; hostile typed
+  damage scaling, armor/body-part resolution, multi-survivor blast ordering,
+  interruption, wake and death handling; and combat scenarios at protocol
+  125/schema 103, CanonicalStateV101,
   canonical-event-V25.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic

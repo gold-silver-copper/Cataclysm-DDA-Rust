@@ -589,13 +589,25 @@ impl WorldState {
                     // polymorph clears the current turn's moves.
                     return Ok(0);
                 }
-                WorldgenMonsterSpecialAttackKindV1::Spell => self.execute_creature_summon_spell(
-                    source,
-                    visible_target,
-                    profile,
-                    sequence,
-                    events,
-                )?,
+                WorldgenMonsterSpecialAttackKindV1::Spell => {
+                    if profile.spell_summoned_monster_type_id.is_empty() {
+                        self.execute_creature_damage_spell(
+                            source,
+                            visible_target,
+                            profile,
+                            sequence,
+                            events,
+                        )?
+                    } else {
+                        self.execute_creature_summon_spell(
+                            source,
+                            visible_target,
+                            profile,
+                            sequence,
+                            events,
+                        )?
+                    }
+                }
             };
             if !used {
                 continue;
@@ -621,6 +633,110 @@ impl WorldState {
                 .ok_or(SimError::NumericOverflow)?;
         }
         Ok(total_cost)
+    }
+
+    fn execute_creature_damage_spell(
+        &mut self,
+        source: CreatureId,
+        visible_target: Option<(ActorId, WorldPosition)>,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let Some((primary_target, center)) = visible_target else {
+            return Ok(false);
+        };
+        let origin = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?
+            .position;
+        if self
+            .actors
+            .get(&primary_target)
+            .is_none_or(|actor| actor.hp <= 0)
+            || ranged_distance(origin, center) > profile.range
+            || !self.has_clear_shot(origin, center)
+        {
+            return Ok(false);
+        }
+        let targets = self
+            .actors
+            .iter()
+            .filter(|(_actor_id, actor)| {
+                actor.hp > 0
+                    && actor.position.z == center.z
+                    && ranged_distance(center, actor.position) <= u32::from(profile.spell_aoe)
+                    && self.has_clear_shot(center, actor.position)
+            })
+            .map(|(actor_id, _actor)| *actor_id)
+            .collect::<Vec<_>>();
+        for target in targets {
+            let mut rng = self.named_rng(
+                b"creature-special-spell-damage",
+                &[source.as_u128(), target.as_u128()],
+                sequence,
+            );
+            let damage_points = roll_inclusive_i32(
+                profile.minimum_damage_multiplier_millionths / 1_000_000,
+                profile.maximum_damage_multiplier_millionths / 1_000_000,
+                &mut rng,
+            )?;
+            let multiplier = damage_points
+                .checked_mul(1_000_000)
+                .ok_or(SimError::NumericOverflow)?;
+            let damage = profile
+                .damage
+                .iter()
+                .map(|unit| {
+                    Ok(ActorDamageUnit {
+                        damage_type_id: unit.damage_type_id.clone(),
+                        amount_milli: unit.amount_milli,
+                        armor_penetration_milli: unit.armor_penetration_milli,
+                        armor_multiplier_millionths: unit.armor_multiplier_millionths,
+                        damage_multiplier_millionths: i128::from(unit.damage_multiplier_millionths)
+                            .checked_mul(i128::from(multiplier))
+                            .and_then(|value| value.checked_div(1_000_000))
+                            .and_then(|value| i32::try_from(value).ok())
+                            .ok_or(SimError::NumericOverflow)?,
+                        constant_armor_multiplier_millionths: unit
+                            .constant_armor_multiplier_millionths,
+                        constant_damage_multiplier_millionths: unit
+                            .constant_damage_multiplier_millionths,
+                    })
+                })
+                .collect::<Result<Vec<_>, SimError>>()?;
+            let (outcome, was_sleeping, _cut_or_stab_damage) =
+                self.damage_actor_components(target, &damage, &mut rng)?;
+            events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
+                source,
+                target,
+                body_part_id: outcome.body_part_id,
+                amount: outcome.amount,
+                remaining_part_hp: outcome.remaining_part_hp,
+                remaining_hp: outcome.remaining_hp,
+            })?);
+            if outcome.amount > 0 {
+                self.interrupt_craft(target, events)?;
+                self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+                self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+                self.interrupt_construction(
+                    target,
+                    ConstructionInterruptionReason::Damage,
+                    events,
+                )?;
+                if was_sleeping && outcome.remaining_hp > 0 {
+                    self.wake_actor(target, cdda_protocol::WakeReason::Damage, events)?;
+                }
+                if outcome.remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
+                        actor_id: target,
+                        killer: source,
+                    })?);
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn execute_creature_summon_spell(

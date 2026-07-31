@@ -482,7 +482,8 @@
         { "id": "stable-identity-polymorph-special-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "target-context-eoc-special-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "permanent-hostile-summon-spell-special-actors", "state": "implementation_complete_verification_deferred" },
-        { "id": "damage-effect-and-extra-chain-spell-special-actors", "state": "planned" }
+        { "id": "hostile-typed-damage-blast-spell-special-actors", "state": "implementation_complete_verification_deferred" },
+        { "id": "effect-field-and-extra-chain-spell-special-actors", "state": "planned" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],

@@ -535,6 +535,9 @@ struct RuntimeMonsterGunProfile {
 #[derive(Clone)]
 struct RuntimeMonsterSpellProfile {
     summoned_monster_type_id: String,
+    damage_type_id: String,
+    minimum_damage: u16,
+    maximum_damage: u16,
     target_self: bool,
     minimum_summons: u16,
     maximum_summons: u16,
@@ -966,7 +969,9 @@ fn runtime_monster_spell_profile(
             attack.spell_id
         )
     })?;
-    if !spell.supports_hostile_permanent_summoning()
+    let summon = spell.supports_hostile_permanent_summoning();
+    let typed_damage = spell.supports_hostile_typed_damage();
+    if (!summon && !typed_damage)
         || attack.spell_min_level > 1_000
         || attack
             .spell_max_level
@@ -993,10 +998,10 @@ fn runtime_monster_spell_profile(
         return Ok(None);
     }
     let level = attack.spell_min_level;
-    let leveled_summons = finalized_spell_stat(
-        spell.minimum_summons,
-        spell.maximum_summons,
-        spell.summon_increment_millionths,
+    let leveled_damage = finalized_spell_stat(
+        spell.minimum_damage,
+        spell.maximum_damage,
+        spell.damage_increment_millionths,
         level,
     );
     let range = finalized_spell_stat(
@@ -1017,39 +1022,64 @@ fn runtime_monster_spell_profile(
         spell.casting_time_increment_millionths,
         level,
     );
-    let Some((leveled_summons, range, aoe, casting_time)) = leveled_summons
+    let Some((leveled_damage, range, aoe, casting_time)) = leveled_damage
         .zip(range)
         .zip(aoe)
         .zip(casting_time)
-        .map(|(((summons, range), aoe), casting_time)| (summons, range, aoe, casting_time))
+        .map(|(((damage, range), aoe), casting_time)| (damage, range, aoe, casting_time))
     else {
         return Ok(None);
     };
-    let random_summons = spell.flags.contains("RANDOM_DAMAGE");
-    let (minimum_summons, maximum_summons) = if random_summons {
+    let random_damage = spell.flags.contains("RANDOM_DAMAGE");
+    let (minimum_damage, maximum_damage) = if random_damage {
         (
-            leveled_summons.min(spell.maximum_summons),
-            leveled_summons.max(spell.maximum_summons),
+            leveled_damage.min(spell.maximum_damage),
+            leveled_damage.max(spell.maximum_damage),
         )
     } else {
-        (leveled_summons, leveled_summons)
+        (leveled_damage, leveled_damage)
     };
-    if !(1..=64).contains(&minimum_summons)
-        || !(minimum_summons..=64).contains(&maximum_summons)
+    let amount_is_bounded = if summon {
+        (1..=64).contains(&minimum_damage) && (minimum_damage..=64).contains(&maximum_damage)
+    } else {
+        (1..=1_000).contains(&minimum_damage) && (minimum_damage..=1_000).contains(&maximum_damage)
+    };
+    if !amount_is_bounded
         || !(0..=1_000).contains(&range)
-        || !(1..=32).contains(&aoe)
+        || !(0..=32).contains(&aoe)
         || !(0..=1_000_000_000).contains(&casting_time)
         || (target_self && range != 0)
         || (!target_self && range == 0)
+        || (summon && aoe == 0)
+        || (typed_damage && target_self)
     {
         return Ok(None);
     }
     Ok(Some(RuntimeMonsterSpellProfile {
-        summoned_monster_type_id: spell.summoned_monster_type_id.clone(),
+        summoned_monster_type_id: summon
+            .then(|| spell.summoned_monster_type_id.clone())
+            .unwrap_or_default(),
+        damage_type_id: typed_damage
+            .then(|| spell.damage_type_id.clone())
+            .unwrap_or_default(),
+        minimum_damage: typed_damage
+            .then(|| u16::try_from(minimum_damage))
+            .transpose()?
+            .unwrap_or(0),
+        maximum_damage: typed_damage
+            .then(|| u16::try_from(maximum_damage))
+            .transpose()?
+            .unwrap_or(0),
         target_self,
-        minimum_summons: u16::try_from(minimum_summons)?,
-        maximum_summons: u16::try_from(maximum_summons)?,
-        random_summons,
+        minimum_summons: summon
+            .then(|| u16::try_from(minimum_damage))
+            .transpose()?
+            .unwrap_or(0),
+        maximum_summons: summon
+            .then(|| u16::try_from(maximum_damage))
+            .transpose()?
+            .unwrap_or(0),
+        random_summons: summon && random_damage,
         range: u32::try_from(range)?,
         aoe: u8::try_from(aoe)?,
         casting_time_moves: u32::try_from(casting_time)?,
@@ -1140,7 +1170,10 @@ fn runtime_monster_catalog(
                     Some(attack.polymorph_monster_type_id.clone())
                 }
                 MonsterSpecialAttackKind::Spell => runtime_monster_spell_profile(attack, spells)?
-                    .map(|profile| profile.summoned_monster_type_id),
+                    .and_then(|profile| {
+                        (!profile.summoned_monster_type_id.is_empty())
+                            .then_some(profile.summoned_monster_type_id)
+                    }),
                 MonsterSpecialAttackKind::Melee
                 | MonsterSpecialAttackKind::Bite
                 | MonsterSpecialAttackKind::Leap
@@ -1365,31 +1398,55 @@ fn runtime_monster_catalog(
                         range: spell_profile.map_or(attack.range, |profile| profile.range),
                         no_adjacent: attack.no_adjacent,
                         dodgeable: attack.dodgeable,
-                        minimum_damage_multiplier_millionths: attack
-                            .minimum_damage_multiplier_millionths,
-                        maximum_damage_multiplier_millionths: attack
-                            .maximum_damage_multiplier_millionths,
-                        damage: gun_profile.map_or_else(
+                        minimum_damage_multiplier_millionths: spell_profile
+                            .map_or(attack.minimum_damage_multiplier_millionths, |profile| {
+                                i32::from(profile.minimum_damage) * 1_000_000
+                            }),
+                        maximum_damage_multiplier_millionths: spell_profile
+                            .map_or(attack.maximum_damage_multiplier_millionths, |profile| {
+                                i32::from(profile.maximum_damage) * 1_000_000
+                            }),
+                        damage: spell_profile.map_or_else(
                             || {
-                                attack
-                                    .damage
-                                    .iter()
-                                    .map(|unit| WorldgenMonsterMeleeDamageUnitV1 {
-                                        damage_type_id: unit.damage_type_id.clone(),
-                                        amount_milli: unit.amount_milli,
-                                        armor_penetration_milli: unit.armor_penetration_milli,
-                                        armor_multiplier_millionths: unit
-                                            .armor_multiplier_millionths,
-                                        damage_multiplier_millionths: unit
-                                            .damage_multiplier_millionths,
-                                        constant_armor_multiplier_millionths: unit
-                                            .constant_armor_multiplier_millionths,
-                                        constant_damage_multiplier_millionths: unit
-                                            .constant_damage_multiplier_millionths,
-                                    })
-                                    .collect()
+                                gun_profile.map_or_else(
+                                    || {
+                                        attack
+                                            .damage
+                                            .iter()
+                                            .map(|unit| WorldgenMonsterMeleeDamageUnitV1 {
+                                                damage_type_id: unit.damage_type_id.clone(),
+                                                amount_milli: unit.amount_milli,
+                                                armor_penetration_milli: unit
+                                                    .armor_penetration_milli,
+                                                armor_multiplier_millionths: unit
+                                                    .armor_multiplier_millionths,
+                                                damage_multiplier_millionths: unit
+                                                    .damage_multiplier_millionths,
+                                                constant_armor_multiplier_millionths: unit
+                                                    .constant_armor_multiplier_millionths,
+                                                constant_damage_multiplier_millionths: unit
+                                                    .constant_damage_multiplier_millionths,
+                                            })
+                                            .collect()
+                                    },
+                                    |profile| profile.damage.clone(),
+                                )
                             },
-                            |profile| profile.damage.clone(),
+                            |profile| {
+                                if profile.damage_type_id.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    vec![WorldgenMonsterMeleeDamageUnitV1 {
+                                        damage_type_id: profile.damage_type_id.clone(),
+                                        amount_milli: 1_000,
+                                        armor_penetration_milli: 0,
+                                        armor_multiplier_millionths: 1_000_000,
+                                        damage_multiplier_millionths: 1_000_000,
+                                        constant_armor_multiplier_millionths: 1_000_000,
+                                        constant_damage_multiplier_millionths: 1_000_000,
+                                    }]
+                                }
+                            },
                         ),
                         effects: attack
                             .effects
