@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    ActorId, VehicleId, WORLDGEN_OMT_SIZE, WorldPosition, WorldgenCoordinateRangeV1,
-    WorldgenU16RangeV1,
+    ActorId, ItemGroupItemPrototypeV1, ItemSnapshot, VehicleId, WORLDGEN_OMT_SIZE, WorldPosition,
+    WorldgenCoordinateRangeV1, WorldgenU16RangeV1, item_snapshot_containment_volume_milliliters,
+    valid_item_snapshot,
 };
 
 pub const MAX_WORLDGEN_VEHICLE_PART_TYPES: usize = 16_384;
@@ -23,6 +24,10 @@ pub const MAX_WORLDGEN_VEHICLE_PART_TOOLS: usize = 256;
 pub const MAX_WORLDGEN_VEHICLE_TEXT_BYTES: usize = 512;
 pub const MAX_WORLDGEN_VEHICLE_SYMBOL_BYTES: usize = 32;
 pub const MAX_LIVE_VEHICLES: usize = 65_536;
+pub const MAX_WORLDGEN_VEHICLE_ITEM_SPAWNS: usize = 4_096;
+pub const MAX_WORLDGEN_VEHICLE_ITEMS_PER_SPAWN: usize = 4_096;
+pub const MAX_VEHICLE_CARGO_ITEMS_PER_PART: usize = 4_096;
+pub const MAX_VEHICLE_CARGO_VOLUME_MILLILITERS: u64 = 10_000_000;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenVehiclePartVariantV1 {
@@ -41,6 +46,7 @@ pub struct WorldgenVehiclePartTypeV1 {
     pub item_type_id: String,
     pub location: String,
     pub durability: u32,
+    pub cargo_capacity_milliliters: u64,
     /// Finalized, sorted upstream flags. Runtime families admit only the flags
     /// whose behavior they implement, while canonical content retains the
     /// exact set needed by later families.
@@ -69,12 +75,34 @@ pub struct WorldgenVehiclePrototypePartV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenVehicleDirectItemSpawnV1 {
+    pub item: ItemGroupItemPrototypeV1,
+    /// Empty means the pinned default constructor selection.
+    pub variant_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenVehicleItemSpawnV1 {
+    pub mount_x: i16,
+    pub mount_y: i16,
+    /// First pinned prototype part at the mount with the `CARGO` feature.
+    pub cargo_prototype_part_index: u16,
+    pub chance_percent: u8,
+    pub with_magazine_percent: u8,
+    pub with_ammo_percent: u8,
+    /// Exact source order. Pinned spawning emits these before item groups.
+    pub direct_items: Vec<WorldgenVehicleDirectItemSpawnV1>,
+    pub item_group_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenVehiclePrototypeV1 {
     pub prototype_id: String,
     pub name: String,
     /// Exact pinned installation order. Vehicle initialization consumes RNG in
     /// this order, so this collection must never be sorted by mount or type.
     pub parts: Vec<WorldgenVehiclePrototypePartV1>,
+    pub item_spawns: Vec<WorldgenVehicleItemSpawnV1>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -128,6 +156,8 @@ pub struct VehiclePartSnapshotV1 {
     pub open: bool,
     pub locked: bool,
     pub passenger: Option<ActorId>,
+    /// Source-ordered vehicle-owned cargo with stable nested item identities.
+    pub cargo: Vec<ItemSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -154,7 +184,10 @@ pub struct VisibleVehicleTileV1 {
     pub open: bool,
     /// Authoritative boardable part at this displayed tile, if one is live.
     pub boardable_prototype_part_index: Option<u16>,
+    /// Adjacent, unlocked cargo boundary selected by the server, if present.
+    pub cargo_prototype_part_index: Option<u16>,
     pub passenger: Option<ActorId>,
+    pub cargo: Vec<ItemSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -199,6 +232,12 @@ fn valid_part_type(part: &WorldgenVehiclePartTypeV1) -> bool {
         && valid_id(&part.item_type_id)
         && valid_id(&part.location)
         && part.durability > 0
+        && part.cargo_capacity_milliliters <= MAX_VEHICLE_CARGO_VOLUME_MILLILITERS
+        && (part.cargo_capacity_milliliters == 0
+            || part
+                .flags
+                .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+                .is_ok())
         && part.flags.len() <= MAX_WORLDGEN_VEHICLE_PART_FLAGS
         && part.flags.iter().all(|flag| valid_id(flag))
         && part.flags.windows(2).all(|pair| pair[0] < pair[1])
@@ -233,6 +272,65 @@ fn valid_prototype_part(
         && ((part.ammo_quantity_minimum == -1 && part.ammo_quantity_maximum == -1)
             || (part.ammo_quantity_minimum >= 0
                 && part.ammo_quantity_minimum <= part.ammo_quantity_maximum))
+}
+
+fn valid_item_spawn(
+    spawn: &WorldgenVehicleItemSpawnV1,
+    prototype: &WorldgenVehiclePrototypeV1,
+    part_types: &[WorldgenVehiclePartTypeV1],
+) -> bool {
+    let Some(cargo_part) = prototype
+        .parts
+        .get(usize::from(spawn.cargo_prototype_part_index))
+    else {
+        return false;
+    };
+    let Some(cargo_type) = part_types.get(usize::from(cargo_part.part_type_index)) else {
+        return false;
+    };
+    cargo_part.mount_x == spawn.mount_x
+        && cargo_part.mount_y == spawn.mount_y
+        && cargo_type
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+            .is_ok()
+        && prototype
+            .parts
+            .iter()
+            .take(usize::from(spawn.cargo_prototype_part_index))
+            .all(|part| {
+                part.mount_x != spawn.mount_x
+                    || part.mount_y != spawn.mount_y
+                    || part_types
+                        .get(usize::from(part.part_type_index))
+                        .is_none_or(|part_type| {
+                            part_type
+                                .flags
+                                .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+                                .is_err()
+                        })
+            })
+        && spawn.chance_percent <= 100
+        && spawn.with_magazine_percent <= 100
+        && spawn.with_ammo_percent <= 100
+        && spawn.direct_items.len() <= MAX_WORLDGEN_VEHICLE_ITEMS_PER_SPAWN
+        && spawn.item_group_ids.len() <= MAX_WORLDGEN_VEHICLE_ITEMS_PER_SPAWN
+        && spawn
+            .direct_items
+            .len()
+            .saturating_add(spawn.item_group_ids.len())
+            <= MAX_WORLDGEN_VEHICLE_ITEMS_PER_SPAWN
+        && spawn.direct_items.iter().all(|direct| {
+            crate::item_groups::item_group_item_prototype_is_valid(&direct.item)
+                && valid_optional_id(&direct.variant_id)
+                && (direct.variant_id.is_empty()
+                    || direct
+                        .item
+                        .variants
+                        .iter()
+                        .any(|variant| variant.variant.id == direct.variant_id))
+        })
+        && spawn.item_group_ids.iter().all(|id| valid_id(id))
 }
 
 fn checked_positive_weight_sum(entries: &[WorldgenVehicleGroupEntryV1]) -> bool {
@@ -282,6 +380,11 @@ pub fn worldgen_vehicle_catalog_is_valid(
                 .parts
                 .iter()
                 .any(|part| part_types[usize::from(part.part_type_index)].location == "structure")
+            || prototype.item_spawns.len() > MAX_WORLDGEN_VEHICLE_ITEM_SPAWNS
+            || !prototype
+                .item_spawns
+                .iter()
+                .all(|spawn| valid_item_spawn(spawn, prototype, part_types))
         {
             return false;
         }
@@ -383,6 +486,21 @@ fn valid_live_part(
                     .binary_search_by(|flag| flag.as_str().cmp("BOARDABLE"))
                     .is_ok()
         })
+        && part.cargo.len() <= MAX_VEHICLE_CARGO_ITEMS_PER_PART
+        && part.cargo.iter().all(valid_item_snapshot)
+        && (part.cargo.is_empty()
+            || (part.hp > 0
+                && part_type
+                    .flags
+                    .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+                    .is_ok()))
+        && part
+            .cargo
+            .iter()
+            .try_fold(0_u64, |total, item| {
+                total.checked_add(item_snapshot_containment_volume_milliliters(item)?)
+            })
+            .is_some_and(|volume| volume <= part_type.cargo_capacity_milliliters)
 }
 
 #[must_use]
@@ -503,6 +621,8 @@ pub fn visible_vehicle_snapshots_are_valid(
                             && visible_actor_ids.contains(&passenger)
                             && passengers.insert(passenger)
                     })
+                    && tile.cargo.len() <= MAX_VEHICLE_CARGO_ITEMS_PER_PART
+                    && tile.cargo.iter().all(valid_item_snapshot)
             })
     })
 }

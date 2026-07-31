@@ -2,9 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{VehiclePrototypeDefinition, VehicleRegistry};
 use cdda_protocol::{
-    WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1, WorldgenVehiclePartTypeV1,
-    WorldgenVehiclePartVariantV1, WorldgenVehiclePrototypePartV1, WorldgenVehiclePrototypeV1,
+    WorldgenVehicleDirectItemSpawnV1, WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1,
+    WorldgenVehicleItemSpawnV1, WorldgenVehiclePartTypeV1, WorldgenVehiclePartVariantV1,
+    WorldgenVehiclePrototypePartV1, WorldgenVehiclePrototypeV1,
 };
+
+use super::item_groups::{RuntimeItemGroupContent, runtime_item_group_item};
 
 pub(super) struct RuntimeVehicleCatalog {
     pub part_types: Vec<WorldgenVehiclePartTypeV1>,
@@ -17,7 +20,10 @@ fn ensure_static_prototype_is_supported(
     prototype: &VehiclePrototypeDefinition,
     vehicles: &VehicleRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !prototype.has_runtime_static_lifecycle() {
+    if prototype.abstract_definition
+        || !prototype.unsupported_fields.is_empty()
+        || prototype.parts.is_empty()
+    {
         return Err(format!(
             "reachable vehicle {} uses unsupported items, zones, inheritance, or an empty body ({})",
             prototype.id, prototype.source
@@ -57,9 +63,23 @@ fn ensure_static_prototype_is_supported(
     Ok(())
 }
 
+pub(super) fn runtime_vehicle_item_group_roots(vehicles: &VehicleRegistry) -> BTreeSet<String> {
+    vehicles
+        .prototypes()
+        .filter(|(_, prototype)| {
+            !prototype.abstract_definition
+                && prototype.unsupported_fields.is_empty()
+                && !prototype.parts.is_empty()
+        })
+        .flat_map(|(_, prototype)| &prototype.item_spawns)
+        .flat_map(|spawn| spawn.item_group_ids.iter().cloned())
+        .collect()
+}
+
 pub(super) fn runtime_vehicle_catalog(
     root_group_ids: BTreeSet<String>,
     vehicles: &VehicleRegistry,
+    item_content: RuntimeItemGroupContent<'_>,
 ) -> Result<RuntimeVehicleCatalog, Box<dyn std::error::Error>> {
     let mut prototype_ids = BTreeSet::new();
     for group_id in &root_group_ids {
@@ -124,6 +144,9 @@ pub(super) fn runtime_vehicle_catalog(
                 item_type_id: part.item_id.clone(),
                 location: part.location.clone(),
                 durability: part.durability,
+                cargo_capacity_milliliters: part
+                    .cargo_capacity_milliliters
+                    .min(cdda_protocol::MAX_VEHICLE_CARGO_VOLUME_MILLILITERS),
                 flags: part.flags.iter().cloned().collect(),
                 variants: part
                     .variants
@@ -163,6 +186,75 @@ pub(super) fn runtime_vehicle_catalog(
                             ammo_quantity_minimum: part.ammo_quantity_minimum,
                             ammo_quantity_maximum: part.ammo_quantity_maximum,
                             tool_item_type_ids: part.tool_item_ids.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+                item_spawns: prototype
+                    .item_spawns
+                    .iter()
+                    .map(|spawn| {
+                        let cargo_prototype_part_index = prototype
+                            .parts
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, candidate)| {
+                                if candidate.mount_x != spawn.mount_x
+                                    || candidate.mount_y != spawn.mount_y
+                                {
+                                    return None;
+                                }
+                                vehicles.part(&candidate.part_id).and_then(|part| {
+                                    part.flags
+                                        .contains("CARGO")
+                                        .then(|| u16::try_from(index).ok())
+                                        .flatten()
+                                })
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "vehicle {} has an item spawn without CARGO at ({}, {})",
+                                    prototype.id, spawn.mount_x, spawn.mount_y
+                                )
+                            })?;
+                        let direct_items = spawn
+                            .direct_items
+                            .iter()
+                            .map(|direct| {
+                                let item =
+                                    item_content.items.get(&direct.item_id).ok_or_else(|| {
+                                        format!(
+                                            "vehicle {} item spawn references missing item {}",
+                                            prototype.id, direct.item_id
+                                        )
+                                    })?;
+                                let item = runtime_item_group_item(item, None, item_content)?;
+                                if !direct.variant_id.is_empty()
+                                    && !item
+                                        .variants
+                                        .iter()
+                                        .any(|variant| variant.variant.id == direct.variant_id)
+                                {
+                                    return Err(format!(
+                                        "vehicle {} item {} references missing variant {}",
+                                        prototype.id, direct.item_id, direct.variant_id
+                                    )
+                                    .into());
+                                }
+                                Ok(WorldgenVehicleDirectItemSpawnV1 {
+                                    item,
+                                    variant_id: direct.variant_id.clone(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+                        Ok(WorldgenVehicleItemSpawnV1 {
+                            mount_x: spawn.mount_x,
+                            mount_y: spawn.mount_y,
+                            cargo_prototype_part_index,
+                            chance_percent: spawn.chance_percent,
+                            with_magazine_percent: spawn.with_magazine_percent,
+                            with_ammo_percent: spawn.with_ammo_percent,
+                            direct_items,
+                            item_group_ids: spawn.item_group_ids.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,

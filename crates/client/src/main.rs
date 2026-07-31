@@ -65,6 +65,16 @@ enum ClientAction {
     Drop {
         item_id: ItemId,
     },
+    TakeVehicleCargo {
+        vehicle_id: cdda_protocol::VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+    },
+    StoreVehicleCargo {
+        vehicle_id: cdda_protocol::VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+    },
     Wield {
         item_id: ItemId,
     },
@@ -237,6 +247,7 @@ enum ItemMenuAction {
 struct ItemMenuEntry {
     item_id: ItemId,
     label: String,
+    vehicle_cargo: Option<(cdda_protocol::VehicleId, u16)>,
 }
 
 #[derive(Default, Resource)]
@@ -1022,6 +1033,24 @@ async fn run_game_session(
                     Some(ClientAction::Drop { item_id }) => {
                         Some(CommandKind::Drop { item_id })
                     }
+                    Some(ClientAction::TakeVehicleCargo {
+                        vehicle_id,
+                        prototype_part_index,
+                        item_id,
+                    }) => Some(CommandKind::TakeVehicleCargo {
+                        vehicle_id,
+                        prototype_part_index,
+                        item_id,
+                    }),
+                    Some(ClientAction::StoreVehicleCargo {
+                        vehicle_id,
+                        prototype_part_index,
+                        item_id,
+                    }) => Some(CommandKind::StoreVehicleCargo {
+                        vehicle_id,
+                        prototype_part_index,
+                        item_id,
+                    }),
                     Some(ClientAction::Wield { item_id }) => {
                         Some(CommandKind::Wield { item_id })
                     }
@@ -1865,7 +1894,7 @@ fn handle_item_menu(
             && let Some(entry) = menu.entries.get(menu.selected)
         {
             if let Some(client_action) =
-                client_action_for_item_menu(action, entry.item_id, game.snapshot.as_ref())
+                client_action_for_item_menu(action, entry, game.snapshot.as_ref())
             {
                 let _send_result = game.actions.try_send(client_action);
             }
@@ -1979,8 +2008,7 @@ fn handle_item_menu(
             game.notice = format!("No item is available to {}.", action.verb());
         }
         [entry] => {
-            if let Some(client_action) =
-                client_action_for_item_menu(action, entry.item_id, Some(snapshot))
+            if let Some(client_action) = client_action_for_item_menu(action, entry, Some(snapshot))
             {
                 let _send_result = game.actions.try_send(client_action);
             }
@@ -3187,9 +3215,24 @@ fn item_menu_entries(
         .map(|item| ItemMenuEntry {
             item_id: item.id,
             label: item_menu_label(item, content),
+            vehicle_cargo: None,
         })
         .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.item_id);
+    if action == ItemMenuAction::PickUp {
+        entries.extend(snapshot.vehicles.iter().flat_map(|vehicle| {
+            vehicle.tiles.iter().flat_map(move |tile| {
+                tile.cargo.iter().filter_map(move |item| {
+                    tile.cargo_prototype_part_index
+                        .map(|part_index| ItemMenuEntry {
+                            item_id: item.id,
+                            label: format!("{} [vehicle]", item_menu_label(item, content)),
+                            vehicle_cargo: Some((vehicle.id, part_index)),
+                        })
+                })
+            })
+        }));
+    }
+    entries.sort_by_key(|entry| (entry.item_id, entry.vehicle_cargo));
     entries
 }
 
@@ -3554,12 +3597,41 @@ fn integral_pocket_has_free_charge_slot(pocket: &IntegralMagazinePocketSnapshotV
 
 fn client_action_for_item_menu(
     action: ItemMenuAction,
-    item_id: ItemId,
+    entry: &ItemMenuEntry,
     snapshot: Option<&ReplicationSnapshotV1>,
 ) -> Option<ClientAction> {
+    let item_id = entry.item_id;
     Some(match action {
-        ItemMenuAction::PickUp => ClientAction::PickUp { item_id },
-        ItemMenuAction::Drop => ClientAction::Drop { item_id },
+        ItemMenuAction::PickUp => match entry.vehicle_cargo {
+            Some((vehicle_id, prototype_part_index)) => ClientAction::TakeVehicleCargo {
+                vehicle_id,
+                prototype_part_index,
+                item_id,
+            },
+            None => ClientAction::PickUp { item_id },
+        },
+        ItemMenuAction::Drop => snapshot
+            .and_then(|snapshot| {
+                snapshot
+                    .vehicles
+                    .iter()
+                    .flat_map(|vehicle| {
+                        vehicle.tiles.iter().filter_map(move |tile| {
+                            tile.cargo_prototype_part_index
+                                .map(|part_index| (vehicle.id, part_index, tile.position))
+                        })
+                    })
+                    .min_by_key(|(vehicle_id, part_index, position)| {
+                        (*vehicle_id, *part_index, *position)
+                    })
+            })
+            .map_or(ClientAction::Drop { item_id }, |(vehicle_id, part, _)| {
+                ClientAction::StoreVehicleCargo {
+                    vehicle_id,
+                    prototype_part_index: part,
+                    item_id,
+                }
+            }),
         ItemMenuAction::Wield => ClientAction::Wield { item_id },
         ItemMenuAction::Wear => ClientAction::Wear { item_id },
         ItemMenuAction::TakeOff => ClientAction::TakeOff { item_id },
@@ -4590,6 +4662,10 @@ fn event_message(event: &WorldEvent) -> String {
         }
         WorldEventKind::ActorBoardedVehicle { .. } => String::from("Boarded the vehicle."),
         WorldEventKind::ActorUnboardedVehicle { .. } => String::from("Left the vehicle."),
+        WorldEventKind::VehicleCargoTaken { .. } => String::from("Took the vehicle cargo."),
+        WorldEventKind::VehicleCargoStored { .. } => {
+            String::from("Stored the item in the vehicle.")
+        }
         WorldEventKind::ActorMoved { .. } => String::from("Moved."),
         WorldEventKind::DamageApplied {
             body_part_id,
@@ -4973,6 +5049,8 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::VehiclePartMissing => "the vehicle part is missing",
         CommandRejection::VehiclePartBroken => "the vehicle part is broken",
         CommandRejection::VehiclePartNotBoardable => "that vehicle part cannot be boarded",
+        CommandRejection::VehiclePartNotCargo => "that vehicle part cannot hold cargo",
+        CommandRejection::VehicleCargoLocked => "that vehicle cargo is locked",
         CommandRejection::VehiclePartOccupied => "that vehicle seat is occupied",
         CommandRejection::ActorAlreadyBoarded => "your character is already aboard a vehicle",
         CommandRejection::ActorNotBoarded => "your character is not aboard that vehicle",

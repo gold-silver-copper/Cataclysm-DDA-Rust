@@ -119,18 +119,21 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 pub use vehicles::{
-    MAX_LIVE_VEHICLES, MAX_WORLDGEN_VEHICLE_GROUP_ENTRIES,
-    MAX_WORLDGEN_VEHICLE_GROUP_ENTRIES_TOTAL, MAX_WORLDGEN_VEHICLE_GROUPS,
-    MAX_WORLDGEN_VEHICLE_PART_AMMO_TYPES, MAX_WORLDGEN_VEHICLE_PART_FLAGS,
-    MAX_WORLDGEN_VEHICLE_PART_TOOLS, MAX_WORLDGEN_VEHICLE_PART_TYPES,
-    MAX_WORLDGEN_VEHICLE_PART_VARIANTS, MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE,
-    MAX_WORLDGEN_VEHICLE_PLACEMENTS, MAX_WORLDGEN_VEHICLE_PROTOTYPE_PARTS_TOTAL,
-    MAX_WORLDGEN_VEHICLE_PROTOTYPES, MAX_WORLDGEN_VEHICLE_REPEAT, MAX_WORLDGEN_VEHICLE_ROTATIONS,
-    MAX_WORLDGEN_VEHICLE_SYMBOL_BYTES, MAX_WORLDGEN_VEHICLE_TEXT_BYTES, VehiclePartSnapshotV1,
-    VehicleSnapshotV1, VehicleSpawnStatusV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1,
-    WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1, WorldgenVehiclePartTypeV1,
-    WorldgenVehiclePartVariantV1, WorldgenVehiclePlacementV1, WorldgenVehiclePrototypePartV1,
-    WorldgenVehiclePrototypeV1, insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
+    MAX_LIVE_VEHICLES, MAX_VEHICLE_CARGO_ITEMS_PER_PART, MAX_VEHICLE_CARGO_VOLUME_MILLILITERS,
+    MAX_WORLDGEN_VEHICLE_GROUP_ENTRIES, MAX_WORLDGEN_VEHICLE_GROUP_ENTRIES_TOTAL,
+    MAX_WORLDGEN_VEHICLE_GROUPS, MAX_WORLDGEN_VEHICLE_ITEM_SPAWNS,
+    MAX_WORLDGEN_VEHICLE_ITEMS_PER_SPAWN, MAX_WORLDGEN_VEHICLE_PART_AMMO_TYPES,
+    MAX_WORLDGEN_VEHICLE_PART_FLAGS, MAX_WORLDGEN_VEHICLE_PART_TOOLS,
+    MAX_WORLDGEN_VEHICLE_PART_TYPES, MAX_WORLDGEN_VEHICLE_PART_VARIANTS,
+    MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE, MAX_WORLDGEN_VEHICLE_PLACEMENTS,
+    MAX_WORLDGEN_VEHICLE_PROTOTYPE_PARTS_TOTAL, MAX_WORLDGEN_VEHICLE_PROTOTYPES,
+    MAX_WORLDGEN_VEHICLE_REPEAT, MAX_WORLDGEN_VEHICLE_ROTATIONS, MAX_WORLDGEN_VEHICLE_SYMBOL_BYTES,
+    MAX_WORLDGEN_VEHICLE_TEXT_BYTES, VehiclePartSnapshotV1, VehicleSnapshotV1,
+    VehicleSpawnStatusV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1,
+    WorldgenVehicleDirectItemSpawnV1, WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1,
+    WorldgenVehicleItemSpawnV1, WorldgenVehiclePartTypeV1, WorldgenVehiclePartVariantV1,
+    WorldgenVehiclePlacementV1, WorldgenVehiclePrototypePartV1, WorldgenVehiclePrototypeV1,
+    insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
     visible_vehicle_snapshots_are_valid, worldgen_vehicle_catalog_is_valid,
     worldgen_vehicle_placement_is_valid,
 };
@@ -1756,6 +1759,16 @@ pub enum CommandKind {
         dx: i8,
         dy: i8,
     },
+    TakeVehicleCargo {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+    },
+    StoreVehicleCargo {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+    },
     ShootActor {
         target: ActorId,
     },
@@ -1894,6 +1907,8 @@ pub enum CommandRejection {
     VehiclePartMissing,
     VehiclePartBroken,
     VehiclePartNotBoardable,
+    VehiclePartNotCargo,
+    VehicleCargoLocked,
     VehiclePartOccupied,
     ActorAlreadyBoarded,
     ActorNotBoarded,
@@ -2025,6 +2040,20 @@ pub enum WorldEventKind {
         prototype_part_index: u16,
         from: WorldPosition,
         to: WorldPosition,
+    },
+    VehicleCargoTaken {
+        actor_id: ActorId,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+        position: WorldPosition,
+    },
+    VehicleCargoStored {
+        actor_id: ActorId,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+        position: WorldPosition,
     },
     ActorMoved {
         actor_id: ActorId,
@@ -4620,6 +4649,21 @@ fn valid_client_command(command: &ClientCommand) -> bool {
                 && vehicle_id.world_namespace() == command.actor_id.world_namespace()
                 && HorizontalDirection { dx: *dx, dy: *dy }.is_valid()
         }
+        CommandKind::TakeVehicleCargo {
+            vehicle_id,
+            item_id,
+            ..
+        }
+        | CommandKind::StoreVehicleCargo {
+            vehicle_id,
+            item_id,
+            ..
+        } => {
+            vehicle_id.counter() > 0
+                && vehicle_id.world_namespace() == command.actor_id.world_namespace()
+                && item_id.counter() > 0
+                && item_id.world_namespace() == command.actor_id.world_namespace()
+        }
         CommandKind::RespondInteraction {
             interaction_id,
             choice_id,
@@ -6949,7 +6993,17 @@ pub fn worldgen_catalog_is_valid(
         .flat_map(|generator| &generator.templates)
         .flat_map(|template| &template.area_items)
         .all(|placement| group_ids.contains(placement.item_group.group_id.as_str()));
-    root_cells_are_valid && root_areas_are_valid && nested_cells_are_valid && nested_areas_are_valid
+    let vehicle_cargo_is_valid = catalog
+        .vehicle_prototypes
+        .iter()
+        .flat_map(|prototype| &prototype.item_spawns)
+        .flat_map(|spawn| &spawn.item_group_ids)
+        .all(|group_id| group_ids.contains(group_id.as_str()));
+    root_cells_are_valid
+        && root_areas_are_valid
+        && nested_cells_are_valid
+        && nested_areas_are_valid
+        && vehicle_cargo_is_valid
 }
 
 impl WorldSnapshotV1 {
@@ -7044,6 +7098,12 @@ impl WorldSnapshotV1 {
         }
         if !self.ground_items.iter().all(|ground| {
             collect_stable_item_ids(&ground.item, self.world_namespace, &mut item_ids)
+        }) || !self.vehicles.iter().all(|vehicle| {
+            vehicle.parts.iter().all(|part| {
+                part.cargo
+                    .iter()
+                    .all(|item| collect_stable_item_ids(item, self.world_namespace, &mut item_ids))
+            })
         }) || item_ids
             .iter()
             .any(|item_id| !counters.insert(item_id.counter()))
@@ -8351,7 +8411,14 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
         && snapshot
             .ground_items
             .iter()
-            .all(|ground| collect_stable_item_ids(&ground.item, namespace, &mut item_ids));
+            .all(|ground| collect_stable_item_ids(&ground.item, namespace, &mut item_ids))
+        && snapshot.vehicles.iter().all(|vehicle| {
+            vehicle.tiles.iter().all(|tile| {
+                tile.cargo
+                    .iter()
+                    .all(|item| collect_stable_item_ids(item, namespace, &mut item_ids))
+            })
+        });
     stable_item_ids_are_valid
         && snapshot.calendar == CalendarSnapshot::at_tick(snapshot.tick)
         && snapshot.natural_light == NaturalLightSnapshot::at_tick(snapshot.tick)

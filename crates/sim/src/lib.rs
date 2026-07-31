@@ -90,10 +90,11 @@ pub use items::{
     normal_ambient_rot_increment_turns, resolve_item_group_charge_range, rot_has_rotten_away,
 };
 use items::{
-    ItemInstance, PlannedItemSpawn, item_fit_state_is_valid, item_from_component,
-    item_from_craft_prototype, item_from_planned_spawn, item_rot_metadata_is_valid,
-    item_temperature_timestamps_are_valid, plan_item_group_source,
-    process_item_snapshot_temperature,
+    ItemInstance, PlannedItemSpawn, damage_vehicle_spawn_item, dress_vehicle_spawn_item,
+    item_fit_state_is_valid, item_from_component, item_from_craft_prototype,
+    item_from_planned_spawn, item_rot_metadata_is_valid, item_temperature_timestamps_are_valid,
+    plan_item_group_source, plan_vehicle_direct_item, process_item_snapshot_temperature,
+    process_vehicle_cargo_temperature_and_rot,
 };
 pub use rivers::{
     OVERMAP_RIVER_IDS, OvermapRiverBoundary, OvermapRiverContinuation, OvermapRiverNode,
@@ -4734,6 +4735,7 @@ fn command_mutates_craft_split_parent(
 ) -> bool {
     match command {
         CommandKind::Drop { item_id }
+        | CommandKind::StoreVehicleCargo { item_id, .. }
         | CommandKind::Wear { item_id }
         | CommandKind::TakeOff { item_id }
         | CommandKind::Consume { item_id }
@@ -4775,6 +4777,7 @@ fn command_mutates_construction_split_parent(
     };
     match command {
         CommandKind::Drop { item_id }
+        | CommandKind::StoreVehicleCargo { item_id, .. }
         | CommandKind::Wear { item_id }
         | CommandKind::TakeOff { item_id }
         | CommandKind::Consume { item_id }
@@ -4828,6 +4831,7 @@ struct GroundItem {
 enum CorpseLocation {
     Ground(WorldPosition),
     Inventory(ActorId, WorldPosition),
+    VehicleCargo(VehicleId, u16, WorldPosition),
 }
 
 impl GroundItem {
@@ -6386,6 +6390,21 @@ impl WorldState {
         }
         for item_id in rotten_ground_items {
             self.ground_items.remove(&item_id);
+        }
+        for vehicle in self.vehicles.values_mut() {
+            for part in &mut vehicle.parts {
+                let mut index = 0;
+                while index < part.cargo.len() {
+                    if process_vehicle_cargo_temperature_and_rot(
+                        part.cargo.get_mut(index).ok_or(SimError::InvalidItem)?,
+                        current_tick,
+                    )? {
+                        part.cargo.remove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -8065,6 +8084,30 @@ impl WorldState {
                 prototype_part_index,
                 dx,
                 dy,
+                events,
+            ),
+            CommandKind::TakeVehicleCargo {
+                vehicle_id,
+                prototype_part_index,
+                item_id,
+            } => self.apply_take_vehicle_cargo(
+                actor_id,
+                sequence,
+                vehicle_id,
+                prototype_part_index,
+                item_id,
+                events,
+            ),
+            CommandKind::StoreVehicleCargo {
+                vehicle_id,
+                prototype_part_index,
+                item_id,
+            } => self.apply_store_vehicle_cargo(
+                actor_id,
+                sequence,
+                vehicle_id,
+                prototype_part_index,
+                item_id,
                 events,
             ),
             CommandKind::ShootActor { target } => {
@@ -10029,8 +10072,25 @@ impl WorldState {
         for creature in planned.creatures {
             self.spawn_creature(creature)?;
         }
-        for vehicle in planned.vehicles {
+        for mut vehicle in planned.vehicles {
             let id = self.allocator.allocate_vehicle()?;
+            if vehicle.parts.len() != vehicle.cargo.len() {
+                return Err(SimError::InvalidItem);
+            }
+            for (part, planned_cargo) in vehicle.parts.iter_mut().zip(vehicle.cargo) {
+                for planned_item in planned_cargo {
+                    let item_id = self.allocator.allocate_item()?;
+                    part.cargo.push(
+                        item_from_planned_spawn(
+                            item_id,
+                            &planned_item,
+                            &mut self.allocator,
+                            self.tick,
+                        )?
+                        .snapshot(),
+                    );
+                }
+            }
             let snapshot = VehicleSnapshotV1 {
                 id,
                 prototype_index: vehicle.prototype_index,
@@ -13895,6 +13955,26 @@ impl WorldState {
                 }
             }
         }
+        for (vehicle_id, vehicle) in &self.vehicles {
+            for (prototype_part_index, part) in vehicle.parts.iter().enumerate() {
+                let prototype_part_index =
+                    u16::try_from(prototype_part_index).map_err(|_| SimError::NumericOverflow)?;
+                for item in &part.cargo {
+                    if let Some(corpse) = &item.creature_corpse {
+                        corpses.push((
+                            item.id,
+                            item.damage,
+                            corpse.clone(),
+                            CorpseLocation::VehicleCargo(
+                                *vehicle_id,
+                                prototype_part_index,
+                                part.position,
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         corpses.sort_by_key(|(item_id, _damage, _corpse, _location)| *item_id);
         for (corpse_item_id, damage, corpse, location) in corpses {
             if !corpse.revivable || !corpse.prototype.revives {
@@ -13919,6 +13999,7 @@ impl WorldState {
             let center = match location {
                 CorpseLocation::Ground(position) => position,
                 CorpseLocation::Inventory(_, position) => position,
+                CorpseLocation::VehicleCargo(_, _, position) => position,
             };
             if corpse.revive_special {
                 let Some(distance) = self
@@ -14005,6 +14086,21 @@ impl WorldState {
                     if actor.wielded == Some(corpse_item_id) {
                         actor.wielded = None;
                     }
+                }
+                CorpseLocation::VehicleCargo(vehicle_id, prototype_part_index, _position) => {
+                    let cargo = &mut self
+                        .vehicles
+                        .get_mut(&vehicle_id)
+                        .and_then(|vehicle| {
+                            vehicle.parts.get_mut(usize::from(prototype_part_index))
+                        })
+                        .ok_or(SimError::InvalidTerrain)?
+                        .cargo;
+                    let cargo_index = cargo
+                        .iter()
+                        .position(|item| item.id == corpse_item_id)
+                        .ok_or(SimError::UnknownItem)?;
+                    cargo.remove(cargo_index);
                 }
             }
             self.creatures.insert(
@@ -14384,6 +14480,13 @@ impl WorldState {
                                 .iter()
                                 .any(|item| item_snapshot_contains_id(&item.item, item_id))
                         })
+            })
+            || self.vehicles.values().any(|vehicle| {
+                vehicle.parts.iter().any(|part| {
+                    part.cargo
+                        .iter()
+                        .any(|item| item_snapshot_contains_id(item, item_id))
+                })
             })
     }
 
@@ -15161,6 +15264,20 @@ impl WorldState {
                     .is_some()
             {
                 return Err(SimError::InvalidSnapshot);
+            }
+        }
+        for vehicle in &snapshot.vehicles {
+            for item in vehicle.parts.iter().flat_map(|part| part.cargo.iter()) {
+                if !item_temperature_timestamps_are_valid(item, snapshot.tick) {
+                    return Err(SimError::InvalidSnapshot);
+                }
+                validate_creature_corpse_context(item, snapshot.tick, &field_types)?;
+                register_stable_item_ids(
+                    item,
+                    snapshot.world_namespace,
+                    &mut item_ids,
+                    &mut maximum_counter,
+                )?;
             }
         }
         let vehicles = snapshot

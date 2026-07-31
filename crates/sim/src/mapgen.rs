@@ -16,7 +16,8 @@ use rand_core::{Rng, SeedableRng};
 
 use super::{
     Chunk, CreatureSpawn, ID_RESERVATION_SIZE, PlannedItemSpawn, SUBMAP_SIZE, SimError,
-    inclusive_rng_u64, plan_item_group_source,
+    damage_vehicle_spawn_item, dress_vehicle_spawn_item, inclusive_rng_u64, plan_item_group_source,
+    plan_vehicle_direct_item,
 };
 
 const OMT_SUBMAP_WIDTH: i32 = 2;
@@ -131,6 +132,7 @@ pub(super) struct PlannedVehicleSpawn {
     pub facing_degrees: i16,
     pub owner_faction_id: String,
     pub parts: Vec<VehiclePartSnapshotV1>,
+    pub cargo: Vec<Vec<PlannedItemSpawn>>,
 }
 
 pub(super) fn catalog_initial_bubble_is_admissible(
@@ -386,7 +388,7 @@ fn plan_omt_cell(
         ));
     }
     let mut vehicles = Vec::with_capacity(plan.vehicles.len());
-    for vehicle in plan.vehicles {
+    for mut vehicle in plan.vehicles {
         let prototype = catalog
             .vehicle_prototypes
             .get(usize::from(vehicle.prototype_index))
@@ -396,29 +398,31 @@ fn plan_omt_cell(
             vehicle.origin_index % OMT_TILE_WIDTH,
             vehicle.origin_index / OMT_TILE_WIDTH,
         )?;
-        let parts = prototype
-            .parts
-            .iter()
-            .enumerate()
-            .map(|(index, prototype_part)| {
-                let state = vehicle.parts.get(index).ok_or(SimError::InvalidTerrain)?;
-                Ok(VehiclePartSnapshotV1 {
-                    prototype_part_index: u16::try_from(index)
-                        .map_err(|_| SimError::NumericOverflow)?,
-                    position: super::vehicles::vehicle_part_position(
-                        origin,
-                        prototype_part.mount_x,
-                        prototype_part.mount_y,
-                        vehicle.facing_degrees,
-                    )?,
-                    hp: state.hp,
-                    enabled: state.enabled,
-                    open: state.open,
-                    locked: state.locked,
-                    passenger: None,
-                })
-            })
-            .collect::<Result<Vec<_>, SimError>>()?;
+        let mut parts = Vec::with_capacity(prototype.parts.len());
+        let mut cargo = Vec::with_capacity(prototype.parts.len());
+        for (index, prototype_part) in prototype.parts.iter().enumerate() {
+            let state = vehicle
+                .parts
+                .get_mut(index)
+                .ok_or(SimError::InvalidTerrain)?;
+            parts.push(VehiclePartSnapshotV1 {
+                prototype_part_index: u16::try_from(index)
+                    .map_err(|_| SimError::NumericOverflow)?,
+                position: super::vehicles::vehicle_part_position(
+                    origin,
+                    prototype_part.mount_x,
+                    prototype_part.mount_y,
+                    vehicle.facing_degrees,
+                )?,
+                hp: state.hp,
+                enabled: state.enabled,
+                open: state.open,
+                locked: state.locked,
+                passenger: None,
+                cargo: Vec::new(),
+            });
+            cargo.push(std::mem::take(&mut state.cargo));
+        }
         let mut structure_positions = std::collections::BTreeSet::new();
         for (index, part) in parts.iter().enumerate() {
             let prototype_part = prototype.parts.get(index).ok_or(SimError::InvalidTerrain)?;
@@ -470,6 +474,7 @@ fn plan_omt_cell(
             facing_degrees: vehicle.facing_degrees,
             owner_faction_id: vehicle.owner_faction_id,
             parts,
+            cargo,
         });
     }
     let mut npcs = Vec::with_capacity(plan.npcs.len());
@@ -588,6 +593,7 @@ struct PlannedVehiclePartState {
     enabled: bool,
     open: bool,
     locked: bool,
+    cargo: Vec<PlannedItemSpawn>,
 }
 
 struct PlannedMapgenVehicle {
@@ -1197,7 +1203,15 @@ fn apply_template_body(
         plan_individual_monster_placement_request(placement, offset_x, offset_y, plan)?;
     }
     for placement in vehicle_placements {
-        plan_vehicle_placement(catalog, placement, offset_x, offset_y, rng, plan)?;
+        plan_vehicle_placement(
+            catalog,
+            placement,
+            offset_x,
+            offset_y,
+            item_groups,
+            rng,
+            plan,
+        )?;
     }
 
     // Nested mapgen is a later pinned phase than ordinary NPC, item, monster,
@@ -1280,6 +1294,7 @@ fn plan_vehicle_placement(
     placement: &WorldgenVehiclePlacementV1,
     offset_x: i32,
     offset_y: i32,
+    item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
     rng: &mut ChaCha8Rng,
     plan: &mut OmtMapgenPlan,
 ) -> Result<(), SimError> {
@@ -1350,7 +1365,7 @@ fn plan_vehicle_placement(
             .rotations_degrees
             .get(rotation_index)
             .ok_or(SimError::InvalidTerrain)?;
-        let parts = initial_vehicle_parts(
+        let mut parts = initial_vehicle_parts(
             catalog,
             prototype,
             placement.status,
@@ -1358,6 +1373,17 @@ fn plan_vehicle_placement(
             placement.faction_id.is_empty(),
             rng,
         )?;
+        plan_vehicle_cargo(catalog, prototype, &mut parts, item_groups, rng)?;
+        let cargo_objects = parts
+            .iter()
+            .flat_map(|part| &part.cargo)
+            .try_fold(0_u64, |total, item| total.checked_add(item.object_count()?))
+            .ok_or(SimError::NumericOverflow)?;
+        plan.item_object_count = plan
+            .item_object_count
+            .checked_add(cargo_objects)
+            .filter(|count| *count <= ID_RESERVATION_SIZE)
+            .ok_or(SimError::InvalidItem)?;
         if plan.vehicles.len() >= MAX_PLANNED_VEHICLES_PER_OMT {
             return Err(SimError::InvalidTerrain);
         }
@@ -1474,6 +1500,7 @@ fn initial_vehicle_parts(
             enabled: unowned && vehicle_part_has_flag(part_type, "ENGINE"),
             open,
             locked,
+            cargo: Vec::new(),
         });
     }
     if status == VehicleSpawnStatusV1::Disabled {
@@ -1496,6 +1523,85 @@ fn initial_vehicle_parts(
         }
     }
     Ok(output)
+}
+
+fn plan_vehicle_cargo(
+    catalog: &WorldgenCatalogV1,
+    prototype: &cdda_protocol::WorldgenVehiclePrototypeV1,
+    parts: &mut [PlannedVehiclePartState],
+    item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    for spawn in &prototype.item_spawns {
+        let cargo_part = parts
+            .get_mut(usize::from(spawn.cargo_prototype_part_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let prototype_part = prototype
+            .parts
+            .get(usize::from(spawn.cargo_prototype_part_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let part_type = catalog
+            .vehicle_part_types
+            .get(usize::from(prototype_part.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let mut stored_volume = cargo_part.cargo.iter().try_fold(0_u64, |total, item| {
+            total.checked_add(item.total_volume_milliliters()?)
+        });
+        let Some(mut stored_volume) = stored_volume.take() else {
+            return Err(SimError::InvalidItem);
+        };
+        let spawn_count = match spawn.chance_percent {
+            0 => 0,
+            100 => 1,
+            chance => usize::from(rng.next_u64() % 100 < u64::from(chance)),
+        };
+        for _ in 0..spawn_count {
+            let broken = cargo_part.hp == 0;
+            if broken && one_in_mapgen(rng, 2) {
+                continue;
+            }
+            let mut created = Vec::new();
+            for direct in &spawn.direct_items {
+                // Pinned `rng_float( 0, 1 ) < ITEM_SPAWNRATE` still consumes
+                // its constructor-adjacent draw at the default rate of one.
+                let _ = rng.next_u64();
+                created.push(plan_vehicle_direct_item(direct, rng)?);
+            }
+            for group_id in &spawn.item_group_ids {
+                created.extend(plan_item_group_source(
+                    &ItemGroupSourceV1::Group(group_id.clone()),
+                    item_groups,
+                    rng,
+                )?);
+            }
+            for mut item in created {
+                if broken && !damage_vehicle_spawn_item(&mut item, rng)? {
+                    continue;
+                }
+                dress_vehicle_spawn_item(
+                    &mut item,
+                    spawn.with_ammo_percent,
+                    spawn.with_magazine_percent,
+                    rng,
+                )?;
+                if cargo_part.cargo.len() >= cdda_protocol::MAX_VEHICLE_CARGO_ITEMS_PER_PART {
+                    continue;
+                }
+                let item_volume = item
+                    .total_volume_milliliters()
+                    .ok_or(SimError::InvalidItem)?;
+                let Some(next_volume) = stored_volume.checked_add(item_volume) else {
+                    continue;
+                };
+                if next_volume > part_type.cargo_capacity_milliliters {
+                    continue;
+                }
+                stored_volume = next_volume;
+                cargo_part.cargo.push(item);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn vehicle_part_has_flag(part: &cdda_protocol::WorldgenVehiclePartTypeV1, flag: &str) -> bool {

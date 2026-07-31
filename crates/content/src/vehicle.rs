@@ -12,6 +12,8 @@ pub const MAX_VEHICLE_PROTOTYPES: usize = 8_192;
 pub const MAX_VEHICLE_GROUPS: usize = 8_192;
 pub const MAX_VEHICLE_PARTS_PER_PROTOTYPE: usize = 4_096;
 pub const MAX_VEHICLE_GROUP_ENTRIES: usize = 4_096;
+pub const MAX_VEHICLE_ITEM_SPAWNS_PER_PROTOTYPE: usize = 4_096;
+pub const MAX_VEHICLE_ITEMS_PER_SPAWN: usize = 4_096;
 
 const PART_FIELDS: &[&str] = &[
     "type",
@@ -22,6 +24,7 @@ const PART_FIELDS: &[&str] = &[
     "item",
     "location",
     "durability",
+    "size",
     "flags",
     "variants",
     "variants_bases",
@@ -62,6 +65,7 @@ pub struct VehiclePartDefinition {
     pub item_id: String,
     pub location: String,
     pub durability: u32,
+    pub cargo_capacity_milliliters: u64,
     pub flags: BTreeSet<String>,
     pub variants: Vec<VehiclePartVariantDefinition>,
     pub unsupported_fields: BTreeSet<String>,
@@ -84,12 +88,31 @@ pub struct VehiclePrototypePartDefinition {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VehicleDirectItemSpawnDefinition {
+    pub item_id: String,
+    pub variant_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VehicleItemSpawnDefinition {
+    pub mount_x: i16,
+    pub mount_y: i16,
+    pub chance_percent: u8,
+    pub with_magazine_percent: u8,
+    pub with_ammo_percent: u8,
+    /// Exact source order; pinned spawning processes direct items before groups.
+    pub direct_items: Vec<VehicleDirectItemSpawnDefinition>,
+    pub item_group_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VehiclePrototypeDefinition {
     pub id: String,
     pub name: String,
     /// Exact upstream order. `vehicle::init_state` consumes randomness while
     /// iterating this sequence, so sorting parts would drift future replays.
     pub parts: Vec<VehiclePrototypePartDefinition>,
+    pub item_spawns: Vec<VehicleItemSpawnDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
     pub abstract_definition: bool,
@@ -98,7 +121,10 @@ pub struct VehiclePrototypeDefinition {
 impl VehiclePrototypeDefinition {
     #[must_use]
     pub fn has_runtime_static_lifecycle(&self) -> bool {
-        !self.abstract_definition && self.unsupported_fields.is_empty() && !self.parts.is_empty()
+        !self.abstract_definition
+            && self.unsupported_fields.is_empty()
+            && !self.parts.is_empty()
+            && self.item_spawns.is_empty()
     }
 }
 
@@ -602,6 +628,11 @@ fn parse_part(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(0);
+    let cargo_capacity_milliliters = object
+        .get("size")
+        .map(|value| parse_vehicle_volume_milliliters(value, source))
+        .transpose()?
+        .unwrap_or(0);
     let flags = string_set(object.get("flags"), source, "flags")?;
     let variants = parse_variants(object.get("variants"), source)?;
     let unsupported_fields = object
@@ -623,12 +654,44 @@ fn parse_part(
         item_id,
         location,
         durability,
+        cargo_capacity_milliliters,
         flags,
         variants,
         unsupported_fields,
         source: source.to_owned(),
         abstract_definition,
     })
+}
+
+fn parse_vehicle_volume_milliliters(
+    value: &Value,
+    source: &str,
+) -> Result<u64, VehicleRegistryError> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("size"),
+        })?;
+    let (amount, multiplier) = if let Some(amount) = text.strip_suffix(" ml") {
+        (amount, 1_u64)
+    } else if let Some(amount) = text.strip_suffix(" L") {
+        (amount, 1_000_u64)
+    } else {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("size"),
+        });
+    };
+    amount
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|amount| amount.checked_mul(multiplier))
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("size"),
+        })
 }
 
 fn parse_variants(
@@ -743,12 +806,13 @@ fn parse_prototype(
             });
         }
     }
+    let item_spawns = parse_vehicle_item_spawns(object.get("items"), source)?;
     let mut unsupported_fields = object
         .keys()
         .filter(|field| !field.starts_with("//") && !PROTOTYPE_FIELDS.contains(&field.as_str()))
         .cloned()
         .collect::<BTreeSet<_>>();
-    for field in ["items", "zones"] {
+    for field in ["zones"] {
         if object
             .get(field)
             .is_some_and(|value| !value.is_null() && !value.as_array().is_some_and(Vec::is_empty))
@@ -760,10 +824,169 @@ fn parse_prototype(
         id: id.to_owned(),
         name,
         parts: result_parts,
+        item_spawns,
         unsupported_fields,
         source: source.to_owned(),
         abstract_definition,
     })
+}
+
+fn parse_vehicle_item_spawns(
+    value: Option<&Value>,
+    source: &str,
+) -> Result<Vec<VehicleItemSpawnDefinition>, VehicleRegistryError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let spawns = value
+        .as_array()
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("items"),
+        })?;
+    if spawns.len() > MAX_VEHICLE_ITEM_SPAWNS_PER_PROTOTYPE {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("items"),
+        });
+    }
+    spawns
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let object =
+                value
+                    .as_object()
+                    .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                        source: source.to_owned(),
+                        field: format!("items[{index}]"),
+                    })?;
+            if object.keys().any(|field| {
+                !field.starts_with("//")
+                    && ![
+                        "x",
+                        "y",
+                        "chance",
+                        "magazine",
+                        "ammo",
+                        "items",
+                        "item_groups",
+                    ]
+                    .contains(&field.as_str())
+            }) {
+                return Err(VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("items[{index}]"),
+                });
+            }
+            let percent = |field: &str, default: Option<u8>| {
+                optional_u8(
+                    object.get(field),
+                    source,
+                    &format!("items[{index}].{field}"),
+                )?
+                .or(default)
+                .filter(|value| *value <= 100)
+                .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("items[{index}].{field}"),
+                })
+            };
+            let direct_items = object
+                .get("items")
+                .map(|value| parse_vehicle_direct_items(value, source, index))
+                .transpose()?
+                .unwrap_or_default();
+            let item_group_ids = string_vec(
+                object.get("item_groups"),
+                source,
+                &format!("items[{index}].item_groups"),
+            )?;
+            if direct_items.len().saturating_add(item_group_ids.len()) > MAX_VEHICLE_ITEMS_PER_SPAWN
+            {
+                return Err(VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("items[{index}]"),
+                });
+            }
+            Ok(VehicleItemSpawnDefinition {
+                mount_x: bounded_i16(object.get("x"), source, &format!("items[{index}].x"))?,
+                mount_y: bounded_i16(object.get("y"), source, &format!("items[{index}].y"))?,
+                chance_percent: percent("chance", None)?,
+                with_magazine_percent: percent("magazine", Some(0))?,
+                with_ammo_percent: percent("ammo", Some(0))?,
+                direct_items,
+                item_group_ids,
+            })
+        })
+        .collect()
+}
+
+fn parse_vehicle_direct_items(
+    value: &Value,
+    source: &str,
+    spawn_index: usize,
+) -> Result<Vec<VehicleDirectItemSpawnDefinition>, VehicleRegistryError> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: format!("items[{spawn_index}].items"),
+        })?;
+    if items.len() > MAX_VEHICLE_ITEMS_PER_SPAWN {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: format!("items[{spawn_index}].items"),
+        });
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(item_index, value)| {
+            let (item_id, variant_id) = if let Some(item_id) = value.as_str() {
+                (item_id, "")
+            } else {
+                let object =
+                    value
+                        .as_object()
+                        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+                            source: source.to_owned(),
+                            field: format!("items[{spawn_index}].items[{item_index}]"),
+                        })?;
+                if object
+                    .keys()
+                    .any(|field| !["id", "variant"].contains(&field.as_str()))
+                {
+                    return Err(VehicleRegistryError::InvalidDefinition {
+                        source: source.to_owned(),
+                        field: format!("items[{spawn_index}].items[{item_index}]"),
+                    });
+                }
+                (
+                    object.get("id").and_then(Value::as_str).unwrap_or_default(),
+                    object
+                        .get("variant")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+            };
+            if item_id.is_empty()
+                || item_id.len() > 512
+                || item_id.chars().any(char::is_control)
+                || variant_id.len() > 512
+                || variant_id.chars().any(char::is_control)
+            {
+                return Err(VehicleRegistryError::InvalidDefinition {
+                    source: source.to_owned(),
+                    field: format!("items[{spawn_index}].items[{item_index}]"),
+                });
+            }
+            Ok(VehicleDirectItemSpawnDefinition {
+                item_id: item_id.to_owned(),
+                variant_id: variant_id.to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn parse_prototype_part(

@@ -969,7 +969,8 @@ fn open_world(
                 .get(DEFAULT_RIVER_SETTINGS_ID)
                 .ok_or("pinned default content is missing default river settings")?,
         )?;
-    let mapgen_item_group_roots = runtime_mapgen_item_group_roots(&regional_overmap, mapgen)?;
+    let mut mapgen_item_group_roots = runtime_mapgen_item_group_roots(&regional_overmap, mapgen)?;
+    mapgen_item_group_roots.extend(vehicles::runtime_vehicle_item_group_roots(content.vehicles));
     let item_group_catalog = merge_item_group_catalogs([
         bash_item_group_catalog,
         runtime_named_item_group_catalogs(
@@ -994,6 +995,7 @@ fn open_world(
             terrain,
             furniture,
             item_groups: &item_group_catalog,
+            item_group_content,
             snippets: content.snippets,
             npc_templates: &npc_templates,
             items,

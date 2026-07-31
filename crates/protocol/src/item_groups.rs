@@ -1324,6 +1324,10 @@ fn valid_item_group_item(item: &ItemGroupItemPrototypeV1) -> bool {
     valid_item_group_item_at_depth(item, 0)
 }
 
+pub(crate) fn item_group_item_prototype_is_valid(item: &ItemGroupItemPrototypeV1) -> bool {
+    valid_item_group_item(item)
+}
+
 fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize) -> bool {
     let generates_description = item.description_expansion.is_some()
         || item

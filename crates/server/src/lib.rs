@@ -4344,7 +4344,7 @@ fn interest_snapshot(
             max_hp: creature.max_hp,
         })
         .collect();
-    let vehicles = visible_vehicles(&snapshot, &visible)?;
+    let vehicles = visible_vehicles(&snapshot, origin, &visible)?;
     let ground_items = snapshot
         .ground_items
         .iter()
@@ -4511,6 +4511,7 @@ fn interest_snapshot(
 
 fn visible_vehicles(
     snapshot: &WorldSnapshotV1,
+    controlled_position: WorldPosition,
     visible: &impl Fn(WorldPosition) -> bool,
 ) -> Result<Vec<VisibleVehicleSnapshotV1>, NetworkError> {
     let Some(catalog) = snapshot.worldgen.as_ref() else {
@@ -4525,6 +4526,8 @@ fn visible_vehicles(
         let mut displayed = BTreeMap::<WorldPosition, (i16, VisibleVehicleTileV1)>::new();
         let mut passengers = BTreeMap::new();
         let mut boardable_parts = BTreeMap::new();
+        let mut cargo_parts = BTreeMap::new();
+        let mut cargo = BTreeMap::<WorldPosition, Vec<cdda_protocol::ItemSnapshot>>::new();
         for (index, part) in vehicle.parts.iter().enumerate() {
             if let Some(passenger) = part.passenger {
                 passengers.insert(part.position, passenger);
@@ -4547,6 +4550,25 @@ fn visible_vehicles(
                 boardable_parts
                     .entry(part.position)
                     .or_insert(part.prototype_part_index);
+            }
+            if !part.locked
+                && part.position.z == controlled_position.z
+                && part.position.x.abs_diff(controlled_position.x) <= 1
+                && part.position.y.abs_diff(controlled_position.y) <= 1
+            {
+                if part_type
+                    .flags
+                    .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+                    .is_ok()
+                {
+                    cargo_parts
+                        .entry(part.position)
+                        .or_insert(part.prototype_part_index);
+                }
+                cargo
+                    .entry(part.position)
+                    .or_default()
+                    .extend(part.cargo.iter().cloned());
             }
         }
         for (index, part) in vehicle.parts.iter().enumerate() {
@@ -4604,7 +4626,9 @@ fn visible_vehicles(
                         boardable_prototype_part_index: boardable_parts
                             .get(&part.position)
                             .copied(),
+                        cargo_prototype_part_index: cargo_parts.get(&part.position).copied(),
                         passenger: passengers.get(&part.position).copied(),
+                        cargo: cargo.remove(&part.position).unwrap_or_default(),
                     },
                 ),
             );
@@ -5036,6 +5060,14 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             ..
         }
         | WorldEventKind::ActorUnboardedVehicle {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::VehicleCargoTaken {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::VehicleCargoStored {
             actor_id: event_actor,
             ..
         }

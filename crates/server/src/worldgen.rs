@@ -48,6 +48,7 @@ use cdda_sim::{
     place_overmap_specials,
 };
 
+use super::item_groups::RuntimeItemGroupContent;
 use super::vehicles::runtime_vehicle_catalog;
 use super::{
     furniture_tile, monster_attack_cost, monster_blood_field_type, monster_path_settings,
@@ -578,6 +579,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub terrain: &'a TerrainRegistry,
     pub furniture: &'a FurnitureRegistry,
     pub item_groups: &'a [ItemGroupDefinitionV1],
+    pub item_group_content: RuntimeItemGroupContent<'a>,
     pub snippets: &'a DescriptionSnippetRegistry,
     pub npc_templates: &'a [NpcTemplateV1],
     pub items: &'a ItemRegistry,
@@ -2432,6 +2434,7 @@ pub(super) fn runtime_mapgen_worldgen(
         terrain,
         furniture,
         item_groups,
+        item_group_content,
         snippets,
         npc_templates,
         items,
@@ -2631,7 +2634,8 @@ pub(super) fn runtime_mapgen_worldgen(
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
             &cdda_protocol::creature_spell_eoc_supported_ids(eoc_definitions),
         )?;
-    let vehicle_catalog = runtime_vehicle_catalog(vehicle_group_roots, vehicles)?;
+    let vehicle_catalog =
+        runtime_vehicle_catalog(vehicle_group_roots, vehicles, item_group_content)?;
 
     let mut terrain_ids = BTreeSet::new();
     let mut furniture_ids = BTreeSet::new();

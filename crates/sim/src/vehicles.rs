@@ -1,9 +1,12 @@
 use cdda_protocol::{
-    ActorId, CommandRejection, CommandSequence, VehicleId, WorldEvent, WorldEventKind,
-    WorldPosition,
+    ActorId, CommandRejection, CommandSequence, ItemId, VehicleId, WorldEvent, WorldEventKind,
+    WorldPosition, item_snapshot_containment_volume_milliliters,
 };
 
-use super::{ACTOR_ACTION_THRESHOLD, SimError, WorldState, roll_dice};
+use super::{
+    ACTOR_ACTION_THRESHOLD, ItemInstance, MAX_ACTOR_INVENTORY_ITEMS, SimError, WorldState,
+    construction_reserved_inventory_slots, craft_reserved_inventory_slots, roll_dice,
+};
 
 // Pinned `tileray` rounds `sin(angle) * 100` before stepping. Keeping the
 // quarter-wave as integer canonical data avoids platform libm differences for
@@ -341,6 +344,252 @@ impl WorldState {
             prototype_part_index,
             from,
             to,
+        })?);
+        Ok(())
+    }
+
+    pub(super) fn apply_take_vehicle_cargo(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let reserved_slots = actor
+            .craft_activity
+            .as_ref()
+            .map_or(0, craft_reserved_inventory_slots)
+            + usize::from(actor.disassembly_activity.is_some())
+            + actor
+                .construction_activity
+                .as_ref()
+                .map_or(0, construction_reserved_inventory_slots);
+        if actor
+            .inventory
+            .len()
+            .checked_add(reserved_slots)
+            .is_none_or(|count| count >= MAX_ACTOR_INVENTORY_ITEMS)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InventoryFull)?);
+            return Ok(());
+        }
+        let Some(vehicle) = self.vehicles.get(&vehicle_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
+            return Ok(());
+        };
+        let Some(part) = vehicle.parts.get(usize::from(prototype_part_index)) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartMissing,
+            )?);
+            return Ok(());
+        };
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return Err(SimError::InvalidTerrain);
+        };
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let prototype_part = prototype
+            .parts
+            .get(usize::from(prototype_part_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let part_type = catalog
+            .vehicle_part_types
+            .get(usize::from(prototype_part.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        if part_type
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+            .is_err()
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartNotCargo,
+            )?);
+            return Ok(());
+        }
+        if part.locked {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehicleCargoLocked,
+            )?);
+            return Ok(());
+        }
+        if actor.position.z != part.position.z
+            || actor.position.x.abs_diff(part.position.x) > 1
+            || actor.position.y.abs_diff(part.position.y) > 1
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotHere)?);
+            return Ok(());
+        }
+        let Some(cargo_index) = part.cargo.iter().position(|item| item.id == item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemMissing)?);
+            return Ok(());
+        };
+        let position = part.position;
+        let snapshot = self
+            .vehicles
+            .get_mut(&vehicle_id)
+            .and_then(|vehicle| vehicle.parts.get_mut(usize::from(prototype_part_index)))
+            .ok_or(SimError::InvalidTerrain)?
+            .cargo
+            .remove(cargo_index);
+        let item = ItemInstance::from_snapshot(&snapshot)?;
+        if self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .inventory
+            .insert(item_id, item)
+            .is_some()
+        {
+            return Err(SimError::InvalidItem);
+        }
+        events.push(self.make_event(WorldEventKind::VehicleCargoTaken {
+            actor_id,
+            vehicle_id,
+            prototype_part_index,
+            item_id,
+            position,
+        })?);
+        Ok(())
+    }
+
+    pub(super) fn apply_store_vehicle_cargo(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        item_id: ItemId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some(vehicle) = self.vehicles.get(&vehicle_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
+            return Ok(());
+        };
+        let Some(part) = vehicle.parts.get(usize::from(prototype_part_index)) else {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartMissing,
+            )?);
+            return Ok(());
+        };
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return Err(SimError::InvalidTerrain);
+        };
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let prototype_part = prototype
+            .parts
+            .get(usize::from(prototype_part_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let part_type = catalog
+            .vehicle_part_types
+            .get(usize::from(prototype_part.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        if part_type
+            .flags
+            .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+            .is_err()
+        {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehiclePartNotCargo,
+            )?);
+            return Ok(());
+        }
+        if part.locked {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::VehicleCargoLocked,
+            )?);
+            return Ok(());
+        }
+        let actor_position = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        if actor_position.z != part.position.z
+            || actor_position.x.abs_diff(part.position.x) > 1
+            || actor_position.y.abs_diff(part.position.y) > 1
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotHere)?);
+            return Ok(());
+        }
+        if self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .worn
+            .contains(&item_id)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemWorn)?);
+            return Ok(());
+        }
+        if part.cargo.len() >= cdda_protocol::MAX_VEHICLE_CARGO_ITEMS_PER_PART {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InventoryFull)?);
+            return Ok(());
+        }
+        let item_snapshot = self
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.inventory.get(&item_id))
+            .map(ItemInstance::snapshot);
+        let Some(item_snapshot) = item_snapshot else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        let used_volume = part.cargo.iter().try_fold(0_u64, |total, item| {
+            total.checked_add(item_snapshot_containment_volume_milliliters(item)?)
+        });
+        let added_volume = item_snapshot_containment_volume_milliliters(&item_snapshot);
+        if used_volume
+            .zip(added_volume)
+            .and_then(|(used, added)| used.checked_add(added))
+            .is_none_or(|total| total > part_type.cargo_capacity_milliliters)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InventoryFull)?);
+            return Ok(());
+        }
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        let Some(_item) = actor.inventory.remove(&item_id) else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        };
+        if actor.wielded == Some(item_id) {
+            actor.wielded = None;
+        }
+        let position = part.position;
+        self.vehicles
+            .get_mut(&vehicle_id)
+            .and_then(|vehicle| vehicle.parts.get_mut(usize::from(prototype_part_index)))
+            .ok_or(SimError::InvalidTerrain)?
+            .cargo
+            .push(item_snapshot);
+        events.push(self.make_event(WorldEventKind::VehicleCargoStored {
+            actor_id,
+            vehicle_id,
+            prototype_part_index,
+            item_id,
+            position,
         })?);
         Ok(())
     }

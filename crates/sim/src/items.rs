@@ -16,8 +16,9 @@ use cdda_protocol::{
     ItemVariableValueV1, ItemVariantV1, MAX_CRAFT_RECIPE_ID_BYTES, MAX_EXPANDED_DESCRIPTION_BYTES,
     MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_OUTPUTS, MAX_ITEM_RAW_DAMAGE,
     MAX_ITEM_VARIABLES, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellSnapshotV1, PoweredToolStateV1,
-    RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, decode_item_group_custom_flag_marker,
-    decode_item_group_dressing_marker, initial_item_temperature_state,
+    RangedWeaponSnapshot, SimTick, SpawnPocketKindV1, WorldgenVehicleDirectItemSpawnV1,
+    decode_item_group_custom_flag_marker, decode_item_group_dressing_marker,
+    encode_item_group_dressing_marker, initial_item_temperature_state,
     is_reserved_item_group_custom_flag_marker, is_reserved_item_group_dressing_marker,
     is_reserved_item_group_internal_marker, item_containment_single_charge_volume_milliliters,
     item_containment_volume_milliliters, item_containment_weight_milligrams,
@@ -780,6 +781,13 @@ fn process_item_snapshot_temperature_and_rot(
     Ok(removable && rotten_away)
 }
 
+pub(super) fn process_vehicle_cargo_temperature_and_rot(
+    item: &mut ItemSnapshot,
+    current_tick: SimTick,
+) -> Result<bool, SimError> {
+    process_item_snapshot_temperature_and_rot(item, current_tick, true, 1.0)
+}
+
 pub(super) fn item_temperature_timestamps_are_valid(
     item: &ItemSnapshot,
     current_tick: SimTick,
@@ -1357,6 +1365,57 @@ fn construct_item_group_item(
     rng: &mut ChaCha8Rng,
 ) -> Result<PlannedItemSpawn, SimError> {
     construct_item_group_item_with_fit_phase(item, rng, true)
+}
+
+pub(super) fn plan_vehicle_direct_item(
+    direct: &WorldgenVehicleDirectItemSpawnV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<PlannedItemSpawn, SimError> {
+    let mut planned = construct_item_group_item_with_fit_phase(&direct.item, rng, false)?;
+    if !direct.variant_id.is_empty() {
+        let variant = planned
+            .variants
+            .iter()
+            .find(|variant| variant.variant.id == direct.variant_id)
+            .cloned()
+            .ok_or(SimError::InvalidItem)?;
+        set_planned_variant(&mut planned, &variant, rng)?;
+    }
+    apply_unmodified_default_container(&mut planned, rng)?;
+    Ok(planned)
+}
+
+pub(super) fn dress_vehicle_spawn_item(
+    planned: &mut PlannedItemSpawn,
+    with_ammo_percent: u8,
+    with_magazine_percent: u8,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    let markers = encode_item_group_dressing_marker(with_ammo_percent, with_magazine_percent)
+        .into_iter()
+        .map(ItemGroupContentsSourceV1::Group)
+        .collect::<Vec<_>>();
+    apply_item_group_modifier_dressing(planned, None, &markers, rng)
+}
+
+pub(super) fn damage_vehicle_spawn_item(
+    planned: &mut PlannedItemSpawn,
+    rng: &mut ChaCha8Rng,
+) -> Result<bool, SimError> {
+    if planned.maximum_raw_damage == 0 {
+        return Err(SimError::InvalidItem);
+    }
+    let damage = u16::try_from(inclusive_rng_u64(
+        rng,
+        1,
+        u64::from(planned.maximum_raw_damage),
+    ))
+    .map_err(|_| SimError::NumericOverflow)?;
+    if damage >= planned.maximum_raw_damage {
+        return Ok(false);
+    }
+    planned.raw_damage = damage;
+    Ok(true)
 }
 
 fn construct_item_group_item_with_fit_phase(
@@ -3189,7 +3248,7 @@ impl PlannedItemSpawn {
             .checked_add(pocketed)
     }
 
-    fn total_volume_milliliters(&self) -> Option<u64> {
+    pub(super) fn total_volume_milliliters(&self) -> Option<u64> {
         let own = item_containment_volume_milliliters(
             &self.prototype.containment,
             self.prototype.charges,
