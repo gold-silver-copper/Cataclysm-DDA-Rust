@@ -115,6 +115,12 @@
       "random_count_ceiling": 10,
       "minimum_generated_size": 2,
       "maximum_generated_size": 55
+    },
+    "road": {
+      "point_x": [10, 179, 100, 70, 110, 90],
+      "point_y": [0, 40, 179, 70, 75, 115],
+      "mst_left": [3, 4, 2, 1, 0],
+      "mst_right": [4, 5, 5, 4, 3]
     }
   }
 }

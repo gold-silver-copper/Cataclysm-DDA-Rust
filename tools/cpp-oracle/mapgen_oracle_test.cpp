@@ -41,6 +41,51 @@ struct rotation_observation {
     point marker;
 };
 
+struct road_observation {
+    std::vector<point_om_omt> points;
+    std::vector<std::pair<int, int>> mst_edges;
+};
+
+road_observation road_mst_observation()
+{
+    road_observation result {
+        {
+            point_om_omt( 10, 0 ), point_om_omt( 179, 40 ), point_om_omt( 100, 179 ),
+            point_om_omt( 70, 70 ), point_om_omt( 110, 75 ), point_om_omt( 90, 115 )
+        },
+        {}
+    };
+    using edge = std::pair<float, std::pair<size_t, size_t>>;
+    std::vector<edge> edges;
+    for( size_t left = 0; left < result.points.size() - 1; ++left ) {
+        for( size_t right = left + 1; right < result.points.size(); ++right ) {
+            edges.push_back( { trig_dist( result.points[left], result.points[right] ),
+                               { left, right } } );
+        }
+    }
+    std::sort( edges.begin(), edges.end() );
+    std::vector<int> components( result.points.size() );
+    for( size_t index = 0; index < components.size(); ++index ) {
+        components[index] = static_cast<int>( index );
+    }
+    for( const edge &candidate : edges ) {
+        const size_t left = candidate.second.first;
+        const size_t right = candidate.second.second;
+        if( components[left] == components[right] ) {
+            continue;
+        }
+        const int replaced = components[right];
+        const int replacement = components[left];
+        for( int &component : components ) {
+            if( component == replaced ) {
+                component = replacement;
+            }
+        }
+        result.mst_edges.emplace_back( static_cast<int>( left ), static_cast<int>( right ) );
+    }
+    return result;
+}
+
 const char *phase_name( mapgen_phase phase )
 {
     switch( phase ) {
@@ -167,6 +212,11 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
 
     const std::vector<rotation_observation> rotatable = rotatable_observations();
     const std::vector<rotation_observation> linear = linear_observations();
+    const road_observation road = road_mst_observation();
+    const std::vector<std::pair<int, int>> expected_road_edges = {
+        { 3, 4 }, { 4, 5 }, { 2, 5 }, { 1, 4 }, { 0, 3 }
+    };
+    REQUIRE( road.mst_edges == expected_road_edges );
 
     const start_location_id start_id( "sloc_lmoe" );
     REQUIRE( start_id.is_valid() );
@@ -415,6 +465,34 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
         json.member( "random_count_ceiling", 10 );
         json.member( "minimum_generated_size", 2 );
         json.member( "maximum_generated_size", 55 );
+        json.end_object();
+
+        json.member( "road" );
+        json.start_object();
+        json.member( "point_x" );
+        json.start_array();
+        for( const point_om_omt &point : road.points ) {
+            json.write( point.x() );
+        }
+        json.end_array();
+        json.member( "point_y" );
+        json.start_array();
+        for( const point_om_omt &point : road.points ) {
+            json.write( point.y() );
+        }
+        json.end_array();
+        json.member( "mst_left" );
+        json.start_array();
+        for( const std::pair<int, int> &edge : road.mst_edges ) {
+            json.write( edge.first );
+        }
+        json.end_array();
+        json.member( "mst_right" );
+        json.start_array();
+        for( const std::pair<int, int> &edge : road.mst_edges ) {
+            json.write( edge.second );
+        }
+        json.end_array();
         json.end_object();
         json.end_object();
     }

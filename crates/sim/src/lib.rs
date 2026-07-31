@@ -4,6 +4,7 @@ mod cities;
 mod items;
 mod mapgen;
 mod overmap;
+mod roads;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -72,6 +73,10 @@ use items::{
     item_from_craft_prototype, item_from_planned_spawn, item_rot_metadata_is_valid,
     item_temperature_timestamps_are_valid, plan_item_group_source,
     process_item_snapshot_temperature,
+};
+pub use roads::{
+    OVERMAP_ROAD_MASK_IDS, OvermapRoadBoundary, OvermapRoadExit, overmap_road_mst_edges,
+    place_overmap_roads,
 };
 
 pub const ID_RESERVATION_SIZE: u64 = 4_096;

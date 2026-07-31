@@ -27,7 +27,7 @@ use cdda_protocol::{
     WorldgenWeightedTerrainTargetV1, initial_item_temperature_state, worldgen_city_start_distance,
     worldgen_omt_matches,
 };
-use cdda_sim::{ReservedIdBlock, WorldState};
+use cdda_sim::{ReservedIdBlock, WorldState, overmap_road_mst_edges};
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
@@ -858,6 +858,7 @@ struct MapgenOracleObservationV1 {
     static_template: MapgenStaticTemplateObservationV1,
     start_location: MapgenStartLocationObservationV1,
     city: MapgenCityObservationV1,
+    road: MapgenRoadObservationV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -954,6 +955,15 @@ struct MapgenCityObservationV1 {
     maximum_generated_size: i32,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenRoadObservationV1 {
+    point_x: Vec<i32>,
+    point_y: Vec<i32>,
+    mst_left: Vec<i32>,
+    mst_right: Vec<i32>,
+}
+
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct MapgenDirectObservationV1 {
     matching: Vec<MapgenMatchObservationV1>,
@@ -962,6 +972,7 @@ struct MapgenDirectObservationV1 {
     static_template: MapgenStaticTemplateObservationV1,
     start_location: MapgenStartLocationObservationV1,
     city: MapgenCityObservationV1,
+    road: MapgenRoadObservationV1,
 }
 
 struct RustStaticTemplateTiles {
@@ -2793,6 +2804,14 @@ fn validate_mapgen_observation(
     {
         return Err("mapgen city placement characterization is incomplete".into());
     }
+    let road = &observation.road;
+    if road.point_x != [10, 179, 100, 70, 110, 90]
+        || road.point_y != [0, 40, 179, 70, 75, 115]
+        || road.mst_left != [3, 4, 2, 1, 0]
+        || road.mst_right != [4, 5, 5, 4, 3]
+    {
+        return Err("mapgen road MST characterization is incomplete".into());
+    }
     Ok(())
 }
 
@@ -4282,6 +4301,7 @@ fn direct_mapgen_projection(observation: &MapgenOracleObservationV1) -> MapgenDi
         static_template: observation.static_template.clone(),
         start_location: observation.start_location.clone(),
         city: observation.city.clone(),
+        road: observation.road.clone(),
     }
 }
 
@@ -4412,6 +4432,41 @@ fn rust_mapgen_direct_observation(
         },
         start_location: rust_start_location_observation(&start_locations, &terrain)?,
         city: rust_city_observation(&city_settings)?,
+        road: rust_road_observation()?,
+    })
+}
+
+fn rust_road_observation() -> Result<MapgenRoadObservationV1, Box<dyn std::error::Error>> {
+    let points = [
+        ChunkCoord { x: 10, y: 0, z: 0 },
+        ChunkCoord {
+            x: 179,
+            y: 40,
+            z: 0,
+        },
+        ChunkCoord {
+            x: 100,
+            y: 179,
+            z: 0,
+        },
+        ChunkCoord { x: 70, y: 70, z: 0 },
+        ChunkCoord {
+            x: 110,
+            y: 75,
+            z: 0,
+        },
+        ChunkCoord {
+            x: 90,
+            y: 115,
+            z: 0,
+        },
+    ];
+    let edges = overmap_road_mst_edges(&points)?;
+    Ok(MapgenRoadObservationV1 {
+        point_x: points.iter().map(|point| point.x).collect(),
+        point_y: points.iter().map(|point| point.y).collect(),
+        mst_left: edges.iter().map(|edge| i32::from(edge.0)).collect(),
+        mst_right: edges.iter().map(|edge| i32::from(edge.1)).collect(),
     })
 }
 

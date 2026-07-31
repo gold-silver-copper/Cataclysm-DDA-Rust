@@ -32,7 +32,7 @@ use iroh::{Endpoint, EndpointAddr, SecretKey, endpoint::presets};
 
 use super::item_groups::{RuntimeItemGroupContent, runtime_named_item_group_catalog};
 use super::worldgen::{
-    RuntimeMapgenContent, bootstrap_regional_city_overmap, runtime_mapgen_worldgen,
+    RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_worldgen,
 };
 use super::{PendingJournal, flush_journal, record_simulation_output, utc_now_seconds};
 
@@ -655,9 +655,10 @@ pub(super) fn assert_production_regional_field_gameplay(
     let production_field_catalog =
         runtime_named_item_group_catalog(field_graph, item_group_content)
             .expect("production field catalog should normalize");
-    let (production_overmap, cities) =
-        bootstrap_regional_city_overmap(overmap_terrain, [31; 32], city_settings)
-            .expect("regional city overmap should normalize");
+    let (production_overmap, cities, road_exits) =
+        bootstrap_regional_road_overmap(overmap_terrain, [31; 32], city_settings)
+            .expect("regional road overmap should normalize");
+    assert_eq!(road_exits.len(), 3);
     let production_field_worldgen = runtime_mapgen_worldgen(
         production_overmap,
         cities,

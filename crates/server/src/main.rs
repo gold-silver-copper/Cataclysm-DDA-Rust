@@ -84,7 +84,7 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
-use worldgen::{RuntimeMapgenContent, bootstrap_regional_city_overmap, runtime_mapgen_worldgen};
+use worldgen::{RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
 use worldgen::{
     bootstrap_lmoe_overmap, runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice,
@@ -809,7 +809,7 @@ fn open_world(
         bash_item_group_catalog,
         runtime_named_item_group_catalog(&field_graph, item_group_content)?,
     ])?;
-    let (regional_overmap, cities) = bootstrap_regional_city_overmap(
+    let (regional_overmap, cities, _road_exits) = bootstrap_regional_road_overmap(
         overmap_terrain,
         metadata.world_seed,
         city_settings

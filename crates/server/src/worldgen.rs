@@ -15,7 +15,10 @@ use cdda_protocol::{
     WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
     WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
 };
-use cdda_sim::{OvermapCitySettings, place_overmap_cities};
+use cdda_sim::{
+    OVERMAP_ROAD_MASK_IDS, OvermapCitySettings, OvermapRoadExit, place_overmap_cities,
+    place_overmap_roads,
+};
 
 use super::{furniture_tile, terrain_tile};
 
@@ -73,6 +76,48 @@ pub(super) fn bootstrap_regional_city_overmap(
         center,
     )
     .map_err(Into::into)
+}
+
+/// Production regional layout after the inter-city road-topology family.
+/// Road OMT ownership is exact; local road rendering continues to use the
+/// pinned field predecessor until nested road mapgen is admitted.
+type RegionalRoadOvermap = (
+    WorldgenOvermapLayoutV1,
+    Vec<WorldgenCityV1>,
+    Vec<OvermapRoadExit>,
+);
+
+pub(super) fn bootstrap_regional_road_overmap(
+    terrain: &OvermapTerrainRegistry,
+    world_seed: [u8; 32],
+    city_settings: &CitySettingsDefinition,
+) -> Result<RegionalRoadOvermap, Box<dyn std::error::Error>> {
+    let (city_layout, cities) =
+        bootstrap_regional_city_overmap(terrain, world_seed, city_settings)?;
+    let road_identities = OVERMAP_ROAD_MASK_IDS
+        .iter()
+        .map(|full_id| {
+            let source = terrain
+                .get_identity(full_id)
+                .ok_or_else(|| format!("pinned overmap-terrain catalog is missing {full_id}"))?;
+            Ok(WorldgenOmtIdentityV1 {
+                full_id: source.full_id.clone(),
+                type_id: source.type_id.clone(),
+                subtype_id: source.subtype_id.clone(),
+                generator_id: String::from("field"),
+                rotation: source.rotation,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let (layout, exits) = place_overmap_roads(
+        world_seed,
+        cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        city_layout,
+        &cities,
+        &[],
+        &road_identities,
+    )?;
+    Ok((layout, cities, exits))
 }
 
 fn bootstrap_uniform_overmap(
@@ -673,10 +718,10 @@ mod tests {
         ItemGroupRegistry, MapgenRegistry, ModCatalog, OvermapTerrainRegistry, TerrainRegistry,
     };
 
-    use super::bootstrap_regional_city_overmap;
+    use super::bootstrap_regional_road_overmap;
 
     #[test]
-    fn pinned_city_center_family_reaches_production_content() {
+    fn pinned_city_and_road_topology_reach_production_content() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest_path = repository.join(cdda_content::DEFAULT_MANIFEST_PATH);
         let manifest = ContentManifest::load(&manifest_path).expect("manifest");
@@ -703,7 +748,7 @@ mod tests {
             .expect("overmap terrain");
         let settings = CitySettingsRegistry::load_selected(&manifest, root, &mods, &enabled)
             .expect("city settings");
-        let (layout, cities) = bootstrap_regional_city_overmap(
+        let (layout, cities, exits) = bootstrap_regional_road_overmap(
             &overmap,
             [37; 32],
             settings
@@ -712,6 +757,7 @@ mod tests {
         )
         .expect("city overmap");
         assert!(!cities.is_empty());
+        assert_eq!(exits.len(), 3);
         let center = layout
             .identities
             .iter()
@@ -719,6 +765,12 @@ mod tests {
             .expect("city center identity");
         assert_eq!(center.type_id, "road");
         assert_eq!(center.subtype_id, "road_four_way");
+        assert!(
+            layout
+                .identities
+                .iter()
+                .any(|identity| identity.type_id == "road" && identity.full_id != "road_nesw")
+        );
         assert!(
             mapgen.get(&center.generator_id).is_some(),
             "production city-center predecessor {:?} is blocked: {:?}",
