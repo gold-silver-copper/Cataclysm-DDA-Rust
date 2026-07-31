@@ -30,6 +30,7 @@ mod snippet;
 mod spell;
 mod start_location;
 mod terrain;
+mod vehicle;
 
 pub use ammo_effect::{
     AmmunitionEffectDefinition, AmmunitionEffectRegistry, AmmunitionEffectRegistryError,
@@ -94,7 +95,8 @@ pub use mapgen::{
     StrictMapgenIndividualMonsterPlacement, StrictMapgenIndividualMonsterTarget,
     StrictMapgenItemPlacement, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedConditions, StrictMapgenNestedPlacement,
-    StrictMapgenNpcPlacement, StrictMapgenOmtMatch, StrictNestedMapgenDefinition, WeightedMapgenId,
+    StrictMapgenNpcPlacement, StrictMapgenOmtMatch, StrictMapgenVehicleBinding,
+    StrictMapgenVehiclePlacement, StrictNestedMapgenDefinition, WeightedMapgenId,
 };
 pub use material::{
     ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,
@@ -163,6 +165,13 @@ pub use start_location::{
     StartLocationRegistryError, StartLocationTarget,
 };
 pub use terrain::{TerrainDefinition, TerrainRegistry, TerrainRegistryError};
+pub use vehicle::{
+    MAX_VEHICLE_GROUP_ENTRIES, MAX_VEHICLE_GROUPS, MAX_VEHICLE_PART_DEFINITIONS,
+    MAX_VEHICLE_PARTS_PER_PROTOTYPE, MAX_VEHICLE_PROTOTYPES, VehicleGroupDefinition,
+    VehicleGroupEntryDefinition, VehiclePartDefinition, VehiclePartVariantDefinition,
+    VehiclePrototypeDefinition, VehiclePrototypePartDefinition, VehicleRegistry,
+    VehicleRegistryError,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

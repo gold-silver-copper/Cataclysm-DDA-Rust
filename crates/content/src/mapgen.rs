@@ -40,12 +40,14 @@ const OBJECT_FIELDS: &[&str] = &[
     "terrain",
     "furniture",
     "items",
+    "vehicles",
     "palettes",
     "rotation",
     "fallback_predecessor_mapgen",
     "place_nested",
     "place_items",
     "place_npcs",
+    "place_vehicles",
     "place_monsters",
     "place_monster",
     "flags",
@@ -57,6 +59,7 @@ const NESTED_OBJECT_FIELDS: &[&str] = &[
     "terrain",
     "furniture",
     "items",
+    "vehicles",
     "palettes",
     "rotation",
     "place_nested",
@@ -73,6 +76,7 @@ const PALETTE_FIELDS: &[&str] = &[
     "terrain",
     "furniture",
     "items",
+    "vehicles",
     "palettes",
     "signs",
 ];
@@ -135,6 +139,26 @@ pub struct StrictMapgenIndividualMonsterPlacement {
 pub struct StrictMapgenNpcPlacement {
     pub template_id: String,
     pub repeat: MapgenU16Range,
+    pub x: MapgenCoordinateRange,
+    pub y: MapgenCoordinateRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenVehicleBinding {
+    pub vehicle_group_id: String,
+    pub chance_percent: u8,
+    /// Exact normalized source order. `random_entry` consumes one selection
+    /// draw even when several equivalent angles are present.
+    pub rotations_degrees: Vec<i16>,
+    pub fuel_percent: i16,
+    pub status: i8,
+    pub faction_id: String,
+    pub repeat: MapgenU16Range,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenVehiclePlacement {
+    pub vehicle: StrictMapgenVehicleBinding,
     pub x: MapgenCoordinateRange,
     pub y: MapgenCoordinateRange,
 }
@@ -236,6 +260,9 @@ pub struct StrictMapgenDefinition {
     /// Item-phase placements, applied after terrain and furniture. Each entry
     /// is one static named-item-group placement for that glyph.
     pub items: BTreeMap<String, StrictMapgenItemPlacement>,
+    /// Vehicle pieces inherited through palettes, retained in pinned layer
+    /// order for every glyph.
+    pub vehicles: BTreeMap<String, Vec<StrictMapgenVehicleBinding>>,
     /// Named palettes in deterministic reference-expansion order. Repeated
     /// references remain repeated because upstream applies them repeatedly.
     pub palette_closure: Vec<String>,
@@ -245,6 +272,7 @@ pub struct StrictMapgenDefinition {
     pub nested: Vec<StrictMapgenNestedPlacement>,
     pub area_items: Vec<StrictMapgenAreaItemPlacement>,
     pub npc_placements: Vec<StrictMapgenNpcPlacement>,
+    pub vehicle_placements: Vec<StrictMapgenVehiclePlacement>,
     pub monster_placements: Vec<StrictMapgenMonsterPlacement>,
     pub individual_monster_placements: Vec<StrictMapgenIndividualMonsterPlacement>,
     pub erase_all_before_placing_terrain: bool,
@@ -274,10 +302,12 @@ pub struct StrictNestedMapgenDefinition {
     pub terrain: BTreeMap<String, Vec<MapgenIdChoice>>,
     pub furniture: BTreeMap<String, Vec<MapgenIdChoice>>,
     pub items: BTreeMap<String, StrictMapgenItemPlacement>,
+    pub vehicles: BTreeMap<String, Vec<StrictMapgenVehicleBinding>>,
     pub palette_closure: Vec<String>,
     pub nested: Vec<StrictMapgenNestedPlacement>,
     pub area_items: Vec<StrictMapgenAreaItemPlacement>,
     pub npc_placements: Vec<StrictMapgenNpcPlacement>,
+    pub vehicle_placements: Vec<StrictMapgenVehiclePlacement>,
     pub monster_placements: Vec<StrictMapgenMonsterPlacement>,
     pub individual_monster_placements: Vec<StrictMapgenIndividualMonsterPlacement>,
     pub erase_all_before_placing_terrain: bool,
@@ -848,6 +878,8 @@ where
         item_group_exists,
     )?;
     let npc_placements = parse_npc_placements(object.get("place_npcs"), "mapgen object")?;
+    let vehicle_placements =
+        parse_vehicle_placements(object.get("place_vehicles"), "mapgen object")?;
     let monster_placements =
         parse_monster_placements(object.get("place_monsters"), "mapgen object")?;
     let individual_monster_placements =
@@ -881,11 +913,13 @@ where
         terrain: state.terrain,
         furniture: state.furniture,
         items: state.items,
+        vehicles: state.vehicles,
         palette_closure: state.palette_closure,
         fallback_predecessor_mapgen,
         nested,
         area_items,
         npc_placements,
+        vehicle_placements,
         monster_placements,
         individual_monster_placements,
         erase_all_before_placing_terrain,
@@ -966,6 +1000,10 @@ where
         raw.object.get("place_npcs"),
         &format!("nested mapgen {:?}", raw.nested_id),
     )?;
+    let vehicle_placements = parse_vehicle_placements(
+        raw.object.get("place_vehicles"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
     let monster_placements = parse_monster_placements(
         raw.object.get("place_monsters"),
         &format!("nested mapgen {:?}", raw.nested_id),
@@ -974,15 +1012,6 @@ where
         raw.object.get("place_monster"),
         &format!("nested mapgen {:?}", raw.nested_id),
     )?;
-    for field in ["place_vehicles"] {
-        if raw
-            .object
-            .get(field)
-            .is_some_and(|value| !value.as_array().is_some_and(Vec::is_empty) && !value.is_null())
-        {
-            state.deferred_fields.insert(field.to_owned());
-        }
-    }
     Ok(StrictNestedMapgenDefinition {
         source: raw.source.clone(),
         nested_id: raw.nested_id.clone(),
@@ -994,10 +1023,12 @@ where
         terrain: state.terrain,
         furniture: state.furniture,
         items: state.items,
+        vehicles: state.vehicles,
         palette_closure: state.palette_closure,
         nested,
         area_items,
         npc_placements,
+        vehicle_placements,
         monster_placements,
         individual_monster_placements,
         erase_all_before_placing_terrain: parse_erase_all_flag(raw.object.get("flags"))?,
@@ -1222,6 +1253,139 @@ fn parse_npc_placements(
                 x: parse_coordinate_range(object.get("x"), "x", &placement_context)?,
                 y: parse_coordinate_range(object.get("y"), "y", &placement_context)?,
             })
+        })
+        .collect()
+}
+
+fn parse_vehicle_placements(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenVehiclePlacement>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let placements = value
+        .as_array()
+        .ok_or_else(|| format!("place_vehicles in {context} must be an array"))?;
+    if placements.len() > MAX_NESTED_MAPGEN_PLACEMENTS {
+        return Err(format!(
+            "place_vehicles in {context} exceeds {MAX_NESTED_MAPGEN_PLACEMENTS} placements"
+        ));
+    }
+    placements
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let placement_context = format!("place_vehicles[{index}] in {context}");
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("{placement_context} must be an object"))?;
+            let vehicle = parse_vehicle_binding(object, &placement_context, true)?;
+            if let Some(z) = object.get("z") {
+                let z = parse_coordinate_range(Some(z), "z", &placement_context)?;
+                if z.minimum != 0 || z.maximum != 0 {
+                    return Err(format!(
+                        "nonzero vehicle z placement is unsupported in {placement_context}"
+                    ));
+                }
+            }
+            Ok(StrictMapgenVehiclePlacement {
+                vehicle,
+                x: parse_coordinate_range(object.get("x"), "x", &placement_context)?,
+                y: parse_coordinate_range(object.get("y"), "y", &placement_context)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_vehicle_binding(
+    object: &Map<String, Value>,
+    context: &str,
+    positioned: bool,
+) -> Result<StrictMapgenVehicleBinding, String> {
+    let mut allowed = vec![
+        "vehicle", "chance", "rotation", "fuel", "status", "faction", "repeat",
+    ];
+    if positioned {
+        allowed.extend(["x", "y", "z"]);
+    }
+    reject_unknown_fields(object, &allowed, context)?;
+    let vehicle_group_id = object
+        .get("vehicle")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or_else(|| format!("vehicle in {context} must be one fixed bounded group id"))?
+        .to_owned();
+    let chance_percent = object
+        .get("chance")
+        .map_or(Some(100), Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value <= 100)
+        .ok_or_else(|| format!("chance in {context} must be an integer from 0 through 100"))?;
+    let fuel_percent = object
+        .get("fuel")
+        .map_or(Some(-1), Value::as_i64)
+        .and_then(|value| i16::try_from(value).ok())
+        .filter(|value| *value >= -1)
+        .ok_or_else(|| format!("fuel in {context} must be an integer at least -1"))?;
+    let status = object
+        .get("status")
+        .map_or(Some(-1), Value::as_i64)
+        .and_then(|value| i8::try_from(value).ok())
+        .filter(|value| (-1..=2).contains(value))
+        .ok_or_else(|| format!("status in {context} must be -1, 0, 1, or 2"))?;
+    let faction_id = object
+        .get("faction")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| id.len() <= 512 && !id.chars().any(char::is_control))
+                .map(str::to_owned)
+                .ok_or_else(|| format!("faction in {context} must be a bounded static id"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(StrictMapgenVehicleBinding {
+        vehicle_group_id,
+        chance_percent,
+        rotations_degrees: parse_vehicle_rotations(object.get("rotation"), context)?,
+        fuel_percent,
+        status,
+        faction_id,
+        repeat: parse_u16_range(
+            object.get("repeat"),
+            1,
+            0,
+            MAX_NESTED_MAPGEN_PLACEMENTS as u16,
+            "repeat",
+            context,
+        )?,
+    })
+}
+
+fn parse_vehicle_rotations(value: Option<&Value>, context: &str) -> Result<Vec<i16>, String> {
+    let values = match value {
+        None => vec![0_i64],
+        Some(value) if value.is_i64() => vec![value.as_i64().expect("checked integer")],
+        Some(value) => value
+            .as_array()
+            .filter(|values| !values.is_empty() && values.len() <= MAX_MAPGEN_CHOICE_ENTRIES)
+            .ok_or_else(|| {
+                format!("rotation in {context} must be one integer or a nonempty bounded array")
+            })?
+            .iter()
+            .map(|value| {
+                value
+                    .as_i64()
+                    .ok_or_else(|| format!("rotation in {context} must contain integers"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    values
+        .into_iter()
+        .map(|degrees| {
+            i16::try_from(degrees.rem_euclid(360))
+                .map_err(|_| format!("rotation in {context} cannot be normalized"))
         })
         .collect()
 }
@@ -1872,6 +2036,7 @@ struct CompileState {
     terrain: BTreeMap<String, Vec<MapgenIdChoice>>,
     furniture: BTreeMap<String, Vec<MapgenIdChoice>>,
     items: BTreeMap<String, StrictMapgenItemPlacement>,
+    vehicles: BTreeMap<String, Vec<StrictMapgenVehicleBinding>>,
     palette_closure: Vec<String>,
     layer_count: usize,
     deferred_fields: BTreeSet<String>,
@@ -2003,6 +2168,12 @@ where
         context,
         item_group_exists,
         &mut state.items,
+        &mut state.layer_count,
+    )?;
+    append_vehicle_binding_map(
+        object.get("vehicles"),
+        context,
+        &mut state.vehicles,
         &mut state.layer_count,
     )?;
     append_sign_binding_map(
@@ -2189,6 +2360,64 @@ where
             return Err(format!(
                 "items[{key:?}] in {context} duplicates an inherited static item placement"
             ));
+        }
+    }
+    Ok(())
+}
+
+fn append_vehicle_binding_map(
+    value: Option<&Value>,
+    context: &str,
+    output: &mut BTreeMap<String, Vec<StrictMapgenVehicleBinding>>,
+    layer_count: &mut usize,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let bindings = value
+        .as_object()
+        .ok_or_else(|| format!("vehicles in {context} must be a glyph object"))?;
+    if bindings.len() > MAX_MAPGEN_BINDINGS {
+        return Err(format!(
+            "vehicles in {context} exceeds {MAX_MAPGEN_BINDINGS} bindings"
+        ));
+    }
+    for (key, value) in bindings {
+        let key = parse_binding_key(key, "vehicles", context)?;
+        let values: Vec<&Value> = if value.is_object() {
+            vec![value]
+        } else {
+            value
+                .as_array()
+                .filter(|values| {
+                    !values.is_empty() && values.len() <= MAX_MAPGEN_CHOICE_ENTRIES
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "vehicles[{key:?}] in {context} must be one object or a bounded object array"
+                    )
+                })?
+                .iter()
+                .collect()
+        };
+        for (index, value) in values.into_iter().enumerate() {
+            let object = value.as_object().ok_or_else(|| {
+                format!("vehicles[{key:?}][{index}] in {context} must be an object")
+            })?;
+            let placement = parse_vehicle_binding(
+                object,
+                &format!("vehicles[{key:?}][{index}] in {context}"),
+                false,
+            )?;
+            *layer_count = layer_count
+                .checked_add(1)
+                .ok_or_else(|| String::from("mapgen placement layer count overflow"))?;
+            if *layer_count > MAX_MAPGEN_PALETTE_LAYERS {
+                return Err(format!(
+                    "mapgen placement layers exceed {MAX_MAPGEN_PALETTE_LAYERS}"
+                ));
+            }
+            output.entry(key.clone()).or_default().push(placement);
         }
     }
     Ok(())
