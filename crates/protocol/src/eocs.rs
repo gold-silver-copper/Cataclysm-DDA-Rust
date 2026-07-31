@@ -94,12 +94,21 @@ pub enum EocActorStatV1 {
     Perception,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EocActorValueV1 {
+    Stamina,
+    MaximumStamina,
+    Thirst,
+    Sleepiness,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EocMathExpressionV1 {
     Constant(i64),
     ActorVariable(String),
     HasActorVariable(String),
     ActorStat(EocActorStatV1),
+    ActorValue(EocActorValueV1),
     Negate(Box<Self>),
     Not(Box<Self>),
     Add(Box<Self>, Box<Self>),
@@ -113,6 +122,13 @@ pub enum EocMathExpressionV1 {
     GreaterOrEqual(Box<Self>, Box<Self>),
     And(Box<Self>, Box<Self>),
     Or(Box<Self>, Box<Self>),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EocMathAssignmentTargetV1 {
+    ActorVariable(String),
+    ActorStat(EocActorStatV1),
+    ActorValue(EocActorValueV1),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -148,7 +164,7 @@ pub enum EocEffectV1 {
         variable_id: String,
     },
     MathAssignment {
-        variable_id: String,
+        target: EocMathAssignmentTargetV1,
         operation: EocMathAssignmentOperationV1,
         value: EocMathExpressionV1,
     },
@@ -404,9 +420,10 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                         .all(|value| valid_variable_value(value))
             }
             EocEffectV1::RemoveActorVariable { variable_id } => valid_id(variable_id),
-            EocEffectV1::MathAssignment {
-                variable_id, value, ..
-            } => valid_id(variable_id) && valid_math_expression_tree(value, depth + 1, nodes),
+            EocEffectV1::MathAssignment { target, value, .. } => {
+                valid_math_assignment_target(target)
+                    && valid_math_expression_tree(value, depth + 1, nodes)
+            }
             EocEffectV1::Confirmation {
                 prompt,
                 accept_effects,
@@ -477,7 +494,7 @@ fn valid_math_expression(
         EocMathExpressionV1::Constant(value) => value.unsigned_abs() <= MAX_EOC_SAFE_INTEGER as u64,
         EocMathExpressionV1::ActorVariable(variable_id)
         | EocMathExpressionV1::HasActorVariable(variable_id) => valid_id(variable_id),
-        EocMathExpressionV1::ActorStat(_) => true,
+        EocMathExpressionV1::ActorStat(_) | EocMathExpressionV1::ActorValue(_) => true,
         EocMathExpressionV1::Negate(value) | EocMathExpressionV1::Not(value) => {
             valid_math_expression(value, depth + 1, nodes)
         }
@@ -495,6 +512,14 @@ fn valid_math_expression(
             valid_math_expression(left, depth + 1, nodes)
                 && valid_math_expression(right, depth + 1, nodes)
         }
+    }
+}
+
+fn valid_math_assignment_target(target: &EocMathAssignmentTargetV1) -> bool {
+    match target {
+        EocMathAssignmentTargetV1::ActorVariable(variable_id) => valid_id(variable_id),
+        EocMathAssignmentTargetV1::ActorStat(_) => true,
+        EocMathAssignmentTargetV1::ActorValue(value) => *value != EocActorValueV1::MaximumStamina,
     }
 }
 

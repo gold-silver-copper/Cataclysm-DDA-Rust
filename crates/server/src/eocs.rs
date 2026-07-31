@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EocActorStatDefinition,
-    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition, EocEventTriggerDefinition,
-    EocMathAssignmentOperationDefinition, EocMathExpressionDefinition, EocStringValueDefinition,
+    EocActorValueDefinition, EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,
+    EocEventTriggerDefinition, EocMathAssignmentOperationDefinition,
+    EocMathAssignmentTargetDefinition, EocMathExpressionDefinition, EocStringValueDefinition,
     ItemRegistry, ProficiencyRegistry, RecipeRegistry,
 };
 use cdda_protocol::{
-    AnatomyDefinitionV1, EocActorStatV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
-    EocEventTriggerV1, EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathExpressionV1,
-    EocStringValueV1, eoc_catalog_is_valid,
+    AnatomyDefinitionV1, EocActorStatV1, EocActorValueV1, EocConditionV1, EocDefinitionV1,
+    EocDelayV1, EocEffectV1, EocEventTriggerV1, EocItemUseTypeV1, EocMathAssignmentOperationV1,
+    EocMathAssignmentTargetV1, EocMathExpressionV1, EocStringValueV1, eoc_catalog_is_valid,
 };
 
 pub(super) fn runtime_eoc_catalog(
@@ -448,7 +449,17 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
             }
         }
         EocEffectDefinition::MathAssignment(assignment) => EocEffectV1::MathAssignment {
-            variable_id: assignment.variable_id.clone(),
+            target: match &assignment.target {
+                EocMathAssignmentTargetDefinition::ActorVariable(variable_id) => {
+                    EocMathAssignmentTargetV1::ActorVariable(variable_id.clone())
+                }
+                EocMathAssignmentTargetDefinition::ActorStat(stat) => {
+                    EocMathAssignmentTargetV1::ActorStat(runtime_actor_stat(*stat))
+                }
+                EocMathAssignmentTargetDefinition::ActorValue(value) => {
+                    EocMathAssignmentTargetV1::ActorValue(runtime_actor_value(*value))
+                }
+            },
             operation: match assignment.operation {
                 EocMathAssignmentOperationDefinition::Set => EocMathAssignmentOperationV1::Set,
                 EocMathAssignmentOperationDefinition::Add => EocMathAssignmentOperationV1::Add,
@@ -512,12 +523,10 @@ fn runtime_math_expression(expression: &EocMathExpressionDefinition) -> EocMathE
             EocMathExpressionV1::HasActorVariable(variable_id.clone())
         }
         EocMathExpressionDefinition::ActorStat(stat) => {
-            EocMathExpressionV1::ActorStat(match stat {
-                EocActorStatDefinition::Strength => EocActorStatV1::Strength,
-                EocActorStatDefinition::Dexterity => EocActorStatV1::Dexterity,
-                EocActorStatDefinition::Intelligence => EocActorStatV1::Intelligence,
-                EocActorStatDefinition::Perception => EocActorStatV1::Perception,
-            })
+            EocMathExpressionV1::ActorStat(runtime_actor_stat(*stat))
+        }
+        EocMathExpressionDefinition::ActorValue(value) => {
+            EocMathExpressionV1::ActorValue(runtime_actor_value(*value))
         }
         EocMathExpressionDefinition::Negate(value) => {
             EocMathExpressionV1::Negate(Box::new(runtime_math_expression(value)))
@@ -569,5 +578,23 @@ fn runtime_math_expression(expression: &EocMathExpressionDefinition) -> EocMathE
             let (left, right) = binary(left, right);
             EocMathExpressionV1::Or(left, right)
         }
+    }
+}
+
+fn runtime_actor_stat(stat: EocActorStatDefinition) -> EocActorStatV1 {
+    match stat {
+        EocActorStatDefinition::Strength => EocActorStatV1::Strength,
+        EocActorStatDefinition::Dexterity => EocActorStatV1::Dexterity,
+        EocActorStatDefinition::Intelligence => EocActorStatV1::Intelligence,
+        EocActorStatDefinition::Perception => EocActorStatV1::Perception,
+    }
+}
+
+fn runtime_actor_value(value: EocActorValueDefinition) -> EocActorValueV1 {
+    match value {
+        EocActorValueDefinition::Stamina => EocActorValueV1::Stamina,
+        EocActorValueDefinition::MaximumStamina => EocActorValueV1::MaximumStamina,
+        EocActorValueDefinition::Thirst => EocActorValueV1::Thirst,
+        EocActorValueDefinition::Sleepiness => EocActorValueV1::Sleepiness,
     }
 }

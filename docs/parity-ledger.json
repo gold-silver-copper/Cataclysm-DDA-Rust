@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 115,
-  "persistence_schema_version": 93,
+  "protocol_version": 116,
+  "persistence_schema_version": 94,
   "replay_format_version": 3,
   "active_milestone": "eoc-use-actions",
   "completion_gate": [
@@ -434,6 +434,7 @@
         { "id": "bounded-integer-actor-variable-math", "state": "implementation_complete_verification_deferred" },
         { "id": "bounded-authoritative-world-event-eoc-dispatch", "state": "implementation_complete_verification_deferred" },
         { "id": "persistent-server-driven-eoc-confirmations", "state": "implementation_complete_verification_deferred" },
+        { "id": "authoritative-actor-needs-stamina-and-base-stat-math", "state": "implementation_complete_verification_deferred" },
         { "id": "dynamic-values-events-and-interactions", "state": "planned" }
       ],
       "priority": 23,

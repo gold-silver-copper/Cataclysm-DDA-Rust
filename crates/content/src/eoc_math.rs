@@ -12,6 +12,7 @@ pub enum EocMathExpressionDefinition {
     ActorVariable(String),
     HasActorVariable(String),
     ActorStat(EocActorStatDefinition),
+    ActorValue(EocActorValueDefinition),
     Negate(Box<Self>),
     Not(Box<Self>),
     Add(Box<Self>, Box<Self>),
@@ -28,6 +29,21 @@ pub enum EocMathExpressionDefinition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EocActorValueDefinition {
+    Stamina,
+    MaximumStamina,
+    Thirst,
+    Sleepiness,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EocMathAssignmentTargetDefinition {
+    ActorVariable(String),
+    ActorStat(EocActorStatDefinition),
+    ActorValue(EocActorValueDefinition),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EocMathAssignmentOperationDefinition {
     Set,
     Add,
@@ -37,7 +53,7 @@ pub enum EocMathAssignmentOperationDefinition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EocMathAssignmentDefinition {
-    pub variable_id: String,
+    pub target: EocMathAssignmentTargetDefinition,
     pub operation: EocMathAssignmentOperationDefinition,
     pub value: EocMathExpressionDefinition,
 }
@@ -81,17 +97,17 @@ pub(crate) fn parse_math_assignment(value: &Value) -> Option<EocMathAssignmentDe
     let source = math_source(value)?;
     let tokens = lex(source)?;
     let mut parser = Parser::new(tokens);
-    let variable_id = parser.take_actor_variable()?;
+    let target = parser.take_assignment_target()?;
     if parser.take_if(&Token::PlusPlus) {
         return parser.finished().then_some(EocMathAssignmentDefinition {
-            variable_id,
+            target,
             operation: EocMathAssignmentOperationDefinition::Add,
             value: EocMathExpressionDefinition::Constant(1),
         });
     }
     if parser.take_if(&Token::MinusMinus) {
         return parser.finished().then_some(EocMathAssignmentDefinition {
-            variable_id,
+            target,
             operation: EocMathAssignmentOperationDefinition::Subtract,
             value: EocMathExpressionDefinition::Constant(1),
         });
@@ -105,7 +121,7 @@ pub(crate) fn parse_math_assignment(value: &Value) -> Option<EocMathAssignmentDe
     };
     let value = parser.parse_expression()?;
     parser.finished().then_some(EocMathAssignmentDefinition {
-        variable_id,
+        target,
         operation,
         value,
     })
@@ -264,6 +280,50 @@ impl Parser {
         actor_variable_id(&identifier)
     }
 
+    fn take_assignment_target(&mut self) -> Option<EocMathAssignmentTargetDefinition> {
+        let Token::Identifier(identifier) = self.take()? else {
+            return None;
+        };
+        if identifier != "u_val" {
+            return actor_variable_id(&identifier)
+                .map(EocMathAssignmentTargetDefinition::ActorVariable);
+        }
+        if !self.take_if(&Token::LeftParen) {
+            return None;
+        }
+        let name = match self.take()? {
+            Token::Text(name) | Token::Identifier(name) => name,
+            _ => return None,
+        };
+        if !self.take_if(&Token::RightParen) {
+            return None;
+        }
+        Some(match name.as_str() {
+            "strength_base" => {
+                EocMathAssignmentTargetDefinition::ActorStat(EocActorStatDefinition::Strength)
+            }
+            "dexterity_base" => {
+                EocMathAssignmentTargetDefinition::ActorStat(EocActorStatDefinition::Dexterity)
+            }
+            "intelligence_base" => {
+                EocMathAssignmentTargetDefinition::ActorStat(EocActorStatDefinition::Intelligence)
+            }
+            "perception_base" => {
+                EocMathAssignmentTargetDefinition::ActorStat(EocActorStatDefinition::Perception)
+            }
+            "stamina" => {
+                EocMathAssignmentTargetDefinition::ActorValue(EocActorValueDefinition::Stamina)
+            }
+            "thirst" => {
+                EocMathAssignmentTargetDefinition::ActorValue(EocActorValueDefinition::Thirst)
+            }
+            "sleepiness" => {
+                EocMathAssignmentTargetDefinition::ActorValue(EocActorValueDefinition::Sleepiness)
+            }
+            _ => return None,
+        })
+    }
+
     fn parse_expression(&mut self) -> Option<EocMathExpressionDefinition> {
         self.parse_or()
     }
@@ -373,17 +433,37 @@ impl Parser {
                 EocMathExpressionDefinition::HasActorVariable(variable_id)
             }
             "u_val" => {
-                let stat = match self.take()? {
-                    Token::Text(stat) | Token::Identifier(stat) => stat,
+                let value = match self.take()? {
+                    Token::Text(value) | Token::Identifier(value) => value,
                     _ => return None,
                 };
-                EocMathExpressionDefinition::ActorStat(match stat.as_str() {
-                    "strength" => EocActorStatDefinition::Strength,
-                    "dexterity" => EocActorStatDefinition::Dexterity,
-                    "intelligence" => EocActorStatDefinition::Intelligence,
-                    "perception" => EocActorStatDefinition::Perception,
+                match value.as_str() {
+                    "strength" | "strength_base" => {
+                        EocMathExpressionDefinition::ActorStat(EocActorStatDefinition::Strength)
+                    }
+                    "dexterity" | "dexterity_base" => {
+                        EocMathExpressionDefinition::ActorStat(EocActorStatDefinition::Dexterity)
+                    }
+                    "intelligence" | "intelligence_base" => {
+                        EocMathExpressionDefinition::ActorStat(EocActorStatDefinition::Intelligence)
+                    }
+                    "perception" | "perception_base" => {
+                        EocMathExpressionDefinition::ActorStat(EocActorStatDefinition::Perception)
+                    }
+                    "stamina" => {
+                        EocMathExpressionDefinition::ActorValue(EocActorValueDefinition::Stamina)
+                    }
+                    "stamina_max" => EocMathExpressionDefinition::ActorValue(
+                        EocActorValueDefinition::MaximumStamina,
+                    ),
+                    "thirst" => {
+                        EocMathExpressionDefinition::ActorValue(EocActorValueDefinition::Thirst)
+                    }
+                    "sleepiness" => {
+                        EocMathExpressionDefinition::ActorValue(EocActorValueDefinition::Sleepiness)
+                    }
                     _ => return None,
-                })
+                }
             }
             _ => return None,
         };

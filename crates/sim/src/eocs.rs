@@ -4,16 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocActorStatV1,
-    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1, EocItemUseTypeV1,
-    EocMathAssignmentOperationV1, EocMathExpressionV1, EocStringValueV1, ItemId,
-    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, ScheduledEocV1,
-    SimTick, WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
+    EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1,
+    EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathAssignmentTargetV1, EocMathExpressionV1,
+    EocStringValueV1, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
+    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, ScheduledEocV1, SimTick, WORLDGEN_OMT_SIZE,
+    WorldEvent, WorldEventKind, eoc_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
 
 use crate::{
-    SimError, WorldState, inclusive_rng_u64,
+    SLEEPINESS_MAX, SimError, WorldState, inclusive_rng_u64,
     items::{InventoryTypeSummary, summarize_inventory_by_type},
 };
 
@@ -252,6 +253,7 @@ impl WorldState {
             .actors
             .get_mut(&actor_id)
             .ok_or(SimError::UnknownActor)?;
+        commit_eoc_actor_context(actor, &execution.actor);
         actor.effects = std::mem::take(&mut execution.effects);
         actor.eoc_variables = std::mem::take(&mut execution.variables);
         actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
@@ -397,6 +399,7 @@ impl WorldState {
                 .actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
+            commit_eoc_actor_context(actor, &execution.actor);
             actor.effects = execution.effects;
             actor.eoc_variables = execution.variables;
             actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
@@ -529,6 +532,7 @@ impl WorldState {
                 .actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
+            commit_eoc_actor_context(actor, &execution.actor);
             actor.effects = execution.effects;
             actor.eoc_variables = execution.variables;
             actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
@@ -692,10 +696,14 @@ struct EocActorContext {
     has_weapon: bool,
     learned_recipes: BTreeSet<String>,
     learned_proficiencies: BTreeSet<String>,
-    base_strength: i32,
-    base_dexterity: i32,
-    base_intelligence: i32,
-    base_perception: i32,
+    base_strength: u16,
+    base_dexterity: u16,
+    base_intelligence: u16,
+    base_perception: u16,
+    stamina: u32,
+    maximum_stamina: u32,
+    thirst: i32,
+    sleepiness: i32,
 }
 
 fn eoc_actor_context(actor: &crate::Actor) -> EocActorContext {
@@ -715,11 +723,25 @@ fn eoc_actor_context(actor: &crate::Actor) -> EocActorContext {
             .filter(|(_id, proficiency)| proficiency.learned)
             .map(|(id, _proficiency)| id.clone())
             .collect(),
-        base_strength: i32::from(actor.base_strength),
-        base_dexterity: i32::from(actor.base_dexterity),
-        base_intelligence: i32::from(actor.base_intelligence),
-        base_perception: i32::from(actor.base_perception),
+        base_strength: actor.base_strength,
+        base_dexterity: actor.base_dexterity,
+        base_intelligence: actor.base_intelligence,
+        base_perception: actor.base_perception,
+        stamina: actor.stamina,
+        maximum_stamina: actor.maximum_stamina,
+        thirst: actor.thirst,
+        sleepiness: actor.sleepiness,
     }
+}
+
+fn commit_eoc_actor_context(actor: &mut crate::Actor, context: &EocActorContext) {
+    actor.base_strength = context.base_strength;
+    actor.base_dexterity = context.base_dexterity;
+    actor.base_intelligence = context.base_intelligence;
+    actor.base_perception = context.base_perception;
+    actor.stamina = context.stamina;
+    actor.thirst = context.thirst;
+    actor.sleepiness = context.sleepiness;
 }
 
 fn execute_eoc(
@@ -839,12 +861,12 @@ fn evaluate_condition(
         }
         EocConditionV1::KnowsRecipe { recipe_id } => actor.learned_recipes.contains(recipe_id),
         EocConditionV1::StatAtLeast { stat, minimum } => {
-            let actual = match stat {
+            let actual = i32::from(match stat {
                 EocActorStatV1::Strength => actor.base_strength,
                 EocActorStatV1::Dexterity => actor.base_dexterity,
                 EocActorStatV1::Intelligence => actor.base_intelligence,
                 EocActorStatV1::Perception => actor.base_perception,
-            };
+            });
             actual >= *minimum
         }
         EocConditionV1::Math(expression) => {
@@ -909,6 +931,7 @@ fn evaluate_math_expression(
             EocActorStatV1::Intelligence => actor.base_intelligence,
             EocActorStatV1::Perception => actor.base_perception,
         })),
+        EocMathExpressionV1::ActorValue(value) => Ok(actor_value(actor, *value)),
         EocMathExpressionV1::Negate(value) => safe_math_result(
             evaluate_math_expression(value, actor, variables, operations)?.checked_neg(),
         ),
@@ -983,6 +1006,81 @@ fn actor_variable_integer(
     safe_math_result(Some(value))
 }
 
+fn actor_value(actor: &EocActorContext, value: EocActorValueV1) -> i64 {
+    match value {
+        EocActorValueV1::Stamina => i64::from(actor.stamina),
+        EocActorValueV1::MaximumStamina => i64::from(actor.maximum_stamina),
+        EocActorValueV1::Thirst => i64::from(actor.thirst),
+        EocActorValueV1::Sleepiness => i64::from(actor.sleepiness),
+    }
+}
+
+fn math_assignment_target_value(
+    target: &EocMathAssignmentTargetV1,
+    actor: &EocActorContext,
+    variables: &BTreeMap<String, String>,
+) -> Result<i64, SimError> {
+    Ok(match target {
+        EocMathAssignmentTargetV1::ActorVariable(variable_id) => {
+            actor_variable_integer(variables, variable_id)?
+        }
+        EocMathAssignmentTargetV1::ActorStat(stat) => i64::from(match stat {
+            EocActorStatV1::Strength => actor.base_strength,
+            EocActorStatV1::Dexterity => actor.base_dexterity,
+            EocActorStatV1::Intelligence => actor.base_intelligence,
+            EocActorStatV1::Perception => actor.base_perception,
+        }),
+        EocMathAssignmentTargetV1::ActorValue(value) => actor_value(actor, *value),
+    })
+}
+
+fn apply_math_assignment_target(
+    target: &EocMathAssignmentTargetV1,
+    value: i64,
+    actor: &mut EocActorContext,
+    variables: &mut BTreeMap<String, String>,
+) -> Result<(), SimError> {
+    match target {
+        EocMathAssignmentTargetV1::ActorVariable(variable_id) => {
+            if !variables.contains_key(variable_id) && variables.len() >= MAX_EOC_ACTOR_VARIABLES {
+                return Err(SimError::InvalidItem);
+            }
+            variables.insert(variable_id.clone(), value.to_string());
+        }
+        EocMathAssignmentTargetV1::ActorStat(stat) => {
+            let value = u16::try_from(value)
+                .ok()
+                .filter(|value| (1..=MAX_ACTOR_BASE_STAT).contains(value))
+                .ok_or(SimError::NumericOverflow)?;
+            match stat {
+                EocActorStatV1::Strength => actor.base_strength = value,
+                EocActorStatV1::Dexterity => actor.base_dexterity = value,
+                EocActorStatV1::Intelligence => actor.base_intelligence = value,
+                EocActorStatV1::Perception => actor.base_perception = value,
+            }
+        }
+        EocMathAssignmentTargetV1::ActorValue(EocActorValueV1::Stamina) => {
+            actor.stamina = u32::try_from(value)
+                .ok()
+                .filter(|value| *value <= actor.maximum_stamina)
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        EocMathAssignmentTargetV1::ActorValue(EocActorValueV1::Thirst) => {
+            actor.thirst = i32::try_from(value).map_err(|_| SimError::NumericOverflow)?;
+        }
+        EocMathAssignmentTargetV1::ActorValue(EocActorValueV1::Sleepiness) => {
+            actor.sleepiness = i32::try_from(value)
+                .ok()
+                .filter(|value| (-1_000..=SLEEPINESS_MAX).contains(value))
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        EocMathAssignmentTargetV1::ActorValue(EocActorValueV1::MaximumStamina) => {
+            return Err(SimError::InvalidItem);
+        }
+    }
+    Ok(())
+}
+
 fn safe_math_result(value: Option<i64>) -> Result<i64, SimError> {
     value
         .filter(|value| value.unsigned_abs() <= MAX_EOC_SAFE_INTEGER as u64)
@@ -1048,7 +1146,7 @@ fn execute_effects(
                 execution.variables.remove(variable_id);
             }
             EocEffectV1::MathAssignment {
-                variable_id,
+                target,
                 operation,
                 value,
             } => {
@@ -1063,7 +1161,11 @@ fn execute_effects(
                     EocMathAssignmentOperationV1::Add
                     | EocMathAssignmentOperationV1::Subtract
                     | EocMathAssignmentOperationV1::Multiply => {
-                        let current = actor_variable_integer(&execution.variables, variable_id)?;
+                        let current = math_assignment_target_value(
+                            target,
+                            &execution.actor,
+                            &execution.variables,
+                        )?;
                         safe_math_result(match operation {
                             EocMathAssignmentOperationV1::Add => current.checked_add(value),
                             EocMathAssignmentOperationV1::Subtract => current.checked_sub(value),
@@ -1072,14 +1174,12 @@ fn execute_effects(
                         })?
                     }
                 };
-                if !execution.variables.contains_key(variable_id)
-                    && execution.variables.len() >= MAX_EOC_ACTOR_VARIABLES
-                {
-                    return Err(SimError::InvalidItem);
-                }
-                execution
-                    .variables
-                    .insert(variable_id.clone(), next.to_string());
+                apply_math_assignment_target(
+                    target,
+                    next,
+                    &mut execution.actor,
+                    &mut execution.variables,
+                )?;
             }
             EocEffectV1::Confirmation {
                 prompt,
