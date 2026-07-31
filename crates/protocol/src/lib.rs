@@ -115,7 +115,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 131;
+pub const PROTOCOL_VERSION: u16 = 129;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3160,6 +3160,15 @@ pub struct WorldgenAreaItemPlacementV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNpcPlacementV1 {
+    pub template_id: String,
+    /// One pinned repeat interval is sampled before applying the placement.
+    pub repeat: WorldgenU16RangeV1,
+    pub x: WorldgenCoordinateRangeV1,
+    pub y: WorldgenCoordinateRangeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenNestedChoiceV1 {
     /// `null` is the pinned explicit no-op branch.
     pub nested_id: String,
@@ -3239,6 +3248,7 @@ pub struct WorldgenTemplateV1 {
     pub cells: Vec<WorldgenCellV1>,
     pub nested: Vec<WorldgenNestedPlacementV1>,
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
+    pub npc_placements: Vec<WorldgenNpcPlacementV1>,
     pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
     pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
@@ -3255,6 +3265,7 @@ pub struct WorldgenNestedTemplateV1 {
     pub cells: Vec<WorldgenCellV1>,
     pub nested: Vec<WorldgenNestedPlacementV1>,
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
+    pub npc_placements: Vec<WorldgenNpcPlacementV1>,
     pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
     pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
@@ -5558,6 +5569,13 @@ fn valid_worldgen_area_item_placement(placement: &WorldgenAreaItemPlacementV1) -
         && valid_worldgen_coordinate_range(placement.y)
 }
 
+fn valid_worldgen_npc_placement(placement: &WorldgenNpcPlacementV1) -> bool {
+    valid_worldgen_id(&placement.template_id)
+        && valid_worldgen_u16_range(placement.repeat, 0, MAX_WORLDGEN_MONSTER_REPEAT)
+        && valid_worldgen_coordinate_range(placement.x)
+        && valid_worldgen_coordinate_range(placement.y)
+}
+
 fn valid_worldgen_u16_range(range: WorldgenU16RangeV1, minimum: u16, maximum: u16) -> bool {
     range.minimum >= minimum && range.minimum <= range.maximum && range.maximum <= maximum
 }
@@ -6540,6 +6558,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         && template.predecessor_id.is_none()
                         && template.nested.is_empty()
                         && template.area_items.is_empty()
+                        && template.npc_placements.is_empty()
                         && template.monster_placements.is_empty()
                         && template.individual_monster_placements.is_empty()
                         && !template.erase_all_before_placing_terrain
@@ -6570,6 +6589,10 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                     .area_items
                     .iter()
                     .all(valid_worldgen_area_item_placement)
+                || !template
+                    .npc_placements
+                    .iter()
+                    .all(valid_worldgen_npc_placement)
                 || !template.monster_placements.iter().all(|placement| {
                     valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
                 })
@@ -6590,6 +6613,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
             let Some(total) = nested_placement_count
                 .checked_add(template.nested.len())
                 .and_then(|total| total.checked_add(template.area_items.len()))
+                .and_then(|total| total.checked_add(template.npc_placements.len()))
                 .and_then(|total| total.checked_add(template.monster_placements.len()))
                 .and_then(|total| total.checked_add(template.individual_monster_placements.len()))
             else {
@@ -6659,6 +6683,10 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         .area_items
                         .iter()
                         .all(valid_worldgen_area_item_placement)
+                    || !template
+                        .npc_placements
+                        .iter()
+                        .all(valid_worldgen_npc_placement)
                     || !template.monster_placements.iter().all(|placement| {
                         valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
                     })
@@ -6679,6 +6707,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                 let Some(total) = nested_placement_count
                     .checked_add(template.nested.len())
                     .and_then(|total| total.checked_add(template.area_items.len()))
+                    .and_then(|total| total.checked_add(template.npc_placements.len()))
                     .and_then(|total| total.checked_add(template.monster_placements.len()))
                     .and_then(|total| {
                         total.checked_add(template.individual_monster_placements.len())
@@ -8837,6 +8866,7 @@ mod tests {
                     cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
+                    npc_placements: Vec::new(),
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,

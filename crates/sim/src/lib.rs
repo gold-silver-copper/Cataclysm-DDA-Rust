@@ -5283,6 +5283,7 @@ impl WorldState {
                 &item_groups,
                 ACTIVE_BUBBLE_RADIUS_SUBMAPS,
             )
+            || !mapgen::catalog_npc_placements_are_supported(&catalog, &self.npc_templates)
             || !mapgen::catalog_initial_bubble_is_admissible(
                 &catalog,
                 ChunkCoord { x: 0, y: 0, z: 0 },
@@ -6114,7 +6115,6 @@ impl WorldState {
             }
         }
         let restored_id = actor.id;
-        let restored_position = actor.position;
         self.actors.insert(
             restored_id,
             Actor {
@@ -9881,6 +9881,7 @@ impl WorldState {
             .values()
             .map(|actor| actor.position)
             .chain(self.creatures.values().map(|creature| creature.position))
+            .chain(self.npcs.values().map(|npc| npc.position))
             .collect::<BTreeSet<_>>();
         let Some(planned) = mapgen::plan_active_bubble(
             self.world_seed,
@@ -9899,6 +9900,7 @@ impl WorldState {
             .checked_add(
                 u64::try_from(planned.creatures.len()).map_err(|_| SimError::NumericOverflow)?,
             )
+            .and_then(|count| count.checked_add(u64::try_from(planned.npcs.len()).ok()?))
             .filter(|count| *count <= ID_RESERVATION_SIZE)
             .ok_or(SimError::IdReservationExhausted)?;
         if self.allocator.remaining() < required_ids {
@@ -9929,6 +9931,9 @@ impl WorldState {
             {
                 return Err(SimError::InvalidItem);
             }
+        }
+        for npc in planned.npcs {
+            self.spawn_npc(&npc.template_id, None, npc.position)?;
         }
         for creature in planned.creatures {
             self.spawn_creature(creature)?;
@@ -14572,6 +14577,11 @@ impl WorldState {
             .cloned()
             .map(|template| (template.template_id.clone(), template))
             .collect::<BTreeMap<_, _>>();
+        if snapshot.worldgen.as_ref().is_some_and(|catalog| {
+            !mapgen::catalog_npc_placements_are_supported(catalog, &npc_templates)
+        }) {
+            return Err(SimError::InvalidTerrain);
+        }
         let dialogue_topics = snapshot
             .dialogue_topics
             .iter()
@@ -15096,7 +15106,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV107");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV105");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -15310,6 +15320,7 @@ mod tests {
                     cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
+                    npc_placements: Vec::new(),
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,
@@ -30582,6 +30593,7 @@ mod tests {
                     cells: field_b_cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
+                    npc_placements: Vec::new(),
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,

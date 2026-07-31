@@ -9,8 +9,8 @@ use cdda_content::{
     RiverSettingsDefinition, SpellRegistry, StartLocationDefinition, StrictMapgenAreaItemPlacement,
     StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
-    StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
-    TerrainRegistry,
+    StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictMapgenNpcPlacement,
+    StrictNestedMapgenDefinition, TerrainRegistry,
 };
 use cdda_protocol::{
     ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1, EocDefinitionV1, ItemGroupDefinitionV1,
@@ -26,14 +26,15 @@ use cdda_protocol::{
     WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
     WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
     WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
-    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
-    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
-    WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1, WorldgenSpecialPlacementV1,
-    WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1, WorldgenStartLocationV1,
-    WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenU16RangeV1,
-    WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
-    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
+    WorldgenNpcPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1,
+    WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
+    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1,
+    WorldgenSpecialPlacementV1, WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
+    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenU16RangeV1, WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
+    worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -180,13 +181,14 @@ pub(super) fn bootstrap_regional_special_overmap(
     terrain: &OvermapTerrainRegistry,
     specials: &OvermapSpecialRegistry,
     mapgen: &MapgenRegistry,
+    npc_template_ids: &BTreeSet<String>,
     world_seed: [u8; 32],
     city_settings: &CitySettingsDefinition,
     river_settings: &RiverSettingsDefinition,
 ) -> Result<RegionalSpecialOvermap, Box<dyn std::error::Error>> {
     let (layout, cities, rivers, exits) =
         bootstrap_regional_road_overmap(terrain, world_seed, city_settings, river_settings)?;
-    let definitions = runtime_fixed_specials(specials, terrain, mapgen, &layout)?;
+    let definitions = runtime_fixed_specials(specials, terrain, mapgen, npc_template_ids, &layout)?;
     let default_below = runtime_omt_identity(terrain, "solid_earth")?;
     let default_above = runtime_omt_identity(terrain, "open_air")?;
     let placed = place_overmap_specials(
@@ -214,6 +216,7 @@ fn runtime_fixed_specials(
     specials: &OvermapSpecialRegistry,
     terrain: &OvermapTerrainRegistry,
     mapgen: &MapgenRegistry,
+    npc_template_ids: &BTreeSet<String>,
     layout: &WorldgenOvermapLayoutV1,
 ) -> Result<Vec<OvermapFixedSpecial>, Box<dyn std::error::Error>> {
     let present_types = layout
@@ -231,7 +234,13 @@ fn runtime_fixed_specials(
             {
                 None
             } else {
-                Some(compile_fixed_special(definition, specials, terrain, mapgen))
+                Some(compile_fixed_special(
+                    definition,
+                    specials,
+                    terrain,
+                    mapgen,
+                    npc_template_ids,
+                ))
             }
         })
         .filter_map(|result| match result {
@@ -247,6 +256,7 @@ fn compile_fixed_special(
     specials: &OvermapSpecialRegistry,
     terrain: &OvermapTerrainRegistry,
     mapgen: &MapgenRegistry,
+    npc_template_ids: &BTreeSet<String>,
 ) -> Result<Option<OvermapFixedSpecial>, Box<dyn std::error::Error>> {
     let mut terrains = Vec::with_capacity(definition.terrains.len());
     for part in &definition.terrains {
@@ -261,10 +271,9 @@ fn compile_fixed_special(
             let Some(peers) = terrain.rotated_peers(overmap) else {
                 return Ok(None);
             };
-            if peers
-                .iter()
-                .any(|identity| !runtime_generator_is_available(&identity.generator_id, mapgen))
-            {
+            if peers.iter().any(|identity| {
+                !runtime_generator_is_available(&identity.generator_id, mapgen, npc_template_ids)
+            }) {
                 return Ok(None);
             }
             peers.into_iter().map(runtime_protocol_identity).collect()
@@ -387,13 +396,23 @@ fn compile_fixed_special(
     }))
 }
 
-fn runtime_generator_is_available(generator_id: &str, mapgen: &MapgenRegistry) -> bool {
-    runtime_generator_is_available_inner(generator_id, mapgen, &mut BTreeSet::new())
+fn runtime_generator_is_available(
+    generator_id: &str,
+    mapgen: &MapgenRegistry,
+    npc_template_ids: &BTreeSet<String>,
+) -> bool {
+    runtime_generator_is_available_inner(
+        generator_id,
+        mapgen,
+        npc_template_ids,
+        &mut BTreeSet::new(),
+    )
 }
 
 fn runtime_generator_is_available_inner(
     generator_id: &str,
     mapgen: &MapgenRegistry,
+    npc_template_ids: &BTreeSet<String>,
     visiting: &mut BTreeSet<String>,
 ) -> bool {
     if runtime_builtin_mapgen(generator_id).is_some() {
@@ -407,10 +426,19 @@ fn runtime_generator_is_available_inner(
             && definitions.iter().all(|definition| {
                 definition.deferred_fields.is_empty()
                     && definition
+                        .npc_placements
+                        .iter()
+                        .all(|placement| npc_template_ids.contains(&placement.template_id))
+                    && definition
                         .fallback_predecessor_mapgen
                         .as_deref()
                         .is_none_or(|predecessor| {
-                            runtime_generator_is_available_inner(predecessor, mapgen, visiting)
+                            runtime_generator_is_available_inner(
+                                predecessor,
+                                mapgen,
+                                npc_template_ids,
+                                visiting,
+                            )
                         })
             })
             && mapgen
@@ -419,9 +447,12 @@ fn runtime_generator_is_available_inner(
                     closure.iter().all(|nested_id| {
                         mapgen.nested(nested_id).is_some_and(|nested| {
                             !nested.is_empty()
-                                && nested
-                                    .iter()
-                                    .all(|definition| definition.deferred_fields.is_empty())
+                                && nested.iter().all(|definition| {
+                                    definition.deferred_fields.is_empty()
+                                        && definition.npc_placements.iter().all(|placement| {
+                                            npc_template_ids.contains(&placement.template_id)
+                                        })
+                                })
                         })
                     })
                 })
@@ -2702,6 +2733,7 @@ fn runtime_builtin_generator(
             cells,
             nested: Vec::new(),
             area_items: Vec::new(),
+            npc_placements: Vec::new(),
             monster_placements: Vec::new(),
             individual_monster_placements: Vec::new(),
             erase_all_before_placing_terrain: false,
@@ -2909,6 +2941,11 @@ fn runtime_mapgen_template(
             .iter()
             .map(runtime_area_item_placement)
             .collect(),
+        npc_placements: definition
+            .npc_placements
+            .iter()
+            .map(runtime_npc_placement)
+            .collect(),
         monster_placements: definition
             .monster_placements
             .iter()
@@ -2963,6 +3000,11 @@ fn runtime_nested_mapgen_template(
             .area_items
             .iter()
             .map(runtime_area_item_placement)
+            .collect(),
+        npc_placements: definition
+            .npc_placements
+            .iter()
+            .map(runtime_npc_placement)
             .collect(),
         monster_placements: definition
             .monster_placements
@@ -3052,6 +3094,18 @@ fn runtime_area_item_placement(
             chance: placement.chance,
             repeat_minimum: 1,
             repeat_maximum: 1,
+        },
+        x: runtime_coordinate_range(placement.x),
+        y: runtime_coordinate_range(placement.y),
+    }
+}
+
+fn runtime_npc_placement(placement: &StrictMapgenNpcPlacement) -> WorldgenNpcPlacementV1 {
+    WorldgenNpcPlacementV1 {
+        template_id: placement.template_id.clone(),
+        repeat: WorldgenU16RangeV1 {
+            minimum: placement.repeat.minimum,
+            maximum: placement.repeat.maximum,
         },
         x: runtime_coordinate_range(placement.x),
         y: runtime_coordinate_range(placement.y),

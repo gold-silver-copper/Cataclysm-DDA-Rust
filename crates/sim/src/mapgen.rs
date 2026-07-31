@@ -5,10 +5,11 @@ use cdda_protocol::{
     WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
     WorldgenMonsterGroupTargetV1, WorldgenMonsterPlacementV1, WorldgenNestedConditionsV1,
     WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
-    WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_city_start_distance,
-    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
+    WorldgenNpcPlacementV1, WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
+    worldgen_city_start_distance, worldgen_omt_identity_at, worldgen_omt_matches,
+    worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -22,6 +23,7 @@ const OMT_SUBMAP_WIDTH: i32 = 2;
 pub(super) const OMT_TILE_WIDTH: usize = (SUBMAP_SIZE as usize) * (OMT_SUBMAP_WIDTH as usize);
 const OMT_TILE_COUNT: usize = OMT_TILE_WIDTH * OMT_TILE_WIDTH;
 const MAX_PLANNED_CREATURES_PER_OMT: usize = 4_096;
+const MAX_PLANNED_NPCS_PER_OMT: usize = 4_096;
 
 pub(super) fn catalog_fits_one_id_reservation(
     catalog: &WorldgenCatalogV1,
@@ -67,11 +69,40 @@ pub(super) fn catalog_fits_one_id_reservation(
     })
 }
 
+pub(super) fn catalog_npc_placements_are_supported(
+    catalog: &WorldgenCatalogV1,
+    templates: &std::collections::BTreeMap<String, cdda_protocol::NpcTemplateV1>,
+) -> bool {
+    let placement_is_supported = |placement: &WorldgenNpcPlacementV1| {
+        templates
+            .get(&placement.template_id)
+            .is_some_and(|template| template.name_unique.is_some())
+    };
+    catalog.omt_generators.iter().all(|generator| {
+        generator
+            .templates
+            .iter()
+            .all(|template| template.npc_placements.iter().all(&placement_is_supported))
+            && generator.nested_generators.iter().all(|nested| {
+                nested
+                    .templates
+                    .iter()
+                    .all(|template| template.npc_placements.iter().all(&placement_is_supported))
+            })
+    })
+}
+
 pub(super) struct PlannedBubble {
     pub chunks: Vec<Chunk>,
     pub items: Vec<(WorldPosition, PlannedItemSpawn)>,
     pub item_object_count: u64,
     pub creatures: Vec<CreatureSpawn>,
+    pub npcs: Vec<PlannedNpcSpawn>,
+}
+
+pub(super) struct PlannedNpcSpawn {
+    pub template_id: String,
+    pub position: WorldPosition,
 }
 
 pub(super) fn catalog_initial_bubble_is_admissible(
@@ -171,6 +202,7 @@ pub(super) fn plan_active_bubble(
         items: Vec::new(),
         item_object_count: 0,
         creatures: Vec::new(),
+        npcs: Vec::new(),
     };
     let mut planned_occupied = occupied.clone();
     for omt_y in minimum_omt_y..=maximum_omt_y {
@@ -205,6 +237,7 @@ pub(super) fn plan_active_bubble(
                     planned.chunks.extend(cell.chunks);
                     planned.items.extend(cell.items);
                     planned.creatures.extend(cell.creatures);
+                    planned.npcs.extend(cell.npcs);
                 }
                 4 => {}
                 _ => return Err(SimError::InvalidTerrain),
@@ -322,6 +355,24 @@ fn plan_omt_cell(
             prototype,
         ));
     }
+    let mut npcs = Vec::with_capacity(plan.npcs.len());
+    for (index, template_id) in plan.npcs {
+        if terrain[index].move_cost <= 0
+            || furniture[index]
+                .as_ref()
+                .is_some_and(|furniture| furniture.move_cost_mod < 0)
+        {
+            continue;
+        }
+        let position = omt_tile_position(omt, index % OMT_TILE_WIDTH, index / OMT_TILE_WIDTH)?;
+        if !occupied.insert(position) {
+            continue;
+        }
+        npcs.push(PlannedNpcSpawn {
+            template_id,
+            position,
+        });
+    }
     let mut creatures = Vec::with_capacity(plan.monsters.len());
     for (index, prototype_index) in plan.monsters {
         if terrain[index].move_cost <= 0
@@ -349,6 +400,7 @@ fn plan_omt_cell(
         items,
         item_object_count,
         creatures,
+        npcs,
     })
 }
 
@@ -407,6 +459,7 @@ struct OmtMapgenPlan {
     nested_expansions: usize,
     monster_placements: Vec<PlannedMonsterPlacement>,
     individual_monster_placements: Vec<PlannedIndividualMonsterPlacement>,
+    npcs: Vec<(usize, String)>,
     monsters: Vec<(usize, u16)>,
 }
 
@@ -430,6 +483,7 @@ impl OmtMapgenPlan {
             nested_expansions: 0,
             monster_placements: Vec::new(),
             individual_monster_placements: Vec::new(),
+            npcs: Vec::new(),
             monsters: Vec::new(),
         }
     }
@@ -534,6 +588,7 @@ fn apply_root_generator(
         OMT_TILE_WIDTH,
         &template.nested,
         &template.area_items,
+        &template.npc_placements,
         &template.monster_placements,
         &template.individual_monster_placements,
         template.erase_all_before_placing_terrain,
@@ -558,6 +613,7 @@ fn apply_builtin_mapgen(
         || !plan.items.is_empty()
         || !plan.monster_placements.is_empty()
         || !plan.individual_monster_placements.is_empty()
+        || !plan.npcs.is_empty()
         || !plan.monsters.is_empty()
     {
         return Err(SimError::InvalidTerrain);
@@ -877,6 +933,11 @@ fn rotate_mapgen_plan(plan: &mut OmtMapgenPlan, rotation: u8) -> Result<(), SimE
         }
         request.candidates.sort_unstable();
     }
+    for (index, _) in &mut plan.npcs {
+        let (target_x, target_y) =
+            rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
+        *index = target_y * OMT_TILE_WIDTH + target_x;
+    }
     for (index, _) in &mut plan.monsters {
         let (target_x, target_y) =
             rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
@@ -900,6 +961,7 @@ fn apply_template_body(
     height: usize,
     nested: &[WorldgenNestedPlacementV1],
     area_items: &[cdda_protocol::WorldgenAreaItemPlacementV1],
+    npc_placements: &[WorldgenNpcPlacementV1],
     monster_placements: &[WorldgenMonsterPlacementV1],
     individual_monster_placements: &[WorldgenIndividualMonsterPlacementV1],
     erase_all_before_placing_terrain: bool,
@@ -958,6 +1020,13 @@ fn apply_template_body(
         }
     }
 
+    // NPC objects are in the pinned default phase before item and monster
+    // objects and before the later nested-mapgen phase. Repeat is sampled once;
+    // each application then samples x and y.
+    for placement in npc_placements {
+        plan_npc_placement(placement, offset_x, offset_y, rng, plan)?;
+    }
+
     for placement in nested {
         apply_nested_placement(
             catalog,
@@ -992,6 +1061,44 @@ fn apply_template_body(
     }
     for placement in individual_monster_placements {
         plan_individual_monster_placement_request(placement, offset_x, offset_y, plan)?;
+    }
+    Ok(())
+}
+
+fn plan_npc_placement(
+    placement: &WorldgenNpcPlacementV1,
+    offset_x: i32,
+    offset_y: i32,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let repeat = if placement.repeat.minimum == placement.repeat.maximum {
+        placement.repeat.minimum
+    } else {
+        choose_worldgen_u16_range(placement.repeat, rng)?
+    };
+    for _ in 0..repeat {
+        let x = offset_x
+            .checked_add(i32::from(choose_i8_range(
+                placement.x.minimum,
+                placement.x.maximum,
+                rng,
+            )?))
+            .ok_or(SimError::NumericOverflow)?;
+        let y = offset_y
+            .checked_add(i32::from(choose_i8_range(
+                placement.y.minimum,
+                placement.y.maximum,
+                rng,
+            )?))
+            .ok_or(SimError::NumericOverflow)?;
+        let Some(index) = absolute_tile_index(x, y) else {
+            continue;
+        };
+        if plan.npcs.len() >= MAX_PLANNED_NPCS_PER_OMT {
+            return Err(SimError::InvalidNpcDialogue);
+        }
+        plan.npcs.push((index, placement.template_id.clone()));
     }
     Ok(())
 }
@@ -1316,7 +1423,7 @@ fn choose_worldgen_u16_range(
     range: cdda_protocol::WorldgenU16RangeV1,
     rng: &mut ChaCha8Rng,
 ) -> Result<u16, SimError> {
-    if range.minimum == 0 || range.minimum > range.maximum {
+    if range.minimum > range.maximum {
         return Err(SimError::InvalidCreature);
     }
     u16::try_from(inclusive_rng_u64(
@@ -1518,6 +1625,7 @@ fn apply_nested_placement(
         usize::from(template.height),
         &template.nested,
         &template.area_items,
+        &template.npc_placements,
         &template.monster_placements,
         &template.individual_monster_placements,
         template.erase_all_before_placing_terrain,
@@ -2321,6 +2429,7 @@ mod tests {
             cells,
             nested: Vec::new(),
             area_items: Vec::new(),
+            npc_placements: Vec::new(),
             monster_placements: Vec::new(),
             individual_monster_placements: Vec::new(),
             erase_all_before_placing_terrain: false,

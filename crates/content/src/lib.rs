@@ -94,7 +94,7 @@ pub use mapgen::{
     StrictMapgenIndividualMonsterPlacement, StrictMapgenIndividualMonsterTarget,
     StrictMapgenItemPlacement, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedConditions, StrictMapgenNestedPlacement,
-    StrictMapgenOmtMatch, StrictNestedMapgenDefinition, WeightedMapgenId,
+    StrictMapgenNpcPlacement, StrictMapgenOmtMatch, StrictNestedMapgenDefinition, WeightedMapgenId,
 };
 pub use material::{
     ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,

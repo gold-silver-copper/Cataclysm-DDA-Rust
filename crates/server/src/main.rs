@@ -15,8 +15,7 @@ use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, DialogueRegistry,
     EffectOnConditionRegistry, EffectTypeRegistry, FactionRegistry, FieldTypeDefinition,
     FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry,
-    ItemRegistry, MapgenRegistry, MaterialRegistry, MissionRegistry, ModCatalog,
-    MonsterDefinition,
+    ItemRegistry, MapgenRegistry, MaterialRegistry, MissionRegistry, ModCatalog, MonsterDefinition,
     MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
     ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry,
     StartLocationRegistry, TerrainDefinition, TerrainRegistry,
@@ -900,6 +899,11 @@ fn open_world(
         content.recipes,
         &mission_ids,
     )?;
+    let mapgen_npc_template_ids = npc_templates
+        .iter()
+        .filter(|template| template.name_unique.is_some())
+        .map(|template| template.template_id.clone())
+        .collect::<BTreeSet<_>>();
     initial.register_npc_faction_catalog(faction_templates, factions)?;
     initial.register_mission_catalog(mission_catalog)?;
     initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
@@ -952,6 +956,7 @@ fn open_world(
             overmap_terrain,
             overmap_specials,
             mapgen,
+            &mapgen_npc_template_ids,
             metadata.world_seed,
             city_settings
                 .get(DEFAULT_CITY_SETTINGS_ID)
@@ -1869,7 +1874,7 @@ fn runtime_npc_dialogue(
         let ids = topics.keys().cloned().collect::<BTreeSet<_>>();
         let rejected = topics
             .iter()
-            .filter(|(topic_id, topic)| {
+            .filter(|(_topic_id, topic)| {
                 topic.responses.iter().any(|response| {
                     !matches!(response.next_topic_id.as_str(), "TALK_NONE" | "TALK_DONE")
                         && !ids.contains(&response.next_topic_id)

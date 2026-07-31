@@ -45,6 +45,7 @@ const OBJECT_FIELDS: &[&str] = &[
     "fallback_predecessor_mapgen",
     "place_nested",
     "place_items",
+    "place_npcs",
     "place_monsters",
     "place_monster",
     "flags",
@@ -60,6 +61,7 @@ const NESTED_OBJECT_FIELDS: &[&str] = &[
     "rotation",
     "place_nested",
     "place_items",
+    "place_npcs",
     "place_vehicles",
     "place_monsters",
     "place_monster",
@@ -124,6 +126,14 @@ pub struct StrictMapgenIndividualMonsterPlacement {
     pub target: StrictMapgenIndividualMonsterTarget,
     pub chance_percent: MapgenU16Range,
     pub pack_size: MapgenU16Range,
+    pub repeat: MapgenU16Range,
+    pub x: MapgenCoordinateRange,
+    pub y: MapgenCoordinateRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenNpcPlacement {
+    pub template_id: String,
     pub repeat: MapgenU16Range,
     pub x: MapgenCoordinateRange,
     pub y: MapgenCoordinateRange,
@@ -234,6 +244,7 @@ pub struct StrictMapgenDefinition {
     pub fallback_predecessor_mapgen: Option<String>,
     pub nested: Vec<StrictMapgenNestedPlacement>,
     pub area_items: Vec<StrictMapgenAreaItemPlacement>,
+    pub npc_placements: Vec<StrictMapgenNpcPlacement>,
     pub monster_placements: Vec<StrictMapgenMonsterPlacement>,
     pub individual_monster_placements: Vec<StrictMapgenIndividualMonsterPlacement>,
     pub erase_all_before_placing_terrain: bool,
@@ -266,6 +277,7 @@ pub struct StrictNestedMapgenDefinition {
     pub palette_closure: Vec<String>,
     pub nested: Vec<StrictMapgenNestedPlacement>,
     pub area_items: Vec<StrictMapgenAreaItemPlacement>,
+    pub npc_placements: Vec<StrictMapgenNpcPlacement>,
     pub monster_placements: Vec<StrictMapgenMonsterPlacement>,
     pub individual_monster_placements: Vec<StrictMapgenIndividualMonsterPlacement>,
     pub erase_all_before_placing_terrain: bool,
@@ -835,6 +847,7 @@ where
         "mapgen object",
         item_group_exists,
     )?;
+    let npc_placements = parse_npc_placements(object.get("place_npcs"), "mapgen object")?;
     let monster_placements =
         parse_monster_placements(object.get("place_monsters"), "mapgen object")?;
     let individual_monster_placements =
@@ -872,6 +885,7 @@ where
         fallback_predecessor_mapgen,
         nested,
         area_items,
+        npc_placements,
         monster_placements,
         individual_monster_placements,
         erase_all_before_placing_terrain,
@@ -948,6 +962,10 @@ where
         &format!("nested mapgen {:?}", raw.nested_id),
         item_group_exists,
     )?;
+    let npc_placements = parse_npc_placements(
+        raw.object.get("place_npcs"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
     let monster_placements = parse_monster_placements(
         raw.object.get("place_monsters"),
         &format!("nested mapgen {:?}", raw.nested_id),
@@ -979,6 +997,7 @@ where
         palette_closure: state.palette_closure,
         nested,
         area_items,
+        npc_placements,
         monster_placements,
         individual_monster_placements,
         erase_all_before_placing_terrain: parse_erase_all_flag(raw.object.get("flags"))?,
@@ -1108,6 +1127,100 @@ where
                 chance,
                 x: parse_coordinate_range(object.get("x"), "x", context)?,
                 y: parse_coordinate_range(object.get("y"), "y", context)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_npc_placements(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenNpcPlacement>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let placements = value
+        .as_array()
+        .ok_or_else(|| format!("place_npcs in {context} must be an array"))?;
+    if placements.len() > MAX_NESTED_MAPGEN_PLACEMENTS {
+        return Err(format!(
+            "place_npcs in {context} exceeds {MAX_NESTED_MAPGEN_PLACEMENTS} placements"
+        ));
+    }
+    placements
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let placement_context = format!("place_npcs[{index}] in {context}");
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("{placement_context} must be an object"))?;
+            reject_unknown_fields(
+                object,
+                &[
+                    "class",
+                    "x",
+                    "y",
+                    "z",
+                    "repeat",
+                    "target",
+                    "add_trait",
+                    "unique_id",
+                ],
+                &placement_context,
+            )?;
+            if object
+                .get("target")
+                .is_some_and(|value| value.as_bool() != Some(false))
+            {
+                return Err(format!(
+                    "mission-target NPC semantics are unsupported in {placement_context}"
+                ));
+            }
+            if object
+                .get("add_trait")
+                .is_some_and(|value| !value.as_array().is_some_and(|traits| traits.is_empty()))
+            {
+                return Err(format!(
+                    "NPC trait mutation is unsupported in {placement_context}"
+                ));
+            }
+            if object
+                .get("unique_id")
+                .is_some_and(|value| value.as_str() != Some(""))
+            {
+                return Err(format!(
+                    "unique NPC identity is unsupported in {placement_context}"
+                ));
+            }
+            if let Some(z) = object.get("z") {
+                let z = parse_coordinate_range(Some(z), "z", &placement_context)?;
+                if z.minimum != 0 || z.maximum != 0 {
+                    return Err(format!(
+                        "nonzero NPC z placement is unsupported in {placement_context}"
+                    ));
+                }
+            }
+            let template_id = object
+                .get("class")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 512)
+                .ok_or_else(|| {
+                    format!("class in {placement_context} must be a fixed bounded NPC template id")
+                })?
+                .to_owned();
+            Ok(StrictMapgenNpcPlacement {
+                template_id,
+                repeat: parse_u16_range(
+                    object.get("repeat"),
+                    1,
+                    0,
+                    MAX_NESTED_MAPGEN_PLACEMENTS as u16,
+                    "repeat",
+                    &placement_context,
+                )?,
+                x: parse_coordinate_range(object.get("x"), "x", &placement_context)?,
+                y: parse_coordinate_range(object.get("y"), "y", &placement_context)?,
             })
         })
         .collect()
