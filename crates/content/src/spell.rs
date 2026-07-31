@@ -431,9 +431,6 @@ fn load_one(
     } else {
         SpellDefinition::default()
     };
-    // Pinned spell loading deliberately does not inherit `field_id` even
-    // though the field's chance/intensity parameters do inherit.
-    spell.field_type_id.clear();
     spell.id = id.clone();
     spell.source = format!("{}#{id}", raw.file.upstream_path);
     apply_fields(&mut spell, &raw.object)?;
@@ -476,7 +473,7 @@ fn apply_fields(
     }
     if let Some(value) = object.get("field_id") {
         match value.as_str() {
-            Some("none") => spell.field_type_id.clear(),
+            Some("none") => {}
             Some(id) if !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control) => {
                 spell.field_type_id = id.to_owned();
             }

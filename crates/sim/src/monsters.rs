@@ -753,10 +753,13 @@ impl WorldState {
                 {
                     continue;
                 }
-                let valid = self.actor_at(position).is_some_and(|actor_id| {
-                    self.actors.get(&actor_id).is_some_and(|actor| actor.hp > 0)
-                }) || (self.creature_at(position).is_none()
-                    && profile.spell_targets_ground);
+                let valid = match self.actor_at(position) {
+                    Some(actor_id) => {
+                        profile.spell_targets_hostile
+                            && self.actors.get(&actor_id).is_some_and(|actor| actor.hp > 0)
+                    }
+                    None => self.creature_at(position).is_none() && profile.spell_targets_ground,
+                };
                 if valid {
                     area.push(position);
                 }
@@ -870,7 +873,12 @@ impl WorldState {
         let intensity = i32::from(profile.spell_field_intensity)
             .checked_add(roll_inclusive_i32(-variance, variance, rng)?)
             .ok_or(SimError::NumericOverflow)?;
-        if intensity <= 0 || roll_inclusive_u32(1, profile.spell_field_chance, rng)? != 1 {
+        if intensity <= 0 {
+            return Ok(());
+        }
+        if profile.spell_field_chance > 1
+            && roll_inclusive_u32(1, profile.spell_field_chance, rng)? != 1
+        {
             return Ok(());
         }
         let initial_age = -i64::from(profile.spell_field_duration_turns);

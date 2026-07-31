@@ -3378,6 +3378,7 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_field_intensity: u8,
     pub spell_field_intensity_variance_millionths: u32,
     pub spell_field_duration_turns: u32,
+    pub spell_targets_hostile: bool,
     pub spell_targets_ground: bool,
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
@@ -5625,13 +5626,17 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         && (if matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Spell) {
                             let common = attack.spell_aoe <= 32
                                 && ((attack.spell_target_self && attack.range == 0)
-                                    || (!attack.spell_target_self && attack.range > 0));
+                                    || (!attack.spell_target_self && attack.range > 0))
+                                && (if attack.spell_target_self {
+                                    !attack.spell_targets_hostile && !attack.spell_targets_ground
+                                } else {
+                                    attack.spell_targets_hostile || attack.spell_targets_ground
+                                });
                             let no_field = attack.spell_field_type_id.is_empty()
                                 && attack.spell_field_chance == 0
                                 && attack.spell_field_intensity == 0
                                 && attack.spell_field_intensity_variance_millionths == 0
-                                && attack.spell_field_duration_turns == 0
-                                && !attack.spell_targets_ground;
+                                && attack.spell_field_duration_turns == 0;
                             let field = valid_worldgen_id(&attack.spell_field_type_id)
                                 && (1..=1_000_000).contains(&attack.spell_field_chance)
                                 && attack.spell_field_intensity > 0
@@ -5715,6 +5720,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.spell_field_intensity == 0
                                 && attack.spell_field_intensity_variance_millionths == 0
                                 && attack.spell_field_duration_turns == 0
+                                && !attack.spell_targets_hostile
                                 && !attack.spell_targets_ground
                         })
                         && attack.gun_ranges.len() <= 64

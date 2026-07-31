@@ -652,6 +652,7 @@ struct RuntimeMonsterSpellProfile {
     field_intensity: u8,
     field_intensity_variance_millionths: u32,
     field_duration_turns: u32,
+    targets_hostile: bool,
     targets_ground: bool,
 }
 
@@ -1329,10 +1330,11 @@ fn runtime_monster_spell_profile(
         field_intensity: field_profile.map_or(0, |profile| profile.0),
         field_intensity_variance_millionths: field_profile.map_or(0, |profile| profile.1),
         field_duration_turns: field_profile
-            .map(|_| u32::try_from(leveled_duration).map(|moves| moves.div_ceil(100)))
+            .map(|_| u32::try_from(leveled_duration).map(|moves| moves / 100))
             .transpose()?
             .unwrap_or(0),
-        targets_ground: field_profile.is_some() && spell.valid_targets.contains("ground"),
+        targets_hostile: !target_self && spell.valid_targets.contains("hostile"),
+        targets_ground: !target_self && spell.valid_targets.contains("ground"),
     }))
 }
 
@@ -1808,6 +1810,8 @@ fn runtime_monster_catalog(
                             .map_or(0, |profile| profile.field_intensity_variance_millionths),
                         spell_field_duration_turns: spell_profile
                             .map_or(0, |profile| profile.field_duration_turns),
+                        spell_targets_hostile: spell_profile
+                            .is_some_and(|profile| profile.targets_hostile),
                         spell_targets_ground: spell_profile
                             .is_some_and(|profile| profile.targets_ground),
                         gun_type_id: gun_profile
