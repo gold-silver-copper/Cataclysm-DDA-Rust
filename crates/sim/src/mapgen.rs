@@ -3007,6 +3007,7 @@ mod tests {
             nested: Vec::new(),
             area_items: Vec::new(),
             npc_placements: Vec::new(),
+            omitted_npc_placement_count: 0,
             monster_placements: Vec::new(),
             individual_monster_placements: Vec::new(),
             erase_all_before_placing_terrain: false,

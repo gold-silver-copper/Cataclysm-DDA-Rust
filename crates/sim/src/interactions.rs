@@ -339,12 +339,14 @@ impl WorldState {
             InteractionContextV1::NpcDialogue {
                 npc_id,
                 topic_stack,
+                selected_mission_id,
             } => self.apply_npc_dialogue_response(
                 actor_id,
                 sequence,
                 interaction_id,
                 *npc_id,
                 topic_stack,
+                *selected_mission_id,
                 &choice_id,
                 events,
             )?,
@@ -381,6 +383,7 @@ impl WorldState {
         if let InteractionContextV1::NpcDialogue {
             npc_id,
             topic_stack,
+            selected_mission_id,
         } = &pending.context
         {
             let Some(choice_id) = self.npc_dialogue_quit_choice(&pending) else {
@@ -397,6 +400,7 @@ impl WorldState {
                 interaction_id,
                 *npc_id,
                 topic_stack,
+                *selected_mission_id,
                 &choice_id,
                 events,
             );
@@ -456,45 +460,6 @@ impl WorldState {
             })
             .collect::<Vec<_>>();
         for (actor_id, interaction) in expired {
-            if let InteractionContextV1::NpcDialogue {
-                npc_id,
-                topic_stack,
-            } = &interaction.context
-            {
-                if let Some(choice_id) = self.npc_dialogue_quit_choice(&interaction) {
-                    let sequence = self
-                        .actors
-                        .get(&actor_id)
-                        .ok_or(SimError::UnknownActor)?
-                        .last_command_sequence;
-                    self.apply_npc_dialogue_response(
-                        actor_id,
-                        sequence,
-                        interaction.interaction_id,
-                        *npc_id,
-                        topic_stack,
-                        &choice_id,
-                        events,
-                    )?;
-                } else {
-                    let created_at_tick = self.tick;
-                    let renewed = self
-                        .tick
-                        .0
-                        .checked_add(EOC_CONFIRMATION_LIFETIME_TICKS)
-                        .ok_or(SimError::NumericOverflow)?;
-                    let pending = self
-                        .actors
-                        .get_mut(&actor_id)
-                        .ok_or(SimError::UnknownActor)?
-                        .pending_interaction
-                        .as_mut()
-                        .ok_or(SimError::InvalidNpcDialogue)?;
-                    pending.created_at_tick = created_at_tick;
-                    pending.expires_at_tick = SimTick(renewed);
-                }
-                continue;
-            }
             self.actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?
@@ -525,7 +490,7 @@ impl WorldState {
                     )?
                 }
                 InteractionContextV1::MedicalBodyPart { .. } => false,
-                InteractionContextV1::NpcDialogue { .. } => unreachable!(),
+                InteractionContextV1::NpcDialogue { .. } => false,
             };
             if !resolved {
                 events.push(self.make_event(WorldEventKind::InteractionCanceled {

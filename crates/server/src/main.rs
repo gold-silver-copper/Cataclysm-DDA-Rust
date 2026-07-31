@@ -858,8 +858,9 @@ fn open_world(
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let eocs = content.eocs;
-    let (_preliminary_missions, preliminary_mission_ids) =
+    let (preliminary_missions, preliminary_mission_ids) =
         runtime_mission_catalog(content.missions, content.monsters, None)?;
+    let preliminary_npc_offer_mission_ids = runtime_npc_offer_mission_ids(&preliminary_missions);
     let mut eoc_catalog = runtime_eoc_catalog(
         eocs,
         items,
@@ -907,6 +908,7 @@ fn open_world(
         content.proficiencies,
         content.recipes,
         &preliminary_mission_ids,
+        &preliminary_npc_offer_mission_ids,
     )?;
     let mapgen_npc_template_ids = runtime_mapgen_npc_template_ids(&npc_templates, content.snippets);
     initial.register_npc_faction_catalog(faction_templates.clone(), factions)?;
@@ -1019,6 +1021,7 @@ fn open_world(
         content.monsters,
         Some(&runtime_monster_type_ids),
     )?;
+    let npc_offer_mission_ids = runtime_npc_offer_mission_ids(&mission_catalog);
     eoc_catalog = runtime_eoc_catalog(
         eocs,
         items,
@@ -1054,6 +1057,7 @@ fn open_world(
         content.proficiencies,
         content.recipes,
         &mission_ids,
+        &npc_offer_mission_ids,
     )?;
     initial.register_mission_catalog(mission_catalog)?;
     initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
@@ -1799,6 +1803,7 @@ fn runtime_npc_dialogue(
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
     mission_ids: &BTreeSet<String>,
+    npc_offer_mission_ids: &BTreeSet<String>,
 ) -> Result<
     (
         Vec<cdda_protocol::NpcTemplateV1>,
@@ -1923,6 +1928,7 @@ fn runtime_npc_dialogue(
                             condition: response.condition.as_ref().map(runtime_condition),
                         })
                         .collect(),
+                    replace_built_in_responses: topic.replace_built_in_responses,
                 },
             )
         })
@@ -1946,6 +1952,25 @@ fn runtime_npc_dialogue(
             topics.remove(&topic_id);
         }
     }
+    for topic_id in cdda_protocol::NPC_BUILTIN_MISSION_TOPICS {
+        let replace = registry
+            .topic_iter()
+            .find(|(id, _topic)| *id == topic_id)
+            .is_some_and(|(_id, topic)| topic.replace_built_in_responses);
+        if replace {
+            // A replacement is all-or-nothing: if its JSON semantics were not
+            // admitted above, do not resurrect the C++ built-in family.
+            continue;
+        }
+        topics
+            .entry(topic_id.to_owned())
+            .or_insert_with(|| cdda_protocol::DialogueTopicV1 {
+                topic_id: topic_id.to_owned(),
+                dynamic_line: String::new(),
+                responses: Vec::new(),
+                replace_built_in_responses: false,
+            });
+    }
     let faction_ids = factions
         .iter()
         .map(|faction| faction.faction_id.as_str())
@@ -1954,8 +1979,25 @@ fn runtime_npc_dialogue(
         .npc_iter()
         .filter(|(_, template)| {
             template.unsupported_fields.is_empty()
+                // Pinned class randomization owns body, stats, equipment,
+                // skills, combat state, and RNG order.  Until that kernel is
+                // represented, class/suffix templates must not enter runtime
+                // as static invulnerable blockers.
+                && template.class_id.is_empty()
+                && template.name_suffix.is_none()
                 && (template.chat_topic_id == "TALK_DONE"
                     || topics.contains_key(&template.chat_topic_id))
+                && !matches!(
+                    template.chat_topic_id.as_str(),
+                    "TALK_MISSION_OFFER"
+                        | "TALK_MISSION_ACCEPTED"
+                        | "TALK_MISSION_REJECTED"
+                        | "TALK_MISSION_ADVICE"
+                        | "TALK_MISSION_INQUIRE"
+                        | "TALK_MISSION_SUCCESS"
+                        | "TALK_MISSION_FAILURE"
+                        | "TALK_MISSION_REWARD"
+                )
                 && cdda_protocol::npc_template_attitude_is_supported(template.attitude)
                 && template
                     .name_unique
@@ -1969,6 +2011,10 @@ fn runtime_npc_dialogue(
                     || template.faction_id == cdda_protocol::NO_FACTION_ID
                     || faction_ids.contains(template.faction_id.as_str()))
                 && template.mission.is_empty()
+                && template
+                    .mission_offered
+                    .iter()
+                    .all(|mission_type_id| npc_offer_mission_ids.contains(mission_type_id))
         })
         .map(|(template_id, template)| cdda_protocol::NpcTemplateV1 {
             template_id: template_id.to_owned(),
@@ -1979,6 +2025,7 @@ fn runtime_npc_dialogue(
             class_id: template.class_id.clone(),
             attitude: template.attitude,
             mission: template.mission.clone(),
+            mission_offered: template.mission_offered.clone(),
             chat_topic_id: template.chat_topic_id.clone(),
         })
         .collect::<Vec<_>>();
@@ -1987,6 +2034,31 @@ fn runtime_npc_dialogue(
         return Err("pinned content has no closed supported NPC dialogue family".into());
     }
     Ok((templates, topics))
+}
+
+fn runtime_npc_offer_mission_ids(
+    missions: &[cdda_protocol::MissionDefinitionV1],
+) -> BTreeSet<String> {
+    const REQUIRED_DIALOGUE: [&str; 9] = [
+        "describe",
+        "offer",
+        "accepted",
+        "rejected",
+        "advice",
+        "inquire",
+        "success",
+        "success_lie",
+        "failure",
+    ];
+    missions
+        .iter()
+        .filter(|mission| {
+            REQUIRED_DIALOGUE
+                .iter()
+                .all(|key| mission.dialogue.contains_key(*key))
+        })
+        .map(|mission| mission.mission_type_id.clone())
+        .collect()
 }
 
 fn contains_unresolved_dialogue_tag(text: &str) -> bool {

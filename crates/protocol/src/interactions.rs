@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, MAX_DIALOGUE_TOPIC_STACK, NpcId,
-    SimTick, eoc_confirmation_branches_are_valid,
+    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, MAX_DIALOGUE_TOPIC_STACK,
+    MissionId, NpcId, SimTick, eoc_confirmation_branches_are_valid,
 };
 
 pub const MAX_INTERACTION_CHOICES: usize = 64;
@@ -39,6 +39,7 @@ pub enum InteractionContextV1 {
     NpcDialogue {
         npc_id: NpcId,
         topic_stack: Vec<String>,
+        selected_mission_id: Option<MissionId>,
     },
 }
 
@@ -122,6 +123,7 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
             InteractionContextV1::NpcDialogue {
                 npc_id,
                 topic_stack,
+                selected_mission_id,
             } => {
                 npc_id.counter() > 0
                     && npc_id.world_namespace() == actor_id.world_namespace()
@@ -129,6 +131,10 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                     && topic_stack.iter().all(|topic_id| {
                         !matches!(topic_id.as_str(), "TALK_NONE" | "TALK_DONE")
                             && valid_id(topic_id, MAX_INTERACTION_CHOICE_ID_BYTES)
+                    })
+                    && selected_mission_id.is_none_or(|mission_id| {
+                        mission_id.counter() > 0
+                            && mission_id.world_namespace() == actor_id.world_namespace()
                     })
             }
         }

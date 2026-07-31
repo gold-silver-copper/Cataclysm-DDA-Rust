@@ -20,9 +20,16 @@ const NPC_FIELDS: &[&str] = &[
     "class",
     "attitude",
     "mission",
+    "mission_offered",
     "chat",
 ];
-const TOPIC_FIELDS: &[&str] = &["type", "id", "dynamic_line", "responses"];
+const TOPIC_FIELDS: &[&str] = &[
+    "type",
+    "id",
+    "dynamic_line",
+    "responses",
+    "replace_built_in_responses",
+];
 const RESPONSE_FIELDS: &[&str] = &["text", "topic", "opinion", "effect", "condition"];
 const OPINION_FIELDS: &[&str] = &["trust", "fear", "value", "anger", "owed"];
 
@@ -57,6 +64,7 @@ pub struct DialogueTopicDefinition {
     pub id: String,
     pub dynamic_line: String,
     pub responses: Vec<DialogueResponseDefinition>,
+    pub replace_built_in_responses: bool,
     pub unsupported: bool,
     pub sources: BTreeSet<String>,
 }
@@ -71,6 +79,7 @@ pub struct NpcTemplateDefinition {
     pub class_id: String,
     pub attitude: i32,
     pub mission: String,
+    pub mission_offered: Vec<String>,
     pub chat_topic_id: String,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
@@ -177,6 +186,11 @@ fn load_npc(
             "attitude",
         )?,
         mission: optional_string(object.get("mission"), file, "mission")?.unwrap_or_default(),
+        mission_offered: object
+            .get("mission_offered")
+            .map(|value| string_or_array(Some(value), file, "mission_offered"))
+            .transpose()?
+            .unwrap_or_default(),
         chat_topic_id: required_string(object.get("chat"), file, "chat")?,
         unsupported_fields: unsupported_fields(object, NPC_FIELDS),
         source: file.upstream_path.clone(),
@@ -199,6 +213,9 @@ fn load_topic(
     unsupported |= object
         .get("responses")
         .is_some_and(|value| !response_shapes_are_supported(value));
+    unsupported |= object
+        .get("replace_built_in_responses")
+        .is_some_and(|value| !value.is_boolean());
     let line = (!unsupported)
         .then(|| {
             object
@@ -225,10 +242,16 @@ fn load_topic(
                 id,
                 dynamic_line: String::new(),
                 responses: Vec::new(),
+                replace_built_in_responses: false,
                 unsupported: false,
                 sources: BTreeSet::new(),
             });
         topic.unsupported |= unsupported;
+        if let Some(replace) = object.get("replace_built_in_responses") {
+            topic.replace_built_in_responses = replace
+                .as_bool()
+                .ok_or_else(|| invalid(file, "replace_built_in_responses"))?;
+        }
         topic.sources.insert(file.upstream_path.clone());
         if let Some(line) = &line {
             topic.dynamic_line.clone_from(line);
@@ -249,18 +272,17 @@ fn dynamic_line_shape_is_supported(value: &Value) -> bool {
                 || (values
                     .keys()
                     .all(|key| key == "gendered_line" || key == "relevant_genders")
-                    && values.get("gendered_line").is_some_and(|line| {
-                        translated_string_shape_is_supported(line)
-                            && translated_string_value(line).is_some_and(dialogue_line_is_supported)
-                    })
+                    && values
+                        .get("gendered_line")
+                        .is_some_and(|line| line.as_str().is_some_and(dialogue_line_is_supported))
                     && values
                         .get("relevant_genders")
                         .and_then(Value::as_array)
                         .is_some_and(|entries| {
                             !entries.is_empty()
-                                && entries.iter().all(|entry| {
-                                    entry.as_str().is_some_and(|entry| !entry.is_empty())
-                                })
+                                && entries
+                                    .iter()
+                                    .all(|entry| matches!(entry.as_str(), Some("npc" | "u")))
                         }))
         }
         _ => false,
@@ -320,13 +342,7 @@ fn dynamic_line(
     {
         return Err(invalid(file, "dynamic_line"));
     }
-    translated_string(
-        values
-            .get("gendered_line")
-            .ok_or_else(|| invalid(file, "gendered_line"))?,
-        file,
-        "gendered_line",
-    )
+    required_string(values.get("gendered_line"), file, "gendered_line")
 }
 
 fn responses(

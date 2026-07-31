@@ -10,6 +10,8 @@ use super::{
 };
 
 pub const MAX_NPC_TEMPLATES: usize = 4_096;
+pub const MAX_NPCS: usize = 1_048_576;
+pub const MAX_NPC_MISSION_OFFERS: usize = 64;
 pub const MAX_DIALOGUE_TOPICS: usize = 16_384;
 pub const MAX_DIALOGUE_RESPONSES: usize = 64;
 pub const MAX_DIALOGUE_TOPIC_STACK: usize = 64;
@@ -17,6 +19,18 @@ pub const MAX_DIALOGUE_TEXT_BYTES: usize = MAX_INTERACTION_CHOICE_LABEL_BYTES;
 pub const MAX_DIALOGUE_ID_BYTES: usize = 512;
 pub const MAX_NPC_NAME_BYTES: usize = 1_024;
 pub const MAX_NPC_OPINION_ABS: i32 = 1_000_000_000;
+pub const NPC_BUILTIN_MISSION_TOPICS: [&str; 10] = [
+    "TALK_MISSION_LIST",
+    "TALK_MISSION_LIST_ASSIGNED",
+    "TALK_MISSION_OFFER",
+    "TALK_MISSION_ACCEPTED",
+    "TALK_MISSION_REJECTED",
+    "TALK_MISSION_ADVICE",
+    "TALK_MISSION_INQUIRE",
+    "TALK_MISSION_SUCCESS",
+    "TALK_MISSION_FAILURE",
+    "TALK_MISSION_REWARD",
+];
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NpcOpinionV1 {
@@ -55,6 +69,9 @@ pub struct DialogueTopicV1 {
     pub topic_id: String,
     pub dynamic_line: String,
     pub responses: Vec<DialogueResponseV1>,
+    /// Matches `json_talk_topic::replace_built_in_responses`.  When false,
+    /// the authoritative dialogue kernel appends the pinned built-in family.
+    pub replace_built_in_responses: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -67,6 +84,7 @@ pub struct NpcTemplateV1 {
     pub class_id: String,
     pub attitude: i32,
     pub mission: String,
+    pub mission_offered: Vec<String>,
     pub chat_topic_id: String,
 }
 
@@ -85,6 +103,13 @@ pub struct NpcSnapshotV1 {
     pub attitude: i32,
     pub position: WorldPosition,
     pub social: Vec<NpcSocialStateV1>,
+    pub mission_offers: Vec<NpcMissionOfferV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NpcMissionOfferV1 {
+    pub mission_id: super::MissionId,
+    pub mission_type_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -138,15 +163,23 @@ pub fn npc_dialogue_catalog_is_valid(
             && optional_id_is_valid(&template.class_id)
             && npc_template_attitude_is_supported(template.attitude)
             && optional_id_is_valid(&template.mission)
+            && template.mission_offered.len() <= MAX_NPC_MISSION_OFFERS
+            && template
+                .mission_offered
+                .iter()
+                .all(|mission_type_id| valid_id(mission_type_id))
             && (template.chat_topic_id == "TALK_DONE"
                 || topic_ids.contains(template.chat_topic_id.as_str()))
     }) && topics.iter().all(|topic| {
+        let builtin = NPC_BUILTIN_MISSION_TOPICS.contains(&topic.topic_id.as_str())
+            && !topic.replace_built_in_responses;
         valid_id(&topic.topic_id)
             && topic.topic_id != "TALK_NONE"
             && topic.topic_id != "TALK_DONE"
-            && valid_text(&topic.dynamic_line, MAX_DIALOGUE_TEXT_BYTES)
-            && !matches!(topic.dynamic_line.as_str(), "*" | "&")
-            && (1..=MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())
+            && (builtin || valid_text(&topic.dynamic_line, MAX_DIALOGUE_TEXT_BYTES))
+            && (builtin || !matches!(topic.dynamic_line.as_str(), "*" | "&"))
+            && ((builtin && topic.responses.len() <= MAX_DIALOGUE_RESPONSES)
+                || (!builtin && (1..=MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())))
             && topic.responses.iter().enumerate().all(|(index, response)| {
                 response.response_id == index.to_string()
                     && valid_text(&response.text, MAX_DIALOGUE_TEXT_BYTES)
@@ -169,14 +202,28 @@ pub fn npc_snapshot_is_valid(
     world_namespace: u64,
     templates: &[NpcTemplateV1],
 ) -> bool {
+    templates
+        .iter()
+        .find(|template| template.template_id == npc.template_id)
+        .is_some_and(|template| npc_snapshot_is_valid_for_template(npc, world_namespace, template))
+}
+
+#[must_use]
+pub fn npc_snapshot_is_valid_for_template(
+    npc: &NpcSnapshotV1,
+    world_namespace: u64,
+    template: &NpcTemplateV1,
+) -> bool {
     npc.id.counter() > 0
         && npc.id.world_namespace() == world_namespace
-        && templates
-            .iter()
-            .any(|template| template.template_id == npc.template_id)
+        && npc.template_id == template.template_id
         && valid_text(&npc.name, MAX_NPC_NAME_BYTES)
-        && optional_id_is_valid(&npc.faction_id)
-        && (0..=18).contains(&npc.attitude)
+        && template
+            .name_unique
+            .as_ref()
+            .is_none_or(|name| npc.name == *name)
+        && npc.faction_id == template.faction_id
+        && (npc.attitude == template.attitude || (template.attitude == 1 && npc.attitude == 0))
         && npc
             .social
             .windows(2)
@@ -185,6 +232,28 @@ pub fn npc_snapshot_is_valid(
             social.actor_id.counter() > 0
                 && social.actor_id.world_namespace() == world_namespace
                 && opinion_is_valid(&social.opinion)
+        })
+        && npc.mission_offers.len() <= MAX_NPC_MISSION_OFFERS
+        && npc
+            .mission_offers
+            .windows(2)
+            .all(|pair| pair[0].mission_id < pair[1].mission_id)
+        && npc.mission_offers.iter().all(|offer| {
+            offer.mission_id.counter() > 0
+                && offer.mission_id.world_namespace() == world_namespace
+                && valid_id(&offer.mission_type_id)
+                && npc
+                    .mission_offers
+                    .iter()
+                    .filter(|candidate| candidate.mission_type_id == offer.mission_type_id)
+                    .count()
+                    <= template
+                        .mission_offered
+                        .iter()
+                        .filter(|mission_type_id| {
+                            mission_type_id.as_str() == offer.mission_type_id.as_str()
+                        })
+                        .count()
         })
 }
 

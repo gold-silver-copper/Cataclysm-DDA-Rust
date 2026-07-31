@@ -39,6 +39,8 @@ pub struct MissionDefinitionV1 {
     pub description: String,
     pub difficulty: i32,
     pub value: i32,
+    pub dialogue: BTreeMap<String, String>,
+    pub has_generic_rewards: bool,
     pub goal: MissionGoalV1,
     pub start_effects: Vec<EocEffectV1>,
     pub end_effects: Vec<EocEffectV1>,
@@ -62,6 +64,9 @@ pub struct MissionSnapshotV1 {
     pub status: MissionStatusV1,
     /// Absolute global count captured at assignment plus the required delta.
     pub kill_count_to_reach: Option<u64>,
+    /// Exact actor-local count observed at assignment.  Persisting the
+    /// baseline makes recovery able to reject forged but plausible thresholds.
+    pub kill_count_at_assignment: Option<u64>,
 }
 
 #[must_use]
@@ -80,6 +85,21 @@ pub fn mission_definition_is_valid(definition: &MissionDefinitionV1) -> bool {
         && (definition.description.is_empty()
             || valid_text(&definition.description, MAX_MISSION_TEXT_BYTES))
         && mission_goal_is_valid(&definition.goal)
+        && definition.dialogue.len() <= 16
+        && definition.dialogue.iter().all(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "describe"
+                    | "offer"
+                    | "accepted"
+                    | "rejected"
+                    | "advice"
+                    | "inquire"
+                    | "success"
+                    | "success_lie"
+                    | "failure"
+            ) && valid_text(value, MAX_MISSION_TEXT_BYTES)
+        })
         && eoc_effects_are_valid(&definition.start_effects)
         && eoc_effects_are_valid(&definition.end_effects)
         && eoc_effects_are_valid(&definition.fail_effects)
@@ -121,10 +141,11 @@ pub fn mission_snapshot_is_valid_for_definition(
         && match &definition.goal {
             MissionGoalV1::KillMonsterType { count, .. }
             | MissionGoalV1::KillMonsterSpecies { count, .. } => mission
-                .kill_count_to_reach
-                .is_some_and(|threshold| threshold >= u64::from(*count)),
+                .kill_count_at_assignment
+                .and_then(|baseline| baseline.checked_add(u64::from(*count)))
+                .is_some_and(|threshold| mission.kill_count_to_reach == Some(threshold)),
             MissionGoalV1::Null | MissionGoalV1::FindItem { .. } => {
-                mission.kill_count_to_reach.is_none()
+                mission.kill_count_to_reach.is_none() && mission.kill_count_at_assignment.is_none()
             }
         }
 }

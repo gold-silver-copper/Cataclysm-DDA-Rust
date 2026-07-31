@@ -1740,11 +1740,13 @@ fn register_stable_item_ids(
     item: &ItemSnapshot,
     world_namespace: u64,
     item_ids: &mut BTreeSet<ItemId>,
+    stable_counters: &mut BTreeSet<u64>,
     maximum_counter: &mut u64,
 ) -> Result<(), SimError> {
     if item.id.counter() == 0
         || item.id.world_namespace() != world_namespace
         || !item_ids.insert(item.id)
+        || !stable_counters.insert(item.id.counter())
     {
         return Err(SimError::InvalidSnapshot);
     }
@@ -1754,21 +1756,39 @@ fn register_stable_item_ids(
         .iter()
         .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
     {
-        register_stable_item_ids(ammunition, world_namespace, item_ids, maximum_counter)?;
+        register_stable_item_ids(
+            ammunition,
+            world_namespace,
+            item_ids,
+            stable_counters,
+            maximum_counter,
+        )?;
     }
     for installed in item
         .magazine_wells
         .iter()
         .filter_map(|well| well.installed_magazine.as_deref())
     {
-        register_stable_item_ids(installed, world_namespace, item_ids, maximum_counter)?;
+        register_stable_item_ids(
+            installed,
+            world_namespace,
+            item_ids,
+            stable_counters,
+            maximum_counter,
+        )?;
     }
     for contained in item
         .ammunition_containers
         .iter()
         .flat_map(|pocket| &pocket.contents)
     {
-        register_stable_item_ids(contained, world_namespace, item_ids, maximum_counter)?;
+        register_stable_item_ids(
+            contained,
+            world_namespace,
+            item_ids,
+            stable_counters,
+            maximum_counter,
+        )?;
     }
     Ok(())
 }
@@ -5993,9 +6013,6 @@ impl WorldState {
         for npc in self.npcs.values_mut() {
             npc.social.remove(&actor_id);
         }
-        if self.actors.is_empty() && self.npcs.values().all(|npc| npc.social.is_empty()) {
-            self.npcs.clear();
-        }
         Ok(())
     }
 
@@ -6039,6 +6056,18 @@ impl WorldState {
                     || mission
                         .origin_npc_id
                         .is_some_and(|npc_id| !self.npcs.contains_key(&npc_id))
+                    || mission.kill_count_at_assignment.is_some_and(|baseline| {
+                        self.mission_definitions
+                            .get(&mission.mission_type_id)
+                            .and_then(|definition| {
+                                missions::current_kill_count_for_recovery(
+                                    &definition.goal,
+                                    &actor.creature_kill_counts,
+                                )
+                                .ok()
+                            })
+                            .is_none_or(|current| baseline > current)
+                    })
                     || self
                         .actors
                         .values()
@@ -6057,6 +6086,8 @@ impl WorldState {
             return Err(SimError::InvalidActorRestore);
         }
         let mut restored_item_ids = BTreeSet::new();
+        let mut restored_stable_counters = BTreeSet::new();
+        restored_stable_counters.insert(actor.id.counter());
         let mut maximum_restored_counter = actor.id.counter();
         for item in &actor.inventory {
             validate_item_snapshot(item).map_err(|_| SimError::InvalidActorRestore)?;
@@ -6064,6 +6095,7 @@ impl WorldState {
                 item,
                 self.world_namespace,
                 &mut restored_item_ids,
+                &mut restored_stable_counters,
                 &mut maximum_restored_counter,
             )
             .map_err(|_| SimError::InvalidActorRestore)?;
@@ -10037,6 +10069,16 @@ impl WorldState {
                 u64::try_from(planned.creatures.len()).map_err(|_| SimError::NumericOverflow)?,
             )
             .and_then(|count| count.checked_add(u64::try_from(planned.npcs.len()).ok()?))
+            .and_then(|count| {
+                planned.npcs.iter().try_fold(count, |count, npc| {
+                    let offers = self
+                        .npc_templates
+                        .get(&npc.template_id)?
+                        .mission_offered
+                        .len();
+                    count.checked_add(u64::try_from(offers).ok()?)
+                })
+            })
             .and_then(|count| count.checked_add(u64::try_from(planned.vehicles.len()).ok()?))
             .filter(|count| *count <= ID_RESERVATION_SIZE)
             .ok_or(SimError::IdReservationExhausted)?;
@@ -14858,6 +14900,14 @@ impl WorldState {
             .cloned()
             .map(|definition| (definition.mission_type_id.clone(), definition))
             .collect::<BTreeMap<_, _>>();
+        if npc_templates.values().any(|template| {
+            template
+                .mission_offered
+                .iter()
+                .any(|mission_type_id| !mission_definitions.contains_key(mission_type_id))
+        }) {
+            return Err(SimError::InvalidSnapshot);
+        }
         let mut actors = BTreeMap::new();
         let snapshot_npc_ids = snapshot
             .npcs
@@ -14867,9 +14917,12 @@ impl WorldState {
         let mut occupied = BTreeSet::new();
         let mut item_ids = BTreeSet::new();
         let mut mission_ids = BTreeSet::new();
+        let mut stable_counters = BTreeSet::new();
         let mut maximum_counter = 0_u64;
         for actor in &snapshot.actors {
             if actor.id.world_namespace() != snapshot.world_namespace
+                || actor.id.counter() == 0
+                || !stable_counters.insert(actor.id.counter())
                 || actors.contains_key(&actor.id)
                 || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
                 || !valid_actor_schedule(actor, snapshot.tick, &snapshot.actor_anatomy)
@@ -14883,6 +14936,18 @@ impl WorldState {
                     mission
                         .origin_npc_id
                         .is_some_and(|npc_id| !snapshot_npc_ids.contains(&npc_id))
+                        || mission.kill_count_at_assignment.is_some_and(|baseline| {
+                            mission_definitions
+                                .get(&mission.mission_type_id)
+                                .and_then(|definition| {
+                                    missions::current_kill_count_for_recovery(
+                                        &definition.goal,
+                                        &actor.creature_kill_counts,
+                                    )
+                                    .ok()
+                                })
+                                .is_none_or(|current| baseline > current)
+                        })
                 })
                 || actor
                     .scheduled_eocs
@@ -14909,6 +14974,7 @@ impl WorldState {
                         .finished_at_tick
                         .is_some_and(|finished| finished > snapshot.tick)
                     || !mission_ids.insert(mission.mission_id)
+                    || !stable_counters.insert(mission.mission_id.counter())
                 {
                     return Err(SimError::InvalidSnapshot);
                 }
@@ -14924,6 +14990,7 @@ impl WorldState {
                     item,
                     snapshot.world_namespace,
                     &mut item_ids,
+                    &mut stable_counters,
                     &mut maximum_counter,
                 )?;
                 if inventory
@@ -14946,6 +15013,7 @@ impl WorldState {
                         &consumed.item,
                         snapshot.world_namespace,
                         &mut item_ids,
+                        &mut stable_counters,
                         &mut maximum_counter,
                     )?;
                 }
@@ -14953,6 +15021,7 @@ impl WorldState {
                     if item_id.counter() == 0
                         || item_id.world_namespace() != snapshot.world_namespace
                         || !item_ids.insert(*item_id)
+                        || !stable_counters.insert(item_id.counter())
                     {
                         return Err(SimError::InvalidSnapshot);
                     }
@@ -14978,12 +15047,14 @@ impl WorldState {
                     &activity.target_item,
                     snapshot.world_namespace,
                     &mut item_ids,
+                    &mut stable_counters,
                     &mut maximum_counter,
                 )?;
                 for item_id in &activity.reserved_component_items {
                     if item_id.counter() == 0
                         || item_id.world_namespace() != snapshot.world_namespace
                         || !item_ids.insert(*item_id)
+                        || !stable_counters.insert(item_id.counter())
                     {
                         return Err(SimError::InvalidSnapshot);
                     }
@@ -15003,6 +15074,7 @@ impl WorldState {
                         &consumed.item,
                         snapshot.world_namespace,
                         &mut item_ids,
+                        &mut stable_counters,
                         &mut maximum_counter,
                     )?;
                 }
@@ -15169,15 +15241,28 @@ impl WorldState {
         }) {
             return Err(SimError::InvalidSnapshot);
         }
+        if snapshot.npcs.len() > cdda_protocol::MAX_NPCS {
+            return Err(SimError::InvalidSnapshot);
+        }
         let mut npcs = BTreeMap::new();
         for npc in &snapshot.npcs {
-            if !cdda_protocol::npc_snapshot_is_valid(
-                npc,
-                snapshot.world_namespace,
-                &snapshot.npc_templates,
-            ) || (!npc.faction_id.is_empty()
-                && npc.faction_id != cdda_protocol::NO_FACTION_ID
-                && !factions.contains_key(&npc.faction_id))
+            if npc_templates.get(&npc.template_id).is_none_or(|template| {
+                !cdda_protocol::npc_snapshot_is_valid_for_template(
+                    npc,
+                    snapshot.world_namespace,
+                    template,
+                ) || npc
+                    .mission_offers
+                    .iter()
+                    .any(|offer| !template.mission_offered.contains(&offer.mission_type_id))
+            }) || !stable_counters.insert(npc.id.counter())
+                || npc.mission_offers.iter().any(|offer| {
+                    !stable_counters.insert(offer.mission_id.counter())
+                        || !mission_definitions.contains_key(&offer.mission_type_id)
+                })
+                || (!npc.faction_id.is_empty()
+                    && npc.faction_id != cdda_protocol::NO_FACTION_ID
+                    && !factions.contains_key(&npc.faction_id))
                 || npc
                     .social
                     .iter()
@@ -15199,6 +15284,11 @@ impl WorldState {
                                 .iter()
                                 .map(|social| (social.actor_id, social.opinion.clone()))
                                 .collect(),
+                            mission_offers: npc
+                                .mission_offers
+                                .iter()
+                                .map(|offer| (offer.mission_id, offer.mission_type_id.clone()))
+                                .collect(),
                         },
                     )
                     .is_some()
@@ -15206,71 +15296,15 @@ impl WorldState {
                 return Err(SimError::InvalidSnapshot);
             }
             maximum_counter = maximum_counter.max(npc.id.counter());
-        }
-        if actors.values().any(|actor| {
-            actor
-                .pending_interaction
-                .as_ref()
-                .is_some_and(|interaction| {
-                    if let cdda_protocol::InteractionContextV1::NpcDialogue {
-                        npc_id,
-                        topic_stack,
-                    } = &interaction.context
-                    {
-                        let Some(npc) = npcs.get(npc_id) else {
-                            return true;
-                        };
-                        if matches!(npc.attitude, 10 | 11 | 17)
-                            || factions.get(&npc.faction_id).is_some_and(|faction| {
-                                faction
-                                    .relation_to(cdda_protocol::PLAYER_FACTION_ID)
-                                    .kill_on_sight
-                            })
-                        {
-                            return true;
-                        }
-                        if !topic_stack
-                            .iter()
-                            .all(|topic_id| dialogue_topics.contains_key(topic_id))
-                        {
-                            return true;
-                        }
-                        let Some(topic) = topic_stack
-                            .last()
-                            .and_then(|topic_id| dialogue_topics.get(topic_id))
-                        else {
-                            return true;
-                        };
-                        if interaction.prompt
-                            != npc_dialogue::render_dialogue_prompt(&npc.name, &topic.dynamic_line)
-                        {
-                            return true;
-                        }
-                        if interaction.choices.as_slice()
-                            == [cdda_protocol::InteractionChoiceV1 {
-                                choice_id: String::from(npc_dialogue::DIALOGUE_FALLBACK_CHOICE_ID),
-                                label: String::from(npc_dialogue::DIALOGUE_FALLBACK_CHOICE_LABEL),
-                            }]
-                        {
-                            return false;
-                        }
-                        let mut responses = topic.responses.iter();
-                        interaction.choices.iter().any(|choice| {
-                            !responses.any(|response| {
-                                choice.choice_id == response.response_id
-                                    && choice.label == response.text
-                            })
-                        })
-                    } else {
-                        false
-                    }
-                })
-        }) {
-            return Err(SimError::InvalidSnapshot);
+            for offer in &npc.mission_offers {
+                maximum_counter = maximum_counter.max(offer.mission_id.counter());
+            }
         }
         let mut creatures = BTreeMap::new();
         for creature_snapshot in &snapshot.creatures {
             if creature_snapshot.id.world_namespace() != snapshot.world_namespace
+                || creature_snapshot.id.counter() == 0
+                || !stable_counters.insert(creature_snapshot.id.counter())
                 || creature_snapshot
                     .effects
                     .iter()
@@ -15305,6 +15339,7 @@ impl WorldState {
                 &ground.item,
                 snapshot.world_namespace,
                 &mut item_ids,
+                &mut stable_counters,
                 &mut maximum_counter,
             )?;
             if !is_passable_in_chunks(&chunks, ground.position)
@@ -15359,7 +15394,7 @@ impl WorldState {
             .iter()
             .map(|(coord, chunk)| (*coord, chunk.revision))
             .collect();
-        Ok(Self {
+        let world = Self {
             world_namespace: snapshot.world_namespace,
             world_seed: snapshot.world_seed,
             tick: snapshot.tick,
@@ -15397,7 +15432,11 @@ impl WorldState {
             chunks,
             memory_chunk_revisions,
             memory_sight_radius: NaturalLightSnapshot::at_tick(snapshot.tick).sight_radius,
-        })
+        };
+        if !world.recovered_npc_interactions_are_exact()? {
+            return Err(SimError::InvalidSnapshot);
+        }
+        Ok(world)
     }
 
     pub fn canonical_hash(&self) -> Result<[u8; 32], SimError> {
@@ -15406,7 +15445,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV108");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV109");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -15622,6 +15661,7 @@ mod tests {
                     nested: Vec::new(),
                     area_items: Vec::new(),
                     npc_placements: Vec::new(),
+                    omitted_npc_placement_count: 0,
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,
@@ -30895,6 +30935,7 @@ mod tests {
                     nested: Vec::new(),
                     area_items: Vec::new(),
                     npc_placements: Vec::new(),
+                    omitted_npc_placement_count: 0,
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,

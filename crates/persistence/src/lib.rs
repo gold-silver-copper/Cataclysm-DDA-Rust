@@ -20,12 +20,12 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 110;
+pub const SCHEMA_VERSION: i64 = 111;
 /// Old Postcard snapshots and journals cannot be decoded after Protocol 132
 /// added canonical monster morale on top of the Protocol 131 spell and
 /// authoritative-vehicle representation.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 110;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 111;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -6813,6 +6813,7 @@ mod tests {
                     nested: Vec::new(),
                     area_items: Vec::new(),
                     npc_placements: Vec::new(),
+                    omitted_npc_placement_count: 0,
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,

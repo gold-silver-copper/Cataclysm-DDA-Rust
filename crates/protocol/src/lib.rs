@@ -57,11 +57,12 @@ pub use missions::{
 };
 pub use npc_dialogue::{
     DialogueResponseV1, DialogueTopicV1, MAX_DIALOGUE_ID_BYTES, MAX_DIALOGUE_RESPONSES,
-    MAX_DIALOGUE_TEXT_BYTES, MAX_DIALOGUE_TOPIC_STACK, MAX_NPC_NAME_BYTES, MAX_NPC_OPINION_ABS,
-    MAX_NPC_TEMPLATES, NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1,
+    MAX_DIALOGUE_TEXT_BYTES, MAX_DIALOGUE_TOPIC_STACK, MAX_NPC_MISSION_OFFERS, MAX_NPC_NAME_BYTES,
+    MAX_NPC_OPINION_ABS, MAX_NPC_TEMPLATES, MAX_NPCS, NPC_BUILTIN_MISSION_TOPICS,
+    NpcMissionOfferV1, NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1,
     VisibleNpcSnapshotV1, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
-    npc_template_attitude_is_supported, npc_template_attitude_will_talk,
-    opinion_delta_cannot_trigger_hostility, opinion_is_valid,
+    npc_snapshot_is_valid_for_template, npc_template_attitude_is_supported,
+    npc_template_attitude_will_talk, opinion_delta_cannot_trigger_hostility, opinion_is_valid,
 };
 pub use npc_faction::{
     FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,
@@ -138,7 +139,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 132;
+pub const PROTOCOL_VERSION: u16 = 133;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3380,6 +3381,10 @@ pub struct WorldgenTemplateV1 {
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
     pub npc_placements: Vec<WorldgenNpcPlacementV1>,
     pub vehicle_placements: Vec<WorldgenVehiclePlacementV1>,
+    /// Deterministic multiplayer adaptation count: pinned placements whose
+    /// character-class instantiation kernel is not admitted are omitted while
+    /// preserving the surrounding production mapgen.
+    pub omitted_npc_placement_count: u16,
     pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
     pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
@@ -3398,6 +3403,7 @@ pub struct WorldgenNestedTemplateV1 {
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
     pub npc_placements: Vec<WorldgenNpcPlacementV1>,
     pub vehicle_placements: Vec<WorldgenVehiclePlacementV1>,
+    pub omitted_npc_placement_count: u16,
     pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
     pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
@@ -6743,6 +6749,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         && template.area_items.is_empty()
                         && template.npc_placements.is_empty()
                         && template.vehicle_placements.is_empty()
+                        && template.omitted_npc_placement_count == 0
                         && template.monster_placements.is_empty()
                         && template.individual_monster_placements.is_empty()
                         && !template.erase_all_before_placing_terrain
@@ -9218,6 +9225,7 @@ mod tests {
                     nested: Vec::new(),
                     area_items: Vec::new(),
                     npc_placements: Vec::new(),
+                    omitted_npc_placement_count: 0,
                     monster_placements: Vec::new(),
                     individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,

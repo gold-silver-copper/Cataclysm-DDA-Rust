@@ -123,6 +123,15 @@ impl WorldState {
                             finished_at_tick: None,
                             status: MissionStatusV1::InProgress,
                             kill_count_to_reach,
+                            kill_count_at_assignment: kill_count_to_reach.and_then(|threshold| {
+                                match &definition.goal {
+                                    MissionGoalV1::KillMonsterType { count, .. }
+                                    | MissionGoalV1::KillMonsterSpecies { count, .. } => {
+                                        threshold.checked_sub(u64::from(*count))
+                                    }
+                                    _ => None,
+                                }
+                            }),
                         },
                     );
                     lifecycle.push(MissionLifecycleEvent::Assigned {
@@ -286,6 +295,81 @@ impl WorldState {
         })
     }
 
+    pub(super) fn accept_npc_mission(
+        &mut self,
+        actor_id: ActorId,
+        npc_id: NpcId,
+        mission_id: MissionId,
+    ) -> Result<MissionLifecycleEvent, SimError> {
+        let mut actor = self
+            .actors
+            .get(&actor_id)
+            .cloned()
+            .ok_or(SimError::UnknownActor)?;
+        let mut npc = self
+            .npcs
+            .get(&npc_id)
+            .cloned()
+            .ok_or(SimError::UnknownNpc)?;
+        let mission_type_id = npc
+            .mission_offers
+            .remove(&mission_id)
+            .ok_or(SimError::InvalidMission)?;
+        let definition = self
+            .mission_definitions
+            .get(&mission_type_id)
+            .ok_or(SimError::InvalidMission)?;
+        if actor
+            .missions
+            .values()
+            .filter(|mission| mission.status == MissionStatusV1::InProgress)
+            .count()
+            >= cdda_protocol::MAX_ACTOR_MISSIONS
+            || actor.missions.contains_key(&mission_id)
+        {
+            return Err(SimError::InvalidMission);
+        }
+        prune_finished_mission_history(&mut actor)?;
+        let kill_count_at_assignment = match &definition.goal {
+            MissionGoalV1::KillMonsterType { .. } | MissionGoalV1::KillMonsterSpecies { .. } => {
+                Some(current_kill_count(
+                    &definition.goal,
+                    &actor.creature_kill_counts,
+                )?)
+            }
+            MissionGoalV1::Null | MissionGoalV1::FindItem { .. } => None,
+        };
+        let kill_count_to_reach = match (&definition.goal, kill_count_at_assignment) {
+            (MissionGoalV1::KillMonsterType { count, .. }, Some(baseline))
+            | (MissionGoalV1::KillMonsterSpecies { count, .. }, Some(baseline)) => Some(
+                baseline
+                    .checked_add(u64::from(*count))
+                    .ok_or(SimError::NumericOverflow)?,
+            ),
+            (MissionGoalV1::Null | MissionGoalV1::FindItem { .. }, None) => None,
+            _ => return Err(SimError::InvalidMission),
+        };
+        actor.missions.insert(
+            mission_id,
+            MissionSnapshotV1 {
+                mission_id,
+                mission_type_id: mission_type_id.clone(),
+                origin_npc_id: Some(npc_id),
+                assigned_at_tick: self.tick,
+                finished_at_tick: None,
+                status: MissionStatusV1::InProgress,
+                kill_count_to_reach,
+                kill_count_at_assignment,
+            },
+        );
+        self.actors.insert(actor_id, actor);
+        self.npcs.insert(npc_id, npc);
+        Ok(MissionLifecycleEvent::Assigned {
+            mission_id,
+            mission_type_id,
+        })
+    }
+
     pub(super) fn advance_missions(
         &mut self,
         events: &mut Vec<WorldEvent>,
@@ -389,6 +473,13 @@ fn current_kill_count(
         }),
         _ => Err(SimError::InvalidMission),
     }
+}
+
+pub(super) fn current_kill_count_for_recovery(
+    goal: &MissionGoalV1,
+    kill_counts: &BTreeMap<String, u64>,
+) -> Result<u64, SimError> {
+    current_kill_count(goal, kill_counts)
 }
 
 fn consume_mission_items(actor: &mut Actor, goal: &MissionGoalV1) -> Result<(), SimError> {

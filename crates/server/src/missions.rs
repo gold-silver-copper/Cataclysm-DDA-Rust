@@ -127,6 +127,8 @@ fn runtime_mission_candidate(
         description: definition.description.clone(),
         difficulty: definition.difficulty,
         value: definition.value,
+        dialogue: definition.dialogue.clone(),
+        has_generic_rewards: definition.has_generic_rewards,
         goal,
         start_effects: definition
             .start_effects
