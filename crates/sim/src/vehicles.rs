@@ -707,7 +707,10 @@ impl WorldState {
             .ok_or(SimError::InvalidTerrain)?
             .cargo
             .remove(cargo_index);
-        let item = ItemInstance::from_snapshot(&snapshot)?;
+        let mut item = ItemInstance::from_snapshot(&snapshot)?;
+        if item.owner_faction_id.is_empty() {
+            item.set_owner_recursive(cdda_protocol::PLAYER_FACTION_ID);
+        }
         if self
             .actors
             .get_mut(&actor_id)

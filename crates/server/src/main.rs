@@ -859,7 +859,7 @@ fn open_world(
     let items = content.items;
     let eocs = content.eocs;
     let (preliminary_missions, preliminary_mission_ids) =
-        runtime_mission_catalog(content.missions, content.monsters, None)?;
+        runtime_mission_catalog(content.missions, content.items, content.monsters, None)?;
     let preliminary_npc_offer_mission_ids = runtime_npc_offer_mission_ids(&preliminary_missions);
     let mut eoc_catalog = runtime_eoc_catalog(
         eocs,
@@ -1018,6 +1018,7 @@ fn open_world(
         .collect::<BTreeSet<_>>();
     let (mission_catalog, mission_ids) = runtime_mission_catalog(
         content.missions,
+        content.items,
         content.monsters,
         Some(&runtime_monster_type_ids),
     )?;

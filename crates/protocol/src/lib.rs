@@ -140,7 +140,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 136;
+pub const PROTOCOL_VERSION: u16 = 137;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2677,6 +2677,12 @@ pub struct CreatureCorpseSnapshotV1 {
 pub struct ItemSnapshot {
     pub id: ItemId,
     pub type_id: String,
+    /// Faction that owns this item. The empty ID represents upstream's null
+    /// owner and is available to take. Ownership is copied recursively when a
+    /// character claims an item so nested contents cannot retain a different
+    /// theft boundary.
+    #[serde(default)]
+    pub owner_faction_id: String,
     pub charges: i32,
     pub damage: u16,
     /// Exact upstream item damage. `damage` is the derived display level.
@@ -5235,6 +5241,7 @@ fn valid_craft_item_prototype(item: &CraftItemPrototypeV1) -> bool {
     let snapshot = ItemSnapshot {
         id: ItemId::new(1, 1),
         type_id: item.type_id.clone(),
+        owner_faction_id: String::new(),
         charges: item.charges,
         damage: item_damage_level(raw_damage),
         raw_damage,

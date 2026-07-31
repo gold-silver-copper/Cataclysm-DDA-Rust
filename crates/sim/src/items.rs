@@ -41,6 +41,7 @@ use super::{
 pub(super) struct ItemInstance {
     pub(super) id: ItemId,
     pub(super) type_id: String,
+    pub(super) owner_faction_id: String,
     pub(super) charges: i32,
     pub(super) damage: u16,
     pub(super) raw_damage: u16,
@@ -294,6 +295,28 @@ fn summarize_item(
 }
 
 impl ItemInstance {
+    /// Matches pinned `item::set_owner`: claiming a container claims every
+    /// item currently nested inside it in deterministic pocket order.
+    pub(super) fn set_owner_recursive(&mut self, owner_faction_id: &str) {
+        self.owner_faction_id.clear();
+        self.owner_faction_id.push_str(owner_faction_id);
+        for pocket in &mut self.integral_magazines {
+            if let Some(item) = pocket.loaded_ammunition.as_deref_mut() {
+                set_snapshot_owner_recursive(item, owner_faction_id);
+            }
+        }
+        for well in &mut self.magazine_wells {
+            if let Some(item) = well.installed_magazine.as_deref_mut() {
+                set_snapshot_owner_recursive(item, owner_faction_id);
+            }
+        }
+        for pocket in &mut self.ammunition_containers {
+            for item in &mut pocket.contents {
+                set_snapshot_owner_recursive(item, owner_faction_id);
+            }
+        }
+    }
+
     pub(super) fn process_temperature(&mut self, current_tick: SimTick) -> Result<(), SimError> {
         self.process_temperature_and_rot(current_tick, false)
             .map(|_| ())
@@ -626,6 +649,7 @@ impl ItemInstance {
         ItemSnapshot {
             id: self.id,
             type_id: self.type_id.clone(),
+            owner_faction_id: self.owner_faction_id.clone(),
             charges: self.charges,
             damage: self.damage,
             raw_damage: self.raw_damage,
@@ -657,6 +681,7 @@ impl ItemInstance {
         Ok(Self {
             id: snapshot.id,
             type_id: snapshot.type_id.clone(),
+            owner_faction_id: snapshot.owner_faction_id.clone(),
             charges: snapshot.charges,
             damage: snapshot.damage,
             raw_damage: snapshot.raw_damage,
@@ -681,6 +706,26 @@ impl ItemInstance {
             creature_corpse: snapshot.creature_corpse.clone(),
             containment: snapshot.containment.clone(),
         })
+    }
+}
+
+pub(super) fn set_snapshot_owner_recursive(item: &mut ItemSnapshot, owner_faction_id: &str) {
+    item.owner_faction_id.clear();
+    item.owner_faction_id.push_str(owner_faction_id);
+    for pocket in &mut item.integral_magazines {
+        if let Some(nested) = pocket.loaded_ammunition.as_deref_mut() {
+            set_snapshot_owner_recursive(nested, owner_faction_id);
+        }
+    }
+    for well in &mut item.magazine_wells {
+        if let Some(nested) = well.installed_magazine.as_deref_mut() {
+            set_snapshot_owner_recursive(nested, owner_faction_id);
+        }
+    }
+    for pocket in &mut item.ammunition_containers {
+        for nested in &mut pocket.contents {
+            set_snapshot_owner_recursive(nested, owner_faction_id);
+        }
     }
 }
 
@@ -1020,6 +1065,7 @@ pub(super) fn item_from_craft_prototype(
     ItemInstance {
         id,
         type_id: prototype.type_id.clone(),
+        owner_faction_id: String::new(),
         charges: prototype.charges,
         damage: 0,
         raw_damage: 0,
@@ -1102,6 +1148,7 @@ pub(super) fn item_from_component(id: ItemId, component: &ItemComponentSnapshotV
     ItemInstance {
         id,
         type_id: component.type_id.clone(),
+        owner_faction_id: String::new(),
         charges: component.charges,
         damage: component.damage,
         raw_damage: component.raw_damage,

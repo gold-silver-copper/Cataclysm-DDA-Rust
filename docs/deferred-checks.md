@@ -95,6 +95,10 @@ Run only when the user explicitly requests a verification checkpoint.
   finish/fail, nested item turn-in, type/species kill-count, EOC ordering and
   active-mission condition traces; production admission; canonical fixtures;
   SQLite/replay recovery; and two-client dialogue assignment/completion.
+- NPC owned-source item-turn-in checkpoint: verify recursive ownership across
+  pickup/crafting/vehicle cargo, visible completion sources, pinned reachable
+  map-before-inventory consumption order, container spill, hostile ownership,
+  protocol 137/schema 114 recovery, replay, and two-client dialogue completion.
 - Vehicle checkpoint: run pinned vehicle inheritance/group selection, mapgen
   phase/RNG order, arbitrary-angle tileray mounts, initialization damage/state,
   collision, cargo capacity/spawning/rot/corpse recovery, contiguous openable

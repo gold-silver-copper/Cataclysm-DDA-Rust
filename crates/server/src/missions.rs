@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use cdda_content::{
-    EocEffectDefinition, MissionDefinition, MissionGoalDefinition, MissionRegistry, MonsterRegistry,
+    EocEffectDefinition, ItemRegistry, MissionDefinition, MissionGoalDefinition, MissionRegistry,
+    MonsterRegistry,
 };
 use cdda_protocol::{EocConditionV1, EocEffectV1, MissionDefinitionV1, MissionGoalV1};
 
@@ -9,13 +10,14 @@ use crate::eocs::runtime_effect;
 
 pub(super) fn runtime_mission_catalog(
     registry: &MissionRegistry,
+    items: &ItemRegistry,
     monsters: &MonsterRegistry,
     runtime_monster_type_ids: Option<&BTreeSet<String>>,
 ) -> Result<(Vec<MissionDefinitionV1>, BTreeSet<String>), Box<dyn std::error::Error>> {
     let mut definitions = registry
         .iter()
         .filter_map(|(_id, definition)| {
-            runtime_mission_candidate(definition, monsters, runtime_monster_type_ids)
+            runtime_mission_candidate(definition, items, monsters, runtime_monster_type_ids)
         })
         .collect::<Vec<_>>();
     loop {
@@ -50,6 +52,7 @@ pub(super) fn runtime_mission_catalog(
 
 fn runtime_mission_candidate(
     definition: &MissionDefinition,
+    items: &ItemRegistry,
     monsters: &MonsterRegistry,
     runtime_monster_type_ids: Option<&BTreeSet<String>>,
 ) -> Option<MissionDefinitionV1> {
@@ -72,13 +75,21 @@ fn runtime_mission_candidate(
             MissionGoalV1::Null
         }
         MissionGoalDefinition::FindItem => {
-            // Pinned completion searches carried items plus owned, visible,
-            // reachable ground and vehicle cargo within radius five, then
-            // consumes from that crafting-inventory source set and spills
-            // containers. The current world kernel cannot represent that
-            // whole source-selection contract, so admitting any production
-            // find-item mission here would silently change its objective.
-            return None;
+            if !definition.monster_type_id.is_empty()
+                || !definition.monster_species_id.is_empty()
+                || definition.monster_kill_goal != -1
+            {
+                return None;
+            }
+            let item = items.get(&definition.item_type_id)?;
+            if item.category == "software" {
+                return None;
+            }
+            MissionGoalV1::FindItem {
+                item_type_id: definition.item_type_id.clone(),
+                count: u32::try_from(definition.item_count).ok()?,
+                count_by_charges: item.count_by_charges(),
+            }
         }
         MissionGoalDefinition::KillMonsterType => {
             if !definition.item_type_id.is_empty()

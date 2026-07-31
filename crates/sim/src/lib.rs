@@ -1089,6 +1089,8 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
         return Err(SimError::InvalidItem);
     }
     if snapshot.id.counter() == 0
+        || (!snapshot.owner_faction_id.is_empty()
+            && validate_item_type_id(&snapshot.owner_faction_id).is_err())
         || snapshot.damage > MAX_ITEM_DAMAGE_LEVEL
         || snapshot.raw_damage > cdda_protocol::MAX_ITEM_RAW_DAMAGE
         || snapshot.damage != cdda_protocol::item_damage_level(snapshot.raw_damage)
@@ -1249,6 +1251,25 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
         return Err(SimError::InvalidItem);
     }
     Ok(())
+}
+
+fn item_owners_are_known(item: &ItemSnapshot, factions: &BTreeMap<String, FactionStateV1>) -> bool {
+    (item.owner_faction_id.is_empty() || factions.contains_key(&item.owner_faction_id))
+        && item
+            .integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .all(|nested| item_owners_are_known(nested, factions))
+        && item
+            .magazine_wells
+            .iter()
+            .filter_map(|well| well.installed_magazine.as_deref())
+            .all(|nested| item_owners_are_known(nested, factions))
+        && item
+            .ammunition_containers
+            .iter()
+            .flat_map(|pocket| &pocket.contents)
+            .all(|nested| item_owners_are_known(nested, factions))
 }
 
 fn validate_creature_corpse_context(
@@ -3795,6 +3816,7 @@ fn roll_dice(rng: &mut ChaCha8Rng, count: u32, sides: u32) -> Result<u32, SimErr
 
 fn same_item_definition(item: &ItemInstance, snapshot: &ItemSnapshot) -> bool {
     item.type_id == snapshot.type_id
+        && item.owner_faction_id == snapshot.owner_faction_id
         && item.damage == snapshot.damage
         && item.raw_damage == snapshot.raw_damage
         && item.fitted == snapshot.fitted
@@ -5620,6 +5642,7 @@ impl WorldState {
             let snapshot = ItemSnapshot {
                 id: ItemId::new(self.world_namespace, 1),
                 type_id: ammunition.type_id,
+                owner_faction_id: String::new(),
                 charges: ammunition.charges,
                 damage: 0,
                 raw_damage: 0,
@@ -5694,6 +5717,7 @@ impl WorldState {
                 item: ItemInstance {
                     id,
                     type_id: spawn.type_id,
+                    owner_faction_id: String::new(),
                     charges: spawn.charges,
                     damage: 0,
                     raw_damage: 0,
@@ -10171,15 +10195,16 @@ impl WorldState {
             for (part, planned_cargo) in vehicle.parts.iter_mut().zip(vehicle.cargo) {
                 for planned_item in planned_cargo {
                     let item_id = self.allocator.allocate_item()?;
-                    part.cargo.push(
-                        item_from_planned_spawn(
-                            item_id,
-                            &planned_item,
-                            &mut self.allocator,
-                            self.tick,
-                        )?
-                        .snapshot(),
-                    );
+                    let mut item = item_from_planned_spawn(
+                        item_id,
+                        &planned_item,
+                        &mut self.allocator,
+                        self.tick,
+                    )?;
+                    if !vehicle.owner_faction_id.is_empty() {
+                        item.set_owner_recursive(&vehicle.owner_faction_id);
+                    }
+                    part.cargo.push(item.snapshot());
                 }
             }
             let snapshot = VehicleSnapshotV1 {
@@ -10338,6 +10363,7 @@ impl WorldState {
                 item: ItemInstance {
                     id: corpse_item_id,
                     type_id: String::from("corpse"),
+                    owner_faction_id: String::new(),
                     charges: 1,
                     damage: cdda_protocol::item_damage_level(raw_damage),
                     raw_damage,
@@ -12021,11 +12047,15 @@ impl WorldState {
             .ground_items
             .remove(&item_id)
             .ok_or(SimError::UnknownItem)?;
+        let mut item = ground.item;
+        if item.owner_faction_id.is_empty() {
+            item.set_owner_recursive(cdda_protocol::PLAYER_FACTION_ID);
+        }
         self.actors
             .get_mut(&actor_id)
             .ok_or(SimError::UnknownActor)?
             .inventory
-            .insert(item_id, ground.item);
+            .insert(item_id, item);
         events.push(self.make_event(WorldEventKind::ItemPickedUp {
             actor_id,
             item_id,
@@ -12739,6 +12769,7 @@ impl WorldState {
                 .enumerate()
             {
                 let mut item = item_from_craft_prototype(*item_id, prototype, self.tick);
+                item.set_owner_recursive(cdda_protocol::PLAYER_FACTION_ID);
                 item.force_fit_if_variable_size();
                 if index < usize::from(activity.recipe.output_instances) {
                     item.component_provenance = output_provenance
@@ -13441,6 +13472,7 @@ impl WorldState {
                     .expect("an allocated unload item has a normalized prototype");
                 let mut ammunition =
                     item_from_craft_prototype(unloaded_item_id, prototype, self.tick);
+                ammunition.set_owner_recursive(&target.owner_faction_id);
                 ammunition.charges = unload_charges;
                 if let Some(weapon) = target.ranged_weapon.as_mut() {
                     weapon.ammunition_remaining = 0;
@@ -13678,7 +13710,7 @@ impl WorldState {
                 let damage_success = component_rng.next_u32() % 10_000 < damage_chance;
                 let recovered_component = skill_success && damage_success;
                 if recovered_component {
-                    let item = if let Some(state) = &component.output_state {
+                    let mut item = if let Some(state) = &component.output_state {
                         item_from_component(item_id, state)
                     } else {
                         let mut item =
@@ -13688,6 +13720,7 @@ impl WorldState {
                         }
                         item
                     };
+                    item.set_owner_recursive(&activity.target_item.owner_faction_id);
                     recovered.push((item_id, item));
                 } else {
                     let count = if component.count_by_charges {
@@ -15119,7 +15152,9 @@ impl WorldState {
             }
             let mut inventory = BTreeMap::new();
             for item in &actor.inventory {
-                if !item_temperature_timestamps_are_valid(item, snapshot.tick) {
+                if !item_owners_are_known(item, &factions)
+                    || !item_temperature_timestamps_are_valid(item, snapshot.tick)
+                {
                     return Err(SimError::InvalidSnapshot);
                 }
                 validate_creature_corpse_context(item, snapshot.tick, &field_types)?;
@@ -15139,7 +15174,9 @@ impl WorldState {
             }
             if let Some(activity) = &actor.craft_activity {
                 for consumed in &activity.consumed_items {
-                    if !item_temperature_timestamps_are_valid(&consumed.item, snapshot.tick) {
+                    if !item_owners_are_known(&consumed.item, &factions)
+                        || !item_temperature_timestamps_are_valid(&consumed.item, snapshot.tick)
+                    {
                         return Err(SimError::InvalidSnapshot);
                     }
                     if consumed.item.creature_corpse.is_some() {
@@ -15169,7 +15206,9 @@ impl WorldState {
                 }
             }
             if let Some(activity) = &actor.disassembly_activity {
-                if !item_temperature_timestamps_are_valid(&activity.target_item, snapshot.tick) {
+                if !item_owners_are_known(&activity.target_item, &factions)
+                    || !item_temperature_timestamps_are_valid(&activity.target_item, snapshot.tick)
+                {
                     return Err(SimError::InvalidSnapshot);
                 }
                 if activity.target_item.creature_corpse.is_some() {
@@ -15200,7 +15239,9 @@ impl WorldState {
             }
             if let Some(activity) = &actor.construction_activity {
                 for consumed in &activity.consumed_items {
-                    if !item_temperature_timestamps_are_valid(&consumed.item, snapshot.tick) {
+                    if !item_owners_are_known(&consumed.item, &factions)
+                        || !item_temperature_timestamps_are_valid(&consumed.item, snapshot.tick)
+                    {
                         return Err(SimError::InvalidSnapshot);
                     }
                     if consumed.item.creature_corpse.is_some() {
@@ -15490,7 +15531,9 @@ impl WorldState {
         }
         let mut ground_items = BTreeMap::new();
         for ground in &snapshot.ground_items {
-            if !item_temperature_timestamps_are_valid(&ground.item, snapshot.tick) {
+            if !item_owners_are_known(&ground.item, &factions)
+                || !item_temperature_timestamps_are_valid(&ground.item, snapshot.tick)
+            {
                 return Err(SimError::InvalidSnapshot);
             }
             validate_creature_corpse_context(&ground.item, snapshot.tick, &field_types)?;
@@ -15524,7 +15567,9 @@ impl WorldState {
             }
             maximum_counter = maximum_counter.max(vehicle.id.counter());
             for item in vehicle.parts.iter().flat_map(|part| part.cargo.iter()) {
-                if !item_temperature_timestamps_are_valid(item, snapshot.tick) {
+                if !item_owners_are_known(item, &factions)
+                    || !item_temperature_timestamps_are_valid(item, snapshot.tick)
+                {
                     return Err(SimError::InvalidSnapshot);
                 }
                 validate_creature_corpse_context(item, snapshot.tick, &field_types)?;

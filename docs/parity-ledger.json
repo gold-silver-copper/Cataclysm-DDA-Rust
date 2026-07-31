@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 136,
-  "persistence_schema_version": 113,
+  "protocol_version": 137,
+  "persistence_schema_version": 114,
   "replay_format_version": 3,
-  "active_milestone": "monsters",
+  "active_milestone": "npcs-social",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -502,11 +502,18 @@
     {
       "id": "npcs-social",
       "title": "NPCs, dialogue, missions, and factions",
-      "state": "planned",
+      "state": "implementation_in_progress",
+      "submilestones": [
+        { "id": "stable-npc-identity-and-factions", "state": "implementation_complete_verification_deferred" },
+        { "id": "leased-dialogue-and-mission-lifecycle", "state": "implementation_complete_verification_deferred" },
+        { "id": "find-item-owned-world-source-turn-in", "state": "implementation_complete_verification_deferred" },
+        { "id": "npc-class-generation-and-ordinary-ai", "state": "planned" },
+        { "id": "dialogue-effects-missions-and-faction-closure", "state": "planned" }
+      ],
       "priority": 26,
       "depends_on": ["eoc-use-actions", "interaction-interface", "overmap-cities", "overmap-specials"],
       "upstream_sources": ["../Cataclysm-DDA/src/npc.cpp", "../Cataclysm-DDA/src/dialogue_helpers.cpp", "../Cataclysm-DDA/src/mission.cpp"],
-      "rust_paths": ["crates/content/src/lib.rs", "crates/sim/src/lib.rs", "crates/protocol/src/lib.rs"],
+      "rust_paths": ["crates/content/src/npc_dialogue.rs", "crates/content/src/mission.rs", "crates/content/src/npc_faction.rs", "crates/protocol/src/npc_dialogue.rs", "crates/protocol/src/missions.rs", "crates/protocol/src/npc_faction.rs", "crates/server/src/missions.rs", "crates/server/src/npc_faction.rs", "crates/sim/src/npc_dialogue.rs", "crates/sim/src/missions.rs", "crates/sim/src/npc_faction.rs"],
       "scenario_families": ["npc-goal-and-activity", "dialogue-condition-and-effect", "mission-state-transition"],
       "differential_oracle": "planned",
       "multiplayer_adaptation": "NPC state is world-owned; conversations use leased interaction contexts and deterministic conflict resolution between players.",
