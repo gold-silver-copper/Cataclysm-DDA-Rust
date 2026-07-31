@@ -1,7 +1,7 @@
 //! Persistent bounded server-owned interaction requests.
 
 use cdda_protocol::{
-    ActorId, CommandRejection, CommandSequence, InteractionCancellationReasonV1,
+    ActorId, CommandRejection, CommandSequence, EocEffectV1, InteractionCancellationReasonV1,
     InteractionChoiceV1, InteractionContextV1, InteractionId, ItemId, PendingInteractionV1,
     SimTick, WorldEvent, WorldEventKind,
 };
@@ -9,8 +9,71 @@ use cdda_protocol::{
 use crate::{SimError, WorldState};
 
 const MEDICAL_INTERACTION_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
+const EOC_CONFIRMATION_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
 
 impl WorldState {
+    pub(super) fn resolve_disconnected_eoc_confirmations(
+        &mut self,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let pending = self
+            .actors
+            .iter()
+            .filter(|(_actor_id, actor)| !actor.connected)
+            .filter_map(|(actor_id, actor)| {
+                let interaction = actor.pending_interaction.as_ref()?;
+                let InteractionContextV1::EocConfirmation {
+                    item_id,
+                    item_type_id,
+                    activation_sequence,
+                    default,
+                    accept_effects,
+                    decline_effects,
+                } = &interaction.context
+                else {
+                    return None;
+                };
+                Some((
+                    *actor_id,
+                    interaction.interaction_id,
+                    *activation_sequence,
+                    *item_id,
+                    item_type_id.clone(),
+                    if *default {
+                        accept_effects.clone()
+                    } else {
+                        decline_effects.clone()
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (actor_id, interaction_id, activation_sequence, item_id, item_type_id, effects) in
+            pending
+        {
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .pending_interaction = None;
+            if !self.apply_eoc_confirmation_response(
+                actor_id,
+                activation_sequence,
+                activation_sequence,
+                item_id,
+                &item_type_id,
+                &effects,
+                false,
+                events,
+            )? {
+                events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                    actor_id,
+                    interaction_id,
+                    reason: InteractionCancellationReasonV1::Invalidated,
+                })?);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn request_medical_body_part(
         &mut self,
         actor_id: ActorId,
@@ -74,6 +137,75 @@ impl WorldState {
         Ok(())
     }
 
+    pub(super) fn request_eoc_confirmation(
+        &mut self,
+        actor_id: ActorId,
+        activation_sequence: CommandSequence,
+        item_id: ItemId,
+        item_type_id: String,
+        prompt: String,
+        default: bool,
+        accept_effects: Vec<EocEffectV1>,
+        decline_effects: Vec<EocEffectV1>,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if let Some(previous) = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction
+            .take()
+        {
+            events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                actor_id,
+                interaction_id: previous.interaction_id,
+                reason: InteractionCancellationReasonV1::Replaced,
+            })?);
+        }
+        let interaction_id = InteractionId::new(self.world_namespace, self.next_event_counter);
+        let interaction = PendingInteractionV1 {
+            interaction_id,
+            prompt,
+            choices: vec![
+                InteractionChoiceV1 {
+                    choice_id: String::from("yes"),
+                    label: String::from("Yes"),
+                },
+                InteractionChoiceV1 {
+                    choice_id: String::from("no"),
+                    label: String::from("No"),
+                },
+            ],
+            created_at_tick: self.tick,
+            expires_at_tick: SimTick(
+                self.tick
+                    .0
+                    .checked_add(EOC_CONFIRMATION_LIFETIME_TICKS)
+                    .ok_or(SimError::NumericOverflow)?,
+            ),
+            context: InteractionContextV1::EocConfirmation {
+                item_id,
+                item_type_id,
+                activation_sequence,
+                default,
+                accept_effects,
+                decline_effects,
+            },
+        };
+        if !cdda_protocol::pending_interaction_is_valid(&interaction, actor_id) {
+            return Err(SimError::InvalidItem);
+        }
+        self.actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction = Some(interaction.clone());
+        events.push(self.make_event(WorldEventKind::InteractionRequested {
+            actor_id,
+            interaction,
+        })?);
+        Ok(())
+    }
+
     pub(super) fn interaction_action_cost(
         &self,
         actor_id: ActorId,
@@ -100,6 +232,7 @@ impl WorldState {
                         .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
                         .ok_or(SimError::NumericOverflow)
                 }),
+            InteractionContextV1::EocConfirmation { .. } => Ok(0),
         }
     }
 
@@ -141,7 +274,7 @@ impl WorldState {
             )?);
             return Ok(());
         }
-        let (outcome, item_id) = match &interaction.context {
+        match &interaction.context {
             InteractionContextV1::MedicalBodyPart {
                 item_id,
                 item_type_id,
@@ -150,32 +283,59 @@ impl WorldState {
                 let Some(healing) = self.healing_item_types.get(item_type_id).cloned() else {
                     return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
                 };
-                (
-                    self.apply_healing_item(
-                        actor_id,
-                        *item_id,
-                        &healing,
-                        activation_sequence.0,
-                        Some(&choice_id),
-                    )?,
+                let outcome = self.apply_healing_item(
+                    actor_id,
                     *item_id,
-                )
+                    &healing,
+                    activation_sequence.0,
+                    Some(&choice_id),
+                )?;
+                let Some(outcome) = outcome else {
+                    return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
+                };
+                self.actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?
+                    .pending_interaction = None;
+                events.push(self.make_event(WorldEventKind::MedicalItemApplied {
+                    actor_id,
+                    item_id: *item_id,
+                    body_part_id: outcome.body_part_id,
+                    healed_hp: outcome.healed_hp,
+                    remaining_charges: outcome.remaining_charges,
+                })?);
             }
-        };
-        let Some(outcome) = outcome else {
-            return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
-        };
-        self.actors
-            .get_mut(&actor_id)
-            .ok_or(SimError::UnknownActor)?
-            .pending_interaction = None;
-        events.push(self.make_event(WorldEventKind::MedicalItemApplied {
-            actor_id,
-            item_id,
-            body_part_id: outcome.body_part_id,
-            healed_hp: outcome.healed_hp,
-            remaining_charges: outcome.remaining_charges,
-        })?);
+            InteractionContextV1::EocConfirmation {
+                item_id,
+                item_type_id,
+                activation_sequence,
+                accept_effects,
+                decline_effects,
+                ..
+            } => {
+                let selected = if choice_id == "yes" {
+                    accept_effects
+                } else {
+                    decline_effects
+                };
+                self.actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?
+                    .pending_interaction = None;
+                if !self.apply_eoc_confirmation_response(
+                    actor_id,
+                    *activation_sequence,
+                    sequence,
+                    *item_id,
+                    item_type_id,
+                    selected,
+                    true,
+                    events,
+                )? {
+                    return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -186,14 +346,14 @@ impl WorldState {
         interaction_id: InteractionId,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        let pending_id = self
+        let pending = self
             .actors
             .get(&actor_id)
             .ok_or(SimError::UnknownActor)?
             .pending_interaction
             .as_ref()
-            .map(|pending| pending.interaction_id);
-        let Some(pending_id) = pending_id else {
+            .cloned();
+        let Some(pending) = pending else {
             events.push(self.rejection(
                 actor_id,
                 sequence,
@@ -201,7 +361,7 @@ impl WorldState {
             )?);
             return Ok(());
         };
-        if pending_id != interaction_id {
+        if pending.interaction_id != interaction_id {
             events.push(self.rejection(actor_id, sequence, CommandRejection::StaleInteraction)?);
             return Ok(());
         }
@@ -209,6 +369,33 @@ impl WorldState {
             .get_mut(&actor_id)
             .ok_or(SimError::UnknownActor)?
             .pending_interaction = None;
+        if let InteractionContextV1::EocConfirmation {
+            item_id,
+            item_type_id,
+            activation_sequence,
+            default,
+            accept_effects,
+            decline_effects,
+        } = pending.context
+        {
+            let effects = if default {
+                accept_effects
+            } else {
+                decline_effects
+            };
+            if self.apply_eoc_confirmation_response(
+                actor_id,
+                activation_sequence,
+                sequence,
+                item_id,
+                &item_type_id,
+                &effects,
+                false,
+                events,
+            )? {
+                return Ok(());
+            }
+        }
         events.push(self.make_event(WorldEventKind::InteractionCanceled {
             actor_id,
             interaction_id,
@@ -229,19 +416,48 @@ impl WorldState {
                     .pending_interaction
                     .as_ref()
                     .filter(|interaction| interaction.expires_at_tick <= self.tick)
-                    .map(|interaction| (*actor_id, interaction.interaction_id))
+                    .map(|interaction| (*actor_id, interaction.clone()))
             })
             .collect::<Vec<_>>();
-        for (actor_id, interaction_id) in expired {
+        for (actor_id, interaction) in expired {
             self.actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?
                 .pending_interaction = None;
-            events.push(self.make_event(WorldEventKind::InteractionCanceled {
-                actor_id,
-                interaction_id,
-                reason: InteractionCancellationReasonV1::Expired,
-            })?);
+            let resolved = match interaction.context {
+                InteractionContextV1::EocConfirmation {
+                    item_id,
+                    item_type_id,
+                    activation_sequence,
+                    default,
+                    accept_effects,
+                    decline_effects,
+                } => {
+                    let effects = if default {
+                        accept_effects
+                    } else {
+                        decline_effects
+                    };
+                    self.apply_eoc_confirmation_response(
+                        actor_id,
+                        activation_sequence,
+                        activation_sequence,
+                        item_id,
+                        &item_type_id,
+                        &effects,
+                        false,
+                        events,
+                    )?
+                }
+                InteractionContextV1::MedicalBodyPart { .. } => false,
+            };
+            if !resolved {
+                events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                    actor_id,
+                    interaction_id: interaction.interaction_id,
+                    reason: InteractionCancellationReasonV1::Expired,
+                })?);
+            }
         }
         Ok(())
     }

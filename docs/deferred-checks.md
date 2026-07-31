@@ -43,9 +43,11 @@ Run only when the user explicitly requests a verification checkpoint.
   depth/node limits, comparisons, boolean short-circuiting, and base-stat reads,
   bounded event-EOC dispatch for movement/OMT entry, damage, death, kills, and
   creature damage, including deterministic ordering and activation caps,
+  persistent server-driven EOC confirmation, default handling for noninteractive
+  actors, tail-continuation rejection, nested confirmation, cancellation,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 114/schema 92, CanonicalStateV90,
-  canonical-event-V19, and
+  expiry, stale-response, protocol 115/schema 93, CanonicalStateV91,
+  canonical-event-V20, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, stationary/disconnected

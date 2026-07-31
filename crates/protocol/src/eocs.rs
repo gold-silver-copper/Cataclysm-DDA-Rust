@@ -152,6 +152,12 @@ pub enum EocEffectV1 {
         operation: EocMathAssignmentOperationV1,
         value: EocMathExpressionV1,
     },
+    Confirmation {
+        prompt: String,
+        default: bool,
+        accept_effects: Vec<Self>,
+        decline_effects: Vec<Self>,
+    },
     RunEocs {
         eoc_ids: Vec<String>,
         delay: Option<EocDelayV1>,
@@ -170,6 +176,11 @@ impl EocEffectV1 {
             Self::Conditional {
                 then_effects,
                 else_effects,
+                ..
+            }
+            | Self::Confirmation {
+                accept_effects: then_effects,
+                decline_effects: else_effects,
                 ..
             } => {
                 for effect in then_effects.iter().chain(else_effects) {
@@ -396,6 +407,18 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             EocEffectV1::MathAssignment {
                 variable_id, value, ..
             } => valid_id(variable_id) && valid_math_expression_tree(value, depth + 1, nodes),
+            EocEffectV1::Confirmation {
+                prompt,
+                accept_effects,
+                decline_effects,
+                ..
+            } => {
+                !prompt.is_empty()
+                    && prompt.len() <= MAX_EOC_MESSAGE_BYTES
+                    && !prompt.chars().any(char::is_control)
+                    && valid_effects(accept_effects, depth + 1, nodes)
+                    && valid_effects(decline_effects, depth + 1, nodes)
+            }
             EocEffectV1::RunEocs { eoc_ids, delay } => {
                 !eoc_ids.is_empty()
                     && eoc_ids.len() <= MAX_EOC_REFERENCES
@@ -415,6 +438,17 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             }
         }
     })
+}
+
+#[must_use]
+pub fn eoc_confirmation_branches_are_valid(
+    accept_effects: &[EocEffectV1],
+    decline_effects: &[EocEffectV1],
+) -> bool {
+    let mut nodes = 0;
+    valid_effects(accept_effects, 0, &mut nodes)
+        && valid_effects(decline_effects, 0, &mut nodes)
+        && nodes <= MAX_EOC_TREE_NODES
 }
 
 fn valid_math_expression_tree(

@@ -83,6 +83,8 @@ impl WorldState {
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
             messages: Vec::new(),
+            interactive: actor.connected,
+            confirmation: None,
             activations: 0,
             operations: 0,
             tick: self.tick,
@@ -92,8 +94,16 @@ impl WorldState {
                 sequence.0,
             ),
         };
-        for eoc_id in &profile.eoc_ids {
+        for (eoc_index, eoc_id) in profile.eoc_ids.iter().enumerate() {
             if execute_eoc(&self.eoc_definitions, eoc_id, &mut execution, 0).is_err() {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::ItemNotActivatable,
+                )?);
+                return Ok(true);
+            }
+            if execution.confirmation.is_some() && eoc_index + 1 != profile.eoc_ids.len() {
                 events.push(self.rejection(
                     actor_id,
                     sequence,
@@ -116,16 +126,152 @@ impl WorldState {
         execution
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        let confirmation = execution.confirmation.take();
+        let messages = std::mem::take(&mut execution.messages);
+        self.commit_eoc_execution_state(actor_id, &mut execution)?;
+        for text in messages {
+            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
+        }
+        if let Some(confirmation) = confirmation {
+            self.request_eoc_confirmation(
+                actor_id,
+                sequence,
+                item_id,
+                profile.item_type_id,
+                confirmation.prompt,
+                confirmation.default,
+                confirmation.accept_effects,
+                confirmation.decline_effects,
+                events,
+            )?;
+        } else {
+            self.finish_eoc_item_activation(actor_id, item_id, &profile, events)?;
+        }
+        Ok(true)
+    }
+
+    pub(super) fn apply_eoc_confirmation_response(
+        &mut self,
+        actor_id: ActorId,
+        activation_sequence: CommandSequence,
+        response_sequence: CommandSequence,
+        item_id: ItemId,
+        item_type_id: &str,
+        effects: &[EocEffectV1],
+        interactive: bool,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let valid_part = |body_part_id: &Option<String>| {
+            body_part_id.as_ref().is_none_or(|body_part_id| {
+                self.actor_anatomy
+                    .parts
+                    .iter()
+                    .any(|part| part.body_part_id == *body_part_id)
+            })
+        };
+        if !effects_body_parts_are_valid(effects, &valid_part) {
+            return Ok(false);
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let Some(item) = actor
+            .inventory
+            .get(&item_id)
+            .filter(|item| item.type_id == item_type_id)
+        else {
+            return Ok(false);
+        };
+        let Some(profile) = self.eoc_item_use_types.get(item_type_id).cloned() else {
+            return Ok(false);
+        };
+        if (profile.need_worn && !actor.worn.contains(&item_id))
+            || (profile.need_wielding && actor.wielded != Some(item_id))
+            || (profile.consume && item.charges <= 0)
+        {
+            return Ok(false);
+        }
+        let mut execution = EocExecution {
+            actor: eoc_actor_context(actor),
+            effects: actor.effects.clone(),
+            variables: actor.eoc_variables.clone(),
+            next_schedule_sequence: actor.next_eoc_schedule_sequence,
+            scheduled_eocs: actor.scheduled_eocs.clone(),
+            inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
+            messages: Vec::new(),
+            interactive: interactive && actor.connected,
+            confirmation: None,
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(
+                b"eoc-confirmation-response",
+                &[actor_id.as_u128(), item_id.as_u128()],
+                response_sequence.0,
+            ),
+        };
+        if execute_effects(&self.eoc_definitions, effects, &mut execution, 0).is_err()
+            || execution.effects.len() > 1_024
+        {
+            return Ok(false);
+        }
+        execution.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        execution
+            .scheduled_eocs
+            .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        let confirmation = execution.confirmation.take();
+        let messages = std::mem::take(&mut execution.messages);
+        self.commit_eoc_execution_state(actor_id, &mut execution)?;
+        for text in messages {
+            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
+        }
+        if let Some(confirmation) = confirmation {
+            self.request_eoc_confirmation(
+                actor_id,
+                activation_sequence,
+                item_id,
+                item_type_id.to_owned(),
+                confirmation.prompt,
+                confirmation.default,
+                confirmation.accept_effects,
+                confirmation.decline_effects,
+                events,
+            )?;
+        } else {
+            self.finish_eoc_item_activation(actor_id, item_id, &profile, events)?;
+        }
+        Ok(true)
+    }
+
+    fn commit_eoc_execution_state(
+        &mut self,
+        actor_id: ActorId,
+        execution: &mut EocExecution,
+    ) -> Result<(), SimError> {
+        let actor = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        actor.effects = std::mem::take(&mut execution.effects);
+        actor.eoc_variables = std::mem::take(&mut execution.variables);
+        actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
+        actor.scheduled_eocs = std::mem::take(&mut execution.scheduled_eocs);
+        actor.inactive_recurring_eocs = std::mem::take(&mut execution.inactive_recurring_eocs);
+        Ok(())
+    }
+
+    fn finish_eoc_item_activation(
+        &mut self,
+        actor_id: ActorId,
+        item_id: ItemId,
+        profile: &EocItemUseTypeV1,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
         let remaining_charges = {
             let actor = self
                 .actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
-            actor.effects = execution.effects;
-            actor.eoc_variables = execution.variables;
-            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
-            actor.scheduled_eocs = execution.scheduled_eocs;
-            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
             let item = actor
                 .inventory
                 .get_mut(&item_id)
@@ -143,15 +289,12 @@ impl WorldState {
             }
             remaining
         };
-        for text in execution.messages {
-            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
-        }
         events.push(self.make_event(WorldEventKind::EocItemActivated {
             actor_id,
             item_id,
             remaining_charges,
         })?);
-        Ok(true)
+        Ok(())
     }
 
     pub(super) fn advance_scheduled_eocs(
@@ -194,6 +337,8 @@ impl WorldState {
                     scheduled_eocs: actor.scheduled_eocs.clone(),
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                     messages: Vec::new(),
+                    interactive: false,
+                    confirmation: None,
                     activations: 0,
                     operations: 0,
                     tick: self.tick,
@@ -358,6 +503,8 @@ impl WorldState {
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                 messages: Vec::new(),
+                interactive: false,
+                confirmation: None,
                 activations: 0,
                 operations: 0,
                 tick: self.tick,
@@ -407,6 +554,8 @@ impl WorldState {
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
             messages: Vec::new(),
+            interactive: false,
+            confirmation: None,
             activations: 0,
             operations: 0,
             tick: self.tick,
@@ -461,6 +610,8 @@ impl WorldState {
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                 messages: Vec::new(),
+                interactive: false,
+                confirmation: None,
                 activations: 0,
                 operations,
                 tick: self.tick,
@@ -519,10 +670,19 @@ struct EocExecution {
     scheduled_eocs: Vec<ScheduledEocV1>,
     inactive_recurring_eocs: Vec<String>,
     messages: Vec<String>,
+    interactive: bool,
+    confirmation: Option<EocConfirmationRequest>,
     activations: usize,
     operations: usize,
     tick: SimTick,
     rng: ChaCha8Rng,
+}
+
+struct EocConfirmationRequest {
+    prompt: String,
+    default: bool,
+    accept_effects: Vec<EocEffectV1>,
+    decline_effects: Vec<EocEffectV1>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -838,7 +998,7 @@ fn execute_effects(
     if depth >= cdda_protocol::MAX_EOC_TREE_DEPTH {
         return Err(SimError::InvalidItem);
     }
-    for effect in effects {
+    for (effect_index, effect) in effects.iter().enumerate() {
         execution.operations = execution.operations.saturating_add(1);
         if execution.operations > MAX_EOC_OPERATIONS_PER_COMMAND {
             return Err(SimError::InvalidItem);
@@ -921,14 +1081,42 @@ fn execute_effects(
                     .variables
                     .insert(variable_id.clone(), next.to_string());
             }
+            EocEffectV1::Confirmation {
+                prompt,
+                default,
+                accept_effects,
+                decline_effects,
+            } => {
+                if execution.interactive {
+                    if execution.confirmation.is_some() || effect_index + 1 != effects.len() {
+                        return Err(SimError::InvalidItem);
+                    }
+                    execution.confirmation = Some(EocConfirmationRequest {
+                        prompt: prompt.clone(),
+                        default: *default,
+                        accept_effects: accept_effects.clone(),
+                        decline_effects: decline_effects.clone(),
+                    });
+                } else {
+                    let selected = if *default {
+                        accept_effects
+                    } else {
+                        decline_effects
+                    };
+                    execute_effects(catalog, selected, execution, depth + 1)?;
+                }
+            }
             EocEffectV1::RunEocs { eoc_ids, delay } => {
                 if let Some(delay) = delay {
                     for eoc_id in eoc_ids {
                         schedule_eoc(execution, eoc_id, *delay)?;
                     }
                 } else {
-                    for eoc_id in eoc_ids {
+                    for (eoc_index, eoc_id) in eoc_ids.iter().enumerate() {
                         execute_eoc(catalog, eoc_id, execution, depth + 1)?;
+                        if execution.confirmation.is_some() && eoc_index + 1 != eoc_ids.len() {
+                            return Err(SimError::InvalidItem);
+                        }
                     }
                 }
             }
@@ -950,6 +1138,12 @@ fn execute_effects(
                 };
                 execute_effects(catalog, selected, execution, depth + 1)?;
             }
+        }
+        if execution.confirmation.is_some() {
+            if effect_index + 1 != effects.len() {
+                return Err(SimError::InvalidItem);
+            }
+            return Ok(());
         }
     }
     Ok(())
@@ -1121,6 +1315,14 @@ fn effects_body_parts_are_valid(
             condition_body_parts_are_valid(condition, valid_part)
                 && effects_body_parts_are_valid(then_effects, valid_part)
                 && effects_body_parts_are_valid(else_effects, valid_part)
+        }
+        EocEffectV1::Confirmation {
+            accept_effects,
+            decline_effects,
+            ..
+        } => {
+            effects_body_parts_are_valid(accept_effects, valid_part)
+                && effects_body_parts_are_valid(decline_effects, valid_part)
         }
         EocEffectV1::Message { .. }
         | EocEffectV1::SetActorVariable { .. }

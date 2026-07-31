@@ -30,6 +30,7 @@ pub use eocs::{
     MAX_EOC_SAFE_INTEGER, MAX_EOC_TREE_DEPTH, MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES,
     ScheduledEocV1, actor_eoc_schedule_is_valid, actor_eoc_variables_are_valid,
     actor_inactive_recurring_eocs_are_valid, eoc_catalog_is_valid,
+    eoc_confirmation_branches_are_valid,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -87,7 +88,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 114;
+pub const PROTOCOL_VERSION: u16 = 115;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";

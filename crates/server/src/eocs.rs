@@ -180,6 +180,14 @@ fn effects_references_are_supported(
                 && effects_references_are_supported(then_effects, items, proficiencies, recipes)
                 && effects_references_are_supported(else_effects, items, proficiencies, recipes)
         }
+        EocEffectDefinition::Confirmation {
+            accept_effects,
+            decline_effects,
+            ..
+        } => {
+            effects_references_are_supported(accept_effects, items, proficiencies, recipes)
+                && effects_references_are_supported(decline_effects, items, proficiencies, recipes)
+        }
         EocEffectDefinition::Message { .. }
         | EocEffectDefinition::AddEffect { .. }
         | EocEffectDefinition::RemoveEffects { .. }
@@ -257,6 +265,14 @@ fn runtime_effect_body_parts_are_supported(
             runtime_condition_body_parts_are_supported(condition, valid_part)
                 && runtime_effect_body_parts_are_supported(then_effects, valid_part)
                 && runtime_effect_body_parts_are_supported(else_effects, valid_part)
+        }
+        EocEffectV1::Confirmation {
+            accept_effects,
+            decline_effects,
+            ..
+        } => {
+            runtime_effect_body_parts_are_supported(accept_effects, valid_part)
+                && runtime_effect_body_parts_are_supported(decline_effects, valid_part)
         }
         EocEffectV1::Message { .. }
         | EocEffectV1::SetActorVariable { .. }
@@ -444,6 +460,17 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
                 }
             },
             value: runtime_math_expression(&assignment.value),
+        },
+        EocEffectDefinition::Confirmation {
+            prompt,
+            default,
+            accept_effects,
+            decline_effects,
+        } => EocEffectV1::Confirmation {
+            prompt: prompt.clone(),
+            default: *default,
+            accept_effects: accept_effects.iter().map(runtime_effect).collect(),
+            decline_effects: decline_effects.iter().map(runtime_effect).collect(),
         },
         EocEffectDefinition::RunEocs { eoc_ids, delay } => EocEffectV1::RunEocs {
             eoc_ids: eoc_ids.clone(),

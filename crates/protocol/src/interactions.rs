@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ActorId, CommandSequence, InteractionId, ItemId, SimTick};
+use super::{
+    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, SimTick,
+    eoc_confirmation_branches_are_valid,
+};
 
 pub const MAX_INTERACTION_CHOICES: usize = 64;
 pub const MAX_INTERACTION_PROMPT_BYTES: usize = 4 * 1_024;
@@ -24,6 +27,14 @@ pub enum InteractionContextV1 {
         item_id: ItemId,
         item_type_id: String,
         activation_sequence: CommandSequence,
+    },
+    EocConfirmation {
+        item_id: ItemId,
+        item_type_id: String,
+        activation_sequence: CommandSequence,
+        default: bool,
+        accept_effects: Vec<EocEffectV1>,
+        decline_effects: Vec<EocEffectV1>,
     },
 }
 
@@ -77,6 +88,31 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                     && item_id.world_namespace() == actor_id.world_namespace()
                     && valid_id(item_type_id, MAX_INTERACTION_CHOICE_ID_BYTES)
                     && activation_sequence.0 > 0
+            }
+            InteractionContextV1::EocConfirmation {
+                item_id,
+                item_type_id,
+                activation_sequence,
+                accept_effects,
+                decline_effects,
+                ..
+            } => {
+                item_id.counter() > 0
+                    && item_id.world_namespace() == actor_id.world_namespace()
+                    && valid_id(item_type_id, MAX_INTERACTION_CHOICE_ID_BYTES)
+                    && activation_sequence.0 > 0
+                    && interaction.choices.as_slice()
+                        == [
+                            InteractionChoiceV1 {
+                                choice_id: String::from("yes"),
+                                label: String::from("Yes"),
+                            },
+                            InteractionChoiceV1 {
+                                choice_id: String::from("no"),
+                                label: String::from("No"),
+                            },
+                        ]
+                    && eoc_confirmation_branches_are_valid(accept_effects, decline_effects)
             }
         }
 }

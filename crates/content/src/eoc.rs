@@ -109,6 +109,12 @@ pub enum EocEffectDefinition {
         variable_id: String,
     },
     MathAssignment(EocMathAssignmentDefinition),
+    Confirmation {
+        prompt: String,
+        default: bool,
+        accept_effects: Vec<Self>,
+        decline_effects: Vec<Self>,
+    },
     RunEocs {
         eoc_ids: Vec<String>,
         delay: Option<EocDelayDefinition>,
@@ -127,6 +133,11 @@ impl EocEffectDefinition {
             Self::Conditional {
                 then_effects,
                 else_effects,
+                ..
+            }
+            | Self::Confirmation {
+                accept_effects: then_effects,
+                decline_effects: else_effects,
                 ..
             } => {
                 for effect in then_effects.iter().chain(else_effects) {
@@ -805,6 +816,35 @@ fn parse_effects(
                 || !object.contains_key("then")
             {
                 unsupported.insert(item_path);
+                continue;
+            }
+            if let Some(query) = condition.as_object().and_then(|condition| {
+                (condition
+                    .keys()
+                    .all(|field| matches!(field.as_str(), "u_query" | "default"))
+                    && condition.contains_key("u_query")
+                    && condition.contains_key("default"))
+                .then_some(condition)
+            }) {
+                let prompt = query.get("u_query").and_then(translated_text);
+                let default = query.get("default").and_then(Value::as_bool);
+                if index + 1 != values.len() || prompt.is_none() || default.is_none() {
+                    unsupported.insert(format!("{item_path}.if.u_query"));
+                    continue;
+                }
+                effects.push(EocEffectDefinition::Confirmation {
+                    prompt: prompt.unwrap_or_default(),
+                    default: default.unwrap_or(false),
+                    accept_effects: parse_effects(
+                        &object["then"],
+                        &format!("{item_path}.then"),
+                        depth + 1,
+                        unsupported,
+                    ),
+                    decline_effects: object.get("else").map_or_else(Vec::new, |value| {
+                        parse_effects(value, &format!("{item_path}.else"), depth + 1, unsupported)
+                    }),
+                });
                 continue;
             }
             let Some(condition) = parse_condition(

@@ -4679,7 +4679,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV19");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV20");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -5910,6 +5910,7 @@ impl WorldState {
         let mut events = Vec::with_capacity(commands.len());
         let mut event_eoc_cursor = 0;
         let mut event_eoc_activations = 0;
+        self.resolve_disconnected_eoc_confirmations(&mut events)?;
         self.expire_interactions(&mut events)?;
         self.advance_actor_combat_resources();
         for input in held_movement {
@@ -14448,7 +14449,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV90");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV91");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
