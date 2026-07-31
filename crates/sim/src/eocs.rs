@@ -1,12 +1,14 @@
 //! Bounded authoritative effect-on-condition interpreter.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocConditionV1,
-    EocDefinitionV1, EocEffectV1, EocItemUseTypeV1, ItemId, SimTick, WorldEvent, WorldEventKind,
-    eoc_catalog_is_valid,
+    EocDefinitionV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1, ItemId,
+    MAX_EOC_ACTOR_VARIABLES, SimTick, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
 };
+use rand_chacha::ChaCha8Rng;
+use rand_core::Rng;
 
 use crate::{SimError, WorldState};
 
@@ -67,10 +69,16 @@ impl WorldState {
 
         let mut execution = EocExecution {
             effects: actor.effects.clone(),
+            variables: actor.eoc_variables.clone(),
             messages: Vec::new(),
             activations: 0,
             operations: 0,
             tick: self.tick,
+            rng: self.named_rng(
+                b"eoc-item-activation",
+                &[actor_id.as_u128(), item_id.as_u128()],
+                sequence.0,
+            ),
         };
         for eoc_id in &profile.eoc_ids {
             if execute_eoc(&self.eoc_definitions, eoc_id, &mut execution, 0).is_err() {
@@ -99,6 +107,7 @@ impl WorldState {
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
             actor.effects = execution.effects;
+            actor.eoc_variables = execution.variables;
             let item = actor
                 .inventory
                 .get_mut(&item_id)
@@ -130,10 +139,12 @@ impl WorldState {
 
 struct EocExecution {
     effects: Vec<ActorEffectSnapshotV1>,
+    variables: BTreeMap<String, String>,
     messages: Vec<String>,
     activations: usize,
     operations: usize,
     tick: SimTick,
+    rng: ChaCha8Rng,
 }
 
 fn execute_eoc(
@@ -152,9 +163,12 @@ fn execute_eoc(
     execution.operations += 1;
     let definition = catalog.get(eoc_id).ok_or(SimError::InvalidItem)?;
     let condition_matches = match definition.condition.as_ref() {
-        Some(condition) => {
-            evaluate_condition(condition, &execution.effects, &mut execution.operations)?
-        }
+        Some(condition) => evaluate_condition(
+            condition,
+            &execution.effects,
+            &execution.variables,
+            &mut execution.operations,
+        )?,
         None => true,
     };
     let selected = if condition_matches {
@@ -168,6 +182,7 @@ fn execute_eoc(
 fn evaluate_condition(
     condition: &EocConditionV1,
     effects: &[ActorEffectSnapshotV1],
+    variables: &BTreeMap<String, String>,
     operations: &mut usize,
 ) -> Result<bool, SimError> {
     *operations = operations.saturating_add(1);
@@ -185,11 +200,40 @@ fn evaluate_condition(
                     .as_ref()
                     .is_none_or(|body_part_id| effect.body_part_id.as_ref() == Some(body_part_id))
         }),
-        EocConditionV1::Not(condition) => !evaluate_condition(condition, effects, operations)?,
+        EocConditionV1::CompareString(values) => {
+            let mut seen = BTreeSet::new();
+            let mut matches = false;
+            for value in values {
+                let value = match value {
+                    EocStringValueV1::Literal(value) => value.as_str(),
+                    EocStringValueV1::ActorVariable(variable_id) => {
+                        variables.get(variable_id).map_or("", String::as_str)
+                    }
+                };
+                if !seen.insert(value) {
+                    matches = true;
+                    break;
+                }
+            }
+            matches
+        }
+        EocConditionV1::CompareStringAll(values) => {
+            let mut values = values.iter().map(|value| match value {
+                EocStringValueV1::Literal(value) => value.as_str(),
+                EocStringValueV1::ActorVariable(variable_id) => {
+                    variables.get(variable_id).map_or("", String::as_str)
+                }
+            });
+            let first = values.next().ok_or(SimError::InvalidItem)?;
+            values.all(|value| value == first)
+        }
+        EocConditionV1::Not(condition) => {
+            !evaluate_condition(condition, effects, variables, operations)?
+        }
         EocConditionV1::And(conditions) => {
             let mut matches = true;
             for condition in conditions {
-                if !evaluate_condition(condition, effects, operations)? {
+                if !evaluate_condition(condition, effects, variables, operations)? {
                     matches = false;
                     break;
                 }
@@ -199,7 +243,7 @@ fn evaluate_condition(
         EocConditionV1::Or(conditions) => {
             let mut matches = false;
             for condition in conditions {
-                if evaluate_condition(condition, effects, operations)? {
+                if evaluate_condition(condition, effects, variables, operations)? {
                     matches = true;
                     break;
                 }
@@ -248,6 +292,25 @@ fn execute_effects(
                         .as_ref()
                         .is_some_and(|part| effect.body_part_id.as_ref() != Some(part))
             }),
+            EocEffectV1::SetActorVariable {
+                variable_id,
+                possible_values,
+            } => {
+                if !execution.variables.contains_key(variable_id)
+                    && execution.variables.len() >= MAX_EOC_ACTOR_VARIABLES
+                {
+                    return Err(SimError::InvalidItem);
+                }
+                let index = usize::try_from(execution.rng.next_u32())
+                    .map_err(|_| SimError::NumericOverflow)?
+                    % possible_values.len();
+                execution
+                    .variables
+                    .insert(variable_id.clone(), possible_values[index].clone());
+            }
+            EocEffectV1::RemoveActorVariable { variable_id } => {
+                execution.variables.remove(variable_id);
+            }
             EocEffectV1::RunEocs { eoc_ids } => {
                 for eoc_id in eoc_ids {
                     execute_eoc(catalog, eoc_id, execution, depth + 1)?;
@@ -261,6 +324,7 @@ fn execute_effects(
                 let selected = if evaluate_condition(
                     condition,
                     &execution.effects,
+                    &execution.variables,
                     &mut execution.operations,
                 )? {
                     then_effects
@@ -348,7 +412,9 @@ fn condition_body_parts_are_valid(
     valid_part: &impl Fn(&Option<String>) -> bool,
 ) -> bool {
     match condition {
-        EocConditionV1::Constant(_) => true,
+        EocConditionV1::Constant(_)
+        | EocConditionV1::CompareString(_)
+        | EocConditionV1::CompareStringAll(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => condition_body_parts_are_valid(condition, valid_part),
         EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => conditions
@@ -373,6 +439,9 @@ fn effects_body_parts_are_valid(
                 && effects_body_parts_are_valid(then_effects, valid_part)
                 && effects_body_parts_are_valid(else_effects, valid_part)
         }
-        EocEffectV1::Message { .. } | EocEffectV1::RunEocs { .. } => true,
+        EocEffectV1::Message { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::RunEocs { .. } => true,
     })
 }

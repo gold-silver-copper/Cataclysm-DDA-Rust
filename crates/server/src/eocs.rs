@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EocConditionDefinition,
-    EocEffectDefinition, ItemRegistry,
+    EocEffectDefinition, EocStringValueDefinition, ItemRegistry,
 };
 use cdda_protocol::{
     AnatomyDefinitionV1, EocConditionV1, EocDefinitionV1, EocEffectV1, EocItemUseTypeV1,
-    eoc_catalog_is_valid,
+    EocStringValueV1, eoc_catalog_is_valid,
 };
 
 pub(super) fn runtime_eoc_catalog(
@@ -127,7 +127,9 @@ fn runtime_condition_body_parts_are_supported(
     valid_part: &impl Fn(&Option<String>) -> bool,
 ) -> bool {
     match condition {
-        EocConditionV1::Constant(_) => true,
+        EocConditionV1::Constant(_)
+        | EocConditionV1::CompareString(_)
+        | EocConditionV1::CompareStringAll(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. } => valid_part(body_part_id),
         EocConditionV1::Not(condition) => {
             runtime_condition_body_parts_are_supported(condition, valid_part)
@@ -154,7 +156,10 @@ fn runtime_effect_body_parts_are_supported(
                 && runtime_effect_body_parts_are_supported(then_effects, valid_part)
                 && runtime_effect_body_parts_are_supported(else_effects, valid_part)
         }
-        EocEffectV1::Message { .. } | EocEffectV1::RunEocs { .. } => true,
+        EocEffectV1::Message { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::RunEocs { .. } => true,
     })
 }
 
@@ -181,6 +186,32 @@ fn runtime_condition(condition: &EocConditionDefinition) -> EocConditionV1 {
             effect_id: effect_id.clone(),
             body_part_id: body_part_id.clone(),
         },
+        EocConditionDefinition::CompareString(values) => EocConditionV1::CompareString(
+            values
+                .iter()
+                .map(|value| match value {
+                    EocStringValueDefinition::Literal(value) => {
+                        EocStringValueV1::Literal(value.clone())
+                    }
+                    EocStringValueDefinition::ActorVariable(variable_id) => {
+                        EocStringValueV1::ActorVariable(variable_id.clone())
+                    }
+                })
+                .collect(),
+        ),
+        EocConditionDefinition::CompareStringAll(values) => EocConditionV1::CompareStringAll(
+            values
+                .iter()
+                .map(|value| match value {
+                    EocStringValueDefinition::Literal(value) => {
+                        EocStringValueV1::Literal(value.clone())
+                    }
+                    EocStringValueDefinition::ActorVariable(variable_id) => {
+                        EocStringValueV1::ActorVariable(variable_id.clone())
+                    }
+                })
+                .collect(),
+        ),
         EocConditionDefinition::Not(condition) => {
             EocConditionV1::Not(Box::new(runtime_condition(condition)))
         }
@@ -216,6 +247,18 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
             effect_ids: effect_ids.clone(),
             body_part_id: body_part_id.clone(),
         },
+        EocEffectDefinition::SetActorVariable {
+            variable_id,
+            possible_values,
+        } => EocEffectV1::SetActorVariable {
+            variable_id: variable_id.clone(),
+            possible_values: possible_values.clone(),
+        },
+        EocEffectDefinition::RemoveActorVariable { variable_id } => {
+            EocEffectV1::RemoveActorVariable {
+                variable_id: variable_id.clone(),
+            }
+        }
         EocEffectDefinition::RunEocs { eoc_ids } => EocEffectV1::RunEocs {
             eoc_ids: eoc_ids.clone(),
         },

@@ -2645,6 +2645,7 @@ struct Actor {
     hp: i32,
     body_parts: Vec<ActorBodyPartSnapshotV1>,
     effects: Vec<ActorEffectSnapshotV1>,
+    eoc_variables: BTreeMap<String, String>,
     base_strength: u16,
     base_dexterity: u16,
     base_intelligence: u16,
@@ -2686,6 +2687,7 @@ impl Actor {
             hp: self.hp,
             body_parts: self.body_parts.clone(),
             effects: self.effects.clone(),
+            eoc_variables: self.eoc_variables.clone(),
             base_strength: self.base_strength,
             base_dexterity: self.base_dexterity,
             base_intelligence: self.base_intelligence,
@@ -2800,6 +2802,7 @@ fn valid_actor_schedule(
 ) -> bool {
     if !anatomy::actor_anatomy_state_is_valid(anatomy, &snapshot.body_parts, snapshot.hp)
         || !cdda_protocol::actor_effects_are_valid(anatomy, &snapshot.effects, current_tick)
+        || !cdda_protocol::actor_eoc_variables_are_valid(&snapshot.eoc_variables)
         || [
             snapshot.base_strength,
             snapshot.base_dexterity,
@@ -5573,6 +5576,7 @@ impl WorldState {
                 hp,
                 body_parts,
                 effects: Vec::new(),
+                eoc_variables: BTreeMap::new(),
                 base_strength: base_stats.strength,
                 base_dexterity: base_stats.dexterity,
                 base_intelligence: base_stats.intelligence,
@@ -5782,6 +5786,7 @@ impl WorldState {
                 hp: actor.hp,
                 body_parts: actor.body_parts,
                 effects: actor.effects,
+                eoc_variables: actor.eoc_variables,
                 base_strength: actor.base_strength,
                 base_dexterity: actor.base_dexterity,
                 base_intelligence: actor.base_intelligence,
@@ -14141,6 +14146,7 @@ impl WorldState {
                     hp: actor.hp,
                     body_parts: actor.body_parts.clone(),
                     effects: actor.effects.clone(),
+                    eoc_variables: actor.eoc_variables.clone(),
                     base_strength: actor.base_strength,
                     base_dexterity: actor.base_dexterity,
                     base_intelligence: actor.base_intelligence,
@@ -14357,7 +14363,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV84");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV85");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -21327,6 +21333,7 @@ mod tests {
                 maximum_hp: DEFAULT_ACTOR_HP,
             }],
             effects: Vec::new(),
+            eoc_variables: BTreeMap::new(),
             base_strength: DEFAULT_ACTOR_BASE_STAT,
             base_dexterity: DEFAULT_ACTOR_BASE_STAT,
             base_intelligence: DEFAULT_ACTOR_BASE_STAT,
@@ -21374,6 +21381,7 @@ mod tests {
                     maximum_hp: DEFAULT_ACTOR_HP,
                 }],
                 effects: Vec::new(),
+                eoc_variables: BTreeMap::new(),
                 base_strength: DEFAULT_ACTOR_BASE_STAT,
                 base_dexterity: DEFAULT_ACTOR_BASE_STAT,
                 base_intelligence: DEFAULT_ACTOR_BASE_STAT,

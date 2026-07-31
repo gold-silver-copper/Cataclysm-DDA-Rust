@@ -9,6 +9,14 @@ pub const MAX_EOC_REFERENCES: usize = 256;
 pub const MAX_EOC_TREE_DEPTH: usize = 64;
 pub const MAX_EOC_TREE_NODES: usize = 8_192;
 pub const MAX_EOC_MESSAGE_BYTES: usize = 16 * 1_024;
+pub const MAX_EOC_ACTOR_VARIABLES: usize = 1_024;
+pub const MAX_EOC_VARIABLE_VALUE_BYTES: usize = 16 * 1_024;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EocStringValueV1 {
+    Literal(String),
+    ActorVariable(String),
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EocConditionV1 {
@@ -17,6 +25,10 @@ pub enum EocConditionV1 {
         effect_id: String,
         body_part_id: Option<String>,
     },
+    /// CDDA `compare_string`: true when any two resolved values match.
+    CompareString(Vec<EocStringValueV1>),
+    /// CDDA `compare_string_match_all`: true when every value matches.
+    CompareStringAll(Vec<EocStringValueV1>),
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
@@ -37,6 +49,14 @@ pub enum EocEffectV1 {
     RemoveEffects {
         effect_ids: Vec<String>,
         body_part_id: Option<String>,
+    },
+    SetActorVariable {
+        variable_id: String,
+        /// Source-ordered weighted choices. Duplicate values retain weight.
+        possible_values: Vec<String>,
+    },
+    RemoveActorVariable {
+        variable_id: String,
     },
     RunEocs {
         eoc_ids: Vec<String>,
@@ -61,7 +81,11 @@ impl EocEffectV1 {
                     effect.collect_references(target);
                 }
             }
-            Self::Message { .. } | Self::AddEffect { .. } | Self::RemoveEffects { .. } => {}
+            Self::Message { .. }
+            | Self::AddEffect { .. }
+            | Self::RemoveEffects { .. }
+            | Self::SetActorVariable { .. }
+            | Self::RemoveActorVariable { .. } => {}
         }
     }
 }
@@ -161,6 +185,10 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
             effect_id,
             body_part_id,
         } => valid_id(effect_id) && body_part_id.as_deref().is_none_or(valid_id),
+        EocConditionV1::CompareString(values) | EocConditionV1::CompareStringAll(values) => {
+            (2..=MAX_EOC_REFERENCES).contains(&values.len())
+                && values.iter().all(valid_string_value)
+        }
         EocConditionV1::Not(condition) => valid_condition(condition, depth + 1, nodes),
         EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => {
             !conditions.is_empty()
@@ -207,6 +235,17 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                     && effect_ids.iter().all(|id| valid_id(id))
                     && body_part_id.as_deref().is_none_or(valid_id)
             }
+            EocEffectV1::SetActorVariable {
+                variable_id,
+                possible_values,
+            } => {
+                valid_id(variable_id)
+                    && (1..=MAX_EOC_REFERENCES).contains(&possible_values.len())
+                    && possible_values
+                        .iter()
+                        .all(|value| valid_variable_value(value))
+            }
+            EocEffectV1::RemoveActorVariable { variable_id } => valid_id(variable_id),
             EocEffectV1::RunEocs { eoc_ids } => {
                 !eoc_ids.is_empty()
                     && eoc_ids.len() <= MAX_EOC_REFERENCES
@@ -223,6 +262,27 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             }
         }
     })
+}
+
+fn valid_string_value(value: &EocStringValueV1) -> bool {
+    match value {
+        EocStringValueV1::Literal(value) => valid_variable_value(value),
+        EocStringValueV1::ActorVariable(variable_id) => valid_id(variable_id),
+    }
+}
+
+#[must_use]
+pub fn actor_eoc_variables_are_valid(
+    variables: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    variables.len() <= MAX_EOC_ACTOR_VARIABLES
+        && variables
+            .iter()
+            .all(|(variable_id, value)| valid_id(variable_id) && valid_variable_value(value))
+}
+
+fn valid_variable_value(value: &str) -> bool {
+    value.len() <= MAX_EOC_VARIABLE_VALUE_BYTES && !value.chars().any(char::is_control)
 }
 
 fn valid_id(id: &str) -> bool {

@@ -42,7 +42,7 @@ pub use construction::{
 };
 pub use eoc::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EffectOnConditionRegistryError,
-    EocConditionDefinition, EocEffectDefinition, MAX_EOC_TREE_DEPTH,
+    EocConditionDefinition, EocEffectDefinition, EocStringValueDefinition, MAX_EOC_TREE_DEPTH,
 };
 pub use field::{
     FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry, FieldTypeRegistryError,

@@ -8,6 +8,14 @@ use serde_json::{Map, Value};
 use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
 
 pub const MAX_EOC_TREE_DEPTH: usize = 64;
+const MAX_EOC_STRING_VALUES: usize = 256;
+const MAX_EOC_VARIABLE_VALUE_BYTES: usize = 16 * 1_024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EocStringValueDefinition {
+    Literal(String),
+    ActorVariable(String),
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EocConditionDefinition {
@@ -16,6 +24,8 @@ pub enum EocConditionDefinition {
         effect_id: String,
         body_part_id: Option<String>,
     },
+    CompareString(Vec<EocStringValueDefinition>),
+    CompareStringAll(Vec<EocStringValueDefinition>),
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
@@ -36,6 +46,13 @@ pub enum EocEffectDefinition {
     RemoveEffects {
         effect_ids: Vec<String>,
         body_part_id: Option<String>,
+    },
+    SetActorVariable {
+        variable_id: String,
+        possible_values: Vec<String>,
+    },
+    RemoveActorVariable {
+        variable_id: String,
     },
     RunEocs {
         eoc_ids: Vec<String>,
@@ -60,7 +77,11 @@ impl EocEffectDefinition {
                     effect.collect_referenced_eocs(target);
                 }
             }
-            Self::Message { .. } | Self::AddEffect { .. } | Self::RemoveEffects { .. } => {}
+            Self::Message { .. }
+            | Self::AddEffect { .. }
+            | Self::RemoveEffects { .. }
+            | Self::SetActorVariable { .. }
+            | Self::RemoveActorVariable { .. } => {}
         }
     }
 }
@@ -371,6 +392,37 @@ fn parse_condition(
             });
         }
     }
+    for (field, match_all) in [
+        ("compare_string", false),
+        ("compare_string_match_all", true),
+    ] {
+        if let Some(values) = object.get(field) {
+            if object.len() != 1 {
+                unsupported.insert(path.to_owned());
+                return None;
+            }
+            let Some(values) = values
+                .as_array()
+                .filter(|values| (2..=MAX_EOC_STRING_VALUES).contains(&values.len()))
+            else {
+                unsupported.insert(format!("{path}.{field}"));
+                return None;
+            };
+            let mut resolved = Vec::with_capacity(values.len());
+            for (index, value) in values.iter().enumerate() {
+                let Some(value) = parse_string_value(value) else {
+                    unsupported.insert(format!("{path}.{field}[{index}]"));
+                    return None;
+                };
+                resolved.push(value);
+            }
+            return Some(if match_all {
+                EocConditionDefinition::CompareStringAll(resolved)
+            } else {
+                EocConditionDefinition::CompareString(resolved)
+            });
+        }
+    }
     if let Some(effect) = object.get("u_has_effect") {
         let Some(effect_id) = effect.as_str().filter(|id| valid_id(id)) else {
             unsupported.insert(format!("{path}.u_has_effect"));
@@ -543,6 +595,67 @@ fn parse_effects(
             });
             continue;
         }
+        if let Some(variable) = object.get("u_add_var") {
+            let has_value = object.contains_key("value");
+            let has_possible_values = object.contains_key("possible_values");
+            if has_value == has_possible_values
+                || object.keys().any(|field| {
+                    !matches!(field.as_str(), "u_add_var" | "value" | "possible_values")
+                })
+            {
+                unsupported.insert(item_path);
+                continue;
+            }
+            let Some(variable_id) = variable.as_str().filter(|id| valid_id(id)) else {
+                unsupported.insert(format!("{item_path}.u_add_var"));
+                continue;
+            };
+            let Some(possible_values) = object.get("value").map_or_else(
+                || {
+                    object.get("possible_values").and_then(|values| {
+                        values
+                            .as_array()
+                            .filter(|values| (1..=MAX_EOC_STRING_VALUES).contains(&values.len()))?
+                            .iter()
+                            .map(|value| {
+                                value
+                                    .as_str()
+                                    .filter(|value| valid_variable_value(value))
+                                    .map(str::to_owned)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                },
+                |value| {
+                    value
+                        .as_str()
+                        .filter(|value| valid_variable_value(value))
+                        .map(|value| vec![value.to_owned()])
+                },
+            ) else {
+                unsupported.insert(format!("{item_path}.value"));
+                continue;
+            };
+            effects.push(EocEffectDefinition::SetActorVariable {
+                variable_id: variable_id.to_owned(),
+                possible_values,
+            });
+            continue;
+        }
+        if let Some(variable) = object.get("u_lose_var") {
+            if object.len() != 1 {
+                unsupported.insert(item_path);
+                continue;
+            }
+            let Some(variable_id) = variable.as_str().filter(|id| valid_id(id)) else {
+                unsupported.insert(format!("{item_path}.u_lose_var"));
+                continue;
+            };
+            effects.push(EocEffectDefinition::RemoveActorVariable {
+                variable_id: variable_id.to_owned(),
+            });
+            continue;
+        }
         if let Some(run) = object.get("run_eocs") {
             if object.len() != 1 {
                 unsupported.insert(item_path);
@@ -568,6 +681,20 @@ fn translated_text(value: &Value) -> Option<String> {
             .find_map(|key| values.get(key).and_then(Value::as_str))
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn parse_string_value(value: &Value) -> Option<EocStringValueDefinition> {
+    match value {
+        Value::String(value) if valid_variable_value(value) => {
+            Some(EocStringValueDefinition::Literal(value.clone()))
+        }
+        Value::Object(object) if object.len() == 1 => object
+            .get("u_val")
+            .and_then(Value::as_str)
+            .filter(|id| valid_id(id))
+            .map(|id| EocStringValueDefinition::ActorVariable(id.to_owned())),
         _ => None,
     }
 }
@@ -618,6 +745,10 @@ fn parse_duration_turns(value: &Value) -> Option<(u32, bool)> {
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+}
+
+fn valid_variable_value(value: &str) -> bool {
+    value.len() <= MAX_EOC_VARIABLE_VALUE_BYTES && !value.chars().any(char::is_control)
 }
 
 fn invalid(source: &str, field: &str) -> EffectOnConditionRegistryError {

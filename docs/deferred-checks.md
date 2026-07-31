@@ -31,10 +31,13 @@ Run only when the user explicitly requests a verification checkpoint.
   selection, canonical persistence/replay, production admission, and two-client
   combat scenarios.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
-  differentials, strict transform/use-action traces, production catalog
-  admission, canonical persistence/replay, hostile recursive-program cases,
+  differentials, actor-variable comparison/set/remove and deterministic
+  possible-value selection traces, strict
+  transform/use-action traces, production catalog admission, CanonicalStateV85
+  persistence/replay, hostile recursive-program and variable-bound cases,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, canonical-event-V19, and recovery coverage.
+  expiry, stale-response, protocol 109/schema 87, canonical-event-V19, and
+  recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, stationary/disconnected
   exposure, death/activity-interruption, CanonicalStateV84, SQLite, and portable
