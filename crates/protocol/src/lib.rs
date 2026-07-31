@@ -12,6 +12,7 @@ mod eocs;
 mod interactions;
 mod item_groups;
 mod npc_dialogue;
+mod npc_faction;
 mod use_actions;
 
 pub use anatomy::{
@@ -51,6 +52,12 @@ pub use npc_dialogue::{
     VisibleNpcSnapshotV1, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
     npc_template_attitude_is_supported, npc_template_attitude_will_talk,
     opinion_delta_cannot_trigger_hostility, opinion_is_valid,
+};
+pub use npc_faction::{
+    FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,
+    FactionTemplateV1, MAX_FACTION_DESCRIPTION_BYTES, MAX_FACTION_FOOD_SUPPLY_ENTRIES,
+    MAX_FACTION_ID_BYTES, MAX_FACTION_NAME_BYTES, MAX_FACTION_RELATIONS, MAX_FACTION_TEMPLATES,
+    NO_FACTION_ID, PLAYER_FACTION_ID, faction_catalog_is_valid, faction_template_is_valid,
 };
 
 pub use item_groups::{
@@ -1842,6 +1849,7 @@ pub enum CommandRejection {
     NoInteractionPending,
     StaleInteraction,
     InvalidInteractionChoice,
+    NpcRefusedDialogue,
     ItemHasNoPower,
     PoweredToolActive,
     InvalidTerrainInteraction,
@@ -3939,6 +3947,9 @@ pub struct WorldSnapshotV1 {
     /// Generated four-submap cells live in `chunks`; the catalog is retained
     /// so recovery never rereads mutable external content.
     pub worldgen: Option<WorldgenCatalogV1>,
+    /// Immutable admitted faction defaults and their mutable canonical state.
+    pub faction_templates: Vec<FactionTemplateV1>,
+    pub factions: Vec<FactionStateV1>,
     pub npc_templates: Vec<NpcTemplateV1>,
     pub dialogue_topics: Vec<DialogueTopicV1>,
     pub actors: Vec<ActorSnapshot>,

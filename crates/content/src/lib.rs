@@ -17,6 +17,7 @@ mod material;
 mod monster;
 mod monster_group;
 mod npc_dialogue;
+mod npc_faction;
 mod overmap_special;
 mod overmap_terrain;
 mod proficiency;
@@ -109,6 +110,10 @@ pub use monster_group::{
 pub use npc_dialogue::{
     DialogueOpinionDefinition, DialogueRegistry, DialogueRegistryError, DialogueResponseDefinition,
     DialogueTopicDefinition, NpcTemplateDefinition,
+};
+pub use npc_faction::{
+    FactionDefinition, FactionFoodSupplyDefinition, FactionRegistry, FactionRegistryError,
+    FactionRelationFlagsDefinition,
 };
 pub use overmap_special::{
     MAX_OVERMAP_SPECIALS, OvermapLocationDefinition, OvermapSpecialConnectionDefinition,
@@ -532,6 +537,7 @@ fn definition_support(kind: &str) -> SupportStatus {
             | "construction"
             | "construction_group"
             | "field_type"
+            | "faction"
             | "item_group"
             | "npc"
             | "talk_topic"
@@ -552,6 +558,7 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "item_group" && item_group::field_is_implemented(field))
         || (kind == "MONSTER" && monster::field_is_implemented(field))
         || (kind == "field_type" && field::field_is_implemented(field))
+        || (kind == "faction" && npc_faction::field_is_implemented(field))
         || (kind == "npc" && npc_dialogue::npc_field_is_implemented(field))
         || (kind == "talk_topic" && npc_dialogue::topic_field_is_implemented(field))
         || (kind == "terrain" && terrain::field_is_implemented(field))

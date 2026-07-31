@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use cdda_protocol::{
     ActorId, CommandRejection, CommandSequence, DialogueTopicV1, InteractionCancellationReasonV1,
     InteractionChoiceV1, InteractionContextV1, InteractionId, MAX_DIALOGUE_TOPIC_STACK,
-    MAX_NPC_NAME_BYTES, NpcId, NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1,
-    PendingInteractionV1, SimTick, WorldEvent, WorldEventKind, WorldPosition,
-    npc_dialogue_catalog_is_valid, npc_template_attitude_will_talk,
+    MAX_NPC_NAME_BYTES, NO_FACTION_ID, NpcId, NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1,
+    NpcTemplateV1, PendingInteractionV1, SimTick, WorldEvent, WorldEventKind, WorldPosition,
+    npc_dialogue_catalog_is_valid,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,8 @@ pub(super) struct Npc {
     pub(super) id: NpcId,
     pub(super) template_id: String,
     pub(super) name: String,
+    pub(super) faction_id: String,
+    pub(super) attitude: i32,
     pub(super) position: WorldPosition,
     pub(super) social: BTreeMap<ActorId, NpcOpinionV1>,
 }
@@ -32,6 +34,8 @@ impl Npc {
             id: self.id,
             template_id: self.template_id.clone(),
             name: self.name.clone(),
+            faction_id: self.faction_id.clone(),
+            attitude: self.attitude,
             position: self.position,
             social: self
                 .social
@@ -52,6 +56,11 @@ impl WorldState {
         topics: Vec<DialogueTopicV1>,
     ) -> Result<(), SimError> {
         if !npc_dialogue_catalog_is_valid(&templates, &topics)
+            || templates.iter().any(|template| {
+                !template.faction_id.is_empty()
+                    && template.faction_id != NO_FACTION_ID
+                    && !self.factions.contains_key(&template.faction_id)
+            })
             || !self.npc_templates.is_empty()
             || !self.dialogue_topics.is_empty()
             || !self.npcs.is_empty()
@@ -104,6 +113,8 @@ impl WorldState {
                 id,
                 template_id: template.template_id,
                 name,
+                faction_id: template.faction_id,
+                attitude: template.attitude,
                 position,
                 social: BTreeMap::new(),
             },
@@ -123,19 +134,43 @@ impl WorldState {
             .get(&actor_id)
             .ok_or(SimError::UnknownActor)?
             .position;
-        let target = self.npcs.get(&npc_id).and_then(|npc| {
-            adjacent(actor_position, npc.position)
-                .then(|| self.npc_templates.get(&npc.template_id))
-                .flatten()
-                .filter(|template| npc_template_attitude_will_talk(template.attitude))
-                .map(|template| template.chat_topic_id.clone())
-        });
-        let Some(topic_id) = target else {
+        let Some(npc) = self.npcs.get(&npc_id) else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::TargetMissing)?);
             return Ok(());
         };
+        if !adjacent(actor_position, npc.position) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        }
+        let template_id = npc.template_id.clone();
+        let faction_id = npc.faction_id.clone();
+        let reset_talk_attitude = npc.attitude == 1;
+        let will_talk = self.npc_will_talk_to_player_faction(npc);
+        let topic_id = self
+            .npc_templates
+            .get(&template_id)
+            .ok_or(SimError::InvalidNpcDialogue)?
+            .chat_topic_id
+            .clone();
         if !self.resolve_pending_before_npc_dialogue(actor_id, sequence, events)? {
             return Ok(());
+        }
+        if !will_talk {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::NpcRefusedDialogue,
+            )?);
+            return Ok(());
+        }
+        if reset_talk_attitude {
+            self.npcs
+                .get_mut(&npc_id)
+                .ok_or(SimError::UnknownNpc)?
+                .attitude = 0;
+        }
+        if let Some(faction) = self.factions.get_mut(&faction_id) {
+            faction.known_by_u = true;
         }
         if topic_id == "TALK_DONE" {
             return Ok(());
@@ -158,7 +193,11 @@ impl WorldState {
             .get(&actor_id)
             .ok_or(SimError::UnknownActor)?
             .position;
-        let Some(npc) = self.npcs.get(&npc_id) else {
+        let Some((npc_position, will_talk)) = self
+            .npcs
+            .get(&npc_id)
+            .map(|npc| (npc.position, self.npc_will_talk_to_player_faction(npc)))
+        else {
             return self.invalidate_npc_dialogue(
                 actor_id,
                 sequence,
@@ -167,12 +206,21 @@ impl WorldState {
                 events,
             );
         };
-        if !adjacent(actor_position, npc.position) {
+        if !adjacent(actor_position, npc_position) {
             return self.invalidate_npc_dialogue(
                 actor_id,
                 sequence,
                 interaction_id,
                 CommandRejection::TargetMissing,
+                events,
+            );
+        }
+        if !will_talk {
+            return self.invalidate_npc_dialogue(
+                actor_id,
+                sequence,
+                interaction_id,
+                CommandRejection::NpcRefusedDialogue,
                 events,
             );
         }

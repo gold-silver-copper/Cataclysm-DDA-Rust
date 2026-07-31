@@ -13,12 +13,12 @@ use cdda_content::{
     BashFieldEffectDefinition, CitySettingsRegistry, ConstructionRegistry, ContentManifest,
     DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID,
     DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, DialogueRegistry,
-    EffectOnConditionRegistry, EffectTypeRegistry, FieldTypeDefinition, FieldTypeRegistry,
-    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry,
-    MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry,
-    MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
-    RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry, StartLocationRegistry,
-    TerrainDefinition, TerrainRegistry,
+    EffectOnConditionRegistry, EffectTypeRegistry, FactionRegistry, FieldTypeDefinition,
+    FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry,
+    ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition,
+    MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
+    ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry,
+    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -74,6 +74,7 @@ use tracing_subscriber::EnvFilter;
 mod anatomy;
 mod eocs;
 mod item_groups;
+mod npc_faction;
 #[cfg(test)]
 mod regional_field_acceptance;
 mod use_actions;
@@ -96,6 +97,7 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
+use npc_faction::runtime_npc_factions;
 use use_actions::runtime_item_transform_types;
 use worldgen::{
     RuntimeMapgenContent, bootstrap_regional_special_overmap, runtime_mapgen_item_group_roots,
@@ -147,6 +149,7 @@ struct RuntimeWorldContent<'a> {
     start_locations: &'a StartLocationRegistry,
     city_settings: &'a CitySettingsRegistry,
     river_settings: &'a RiverSettingsRegistry,
+    factions: &'a FactionRegistry,
     dialogue: &'a DialogueRegistry,
 }
 
@@ -435,6 +438,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let factions = FactionRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let crafting = build_crafting_catalog(&recipes, &items, &materials, &proficiencies)?;
     let reading = build_reading_catalog(&items, &skills)?;
     let disassembly =
@@ -502,6 +511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_locations: &start_locations,
             city_settings: &city_settings,
             river_settings: &river_settings,
+            factions: &factions,
             dialogue: &dialogue,
         },
     )?;
@@ -865,14 +875,17 @@ fn open_world(
     };
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
+    let (faction_templates, factions) = runtime_npc_factions(content.factions)?;
     let (npc_templates, dialogue_topics) = runtime_npc_dialogue(
         content.dialogue,
+        &faction_templates,
         &eoc_catalog.0,
         &actor_anatomy,
         items,
         content.proficiencies,
         content.recipes,
     )?;
+    initial.register_npc_faction_catalog(faction_templates, factions)?;
     initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
     initial.register_actor_anatomy(actor_anatomy)?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
@@ -1701,6 +1714,7 @@ fn build_reading_catalog(
 
 fn runtime_npc_dialogue(
     registry: &DialogueRegistry,
+    factions: &[cdda_protocol::FactionTemplateV1],
     eoc_definitions: &[cdda_protocol::EocDefinitionV1],
     anatomy: &cdda_protocol::AnatomyDefinitionV1,
     items: &ItemRegistry,
@@ -1848,6 +1862,10 @@ fn runtime_npc_dialogue(
             topics.remove(&topic_id);
         }
     }
+    let faction_ids = factions
+        .iter()
+        .map(|faction| faction.faction_id.as_str())
+        .collect::<BTreeSet<_>>();
     let templates = registry
         .npc_iter()
         .filter(|(_, template)| {
@@ -1863,6 +1881,9 @@ fn runtime_npc_dialogue(
                     .name_suffix
                     .as_ref()
                     .is_none_or(|name| !contains_unresolved_dialogue_tag(name))
+                && (template.faction_id.is_empty()
+                    || template.faction_id == cdda_protocol::NO_FACTION_ID
+                    || faction_ids.contains(template.faction_id.as_str()))
         })
         .map(|(template_id, template)| cdda_protocol::NpcTemplateV1 {
             template_id: template_id.to_owned(),

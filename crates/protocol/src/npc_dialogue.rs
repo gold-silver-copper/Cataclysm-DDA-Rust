@@ -81,6 +81,8 @@ pub struct NpcSnapshotV1 {
     pub id: NpcId,
     pub template_id: String,
     pub name: String,
+    pub faction_id: String,
+    pub attitude: i32,
     pub position: WorldPosition,
     pub social: Vec<NpcSocialStateV1>,
 }
@@ -90,6 +92,9 @@ pub struct VisibleNpcSnapshotV1 {
     pub id: NpcId,
     pub template_id: String,
     pub name: String,
+    pub faction_id: String,
+    pub faction_name: String,
+    pub hostile_to_controlled_actor: bool,
     pub position: WorldPosition,
     pub opinion_of_controlled_actor: Option<NpcOpinionV1>,
 }
@@ -129,6 +134,7 @@ pub fn npc_dialogue_catalog_is_valid(
                 .as_ref()
                 .is_none_or(|gender| valid_id(gender))
             && optional_id_is_valid(&template.faction_id)
+            && (0..=18).contains(&template.attitude)
             && optional_id_is_valid(&template.class_id)
             && npc_template_attitude_is_supported(template.attitude)
             && optional_id_is_valid(&template.mission)
@@ -169,6 +175,8 @@ pub fn npc_snapshot_is_valid(
             .iter()
             .any(|template| template.template_id == npc.template_id)
         && valid_text(&npc.name, MAX_NPC_NAME_BYTES)
+        && optional_id_is_valid(&npc.faction_id)
+        && (0..=18).contains(&npc.attitude)
         && npc
             .social
             .windows(2)

@@ -4806,6 +4806,7 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::NoInteractionPending => "there is no interaction to answer",
         CommandRejection::StaleInteraction => "that interaction is no longer current",
         CommandRejection::InvalidInteractionChoice => "that choice is not available",
+        CommandRejection::NpcRefusedDialogue => "the NPC refuses to talk",
         CommandRejection::ItemHasNoPower => "item has no usable battery charge",
         CommandRejection::PoweredToolActive => "turn the powered tool off first",
         CommandRejection::InvalidTerrainInteraction => "terrain cannot be changed",
@@ -5271,8 +5272,18 @@ fn gameplay_status(
                         )
                     });
             format!(
-                "{} at ({}, {}, {}){}",
-                npc.name, npc.position.x, npc.position.y, npc.position.z, opinion,
+                "{} [{}; {}] at ({}, {}, {}){}",
+                npc.name,
+                npc.faction_name,
+                if npc.hostile_to_controlled_actor {
+                    "hostile"
+                } else {
+                    "not hostile"
+                },
+                npc.position.x,
+                npc.position.y,
+                npc.position.z,
+                opinion,
             )
         })
         .unwrap_or_else(|| String::from("none"));

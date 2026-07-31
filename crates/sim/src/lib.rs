@@ -10,6 +10,7 @@ mod items;
 mod mapgen;
 mod monsters;
 mod npc_dialogue;
+mod npc_faction;
 mod overmap;
 mod rivers;
 mod roads;
@@ -36,12 +37,12 @@ use cdda_protocol::{
     CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
     CreatureSpecialAttackStateV1, DialogueTopicV1, DisassemblyActivitySnapshotV1,
     DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason, DisassemblyRecipeV1,
-    EocDefinitionV1, EocItemUseTypeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1,
-    FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot, HealingItemTypeV1,
-    HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1, HorizontalDirection,
-    IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1,
-    ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot, ItemTransformTypeV1,
-    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
+    EocDefinitionV1, EocItemUseTypeV1, EventId, FactionStateV1, FactionTemplateV1, FieldSnapshotV1,
+    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot,
+    HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1,
+    HorizontalDirection, IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1,
+    ItemComponentSnapshotV1, ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot,
+    ItemTransformTypeV1, LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
     MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
     MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
     MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
@@ -4843,6 +4844,8 @@ pub struct WorldState {
     eoc_item_use_types: BTreeMap<String, EocItemUseTypeV1>,
     item_transform_types: BTreeMap<String, ItemTransformTypeV1>,
     worldgen: Option<WorldgenCatalogV1>,
+    faction_templates: BTreeMap<String, FactionTemplateV1>,
+    factions: BTreeMap<String, FactionStateV1>,
     npc_templates: BTreeMap<String, NpcTemplateV1>,
     dialogue_topics: BTreeMap<String, DialogueTopicV1>,
     actors: BTreeMap<ActorId, Actor>,
@@ -4879,6 +4882,8 @@ impl WorldState {
             eoc_item_use_types: BTreeMap::new(),
             item_transform_types: BTreeMap::new(),
             worldgen: None,
+            faction_templates: BTreeMap::new(),
+            factions: BTreeMap::new(),
             npc_templates: BTreeMap::new(),
             dialogue_topics: BTreeMap::new(),
             actors: BTreeMap::new(),
@@ -14242,6 +14247,8 @@ impl WorldState {
             eoc_item_use_types: self.eoc_item_use_types.values().cloned().collect(),
             item_transform_types: self.item_transform_types.values().cloned().collect(),
             worldgen: self.worldgen.clone(),
+            faction_templates: self.faction_templates.values().cloned().collect(),
+            factions: self.factions.values().cloned().collect(),
             npc_templates: self.npc_templates.values().cloned().collect(),
             dialogue_topics: self.dialogue_topics.values().cloned().collect(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
@@ -14268,6 +14275,18 @@ impl WorldState {
                 &snapshot.npc_templates,
                 &snapshot.dialogue_topics,
             )
+            || !cdda_protocol::faction_catalog_is_valid(
+                &snapshot.faction_templates,
+                &snapshot.factions,
+            )
+            || snapshot.npc_templates.iter().any(|template| {
+                !template.faction_id.is_empty()
+                    && template.faction_id != cdda_protocol::NO_FACTION_ID
+                    && !snapshot
+                        .factions
+                        .iter()
+                        .any(|faction| faction.faction_id == template.faction_id)
+            })
         {
             return Err(SimError::InvalidSnapshot);
         }
@@ -14435,6 +14454,18 @@ impl WorldState {
             .cloned()
             .map(|profile| (profile.source_type_id.clone(), profile))
             .collect();
+        let faction_templates = snapshot
+            .faction_templates
+            .iter()
+            .cloned()
+            .map(|template| (template.faction_id.clone(), template))
+            .collect::<BTreeMap<_, _>>();
+        let factions = snapshot
+            .factions
+            .iter()
+            .cloned()
+            .map(|faction| (faction.faction_id.clone(), faction))
+            .collect::<BTreeMap<_, _>>();
         let npc_templates = snapshot
             .npc_templates
             .iter()
@@ -14729,10 +14760,13 @@ impl WorldState {
                 npc,
                 snapshot.world_namespace,
                 &snapshot.npc_templates,
-            ) || npc
-                .social
-                .iter()
-                .any(|social| !actors.contains_key(&social.actor_id))
+            ) || (!npc.faction_id.is_empty()
+                && npc.faction_id != cdda_protocol::NO_FACTION_ID
+                && !factions.contains_key(&npc.faction_id))
+                || npc
+                    .social
+                    .iter()
+                    .any(|social| !actors.contains_key(&social.actor_id))
                 || !occupied.insert(npc.position)
                 || !is_passable_in_chunks(&chunks, npc.position)
                 || npcs
@@ -14742,6 +14776,8 @@ impl WorldState {
                             id: npc.id,
                             template_id: npc.template_id.clone(),
                             name: npc.name.clone(),
+                            faction_id: npc.faction_id.clone(),
+                            attitude: npc.attitude,
                             position: npc.position,
                             social: npc
                                 .social
@@ -14769,6 +14805,15 @@ impl WorldState {
                         let Some(npc) = npcs.get(npc_id) else {
                             return true;
                         };
+                        if matches!(npc.attitude, 10 | 11 | 17)
+                            || factions.get(&npc.faction_id).is_some_and(|faction| {
+                                faction
+                                    .relation_to(cdda_protocol::PLAYER_FACTION_ID)
+                                    .kill_on_sight
+                            })
+                        {
+                            return true;
+                        }
                         if !topic_stack
                             .iter()
                             .all(|topic_id| dialogue_topics.contains_key(topic_id))
@@ -14900,6 +14945,8 @@ impl WorldState {
             eoc_item_use_types,
             item_transform_types,
             worldgen: snapshot.worldgen.clone(),
+            faction_templates,
+            factions,
             npc_templates,
             dialogue_topics,
             actors,
@@ -14966,6 +15013,7 @@ pub enum SimError {
     InvalidField,
     InvalidHeldMovement,
     InvalidItem,
+    InvalidNpcFaction,
     InvalidLocalCoordinate,
     InvalidNpcDialogue,
     InvalidReservation,
@@ -15000,6 +15048,7 @@ impl fmt::Display for SimError {
             Self::InvalidField => formatter.write_str("invalid field state"),
             Self::InvalidHeldMovement => formatter.write_str("invalid held movement state"),
             Self::InvalidItem => formatter.write_str("invalid item state"),
+            Self::InvalidNpcFaction => formatter.write_str("invalid NPC faction state"),
             Self::InvalidLocalCoordinate => formatter.write_str("invalid local tile coordinate"),
             Self::InvalidNpcDialogue => formatter.write_str("invalid NPC dialogue state"),
             Self::InvalidReservation => formatter.write_str("invalid stable ID reservation"),

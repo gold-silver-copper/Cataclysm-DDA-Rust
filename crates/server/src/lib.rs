@@ -41,6 +41,8 @@ use iroh::{
     endpoint::{Connection, presets},
 };
 
+mod npc_faction;
+
 pub const INPUT_QUEUE_CAPACITY: usize = 4_096;
 pub const OUTPUT_QUEUE_CAPACITY: usize = 256;
 pub const SIMULATION_INTERVAL: Duration = Duration::from_millis(50);
@@ -4309,18 +4311,25 @@ fn interest_snapshot(
         .npcs
         .iter()
         .filter(|npc| visible(npc.position))
-        .map(|npc| VisibleNpcSnapshotV1 {
-            id: npc.id,
-            template_id: npc.template_id.clone(),
-            name: npc.name.clone(),
-            position: npc.position,
-            opinion_of_controlled_actor: (dialogue_npc_id == Some(npc.id)).then(|| {
-                npc.social
-                    .iter()
-                    .find(|social| social.actor_id == actor_id)
-                    .map(|social| social.opinion.clone())
-                    .unwrap_or_default()
-            }),
+        .map(|npc| {
+            let (faction_name, hostile_to_controlled_actor) =
+                npc_faction::visible_npc_faction(&snapshot, npc);
+            VisibleNpcSnapshotV1 {
+                id: npc.id,
+                template_id: npc.template_id.clone(),
+                name: npc.name.clone(),
+                faction_id: npc.faction_id.clone(),
+                faction_name,
+                hostile_to_controlled_actor,
+                position: npc.position,
+                opinion_of_controlled_actor: (dialogue_npc_id == Some(npc.id)).then(|| {
+                    npc.social
+                        .iter()
+                        .find(|social| social.actor_id == actor_id)
+                        .map(|social| social.opinion.clone())
+                        .unwrap_or_default()
+                }),
+            }
         })
         .collect();
     let creatures = snapshot
