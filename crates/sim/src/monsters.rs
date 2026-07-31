@@ -14,6 +14,56 @@ use crate::{
     horizontally_adjacent, ranged_distance, ranged_sound_description,
 };
 
+fn insert_whole_creature_effect(
+    effects: &mut Vec<ActorEffectSnapshotV1>,
+    effect_id: &str,
+    expires_at_tick: SimTick,
+) {
+    if let Some(effect) = effects
+        .iter_mut()
+        .find(|effect| effect.effect_id == effect_id && effect.body_part_id.is_none())
+    {
+        effect.intensity = effect.intensity.max(1);
+        effect.expires_at_tick = effect.expires_at_tick.max(expires_at_tick);
+    } else if effects.len() < 1_024 {
+        effects.push(ActorEffectSnapshotV1 {
+            effect_id: effect_id.to_owned(),
+            body_part_id: None,
+            intensity: 1,
+            expires_at_tick,
+        });
+        effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+    }
+}
+
+fn add_or_extend_whole_creature_effect(
+    effects: &mut Vec<ActorEffectSnapshotV1>,
+    effect_id: &str,
+    duration_ticks: i64,
+    current_tick: SimTick,
+) {
+    if let Some(index) = effects
+        .iter()
+        .position(|effect| effect.effect_id == effect_id && effect.body_part_id.is_none())
+    {
+        let expiration = i128::from(effects[index].expires_at_tick.0) + i128::from(duration_ticks);
+        if expiration <= i128::from(current_tick.0) {
+            effects.remove(index);
+        } else {
+            effects[index].expires_at_tick = SimTick(
+                u64::try_from(expiration)
+                    .unwrap_or(u64::MAX)
+                    .min(u64::MAX - 1),
+            );
+        }
+    } else if duration_ticks > 0 {
+        let expiration = current_tick.0.saturating_add(duration_ticks as u64);
+        insert_whole_creature_effect(effects, effect_id, SimTick(expiration.min(u64::MAX - 1)));
+    }
+}
+
 pub(super) fn special_state_matches_catalog(
     catalog: Option<&WorldgenCatalogV1>,
     snapshot: &CreatureSnapshot,
@@ -345,6 +395,8 @@ impl WorldState {
             .clone();
         let mut total_cost = 0_i64;
         for (index, profile) in profiles.iter().enumerate() {
+            let mut move_cost_moves = profile.move_cost_moves;
+            let mut starts_cooldown = true;
             let Some(state) = states
                 .iter()
                 .find(|state| state.attack_id == profile.attack_id)
@@ -449,49 +501,174 @@ impl WorldState {
                             .any(|range| (range.minimum..=range.maximum).contains(&distance))
                         || !self.has_clear_shot(source_position, target_position)
                         || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
-                        || (!profile.gun_ammunition_type_id.is_empty()
+                    {
+                        continue;
+                    }
+                    if !self.prepare_creature_gun_targeting(
+                        source,
+                        target,
+                        source_position,
+                        profile,
+                        events,
+                    )? {
+                        move_cost_moves = profile.gun_targeting_cost_moves;
+                        starts_cooldown = false;
+                        true
+                    } else {
+                        if !profile.gun_ammunition_type_id.is_empty()
                             && self.creatures.get(&source).is_none_or(|creature| {
                                 creature
                                     .ammunition
                                     .get(&profile.gun_ammunition_type_id)
                                     .is_none_or(|amount| *amount == 0)
-                            }))
-                    {
-                        continue;
+                            })
+                        {
+                            continue;
+                        }
+                        self.execute_creature_gun_attack(
+                            source,
+                            target,
+                            source_position,
+                            profile,
+                            sequence,
+                            events,
+                        )?;
+                        true
                     }
-                    self.execute_creature_gun_attack(
-                        source,
-                        target,
-                        source_position,
-                        profile,
-                        sequence,
-                        events,
-                    )?;
-                    true
                 }
             };
             if !used {
                 continue;
             }
-            self.creatures
-                .get_mut(&source)
-                .and_then(|creature| {
-                    creature
-                        .special_attacks
-                        .iter_mut()
-                        .find(|state| state.attack_id == profile.attack_id)
-                })
-                .ok_or(SimError::InvalidCreature)?
-                .cooldown_turns = profile.cooldown_turns;
+            if starts_cooldown {
+                self.creatures
+                    .get_mut(&source)
+                    .and_then(|creature| {
+                        creature
+                            .special_attacks
+                            .iter_mut()
+                            .find(|state| state.attack_id == profile.attack_id)
+                    })
+                    .ok_or(SimError::InvalidCreature)?
+                    .cooldown_turns = profile.cooldown_turns;
+            }
             total_cost = total_cost
                 .checked_add(
-                    i64::from(profile.move_cost_moves)
+                    i64::from(move_cost_moves)
                         .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
                         .ok_or(SimError::NumericOverflow)?,
                 )
                 .ok_or(SimError::NumericOverflow)?;
         }
         Ok(total_cost)
+    }
+
+    fn prepare_creature_gun_targeting(
+        &mut self,
+        source: CreatureId,
+        target: ActorId,
+        origin: WorldPosition,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let requires_targeting = profile.gun_require_targeting_player;
+        let not_targeted = requires_targeting
+            && self
+                .creatures
+                .get(&source)
+                .ok_or(SimError::UnknownCreature)?
+                .effects
+                .iter()
+                .all(|effect| effect.effect_id != "targeted");
+        let not_laser_locked = requires_targeting
+            && profile.gun_laser_lock
+            && self
+                .actors
+                .get(&target)
+                .ok_or(SimError::UnknownActor)?
+                .effects
+                .iter()
+                .all(|effect| effect.effect_id != "was_laserlocked");
+        if not_targeted || not_laser_locked {
+            let duration_ticks = u64::from(profile.gun_targeting_timeout_turns)
+                .checked_mul(SimTick::HZ)
+                .ok_or(SimError::NumericOverflow)?;
+            let expires_at_tick = SimTick(
+                self.tick
+                    .0
+                    .checked_add(duration_ticks)
+                    .ok_or(SimError::NumericOverflow)?,
+            );
+            if expires_at_tick > self.tick {
+                if not_targeted {
+                    let creature = self
+                        .creatures
+                        .get_mut(&source)
+                        .ok_or(SimError::UnknownCreature)?;
+                    insert_whole_creature_effect(
+                        &mut creature.effects,
+                        "targeted",
+                        expires_at_tick,
+                    );
+                }
+                if not_laser_locked {
+                    let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+                    insert_whole_creature_effect(
+                        &mut actor.effects,
+                        "laserlocked",
+                        expires_at_tick,
+                    );
+                    insert_whole_creature_effect(
+                        &mut actor.effects,
+                        "was_laserlocked",
+                        expires_at_tick,
+                    );
+                }
+            }
+            let sound_volume = if profile.gun_targeting_sound.is_empty() {
+                0
+            } else {
+                profile.gun_targeting_volume
+            };
+            if sound_volume > 0 || not_laser_locked {
+                events.push(self.make_event(WorldEventKind::CreatureTargetedActor {
+                    source,
+                    target,
+                    origin,
+                    sound: profile.gun_targeting_sound.clone(),
+                    sound_volume,
+                    laser_lock: not_laser_locked,
+                })?);
+            }
+            return Ok(false);
+        }
+        if requires_targeting {
+            let extension_ticks = i64::from(profile.gun_targeting_timeout_extend_turns)
+                .checked_mul(i64::try_from(SimTick::HZ).map_err(|_| SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+            let creature = self
+                .creatures
+                .get_mut(&source)
+                .ok_or(SimError::UnknownCreature)?;
+            add_or_extend_whole_creature_effect(
+                &mut creature.effects,
+                "targeted",
+                extension_ticks,
+                self.tick,
+            );
+        }
+        if profile.gun_laser_lock {
+            let extension_ticks =
+                i64::try_from(5 * SimTick::HZ).map_err(|_| SimError::NumericOverflow)?;
+            let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+            add_or_extend_whole_creature_effect(
+                &mut actor.effects,
+                "was_laserlocked",
+                extension_ticks,
+                self.tick,
+            );
+        }
+        Ok(true)
     }
 
     fn execute_creature_gun_attack(

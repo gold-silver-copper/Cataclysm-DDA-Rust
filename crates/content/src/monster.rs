@@ -146,7 +146,8 @@ pub struct MonsterSpecialAttackDefinition {
     pub gun_require_targeting_npc: bool,
     pub gun_require_targeting_monster: bool,
     pub gun_targeting_timeout_turns: u32,
-    pub gun_targeting_timeout_extend_turns: u32,
+    pub gun_targeting_timeout_extend_turns: i32,
+    pub gun_targeting_sound: String,
     pub gun_targeting_volume: u32,
     pub gun_laser_lock: bool,
     pub gun_target_moving_vehicles: bool,
@@ -776,6 +777,7 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         gun_require_targeting_monster: false,
         gun_targeting_timeout_turns: 8,
         gun_targeting_timeout_extend_turns: 3,
+        gun_targeting_sound: String::from("Beep."),
         gun_targeting_volume: 6,
         gun_laser_lock: false,
         gun_target_moving_vehicles: false,
@@ -888,6 +890,7 @@ fn parse_special_attack(
         attack.gun_require_targeting_monster = false;
         attack.gun_targeting_timeout_turns = 8;
         attack.gun_targeting_timeout_extend_turns = 3;
+        attack.gun_targeting_sound = String::from("Beep.");
         attack.gun_targeting_volume = 6;
         attack.gun_laser_lock = false;
         attack.gun_target_moving_vehicles = false;
@@ -1071,16 +1074,22 @@ fn parse_special_attack(
         for (field, target) in [
             ("targeting_cost", &mut attack.gun_targeting_cost_moves),
             ("targeting_timeout", &mut attack.gun_targeting_timeout_turns),
-            (
-                "targeting_timeout_extend",
-                &mut attack.gun_targeting_timeout_extend_turns,
-            ),
             ("targeting_volume", &mut attack.gun_targeting_volume),
         ] {
             if let Some(value) = fields.get(field) {
                 *target = parse_u32(value, source, &format!("special_attacks.{field}"))?;
             }
         }
+        if let Some(value) = fields.get("targeting_timeout_extend") {
+            attack.gun_targeting_timeout_extend_turns =
+                parse_i32(value, source, "special_attacks.targeting_timeout_extend")?;
+        }
+        apply_text(
+            fields,
+            "targeting_sound",
+            &mut attack.gun_targeting_sound,
+            source,
+        )?;
         for (field, target) in [
             (
                 "require_targeting_player",

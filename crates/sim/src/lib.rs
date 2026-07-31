@@ -4705,7 +4705,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV22");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV23");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -10457,6 +10457,11 @@ impl WorldState {
                     origin,
                     sound_volume,
                     ..
+                }
+                | WorldEventKind::CreatureTargetedActor {
+                    origin,
+                    sound_volume,
+                    ..
                 } if *sound_volume > 0 => Some((*origin, *sound_volume, false)),
                 WorldEventKind::CreatureBashed { target, volume, .. } if *volume > 0 => {
                     Some((*target, *volume, false))
@@ -14514,7 +14519,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV95");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV96");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

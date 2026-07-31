@@ -513,6 +513,13 @@ struct RuntimeMonsterGunProfile {
     item_range: u32,
     dispersion: u32,
     sound_volume: u16,
+    targeting_cost_moves: u32,
+    require_targeting_player: bool,
+    targeting_timeout_turns: u32,
+    targeting_timeout_extend_turns: i32,
+    targeting_sound: String,
+    targeting_volume: u16,
+    laser_lock: bool,
     no_damage_scaling: bool,
     blinds_eyes: bool,
     target_moving_vehicles: bool,
@@ -537,11 +544,6 @@ fn runtime_monster_gun_profile(
             .gun_ranges
             .iter()
             .all(|range| matches!(range.mode_id.as_str(), "" | "DEFAULT"));
-    let targeting_is_immediate = !attack.gun_require_targeting_player
-        && !attack.gun_require_targeting_npc
-        && !attack.gun_require_targeting_monster
-        && !attack.gun_laser_lock
-        && !attack.gun_require_sunlight;
     let ammunition = if attack.gun_ammunition_type_id.is_empty() {
         None
     } else {
@@ -601,7 +603,9 @@ fn runtime_monster_gun_profile(
         && ammunition_shape_is_supported
         && attack.gun_max_ammunition.is_none()
         && single_shot_ranges
-        && targeting_is_immediate
+        && !attack.gun_require_sunlight
+        && attack.gun_targeting_sound.len() <= 512
+        && !attack.gun_targeting_sound.chars().any(char::is_control)
         && !attack.gun_fake_skills.contains_key("throw")
         && !gun.gun_skill.is_empty()
         && combined_range > 0
@@ -712,6 +716,13 @@ fn runtime_monster_gun_profile(
         item_range,
         dispersion,
         sound_volume: monster_firearm_sound_volume(gun, ammunition)?,
+        targeting_cost_moves: attack.gun_targeting_cost_moves,
+        require_targeting_player: attack.gun_require_targeting_player,
+        targeting_timeout_turns: attack.gun_targeting_timeout_turns,
+        targeting_timeout_extend_turns: attack.gun_targeting_timeout_extend_turns,
+        targeting_sound: attack.gun_targeting_sound.clone(),
+        targeting_volume: u16::try_from(attack.gun_targeting_volume)?,
+        laser_lock: attack.gun_laser_lock,
         no_damage_scaling: true,
         blinds_eyes: projectile_effects.contains("BLINDS_EYES"),
         target_moving_vehicles: attack.gun_target_moving_vehicles,
@@ -1067,6 +1078,20 @@ fn runtime_monster_catalog(
                         gun_item_range: gun_profile.map_or(0, |profile| profile.item_range),
                         gun_dispersion: gun_profile.map_or(0, |profile| profile.dispersion),
                         gun_sound_volume: gun_profile.map_or(0, |profile| profile.sound_volume),
+                        gun_targeting_cost_moves: gun_profile
+                            .map_or(0, |profile| profile.targeting_cost_moves),
+                        gun_require_targeting_player: gun_profile
+                            .is_some_and(|profile| profile.require_targeting_player),
+                        gun_targeting_timeout_turns: gun_profile
+                            .map_or(0, |profile| profile.targeting_timeout_turns),
+                        gun_targeting_timeout_extend_turns: gun_profile
+                            .map_or(0, |profile| profile.targeting_timeout_extend_turns),
+                        gun_targeting_sound: gun_profile
+                            .map(|profile| profile.targeting_sound.clone())
+                            .unwrap_or_default(),
+                        gun_targeting_volume: gun_profile
+                            .map_or(0, |profile| profile.targeting_volume),
+                        gun_laser_lock: gun_profile.is_some_and(|profile| profile.laser_lock),
                         gun_no_damage_scaling: gun_profile
                             .is_some_and(|profile| profile.no_damage_scaling),
                         gun_blinds_eyes: gun_profile.is_some_and(|profile| profile.blinds_eyes),

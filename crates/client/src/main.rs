@@ -4577,6 +4577,17 @@ fn event_message(event: &WorldEvent) -> String {
             "A creature fired {gun_type_id} and {} you.",
             if *hit { "hit" } else { "missed" }
         ),
+        WorldEventKind::CreatureTargetedActor {
+            sound, laser_lock, ..
+        } => {
+            if *laser_lock {
+                String::from("A creature paints you with a targeting laser.")
+            } else if sound.is_empty() {
+                String::from("A creature targets you.")
+            } else {
+                format!("A creature targets you: {sound}")
+            }
+        }
         WorldEventKind::WeaponReloaded {
             loaded,
             ammunition_remaining,

@@ -89,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 119;
+pub const PROTOCOL_VERSION: u16 = 120;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2158,6 +2158,14 @@ pub enum WorldEventKind {
         sound: String,
         sound_volume: u16,
     },
+    CreatureTargetedActor {
+        source: CreatureId,
+        target: ActorId,
+        origin: WorldPosition,
+        sound: String,
+        sound_volume: u16,
+        laser_lock: bool,
+    },
     WeaponReloaded {
         actor_id: ActorId,
         weapon: ItemId,
@@ -3261,6 +3269,13 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     /// Finalized fake-shooter dispersion in pinned engine dispersion units.
     pub gun_dispersion: u32,
     pub gun_sound_volume: u16,
+    pub gun_targeting_cost_moves: u32,
+    pub gun_require_targeting_player: bool,
+    pub gun_targeting_timeout_turns: u32,
+    pub gun_targeting_timeout_extend_turns: i32,
+    pub gun_targeting_sound: String,
+    pub gun_targeting_volume: u16,
+    pub gun_laser_lock: bool,
     pub gun_no_damage_scaling: bool,
     pub gun_blinds_eyes: bool,
     /// Retained even before vehicles exist so later vehicle admission cannot
@@ -5453,6 +5468,13 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.gun_item_range == 0
                                     && attack.gun_dispersion == 0
                                     && attack.gun_sound_volume == 0
+                                    && attack.gun_targeting_cost_moves == 0
+                                    && !attack.gun_require_targeting_player
+                                    && attack.gun_targeting_timeout_turns == 0
+                                    && attack.gun_targeting_timeout_extend_turns == 0
+                                    && attack.gun_targeting_sound.is_empty()
+                                    && attack.gun_targeting_volume == 0
+                                    && !attack.gun_laser_lock
                                     && !attack.gun_no_damage_scaling
                                     && !attack.gun_blinds_eyes
                                     && !attack.gun_target_moving_vehicles
@@ -5475,6 +5497,13 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.gun_item_range == 0
                                     && attack.gun_dispersion == 0
                                     && attack.gun_sound_volume == 0
+                                    && attack.gun_targeting_cost_moves == 0
+                                    && !attack.gun_require_targeting_player
+                                    && attack.gun_targeting_timeout_turns == 0
+                                    && attack.gun_targeting_timeout_extend_turns == 0
+                                    && attack.gun_targeting_sound.is_empty()
+                                    && attack.gun_targeting_volume == 0
+                                    && !attack.gun_laser_lock
                                     && !attack.gun_no_damage_scaling
                                     && !attack.gun_blinds_eyes
                                     && !attack.gun_target_moving_vehicles
@@ -5494,6 +5523,13 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.gun_item_range == 0
                                     && attack.gun_dispersion == 0
                                     && attack.gun_sound_volume == 0
+                                    && attack.gun_targeting_cost_moves == 0
+                                    && !attack.gun_require_targeting_player
+                                    && attack.gun_targeting_timeout_turns == 0
+                                    && attack.gun_targeting_timeout_extend_turns == 0
+                                    && attack.gun_targeting_sound.is_empty()
+                                    && attack.gun_targeting_volume == 0
+                                    && !attack.gun_laser_lock
                                     && !attack.gun_no_damage_scaling
                                     && !attack.gun_blinds_eyes
                                     && !attack.gun_target_moving_vehicles
@@ -5545,6 +5581,12 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.gun_ranges.is_empty()
                                     && (1..=1_000_000).contains(&attack.gun_item_range)
                                     && (1..=1_000_000).contains(&attack.gun_dispersion)
+                                    && attack.gun_targeting_cost_moves <= 1_000_000_000
+                                    && attack.gun_targeting_timeout_turns <= 1_000_000_000
+                                    && attack.gun_targeting_timeout_extend_turns.unsigned_abs()
+                                        <= 1_000_000_000
+                                    && attack.gun_targeting_sound.len() <= 512
+                                    && !attack.gun_targeting_sound.chars().any(char::is_control)
                                     && attack.gun_no_damage_scaling
                                     && attack.gun_ranges.windows(2).all(|ranges| {
                                         (ranges[0].minimum, ranges[0].maximum)
