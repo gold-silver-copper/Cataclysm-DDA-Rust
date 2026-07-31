@@ -89,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 118;
+pub const PROTOCOL_VERSION: u16 = 119;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2847,6 +2847,10 @@ pub struct CreatureSnapshot {
     /// Private bounded monster-alpha EOC variables.
     #[serde(default)]
     pub eoc_variables: BTreeMap<String, String>,
+    /// Private authoritative concrete item-ID ammunition pools used by
+    /// monster attack actors.
+    #[serde(default)]
+    pub ammunition: BTreeMap<String, u32>,
     /// Empty means this creature leaves no splatter on ordinary death.
     pub blood_field_type_id: String,
     /// `None` means this runtime creature has no modeled ordinary corpse.
@@ -3177,6 +3181,9 @@ pub struct WorldgenU16RangeV1 {
 pub struct WorldgenMonsterPrototypeV1 {
     pub base: CreatureCorpsePrototypeV1,
     pub leaves_corpse: bool,
+    /// Final inherited concrete item-ID ammunition assigned to each new
+    /// creature of this type.
+    pub starting_ammunition: BTreeMap<String, u32>,
     /// Final inherited flat resistances in thousandths of one damage point.
     pub armor_milli: BTreeMap<String, i32>,
     /// Armor penetration applied to the ordinary rolled bash dice, in
@@ -3244,6 +3251,9 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub eoc_ids: Vec<String>,
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
+    /// Empty for ammo-free pseudo guns; otherwise the concrete item ID whose
+    /// owning creature pool loses one charge per admitted single shot.
+    pub gun_ammunition_type_id: String,
     /// Lexicographically sorted single-shot engagement bands. Overlap is
     /// harmless because strict admission permits only the same default mode.
     pub gun_ranges: Vec<WorldgenMonsterGunRangeV1>,
@@ -5390,6 +5400,11 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
         || !catalog.monster_prototypes.iter().all(|prototype| {
             valid_creature_corpse_prototype(&prototype.base)
                 && valid_worldgen_id(&prototype.base.monster_type_id)
+                && prototype.starting_ammunition.len() <= 256
+                && prototype
+                    .starting_ammunition
+                    .iter()
+                    .all(|(item_id, amount)| valid_worldgen_id(item_id) && *amount <= 1_000_000_000)
                 && prototype.armor_milli.len() <= 64
                 && prototype
                     .armor_milli
@@ -5433,6 +5448,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         && match attack.kind {
                             WorldgenMonsterSpecialAttackKindV1::Leap => {
                                 attack.gun_type_id.is_empty()
+                                    && attack.gun_ammunition_type_id.is_empty()
                                     && attack.gun_ranges.is_empty()
                                     && attack.gun_item_range == 0
                                     && attack.gun_dispersion == 0
@@ -5454,6 +5470,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             WorldgenMonsterSpecialAttackKindV1::Melee
                             | WorldgenMonsterSpecialAttackKindV1::Bite => {
                                 attack.gun_type_id.is_empty()
+                                    && attack.gun_ammunition_type_id.is_empty()
                                     && attack.gun_ranges.is_empty()
                                     && attack.gun_item_range == 0
                                     && attack.gun_dispersion == 0
@@ -5472,6 +5489,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             }
                             WorldgenMonsterSpecialAttackKindV1::Eoc => {
                                 attack.gun_type_id.is_empty()
+                                    && attack.gun_ammunition_type_id.is_empty()
                                     && attack.gun_ranges.is_empty()
                                     && attack.gun_item_range == 0
                                     && attack.gun_dispersion == 0
@@ -5518,6 +5536,12 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.leap_ignore_destination_danger
                                     && attack.eoc_ids.is_empty()
                                     && valid_worldgen_id(&attack.gun_type_id)
+                                    && (attack.gun_ammunition_type_id.is_empty()
+                                        || (valid_worldgen_id(&attack.gun_ammunition_type_id)
+                                            && prototype
+                                                .starting_ammunition
+                                                .get(&attack.gun_ammunition_type_id)
+                                                .is_some_and(|amount| *amount > 0)))
                                     && !attack.gun_ranges.is_empty()
                                     && (1..=1_000_000).contains(&attack.gun_item_range)
                                     && (1..=1_000_000).contains(&attack.gun_dispersion)
@@ -5527,8 +5551,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                             < (ranges[1].minimum, ranges[1].maximum)
                                     })
                                     && attack.gun_ranges.iter().all(|range| {
-                                        range.minimum > 0
-                                            && range.minimum <= range.maximum
+                                        range.minimum <= range.maximum
                                             && range.maximum <= attack.range
                                             && range.maximum <= attack.gun_item_range
                                     })

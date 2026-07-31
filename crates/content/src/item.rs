@@ -63,6 +63,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "loudness",
     "skill",
     "ammo_effects",
+    "effects",
     "damage",
     "ranged_damage",
     "clip_size",
@@ -1256,6 +1257,20 @@ fn apply_common_fields(
     apply_integer(object, "dispersion", &mut item.dispersion, source)?;
     apply_string(object, "skill", &mut item.gun_skill, source)?;
     apply_string_set(object, "ammo_effects", &mut item.ammunition_effects, source)?;
+    if item.subtypes.contains("AMMO") {
+        apply_string_set(object, "effects", &mut item.ammunition_effects, source)?;
+    } else if object.contains_key("effects")
+        || ["extend", "delete", "relative", "proportional"]
+            .iter()
+            .any(|modifier_name| {
+                object
+                    .get(*modifier_name)
+                    .and_then(Value::as_object)
+                    .is_some_and(|fields| fields.contains_key("effects"))
+            })
+    {
+        item.unsupported_fields.insert(String::from("effects"));
+    }
     let loudness_default = if item.subtypes.contains("AMMO") {
         -1
     } else {

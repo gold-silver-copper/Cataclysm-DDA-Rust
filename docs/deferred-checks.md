@@ -31,7 +31,9 @@ Run only when the user explicitly requests a verification checkpoint.
   selection, ammo-free gun range/fake-skill/dispersion/damage/sound traces,
   blindness/environmental-resistance boundaries, canonical persistence/replay,
   production acid-spit admission, and
-  two-client combat scenarios at protocol 118/schema 96, CanonicalStateV94,
+  ammo-free and ammo-fed single-shot actor traces, authoritative ammunition
+  depletion across persistence/replay, production admission, and two-client
+  combat scenarios at protocol 119/schema 97, CanonicalStateV95,
   canonical-event-V22.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
@@ -54,7 +56,7 @@ Run only when the user explicitly requests a verification checkpoint.
   immediate EOC chains, melee EOC hooks, dedicated EOC special actors,
   creature effect expiry and unsafe target-context/delayed graph rejection,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 118/schema 96, CanonicalStateV94,
+  expiry, stale-response, protocol 119/schema 97, CanonicalStateV95,
   canonical-event-V22, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,

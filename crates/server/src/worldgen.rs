@@ -508,6 +508,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
 #[derive(Clone)]
 struct RuntimeMonsterGunProfile {
     damage: Vec<WorldgenMonsterMeleeDamageUnitV1>,
+    ammunition_type_id: String,
     ranges: Vec<WorldgenMonsterGunRangeV1>,
     item_range: u32,
     dispersion: u32,
@@ -520,6 +521,7 @@ struct RuntimeMonsterGunProfile {
 fn runtime_monster_gun_profile(
     attack: &cdda_content::MonsterSpecialAttackDefinition,
     items: &ItemRegistry,
+    starting_ammunition: &BTreeMap<String, u32>,
 ) -> Result<Option<RuntimeMonsterGunProfile>, Box<dyn std::error::Error>> {
     if attack.kind != MonsterSpecialAttackKind::Gun {
         return Ok(None);
@@ -540,26 +542,72 @@ fn runtime_monster_gun_profile(
         && !attack.gun_require_targeting_monster
         && !attack.gun_laser_lock
         && !attack.gun_require_sunlight;
-    let projectile_effects_are_supported =
-        gun.ammunition_effects.iter().all(|effect| {
-            matches!(
-                effect.as_str(),
-                "BLINDS_EYES" | "NO_DAMAGE_SCALING" | "NO_PENETRATE_OBSTACLES"
+    let ammunition = if attack.gun_ammunition_type_id.is_empty() {
+        None
+    } else {
+        let ammunition = items.get(&attack.gun_ammunition_type_id).ok_or_else(|| {
+            format!(
+                "monster gun actor references unknown ammunition item {}",
+                attack.gun_ammunition_type_id
             )
-        }) && gun.ammunition_effects.contains("NO_DAMAGE_SCALING")
-            && gun.ammunition_effects.contains("NO_PENETRATE_OBSTACLES");
+        })?;
+        let compatible = ammunition.subtypes.contains("AMMO")
+            && ammunition.ammo_types.len() == 1
+            && ammunition
+                .ammo_types
+                .iter()
+                .next()
+                .is_some_and(|ammunition_type| gun.ammo.contains(ammunition_type))
+            && starting_ammunition
+                .get(&attack.gun_ammunition_type_id)
+                .is_some_and(|amount| *amount > 0)
+            && !ammunition
+                .unsupported_fields
+                .iter()
+                .any(|field| field == "damage" || field.starts_with("damage."));
+        if !compatible {
+            return Ok(None);
+        }
+        Some(ammunition)
+    };
+    let projectile_effects = gun
+        .ammunition_effects
+        .iter()
+        .chain(
+            ammunition
+                .into_iter()
+                .flat_map(|ammunition| ammunition.ammunition_effects.iter()),
+        )
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let projectile_effects_are_supported = projectile_effects.iter().all(|effect| {
+        matches!(
+            effect.as_str(),
+            "BLINDS_EYES" | "NO_DAMAGE_SCALING" | "NO_PENETRATE_OBSTACLES"
+        )
+    }) && projectile_effects.contains("NO_DAMAGE_SCALING")
+        && projectile_effects.contains("NO_PENETRATE_OBSTACLES");
+    let ammunition_shape_is_supported = ammunition.is_none() == gun.ammo.is_empty();
+    let combined_range = gun
+        .range
+        .checked_add(ammunition.map_or(0, |ammunition| ammunition.range))
+        .ok_or("monster gun range overflow")?;
+    let combined_dispersion = gun
+        .dispersion
+        .checked_add(ammunition.map_or(0, |ammunition| ammunition.dispersion))
+        .ok_or("monster gun dispersion overflow")?;
     let gun_is_supported = gun.subtypes.contains("GUN")
         && gun.flags.contains("NEVER_JAMS")
-        && gun.ammo.is_empty()
-        && attack.gun_ammunition_type_id.is_empty()
+        && ammunition_shape_is_supported
         && attack.gun_max_ammunition.is_none()
         && single_shot_ranges
         && targeting_is_immediate
         && !attack.gun_fake_skills.contains_key("throw")
         && !gun.gun_skill.is_empty()
-        && gun.range > 0
-        && gun.dispersion >= 0
-        && !gun.ranged_damage.is_empty()
+        && combined_range > 0
+        && combined_dispersion >= 0
+        && (!gun.ranged_damage.is_empty()
+            || ammunition.is_some_and(|ammunition| !ammunition.damage.is_empty()))
         && !gun
             .unsupported_fields
             .iter()
@@ -578,11 +626,11 @@ fn runtime_monster_gun_profile(
     let Some((generic_skill, weapon_skill)) = gun_skill else {
         return Ok(None);
     };
-    let item_range = u32::try_from(gun.range)?;
+    let item_range = u32::try_from(combined_range)?;
     if attack.range > item_range {
         return Ok(None);
     }
-    let raw_dispersion = u32::try_from(gun.dispersion)?;
+    let raw_dispersion = u32::try_from(combined_dispersion)?;
     let weapon_dispersion = raw_dispersion
         .saturating_add(9)
         .checked_div(18)
@@ -611,8 +659,19 @@ fn runtime_monster_gun_profile(
         .and_then(|value| value.checked_add(base_skill_penalty))
         .and_then(|value| value.checked_add(scaled_skill_penalty))
         .ok_or("monster gun dispersion overflow")?;
-    let damage = gun
+    let mut combined_damage = gun
         .ranged_damage
+        .iter()
+        .map(|(damage_type_id, unit)| (damage_type_id.clone(), unit.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if let Some(ammunition) = ammunition {
+        for (damage_type_id, ammunition_unit) in &ammunition.damage {
+            let unit = combined_damage.entry(damage_type_id.clone()).or_default();
+            unit.amount += ammunition_unit.amount;
+            unit.armor_penetration += ammunition_unit.armor_penetration;
+        }
+    }
+    let damage = combined_damage
         .iter()
         .map(|(damage_type_id, unit)| {
             if !unit.amount.is_finite()
@@ -648,14 +707,56 @@ fn runtime_monster_gun_profile(
         .collect();
     Ok(Some(RuntimeMonsterGunProfile {
         damage,
+        ammunition_type_id: attack.gun_ammunition_type_id.clone(),
         ranges,
         item_range,
         dispersion,
-        sound_volume: u16::try_from(gun.loudness.unwrap_or(0))?,
+        sound_volume: monster_firearm_sound_volume(gun, ammunition)?,
         no_damage_scaling: true,
-        blinds_eyes: gun.ammunition_effects.contains("BLINDS_EYES"),
+        blinds_eyes: projectile_effects.contains("BLINDS_EYES"),
         target_moving_vehicles: attack.gun_target_moving_vehicles,
     }))
+}
+
+fn monster_firearm_sound_volume(
+    gun: &cdda_content::ItemDefinition,
+    ammunition: Option<&cdda_content::ItemDefinition>,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    let ammunition_loudness = if let Some(ammunition) = ammunition {
+        if let Some(loudness) = ammunition.loudness {
+            loudness
+        } else {
+            let damage_loudness = ammunition.damage.values().try_fold(
+                0.0,
+                |total, damage| -> Result<_, Box<dyn std::error::Error>> {
+                    let total = total + (damage.amount + damage.armor_penetration) * 2.0;
+                    total
+                        .is_finite()
+                        .then_some(total)
+                        .ok_or_else(|| "monster ammunition loudness is not finite".into())
+                },
+            )?;
+            let derived = f64::from(
+                ammunition
+                    .range
+                    .checked_mul(2)
+                    .ok_or("monster ammunition loudness range overflow")?,
+            ) + damage_loudness;
+            if !derived.is_finite() || derived < 0.0 || derived > f64::from(i32::MAX) {
+                return Err("derived monster ammunition loudness is out of range".into());
+            }
+            derived.trunc() as i32
+        }
+    } else {
+        0
+    };
+    let volume = gun
+        .loudness
+        .unwrap_or(0)
+        .checked_add(ammunition_loudness)
+        .ok_or("monster firearm loudness overflow")?
+        .max(0);
+    Ok(u16::try_from(volume)?)
 }
 
 fn runtime_monster_catalog(
@@ -735,6 +836,15 @@ fn runtime_monster_catalog(
             let monster = monsters
                 .get(id)
                 .ok_or_else(|| format!("monster group references unknown MONSTER {id}"))?;
+            for ammunition_type_id in monster.starting_ammunition.keys() {
+                if items.get(ammunition_type_id).is_none() {
+                    return Err(format!(
+                        "monster {} starting_ammo references unknown item {ammunition_type_id}",
+                        monster.id
+                    )
+                    .into());
+                }
+            }
             let base = cdda_protocol::CreatureCorpsePrototypeV1 {
                 monster_type_id: monster.id.clone(),
                 max_hp: monster.hp,
@@ -845,7 +955,9 @@ fn runtime_monster_catalog(
                     && creature_eoc_context_is_supported(attack)
                     && attack.kind == MonsterSpecialAttackKind::Gun
             }) {
-                if let Some(profile) = runtime_monster_gun_profile(attack, items)? {
+                if let Some(profile) =
+                    runtime_monster_gun_profile(attack, items, &monster.starting_ammunition)?
+                {
                     gun_profiles.insert(attack.id.clone(), profile);
                 } else {
                     deferred_behavior_fields
@@ -946,6 +1058,9 @@ fn runtime_monster_catalog(
                         gun_type_id: gun_profile
                             .map(|_| attack.gun_type_id.clone())
                             .unwrap_or_default(),
+                        gun_ammunition_type_id: gun_profile
+                            .map(|profile| profile.ammunition_type_id.clone())
+                            .unwrap_or_default(),
                         gun_ranges: gun_profile
                             .map(|profile| profile.ranges.clone())
                             .unwrap_or_default(),
@@ -962,6 +1077,7 @@ fn runtime_monster_catalog(
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
+                starting_ammunition: monster.starting_ammunition.clone(),
                 armor_milli: monster.finalized_armor_milli(),
                 melee_dice_armor_penetration_milli: monster.melee_dice_armor_penetration_milli,
                 melee_damage: melee_damage_supported

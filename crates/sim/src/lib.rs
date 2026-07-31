@@ -3041,6 +3041,7 @@ struct Creature {
     special_attacks: Vec<CreatureSpecialAttackStateV1>,
     effects: Vec<ActorEffectSnapshotV1>,
     eoc_variables: BTreeMap<String, String>,
+    ammunition: BTreeMap<String, u32>,
     blood_field_type_id: String,
     corpse: Option<CreatureCorpsePrototypeV1>,
 }
@@ -3201,6 +3202,7 @@ impl Creature {
             special_attacks: self.special_attacks.clone(),
             effects: self.effects.clone(),
             eoc_variables: self.eoc_variables.clone(),
+            ammunition: self.ammunition.clone(),
             blood_field_type_id: self.blood_field_type_id.clone(),
             corpse: self.corpse.clone(),
         }
@@ -3242,6 +3244,7 @@ impl Creature {
             special_attacks: snapshot.special_attacks.clone(),
             effects: snapshot.effects.clone(),
             eoc_variables: snapshot.eoc_variables.clone(),
+            ammunition: snapshot.ammunition.clone(),
             blood_field_type_id: snapshot.blood_field_type_id.clone(),
             corpse: snapshot.corpse.clone(),
         })
@@ -3295,6 +3298,10 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
                 || effect.expires_at_tick == SimTick(0)
         })
         || !cdda_protocol::actor_eoc_variables_are_valid(&snapshot.eoc_variables)
+        || snapshot.ammunition.len() > 256
+        || snapshot.ammunition.iter().any(|(item_id, amount)| {
+            validate_item_type_id(item_id).is_err() || *amount > 1_000_000_000
+        })
         || (!snapshot.blood_field_type_id.is_empty()
             && validate_item_type_id(&snapshot.blood_field_type_id).is_err())
         || snapshot.corpse.as_ref().is_some_and(|corpse| {
@@ -5539,6 +5546,7 @@ impl WorldState {
         }
         let id = self.allocator.allocate_creature()?;
         let special_attacks = self.initial_creature_special_attacks(&spawn.type_id, id)?;
+        let ammunition = self.initial_creature_ammunition(&spawn.type_id);
         self.creatures.insert(
             id,
             Creature {
@@ -5575,6 +5583,7 @@ impl WorldState {
                 special_attacks,
                 effects: Vec::new(),
                 eoc_variables: BTreeMap::new(),
+                ammunition,
                 blood_field_type_id: spawn.blood_field_type_id,
                 corpse: spawn.corpse,
             },
@@ -13492,6 +13501,8 @@ impl WorldState {
             let creature_id = self.allocator.allocate_creature()?;
             let revived_special_attacks = self
                 .initial_creature_special_attacks(&corpse.prototype.monster_type_id, creature_id)?;
+            let revived_ammunition =
+                self.initial_creature_ammunition(&corpse.prototype.monster_type_id);
             match location {
                 CorpseLocation::Ground(_position) => {
                     self.ground_items
@@ -13553,6 +13564,7 @@ impl WorldState {
                     special_attacks: revived_special_attacks,
                     effects: Vec::new(),
                     eoc_variables: BTreeMap::new(),
+                    ammunition: revived_ammunition,
                     blood_field_type_id: corpse.prototype.blood_field_type_id.clone(),
                     corpse: Some(corpse.prototype),
                 },
@@ -14502,7 +14514,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV94");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV95");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

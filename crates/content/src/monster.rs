@@ -34,6 +34,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "melee_damage",
     "attack_effs",
     "special_attacks",
+    "starting_ammo",
     "dodge",
     "vision_day",
     "vision_night",
@@ -232,6 +233,10 @@ pub struct MonsterDefinition {
     /// ID-sorted finalized generic special attacks. The pinned engine stores
     /// these in a map and attempts them in key order.
     pub special_attacks: BTreeMap<String, MonsterSpecialAttackDefinition>,
+    /// Final inherited per-item ammunition pool assigned to each newly
+    /// constructed monster. Runtime gun actors index this map by their
+    /// concrete `ammo_type` item ID.
+    pub starting_ammunition: BTreeMap<String, u32>,
     pub dodge: i32,
     pub vision_day: i32,
     pub vision_night: i32,
@@ -270,6 +275,7 @@ impl Default for MonsterDefinition {
             melee_damage: Vec::new(),
             attack_effects: Vec::new(),
             special_attacks: BTreeMap::new(),
+            starting_ammunition: BTreeMap::new(),
             dodge: 0,
             vision_day: 40,
             vision_night: 1,
@@ -559,6 +565,7 @@ fn apply_fields(
     apply_melee_damage(monster, object, source)?;
     apply_attack_effects(monster, object, source)?;
     apply_special_attacks(monster, object, attacks, source)?;
+    apply_starting_ammunition(monster, object, source)?;
     apply_string_set(object, "material", &mut monster.materials, source)?;
     apply_string_set(object, "flags", &mut monster.flags, source)?;
     apply_string_set(object, "species", &mut monster.species, source)?;
@@ -587,6 +594,38 @@ fn apply_fields(
                     monster.unsupported_fields.insert(field.clone());
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn apply_starting_ammunition(
+    monster: &mut MonsterDefinition,
+    object: &Map<String, Value>,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    if let Some(value) = object.get("starting_ammo") {
+        let entries = value
+            .as_object()
+            .ok_or_else(|| invalid(source, "starting_ammo"))?;
+        let mut ammunition = BTreeMap::new();
+        for (item_id, amount) in entries {
+            if item_id.is_empty() || item_id.len() > 512 || item_id.chars().any(char::is_control) {
+                return Err(invalid(source, "starting_ammo"));
+            }
+            let amount = amount
+                .as_u64()
+                .and_then(|amount| u32::try_from(amount).ok())
+                .ok_or_else(|| invalid(source, "starting_ammo"))?;
+            ammunition.insert(item_id.clone(), amount);
+        }
+        monster.starting_ammunition = ammunition;
+    }
+    for modifier_name in ["extend", "delete", "relative", "proportional"] {
+        if modifier(object, modifier_name, "starting_ammo", source)?.is_some() {
+            monster
+                .unsupported_fields
+                .insert(format!("starting_ammo.{modifier_name}"));
         }
     }
     Ok(())

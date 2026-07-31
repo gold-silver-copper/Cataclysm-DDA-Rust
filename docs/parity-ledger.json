@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 118,
-  "persistence_schema_version": 96,
+  "protocol_version": 119,
+  "persistence_schema_version": 97,
   "replay_format_version": 3,
   "active_milestone": "monsters",
   "completion_gate": [

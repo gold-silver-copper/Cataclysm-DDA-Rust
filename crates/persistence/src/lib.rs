@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 96;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 118
-/// retained content-derived monster gun profiles and ranged events.
+pub const SCHEMA_VERSION: i64 = 97;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 119
+/// added authoritative per-creature ammunition pools.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 96;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 97;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the

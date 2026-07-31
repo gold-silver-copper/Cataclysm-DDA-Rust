@@ -40,14 +40,60 @@ pub(super) fn special_state_matches_catalog(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    snapshot
+    let attacks_match = snapshot
         .special_attacks
         .iter()
         .map(|attack| attack.attack_id.as_str())
-        .eq(expected)
+        .eq(expected);
+    let ammunition_matches = catalog
+        .and_then(|catalog| {
+            catalog
+                .monster_prototypes
+                .binary_search_by(|prototype| {
+                    prototype
+                        .base
+                        .monster_type_id
+                        .as_str()
+                        .cmp(&snapshot.type_id)
+                })
+                .ok()
+                .and_then(|index| catalog.monster_prototypes.get(index))
+        })
+        .map_or_else(
+            || snapshot.ammunition.is_empty(),
+            |prototype| {
+                snapshot.ammunition.len() == prototype.starting_ammunition.len()
+                    && snapshot.ammunition.iter().all(|(item_id, amount)| {
+                        prototype
+                            .starting_ammunition
+                            .get(item_id)
+                            .is_some_and(|initial| amount <= initial)
+                    })
+            },
+        );
+    attacks_match && ammunition_matches
 }
 
 impl WorldState {
+    pub(super) fn initial_creature_ammunition(
+        &self,
+        type_id: &str,
+    ) -> std::collections::BTreeMap<String, u32> {
+        self.worldgen
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .monster_prototypes
+                    .binary_search_by(|prototype| {
+                        prototype.base.monster_type_id.as_str().cmp(type_id)
+                    })
+                    .ok()
+                    .and_then(|index| catalog.monster_prototypes.get(index))
+            })
+            .map(|prototype| prototype.starting_ammunition.clone())
+            .unwrap_or_default()
+    }
+
     pub(super) fn initial_creature_special_attacks(
         &self,
         type_id: &str,
@@ -403,6 +449,13 @@ impl WorldState {
                             .any(|range| (range.minimum..=range.maximum).contains(&distance))
                         || !self.has_clear_shot(source_position, target_position)
                         || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
+                        || (!profile.gun_ammunition_type_id.is_empty()
+                            && self.creatures.get(&source).is_none_or(|creature| {
+                                creature
+                                    .ammunition
+                                    .get(&profile.gun_ammunition_type_id)
+                                    .is_none_or(|amount| *amount == 0)
+                            }))
                     {
                         continue;
                     }
@@ -450,6 +503,14 @@ impl WorldState {
         turn_sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        if !profile.gun_ammunition_type_id.is_empty() {
+            let remaining = self
+                .creatures
+                .get_mut(&source)
+                .and_then(|creature| creature.ammunition.get_mut(&profile.gun_ammunition_type_id))
+                .ok_or(SimError::InvalidCreature)?;
+            *remaining = remaining.checked_sub(1).ok_or(SimError::InvalidCreature)?;
+        }
         let target_position = self
             .actors
             .get(&target)
