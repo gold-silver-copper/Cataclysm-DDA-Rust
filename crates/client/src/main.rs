@@ -4459,6 +4459,17 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!("Hit a creature for {amount}; {remaining_hp} HP remains."),
         WorldEventKind::ActorMissedCreature { .. } => String::from("Missed the creature."),
         WorldEventKind::CreatureDied { .. } => String::from("The creature died."),
+        WorldEventKind::MissionAssigned {
+            mission_type_id, ..
+        } => format!("Mission assigned: {mission_type_id}."),
+        WorldEventKind::MissionFinished {
+            mission_type_id,
+            success,
+            ..
+        } => format!(
+            "Mission {mission_type_id} {}.",
+            if *success { "completed" } else { "failed" }
+        ),
         WorldEventKind::CreatureCorpseCreated { .. } => String::from("The creature left a corpse."),
         WorldEventKind::CreatureRevived { .. } => String::from("A corpse rose again."),
         WorldEventKind::CreaturePolymorphed {
@@ -5470,23 +5481,31 @@ fn gameplay_status(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let mission_definitions = snapshot
+        .mission_definitions
+        .iter()
+        .map(|definition| (definition.mission_type_id.as_str(), definition))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let missions = actor
         .missions
         .iter()
         .map(|mission| {
-            let name = snapshot
-                .mission_definitions
-                .iter()
-                .find(|definition| definition.mission_type_id == mission.mission_type_id)
-                .map_or(mission.mission_type_id.as_str(), |definition| {
-                    definition.name.as_str()
-                });
+            let definition = mission_definitions
+                .get(mission.mission_type_id.as_str())
+                .copied();
+            let name = definition.map_or(mission.mission_type_id.as_str(), |definition| {
+                definition.name.as_str()
+            });
             let status = match mission.status {
                 cdda_protocol::MissionStatusV1::InProgress => "active",
                 cdda_protocol::MissionStatusV1::Success => "completed",
                 cdda_protocol::MissionStatusV1::Failure => "failed",
             };
-            format!("{name} ({status})")
+            let objective = definition.map_or_else(
+                || String::from("objective unavailable"),
+                |definition| mission_objective(actor, mission, definition),
+            );
+            format!("{name}: {objective} ({status})")
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -5536,6 +5555,124 @@ fn gameplay_status(
         nearest_hostile,
         nearest_npc,
     )
+}
+
+fn mission_objective(
+    actor: &cdda_protocol::ActorSnapshot,
+    mission: &cdda_protocol::MissionSnapshotV1,
+    definition: &cdda_protocol::MissionDefinitionV1,
+) -> String {
+    match &definition.goal {
+        cdda_protocol::MissionGoalV1::Null => {
+            if definition.description.is_empty() {
+                String::from("await the mission objective")
+            } else {
+                definition.description.clone()
+            }
+        }
+        cdda_protocol::MissionGoalV1::FindItem {
+            item_type_id,
+            count,
+            count_by_charges,
+        } => {
+            let progress = actor.inventory.iter().fold(0_u64, |total, item| {
+                total.saturating_add(mission_item_quantity(item, item_type_id, *count_by_charges))
+            });
+            format!(
+                "find {item_type_id} ({}/{count})",
+                progress.min(u64::from(*count))
+            )
+        }
+        cdda_protocol::MissionGoalV1::KillMonsterType {
+            monster_type_id,
+            count,
+        } => mission_kill_objective(
+            actor,
+            mission,
+            std::slice::from_ref(monster_type_id),
+            *count,
+            format!("kill {monster_type_id}"),
+        ),
+        cdda_protocol::MissionGoalV1::KillMonsterSpecies {
+            monster_species_id,
+            monster_type_ids,
+            count,
+        } => mission_kill_objective(
+            actor,
+            mission,
+            monster_type_ids,
+            *count,
+            format!("kill {monster_species_id} creatures"),
+        ),
+    }
+}
+
+fn mission_kill_objective(
+    actor: &cdda_protocol::ActorSnapshot,
+    mission: &cdda_protocol::MissionSnapshotV1,
+    monster_type_ids: &[String],
+    required: u32,
+    label: String,
+) -> String {
+    let current = monster_type_ids.iter().fold(0_u64, |total, id| {
+        total.saturating_add(actor.creature_kill_counts.get(id).copied().unwrap_or(0))
+    });
+    let threshold = mission.kill_count_to_reach.unwrap_or(u64::from(required));
+    let baseline = threshold.saturating_sub(u64::from(required));
+    let progress = current.saturating_sub(baseline).min(u64::from(required));
+    format!("{label} ({progress}/{required})")
+}
+
+fn mission_item_quantity(
+    item: &cdda_protocol::ItemSnapshot,
+    sought_type_id: &str,
+    count_by_charges: bool,
+) -> u64 {
+    let own = if item.type_id == sought_type_id {
+        if count_by_charges {
+            u64::try_from(item.charges.max(0)).unwrap_or(0)
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+    let integral = item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+        .fold(0_u64, |total, nested| {
+            total.saturating_add(mission_item_quantity(
+                nested,
+                sought_type_id,
+                count_by_charges,
+            ))
+        });
+    let wells = item
+        .magazine_wells
+        .iter()
+        .filter_map(|well| well.installed_magazine.as_deref())
+        .fold(0_u64, |total, nested| {
+            total.saturating_add(mission_item_quantity(
+                nested,
+                sought_type_id,
+                count_by_charges,
+            ))
+        });
+    let containers = item
+        .ammunition_containers
+        .iter()
+        .flat_map(|pocket| &pocket.contents)
+        .fold(0_u64, |total, nested| {
+            total.saturating_add(mission_item_quantity(
+                nested,
+                sought_type_id,
+                count_by_charges,
+            ))
+        });
+    own.saturating_add(integral)
+        .saturating_add(wells)
+        .saturating_add(containers)
 }
 
 #[cfg(test)]

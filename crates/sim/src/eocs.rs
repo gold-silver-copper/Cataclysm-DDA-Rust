@@ -7,17 +7,17 @@ use cdda_protocol::{
     EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1,
     EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathAssignmentTargetV1, EocMathExpressionV1,
     EocStringValueV1, InteractionId, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
-    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, NpcId, ScheduledEocV1, SimTick,
-    WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid, eoc_condition_is_valid,
-    eoc_condition_requires_target_context, eoc_effects_are_valid, eoc_effects_contain_confirmation,
-    eoc_effects_require_target_context,
+    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, MissionDefinitionV1, NpcId, ScheduledEocV1,
+    SimTick, WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
+    eoc_condition_is_valid, eoc_condition_requires_target_context, eoc_effects_are_valid,
+    eoc_effects_contain_confirmation, eoc_effects_require_target_context,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
 
 use crate::{
     SLEEPINESS_MAX, SimError, WorldState, inclusive_rng_u64,
-    items::{InventoryTypeSummary, summarize_inventory_by_type},
+    items::{InventoryTypeSummary, ItemInstance, summarize_inventory_by_type},
     missions::MissionOperation,
 };
 
@@ -54,12 +54,23 @@ impl WorldState {
         definitions: Vec<EocDefinitionV1>,
         item_use_types: Vec<EocItemUseTypeV1>,
     ) -> Result<(), SimError> {
+        let mission_ids = self
+            .mission_definitions
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         if self.tick != SimTick(0)
             || !self.actors.is_empty()
             || !eoc_catalog_is_valid(&definitions, &item_use_types)
             || definitions
                 .iter()
                 .any(|definition| !eoc_body_parts_are_valid(definition, &self.actor_anatomy))
+            || !mission_references_are_valid_for_ids(
+                definitions.iter(),
+                self.dialogue_topics.values(),
+                self.mission_definitions.values(),
+                &mission_ids,
+            )
         {
             return Err(SimError::InvalidItem);
         }
@@ -138,7 +149,15 @@ impl WorldState {
             ),
         };
         for eoc_id in eoc_ids {
-            if execute_eoc(&self.eoc_definitions, eoc_id, &mut execution, 0).is_err() {
+            if execute_eoc(
+                &self.eoc_definitions,
+                &self.mission_definitions,
+                eoc_id,
+                &mut execution,
+                0,
+            )
+            .is_err()
+            {
                 return Ok(false);
             }
         }
@@ -230,7 +249,15 @@ impl WorldState {
             ),
         };
         for (eoc_index, eoc_id) in profile.eoc_ids.iter().enumerate() {
-            if execute_eoc(&self.eoc_definitions, eoc_id, &mut execution, 0).is_err() {
+            if execute_eoc(
+                &self.eoc_definitions,
+                &self.mission_definitions,
+                eoc_id,
+                &mut execution,
+                0,
+            )
+            .is_err()
+            {
                 events.push(self.rejection(
                     actor_id,
                     sequence,
@@ -263,7 +290,7 @@ impl WorldState {
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
         let confirmation = execution.confirmation.take();
         let messages = std::mem::take(&mut execution.messages);
-        self.commit_eoc_execution_state(actor_id, &mut execution)?;
+        self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
         for text in messages {
             events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
         }
@@ -346,7 +373,14 @@ impl WorldState {
                 response_sequence.0,
             ),
         };
-        if execute_effects(&self.eoc_definitions, effects, &mut execution, 0).is_err()
+        if execute_effects(
+            &self.eoc_definitions,
+            &self.mission_definitions,
+            effects,
+            &mut execution,
+            0,
+        )
+        .is_err()
             || execution.effects.len() > 1_024
         {
             return Ok(false);
@@ -359,7 +393,7 @@ impl WorldState {
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
         let confirmation = execution.confirmation.take();
         let messages = std::mem::take(&mut execution.messages);
-        self.commit_eoc_execution_state(actor_id, &mut execution)?;
+        self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
         for text in messages {
             events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
         }
@@ -435,7 +469,14 @@ impl WorldState {
                 sequence.0,
             ),
         };
-        if execute_effects(&self.eoc_definitions, effects, &mut execution, 0).is_err()
+        if execute_effects(
+            &self.eoc_definitions,
+            &self.mission_definitions,
+            effects,
+            &mut execution,
+            0,
+        )
+        .is_err()
             || execution.effects.len() > 1_024
             || execution.confirmation.is_some()
         {
@@ -448,7 +489,7 @@ impl WorldState {
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
         let messages = std::mem::take(&mut execution.messages);
-        self.commit_eoc_execution_state(actor_id, &mut execution)?;
+        self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
         for text in messages {
             events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
         }
@@ -459,8 +500,9 @@ impl WorldState {
         &mut self,
         actor_id: ActorId,
         execution: &mut EocExecution,
+        events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        self.commit_mission_operations(
+        let lifecycle = self.commit_mission_operations(
             actor_id,
             std::mem::take(&mut execution.mission_operations),
         )?;
@@ -474,6 +516,7 @@ impl WorldState {
         actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
         actor.scheduled_eocs = std::mem::take(&mut execution.scheduled_eocs);
         actor.inactive_recurring_eocs = std::mem::take(&mut execution.inactive_recurring_eocs);
+        self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
         Ok(())
     }
 
@@ -489,22 +532,24 @@ impl WorldState {
                 .actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
-            let item = actor
-                .inventory
-                .get_mut(&item_id)
-                .ok_or(SimError::UnknownItem)?;
-            if profile.consume {
-                item.charges = item.charges.saturating_sub(1);
-            }
-            let remaining = item.charges;
-            if profile.consume && remaining == 0 {
-                actor.inventory.remove(&item_id);
-                actor.worn.retain(|worn| *worn != item_id);
-                if actor.wielded == Some(item_id) {
-                    actor.wielded = None;
+            if let Some(item) = actor.inventory.get_mut(&item_id) {
+                if profile.consume {
+                    item.charges = item.charges.saturating_sub(1);
                 }
+                let remaining = item.charges;
+                if profile.consume && remaining == 0 {
+                    actor.inventory.remove(&item_id);
+                    actor.worn.retain(|worn| *worn != item_id);
+                    if actor.wielded == Some(item_id) {
+                        actor.wielded = None;
+                    }
+                }
+                remaining
+            } else {
+                // A successful `finish_mission` earlier in this same atomic
+                // effect tree may have turned in the activating item.
+                0
             }
-            remaining
         };
         events.push(self.make_event(WorldEventKind::EocItemActivated {
             actor_id,
@@ -536,16 +581,15 @@ impl WorldState {
         for (actor_id, _due_tick, sequence) in due {
             let rng = self.named_rng(b"scheduled-eoc-activation", &[actor_id.as_u128()], sequence);
             let (entry, mut execution) = {
-                let actor = self
-                    .actors
-                    .get_mut(&actor_id)
-                    .ok_or(SimError::UnknownActor)?;
+                let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
                 let index = actor
                     .scheduled_eocs
                     .iter()
                     .position(|entry| entry.sequence == sequence)
                     .ok_or(SimError::InvalidItem)?;
-                let entry = actor.scheduled_eocs.remove(index);
+                let entry = actor.scheduled_eocs[index].clone();
+                let mut scheduled_eocs = actor.scheduled_eocs.clone();
+                scheduled_eocs.remove(index);
                 let execution = EocExecution {
                     actor: eoc_actor_context(actor),
                     effects: actor.effects.clone(),
@@ -553,7 +597,7 @@ impl WorldState {
                     target_effects: None,
                     target_variables: None,
                     next_schedule_sequence: actor.next_eoc_schedule_sequence,
-                    scheduled_eocs: actor.scheduled_eocs.clone(),
+                    scheduled_eocs,
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                     messages: Vec::new(),
                     mission_operations: Vec::new(),
@@ -566,9 +610,13 @@ impl WorldState {
                 };
                 (entry, execution)
             };
-            let Ok(condition_matches) =
-                execute_eoc(&self.eoc_definitions, &entry.eoc_id, &mut execution, 0)
-            else {
+            let Ok(condition_matches) = execute_eoc(
+                &self.eoc_definitions,
+                &self.mission_definitions,
+                &entry.eoc_id,
+                &mut execution,
+                0,
+            ) else {
                 continue;
             };
             let Some(definition) = self.eoc_definitions.get(&entry.eoc_id) else {
@@ -615,7 +663,7 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
-            self.commit_mission_operations(
+            let lifecycle = self.commit_mission_operations(
                 actor_id,
                 std::mem::take(&mut execution.mission_operations),
             )?;
@@ -629,6 +677,7 @@ impl WorldState {
             actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
             actor.scheduled_eocs = execution.scheduled_eocs;
             actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
+            self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
             for text in execution.messages {
                 events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
             }
@@ -744,7 +793,14 @@ impl WorldState {
                     activation_sequence,
                 ),
             };
-            if execute_eoc(&self.eoc_definitions, &eoc_id, &mut execution, 0).is_err()
+            if execute_eoc(
+                &self.eoc_definitions,
+                &self.mission_definitions,
+                &eoc_id,
+                &mut execution,
+                0,
+            )
+            .is_err()
                 || execution.effects.len() > 1_024
             {
                 continue;
@@ -755,7 +811,7 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
-            self.commit_mission_operations(
+            let lifecycle = self.commit_mission_operations(
                 actor_id,
                 std::mem::take(&mut execution.mission_operations),
             )?;
@@ -769,6 +825,7 @@ impl WorldState {
             actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
             actor.scheduled_eocs = execution.scheduled_eocs;
             actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
+            self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
             for text in execution.messages {
                 events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
             }
@@ -934,6 +991,9 @@ struct EocConfirmationRequest {
 #[derive(Clone, Debug, Default)]
 struct EocActorContext {
     inventory: BTreeMap<String, InventoryTypeSummary>,
+    mission_inventory: BTreeMap<ItemId, ItemInstance>,
+    mission_worn: Vec<ItemId>,
+    mission_wielded: Option<ItemId>,
     worn_item_types: BTreeSet<String>,
     has_weapon: bool,
     learned_recipes: BTreeSet<String>,
@@ -952,6 +1012,9 @@ struct EocActorContext {
 fn eoc_actor_context(actor: &crate::Actor) -> EocActorContext {
     EocActorContext {
         inventory: summarize_inventory_by_type(actor.inventory.values()),
+        mission_inventory: actor.inventory.clone(),
+        mission_worn: actor.worn.clone(),
+        mission_wielded: actor.wielded,
         worn_item_types: actor
             .worn
             .iter()
@@ -990,6 +1053,7 @@ fn commit_eoc_actor_context(actor: &mut crate::Actor, context: &EocActorContext)
 
 fn execute_eoc(
     catalog: &BTreeMap<String, EocDefinitionV1>,
+    mission_catalog: &BTreeMap<String, MissionDefinitionV1>,
     eoc_id: &str,
     execution: &mut EocExecution,
     depth: usize,
@@ -1020,7 +1084,7 @@ fn execute_eoc(
     } else {
         &definition.false_effects
     };
-    execute_effects(catalog, selected, execution, depth + 1)?;
+    execute_effects(catalog, mission_catalog, selected, execution, depth + 1)?;
     Ok(condition_matches)
 }
 
@@ -1417,6 +1481,7 @@ fn safe_math_result(value: Option<i64>) -> Result<i64, SimError> {
 
 fn execute_effects(
     catalog: &BTreeMap<String, EocDefinitionV1>,
+    mission_catalog: &BTreeMap<String, MissionDefinitionV1>,
     effects: &[EocEffectV1],
     execution: &mut EocExecution,
     depth: usize,
@@ -1595,7 +1660,7 @@ fn execute_effects(
                     } else {
                         decline_effects
                     };
-                    execute_effects(catalog, selected, execution, depth + 1)?;
+                    execute_effects(catalog, mission_catalog, selected, execution, depth + 1)?;
                 }
             }
             EocEffectV1::RunEocs { eoc_ids, delay } => {
@@ -1605,7 +1670,7 @@ fn execute_effects(
                     }
                 } else {
                     for (eoc_index, eoc_id) in eoc_ids.iter().enumerate() {
-                        execute_eoc(catalog, eoc_id, execution, depth + 1)?;
+                        execute_eoc(catalog, mission_catalog, eoc_id, execution, depth + 1)?;
                         if execution.confirmation.is_some() && eoc_index + 1 != eoc_ids.len() {
                             return Err(SimError::InvalidItem);
                         }
@@ -1639,8 +1704,21 @@ fn execute_effects(
                     .position(|active| active == mission_type_id)
                 {
                     execution.actor.active_mission_types.remove(index);
+                    if *success {
+                        let definition = mission_catalog
+                            .get(mission_type_id)
+                            .ok_or(SimError::InvalidMission)?;
+                        crate::missions::consume_mission_items_from_inventory(
+                            &mut execution.actor.mission_inventory,
+                            &mut execution.actor.mission_worn,
+                            &mut execution.actor.mission_wielded,
+                            &definition.goal,
+                        )?;
+                        refresh_eoc_item_context(&mut execution.actor);
+                    }
                     execution.mission_operations.push(MissionOperation::Finish {
                         mission_type_id: mission_type_id.clone(),
+                        mission_id: None,
                         success: *success,
                     });
                 }
@@ -1663,7 +1741,7 @@ fn execute_effects(
                 } else {
                     else_effects
                 };
-                execute_effects(catalog, selected, execution, depth + 1)?;
+                execute_effects(catalog, mission_catalog, selected, execution, depth + 1)?;
             }
         }
         if execution.confirmation.is_some() {
@@ -1708,6 +1786,17 @@ fn schedule_eoc(
         eoc_id: eoc_id.to_owned(),
     });
     Ok(())
+}
+
+fn refresh_eoc_item_context(actor: &mut EocActorContext) {
+    actor.inventory = summarize_inventory_by_type(actor.mission_inventory.values());
+    actor.worn_item_types = actor
+        .mission_worn
+        .iter()
+        .filter_map(|item_id| actor.mission_inventory.get(item_id))
+        .map(|item| item.type_id.clone())
+        .collect();
+    actor.has_weapon = actor.mission_wielded.is_some();
 }
 
 fn add_effect(
@@ -1841,7 +1930,21 @@ pub(super) fn mission_references_are_valid(
         .iter()
         .map(|definition| definition.mission_type_id.as_str())
         .collect::<BTreeSet<_>>();
-    eoc_definitions.iter().all(|definition| {
+    mission_references_are_valid_for_ids(
+        eoc_definitions.iter(),
+        dialogue_topics.iter(),
+        mission_definitions.iter(),
+        &mission_ids,
+    )
+}
+
+pub(super) fn mission_references_are_valid_for_ids<'a>(
+    eoc_definitions: impl IntoIterator<Item = &'a EocDefinitionV1>,
+    dialogue_topics: impl IntoIterator<Item = &'a cdda_protocol::DialogueTopicV1>,
+    mission_definitions: impl IntoIterator<Item = &'a cdda_protocol::MissionDefinitionV1>,
+    mission_ids: &BTreeSet<&str>,
+) -> bool {
+    eoc_definitions.into_iter().all(|definition| {
         definition
             .condition
             .as_ref()
@@ -1854,13 +1957,13 @@ pub(super) fn mission_references_are_valid(
                 })
             && effects_reference_known_missions(&definition.effects, &mission_ids)
             && effects_reference_known_missions(&definition.false_effects, &mission_ids)
-    }) && dialogue_topics.iter().all(|topic| {
+    }) && dialogue_topics.into_iter().all(|topic| {
         topic.responses.iter().all(|response| {
             response.condition.as_ref().is_none_or(|condition| {
                 condition_references_known_missions(condition, &mission_ids)
             }) && effects_reference_known_missions(&response.effects, &mission_ids)
         })
-    }) && mission_definitions.iter().all(|definition| {
+    }) && mission_definitions.into_iter().all(|definition| {
         effects_reference_known_missions(&definition.start_effects, &mission_ids)
             && effects_reference_known_missions(&definition.end_effects, &mission_ids)
             && effects_reference_known_missions(&definition.fail_effects, &mission_ids)

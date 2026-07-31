@@ -2725,6 +2725,7 @@ struct Actor {
     construction_activity: Option<ConstructionActivitySnapshotV1>,
     pending_interaction: Option<cdda_protocol::PendingInteractionV1>,
     missions: BTreeMap<MissionId, MissionSnapshotV1>,
+    creature_kill_counts: BTreeMap<String, u64>,
     learned_recipes: BTreeSet<String>,
     skills: BTreeMap<String, SkillLevelSnapshot>,
     proficiencies: BTreeMap<String, ProficiencyLevelSnapshot>,
@@ -2775,6 +2776,7 @@ impl Actor {
             construction_activity: self.construction_activity.clone(),
             pending_interaction: self.pending_interaction.clone(),
             missions: self.missions.values().cloned().collect(),
+            creature_kill_counts: self.creature_kill_counts.clone(),
             learned_recipes: self.learned_recipes.iter().cloned().collect(),
             skills: self.skills.values().cloned().collect(),
             proficiencies: self.proficiencies.values().cloned().collect(),
@@ -4875,7 +4877,6 @@ pub struct WorldState {
     npc_templates: BTreeMap<String, NpcTemplateV1>,
     dialogue_topics: BTreeMap<String, DialogueTopicV1>,
     mission_definitions: BTreeMap<String, MissionDefinitionV1>,
-    monster_kill_counts: BTreeMap<String, u64>,
     actors: BTreeMap<ActorId, Actor>,
     npcs: BTreeMap<NpcId, npc_dialogue::Npc>,
     creatures: BTreeMap<CreatureId, Creature>,
@@ -4915,7 +4916,6 @@ impl WorldState {
             npc_templates: BTreeMap::new(),
             dialogue_topics: BTreeMap::new(),
             mission_definitions: BTreeMap::new(),
-            monster_kill_counts: BTreeMap::new(),
             actors: BTreeMap::new(),
             npcs: BTreeMap::new(),
             creatures: BTreeMap::new(),
@@ -5880,6 +5880,7 @@ impl WorldState {
                 construction_activity: None,
                 pending_interaction: None,
                 missions: BTreeMap::new(),
+                creature_kill_counts: BTreeMap::new(),
                 learned_recipes: BTreeSet::new(),
                 skills: BTreeMap::new(),
                 proficiencies: BTreeMap::new(),
@@ -6003,11 +6004,15 @@ impl WorldState {
                 self.world_namespace,
                 &self.mission_definitions,
             )
+            || !cdda_protocol::creature_kill_counts_are_valid(&actor.creature_kill_counts)
             || actor.missions.iter().any(|mission| {
                 mission.assigned_at_tick > self.tick
                     || mission
                         .finished_at_tick
                         .is_some_and(|finished| finished > self.tick)
+                    || mission
+                        .origin_npc_id
+                        .is_some_and(|npc_id| !self.npcs.contains_key(&npc_id))
                     || self
                         .actors
                         .values()
@@ -6170,6 +6175,7 @@ impl WorldState {
                 construction_activity: actor.construction_activity,
                 pending_interaction: actor.pending_interaction,
                 missions: restored_missions,
+                creature_kill_counts: actor.creature_kill_counts,
                 learned_recipes: actor.learned_recipes.into_iter().collect(),
                 skills: restored_skills,
                 proficiencies: restored_proficiencies,
@@ -6295,6 +6301,7 @@ impl WorldState {
             &mut event_eoc_activations,
             &mut events,
         )?;
+        self.advance_missions(&mut events)?;
         self.refresh_terrain_memory(&events)?;
         let canonical_hash = self.canonical_hash()?;
         Ok(TickOutcome {
@@ -14363,7 +14370,6 @@ impl WorldState {
             npc_templates: self.npc_templates.values().cloned().collect(),
             dialogue_topics: self.dialogue_topics.values().cloned().collect(),
             mission_definitions: self.mission_definitions.values().cloned().collect(),
-            monster_kill_counts: self.monster_kill_counts.clone(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
             npcs: self
                 .npcs
@@ -14401,16 +14407,16 @@ impl WorldState {
                         .any(|faction| faction.faction_id == template.faction_id)
             })
             || !cdda_protocol::mission_catalog_is_valid(&snapshot.mission_definitions)
+            || snapshot.mission_definitions.iter().any(|definition| {
+                !definition.start_effects.is_empty()
+                    || !definition.end_effects.is_empty()
+                    || !definition.fail_effects.is_empty()
+            })
             || !eocs::mission_references_are_valid(
                 &snapshot.eoc_definitions,
                 &snapshot.dialogue_topics,
                 &snapshot.mission_definitions,
             )
-            || snapshot.monster_kill_counts.iter().any(|(id, _count)| {
-                id.is_empty()
-                    || id.len() > cdda_protocol::MAX_INTERACTION_CHOICE_ID_BYTES
-                    || id.chars().any(char::is_control)
-            })
         {
             return Err(SimError::InvalidSnapshot);
         }
@@ -14614,6 +14620,11 @@ impl WorldState {
             .map(|definition| (definition.mission_type_id.clone(), definition))
             .collect::<BTreeMap<_, _>>();
         let mut actors = BTreeMap::new();
+        let snapshot_npc_ids = snapshot
+            .npcs
+            .iter()
+            .map(|npc| npc.id)
+            .collect::<BTreeSet<_>>();
         let mut occupied = BTreeSet::new();
         let mut item_ids = BTreeSet::new();
         let mut mission_ids = BTreeSet::new();
@@ -14628,6 +14639,12 @@ impl WorldState {
                     snapshot.world_namespace,
                     &mission_definitions,
                 )
+                || !cdda_protocol::creature_kill_counts_are_valid(&actor.creature_kill_counts)
+                || actor.missions.iter().any(|mission| {
+                    mission
+                        .origin_npc_id
+                        .is_some_and(|npc_id| !snapshot_npc_ids.contains(&npc_id))
+                })
                 || actor
                     .scheduled_eocs
                     .iter()
@@ -14823,6 +14840,7 @@ impl WorldState {
                         .cloned()
                         .map(|mission| (mission.mission_id, mission))
                         .collect(),
+                    creature_kill_counts: actor.creature_kill_counts.clone(),
                     learned_recipes: actor.learned_recipes.iter().cloned().collect(),
                     skills,
                     proficiencies,
@@ -15108,7 +15126,6 @@ impl WorldState {
             npc_templates,
             dialogue_topics,
             mission_definitions,
-            monster_kill_counts: snapshot.monster_kill_counts.clone(),
             actors,
             npcs,
             creatures,

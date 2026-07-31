@@ -13,6 +13,7 @@ use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
 const MISSION_FIELDS: &[&str] = &[
     "type",
     "id",
+    "abstract",
     "copy-from",
     "name",
     "description",
@@ -41,6 +42,18 @@ const MISSION_FIELDS: &[&str] = &[
     "destination",
     "goal_condition",
     "invisible_on_complete",
+];
+
+const MISSION_DIALOGUE_FIELDS: &[&str] = &[
+    "describe",
+    "offer",
+    "accepted",
+    "rejected",
+    "advice",
+    "inquire",
+    "success",
+    "success_lie",
+    "failure",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -83,6 +96,9 @@ pub struct MissionDefinition {
     pub monster_type_id: String,
     pub monster_species_id: String,
     pub monster_kill_goal: i32,
+    pub origins: Vec<String>,
+    pub dialogue: BTreeMap<String, String>,
+    pub has_generic_rewards: bool,
     pub start_effects: Vec<EocEffectDefinition>,
     pub end_effects: Vec<EocEffectDefinition>,
     pub fail_effects: Vec<EocEffectDefinition>,
@@ -118,6 +134,7 @@ impl MissionRegistry {
             .map_err(MissionRegistryError::Catalog)?;
         let mut pending = read_missions(content_root.as_ref(), files)?;
         let mut definitions = BTreeMap::new();
+        let mut abstract_ids = BTreeSet::new();
         while !pending.is_empty() {
             let pass_size = pending.len();
             let mut loaded = 0;
@@ -125,7 +142,7 @@ impl MissionRegistry {
                 let raw = pending
                     .pop_front()
                     .ok_or(MissionRegistryError::InternalQueue)?;
-                if load_one(&raw, &mut definitions)? {
+                if load_one(&raw, &mut definitions, &mut abstract_ids)? {
                     loaded += 1;
                 } else {
                     pending.push_back(raw);
@@ -133,15 +150,11 @@ impl MissionRegistry {
             }
             if loaded == 0 {
                 return Err(MissionRegistryError::UnresolvedInheritance(
-                    pending
-                        .iter()
-                        .take(20)
-                        .filter_map(|raw| raw.object.get("id").and_then(Value::as_str))
-                        .map(str::to_owned)
-                        .collect(),
+                    pending.iter().take(20).map(|raw| raw.id.clone()).collect(),
                 ));
             }
         }
+        definitions.retain(|id, _definition| !abstract_ids.contains(id));
         Ok(Self { definitions })
     }
 
@@ -161,6 +174,8 @@ impl MissionRegistry {
 struct RawMission {
     file: SelectedContentFile,
     object: Map<String, Value>,
+    id: String,
+    is_abstract: bool,
 }
 
 fn read_missions(
@@ -184,10 +199,23 @@ fn read_missions(
                 .as_object()
                 .ok_or_else(|| invalid(&file, "mission_definition"))?
                 .clone();
-            pending.push_back(RawMission {
-                file: file.clone(),
-                object,
-            });
+            let identifiers = match (object.get("id"), object.get("abstract")) {
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(invalid(&file, "id"));
+                }
+                (Some(value), None) => (definition_ids(value, &file)?, false),
+                (None, Some(value)) => {
+                    (vec![required_string(Some(value), &file, "abstract")?], true)
+                }
+            };
+            for id in identifiers.0 {
+                pending.push_back(RawMission {
+                    file: file.clone(),
+                    object: object.clone(),
+                    id,
+                    is_abstract: identifiers.1,
+                });
+            }
         }
     }
     Ok(pending)
@@ -196,8 +224,9 @@ fn read_missions(
 fn load_one(
     raw: &RawMission,
     definitions: &mut BTreeMap<String, MissionDefinition>,
+    abstract_ids: &mut BTreeSet<String>,
 ) -> Result<bool, MissionRegistryError> {
-    let id = required_string(raw.object.get("id"), &raw.file, "id")?;
+    let id = raw.id.clone();
     let parent = raw
         .object
         .get("copy-from")
@@ -238,6 +267,9 @@ fn load_one(
             monster_type_id: String::new(),
             monster_species_id: String::new(),
             monster_kill_goal: -1,
+            origins: Vec::new(),
+            dialogue: BTreeMap::new(),
+            has_generic_rewards: true,
             start_effects: Vec::new(),
             end_effects: Vec::new(),
             fail_effects: Vec::new(),
@@ -248,6 +280,7 @@ fn load_one(
     };
 
     for field in raw.object.keys() {
+        definition.unsupported_fields.remove(field);
         if !MISSION_FIELDS.contains(&field.as_str()) && !field.starts_with("//") {
             definition.unsupported_fields.insert(field.clone());
         }
@@ -286,6 +319,18 @@ fn load_one(
         definition.monster_kill_goal =
             integer(value).ok_or_else(|| invalid(&raw.file, "monster_kill_goal"))?;
     }
+    if let Some(value) = raw.object.get("origins") {
+        definition.origins = parse_origins(value).ok_or_else(|| invalid(&raw.file, "origins"))?;
+    }
+    if let Some(value) = raw.object.get("dialogue") {
+        let dialogue = parse_dialogue(value).ok_or_else(|| invalid(&raw.file, "dialogue"))?;
+        definition.dialogue.extend(dialogue);
+    }
+    if let Some(value) = raw.object.get("has_generic_rewards") {
+        definition.has_generic_rewards = value
+            .as_bool()
+            .ok_or_else(|| invalid(&raw.file, "has_generic_rewards"))?;
+    }
     definition.start_effects = phase_effects(
         raw.object.get("start"),
         &definition.start_effects,
@@ -304,8 +349,8 @@ fn load_one(
         "fail",
         &mut definition.unsupported_fields,
     );
-    definition.has_legacy_offer_metadata |=
-        raw.object.contains_key("origins") || raw.object.contains_key("dialogue");
+    definition.has_legacy_offer_metadata =
+        !definition.origins.is_empty() || !definition.dialogue.is_empty();
 
     for unsupported in [
         "urgent",
@@ -324,15 +369,12 @@ fn load_one(
             definition.unsupported_fields.insert(unsupported.to_owned());
         }
     }
-    if raw
-        .object
-        .get("has_generic_rewards")
-        .is_some_and(|value| value.as_bool() != Some(false))
-    {
-        definition
-            .unsupported_fields
-            .insert(String::from("has_generic_rewards"));
-    }
+    let npc_origin = definition.origins.iter().any(|origin| {
+        matches!(
+            origin.as_str(),
+            "ORIGIN_OPENER_NPC" | "ORIGIN_ANY_NPC" | "ORIGIN_SECONDARY"
+        )
+    });
     if definition.name.is_empty()
         || definition.item_count <= 0
         || (matches!(definition.goal, MissionGoalDefinition::FindItem)
@@ -341,10 +383,19 @@ fn load_one(
             && (definition.monster_type_id.is_empty() || definition.monster_kill_goal <= 0))
         || (matches!(definition.goal, MissionGoalDefinition::KillMonsterSpecies)
             && (definition.monster_species_id.is_empty() || definition.monster_kill_goal <= 0))
+        || (npc_origin
+            && MISSION_DIALOGUE_FIELDS
+                .iter()
+                .any(|field| !definition.dialogue.contains_key(*field)))
     {
         return Err(invalid(&raw.file, "mission_definition"));
     }
     definitions.insert(id, definition);
+    if raw.is_abstract {
+        abstract_ids.insert(raw.id.clone());
+    } else {
+        abstract_ids.remove(&raw.id);
+    }
     Ok(true)
 }
 
@@ -373,6 +424,62 @@ fn phase_effects(
         return Vec::new();
     };
     effects
+}
+
+fn definition_ids(
+    value: &Value,
+    file: &SelectedContentFile,
+) -> Result<Vec<String>, MissionRegistryError> {
+    if let Some(id) = string(value) {
+        return Ok(vec![id]);
+    }
+    let values = value.as_array().ok_or_else(|| invalid(file, "id"))?;
+    if values.is_empty() {
+        return Err(invalid(file, "id"));
+    }
+    let ids = values
+        .iter()
+        .map(|value| string(value).ok_or_else(|| invalid(file, "id")))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.iter().collect::<BTreeSet<_>>().len() != ids.len() {
+        return Err(invalid(file, "id"));
+    }
+    Ok(ids)
+}
+
+fn parse_origins(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    let origins = values
+        .iter()
+        .map(|value| {
+            let origin = value.as_str()?;
+            matches!(
+                origin,
+                "ORIGIN_NULL"
+                    | "ORIGIN_GAME_START"
+                    | "ORIGIN_OPENER_NPC"
+                    | "ORIGIN_ANY_NPC"
+                    | "ORIGIN_SECONDARY"
+                    | "ORIGIN_COMPUTER"
+            )
+            .then(|| origin.to_owned())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (origins.iter().collect::<BTreeSet<_>>().len() == origins.len()).then_some(origins)
+}
+
+fn parse_dialogue(value: &Value) -> Option<BTreeMap<String, String>> {
+    let object = value.as_object()?;
+    if object
+        .keys()
+        .any(|field| !MISSION_DIALOGUE_FIELDS.contains(&field.as_str()))
+    {
+        return None;
+    }
+    object
+        .iter()
+        .map(|(field, value)| Some((field.clone(), translated_string(value)?)))
+        .collect()
 }
 
 fn parse_goal(value: &Value) -> Option<MissionGoalDefinition> {

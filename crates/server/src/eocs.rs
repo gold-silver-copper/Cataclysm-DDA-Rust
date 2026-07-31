@@ -443,11 +443,15 @@ fn dialogue_mission_references_are_supported(
             mission_type_id, ..
         } => mission_ids.contains(mission_type_id),
         EocEffectDefinition::Conditional {
+            condition,
             then_effects,
             else_effects,
-            ..
+        } => {
+            dialogue_condition_mission_references_are_supported(condition, mission_ids)
+                && dialogue_mission_references_are_supported(then_effects, mission_ids)
+                && dialogue_mission_references_are_supported(else_effects, mission_ids)
         }
-        | EocEffectDefinition::Confirmation {
+        EocEffectDefinition::Confirmation {
             accept_effects: then_effects,
             decline_effects: else_effects,
             ..
@@ -457,6 +461,26 @@ fn dialogue_mission_references_are_supported(
         }
         _ => true,
     })
+}
+
+fn dialogue_condition_mission_references_are_supported(
+    condition: &EocConditionDefinition,
+    mission_ids: &BTreeSet<String>,
+) -> bool {
+    match condition {
+        EocConditionDefinition::HasMission { mission_type_id } => {
+            mission_ids.contains(mission_type_id)
+        }
+        EocConditionDefinition::Not(condition) => {
+            dialogue_condition_mission_references_are_supported(condition, mission_ids)
+        }
+        EocConditionDefinition::And(conditions) | EocConditionDefinition::Or(conditions) => {
+            conditions.iter().all(|condition| {
+                dialogue_condition_mission_references_are_supported(condition, mission_ids)
+            })
+        }
+        _ => true,
+    }
 }
 
 pub(super) fn runtime_dialogue_condition_is_supported(

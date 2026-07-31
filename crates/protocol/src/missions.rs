@@ -1,6 +1,6 @@
 //! Canonical mission programs and stable per-actor mission state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,7 @@ use super::{
 pub const MAX_MISSION_DEFINITIONS: usize = 16_384;
 pub const MAX_ACTOR_MISSIONS: usize = 4_096;
 pub const MAX_MISSION_TEXT_BYTES: usize = 16 * 1_024;
+pub const MAX_CREATURE_KILL_COUNT_TYPES: usize = 16_384;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum MissionGoalV1 {
@@ -96,7 +97,17 @@ pub fn mission_snapshot_is_valid(
     else {
         return false;
     };
-    mission.mission_id.counter() > 0
+    mission_snapshot_is_valid_for_definition(mission, world_namespace, definition)
+}
+
+#[must_use]
+pub fn mission_snapshot_is_valid_for_definition(
+    mission: &MissionSnapshotV1,
+    world_namespace: u64,
+    definition: &MissionDefinitionV1,
+) -> bool {
+    mission.mission_type_id == definition.mission_type_id
+        && mission.mission_id.counter() > 0
         && mission.mission_id.world_namespace() == world_namespace
         && mission.origin_npc_id.is_none_or(|npc_id| {
             npc_id.counter() > 0 && npc_id.world_namespace() == world_namespace
@@ -108,9 +119,10 @@ pub fn mission_snapshot_is_valid(
                 .is_some_and(|finished| finished >= mission.assigned_at_tick),
         }
         && match &definition.goal {
-            MissionGoalV1::KillMonsterType { .. } | MissionGoalV1::KillMonsterSpecies { .. } => {
-                mission.kill_count_to_reach.is_some()
-            }
+            MissionGoalV1::KillMonsterType { count, .. }
+            | MissionGoalV1::KillMonsterSpecies { count, .. } => mission
+                .kill_count_to_reach
+                .is_some_and(|threshold| threshold >= u64::from(*count)),
             MissionGoalV1::Null | MissionGoalV1::FindItem { .. } => {
                 mission.kill_count_to_reach.is_none()
             }
@@ -136,6 +148,14 @@ pub fn actor_missions_are_valid(
             .collect::<BTreeSet<_>>()
             .len()
             == missions.len()
+}
+
+#[must_use]
+pub fn creature_kill_counts_are_valid(counts: &BTreeMap<String, u64>) -> bool {
+    counts.len() <= MAX_CREATURE_KILL_COUNT_TYPES
+        && counts
+            .iter()
+            .all(|(monster_type_id, count)| valid_id(monster_type_id) && *count > 0)
 }
 
 fn mission_goal_is_valid(goal: &MissionGoalV1) -> bool {

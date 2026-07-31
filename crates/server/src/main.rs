@@ -849,15 +849,15 @@ fn open_world(
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let eocs = content.eocs;
-    let (mission_catalog, mission_ids) =
-        runtime_mission_catalog(content.missions, items, content.monsters)?;
-    let eoc_catalog = runtime_eoc_catalog(
+    let (_preliminary_missions, preliminary_mission_ids) =
+        runtime_mission_catalog(content.missions, content.monsters, None)?;
+    let mut eoc_catalog = runtime_eoc_catalog(
         eocs,
         items,
         &actor_anatomy,
         content.proficiencies,
         content.recipes,
-        &mission_ids,
+        &preliminary_mission_ids,
     )?;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
@@ -889,7 +889,7 @@ fn open_world(
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
     let (faction_templates, factions) = runtime_npc_factions(content.factions)?;
-    let (npc_templates, dialogue_topics) = runtime_npc_dialogue(
+    let (npc_templates, _preliminary_dialogue_topics) = runtime_npc_dialogue(
         content.dialogue,
         &faction_templates,
         &eoc_catalog.0,
@@ -897,13 +897,11 @@ fn open_world(
         items,
         content.proficiencies,
         content.recipes,
-        &mission_ids,
+        &preliminary_mission_ids,
     )?;
     let mapgen_npc_template_ids = runtime_mapgen_npc_template_ids(&npc_templates, content.snippets);
-    initial.register_npc_faction_catalog(faction_templates, factions)?;
-    initial.register_mission_catalog(mission_catalog)?;
-    initial.register_npc_dialogue_catalog(npc_templates.clone(), dialogue_topics)?;
-    initial.register_actor_anatomy(actor_anatomy)?;
+    initial.register_npc_faction_catalog(faction_templates.clone(), factions)?;
+    initial.register_actor_anatomy(actor_anatomy.clone())?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
     for field_type_id in [
         "fd_acid",
@@ -998,6 +996,55 @@ fn open_world(
             eoc_definitions: &eoc_catalog.0,
         },
     )?;
+    let runtime_monster_type_ids = worldgen
+        .monster_prototypes
+        .iter()
+        .filter(|prototype| prototype.runtime_spawnable)
+        .map(|prototype| prototype.base.monster_type_id.clone())
+        .collect::<BTreeSet<_>>();
+    let (mission_catalog, mission_ids) = runtime_mission_catalog(
+        content.missions,
+        content.monsters,
+        Some(&runtime_monster_type_ids),
+    )?;
+    eoc_catalog = runtime_eoc_catalog(
+        eocs,
+        items,
+        &actor_anatomy,
+        content.proficiencies,
+        content.recipes,
+        &mission_ids,
+    )?;
+    let admitted_eoc_ids = eoc_catalog
+        .0
+        .iter()
+        .map(|definition| definition.eoc_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if worldgen.monster_prototypes.iter().any(|prototype| {
+        prototype.runtime_spawnable
+            && prototype.special_attacks.iter().any(|attack| {
+                attack
+                    .eoc_ids
+                    .iter()
+                    .any(|eoc_id| !admitted_eoc_ids.contains(eoc_id.as_str()))
+            })
+    }) {
+        return Err(
+            "runtime monster EOC closure changed after mission reachability admission".into(),
+        );
+    }
+    let (npc_templates, dialogue_topics) = runtime_npc_dialogue(
+        content.dialogue,
+        &faction_templates,
+        &eoc_catalog.0,
+        &actor_anatomy,
+        items,
+        content.proficiencies,
+        content.recipes,
+        &mission_ids,
+    )?;
+    initial.register_mission_catalog(mission_catalog)?;
+    initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
     let projectile_field_type_ids = worldgen
         .monster_prototypes
         .iter()

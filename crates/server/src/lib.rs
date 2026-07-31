@@ -5086,6 +5086,14 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::ProficiencyLearned {
             actor_id: event_actor,
             ..
+        }
+        | WorldEventKind::MissionAssigned {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::MissionFinished {
+            actor_id: event_actor,
+            ..
         } => event_actor == actor_id,
         WorldEventKind::PoweredToolChanged {
             actor_id: event_actor,

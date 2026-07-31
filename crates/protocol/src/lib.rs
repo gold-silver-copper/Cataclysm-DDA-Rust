@@ -47,9 +47,11 @@ pub use interactions::{
     pending_interaction_is_valid,
 };
 pub use missions::{
-    MAX_ACTOR_MISSIONS, MAX_MISSION_DEFINITIONS, MAX_MISSION_TEXT_BYTES, MissionDefinitionV1,
-    MissionGoalV1, MissionSnapshotV1, MissionStatusV1, actor_missions_are_valid,
-    mission_catalog_is_valid, mission_definition_is_valid, mission_snapshot_is_valid,
+    MAX_ACTOR_MISSIONS, MAX_CREATURE_KILL_COUNT_TYPES, MAX_MISSION_DEFINITIONS,
+    MAX_MISSION_TEXT_BYTES, MissionDefinitionV1, MissionGoalV1, MissionSnapshotV1, MissionStatusV1,
+    actor_missions_are_valid, creature_kill_counts_are_valid, mission_catalog_is_valid,
+    mission_definition_is_valid, mission_snapshot_is_valid,
+    mission_snapshot_is_valid_for_definition,
 };
 pub use npc_dialogue::{
     DialogueResponseV1, DialogueTopicV1, MAX_DIALOGUE_ID_BYTES, MAX_DIALOGUE_RESPONSES,
@@ -2011,6 +2013,17 @@ pub enum WorldEventKind {
         creature_id: CreatureId,
         killer: ActorId,
     },
+    MissionAssigned {
+        actor_id: ActorId,
+        mission_id: MissionId,
+        mission_type_id: String,
+    },
+    MissionFinished {
+        actor_id: ActorId,
+        mission_id: MissionId,
+        mission_type_id: String,
+        success: bool,
+    },
     CreatureCorpseCreated {
         creature_id: CreatureId,
         corpse_item_id: ItemId,
@@ -2798,6 +2811,10 @@ pub struct ActorSnapshot {
     pub pending_interaction: Option<PendingInteractionV1>,
     /// Stable-ID-sorted canonical mission history, including active missions.
     pub missions: Vec<MissionSnapshotV1>,
+    /// Per-character server-attributed lifetime kills keyed by concrete
+    /// monster type. Sharing the upstream single-player tracker would let one
+    /// multiplayer character advance another character's mission.
+    pub creature_kill_counts: BTreeMap<String, u64>,
     /// Stable recipe-ID-sorted permanent knowledge. Autolearn and carried-book
     /// availability remain derived rather than duplicated here.
     pub learned_recipes: Vec<String>,
@@ -4000,8 +4017,6 @@ pub struct WorldSnapshotV1 {
     pub npc_templates: Vec<NpcTemplateV1>,
     pub dialogue_topics: Vec<DialogueTopicV1>,
     pub mission_definitions: Vec<MissionDefinitionV1>,
-    /// Monster-type-ID-sorted authoritative non-hallucination kill totals.
-    pub monster_kill_counts: BTreeMap<String, u64>,
     pub actors: Vec<ActorSnapshot>,
     pub npcs: Vec<NpcSnapshotV1>,
     pub creatures: Vec<CreatureSnapshot>,

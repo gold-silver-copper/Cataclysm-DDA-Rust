@@ -1,6 +1,6 @@
 //! Authoritative deterministic NPC spawning and dialogue execution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     ActorId, CommandRejection, CommandSequence, DialogueTopicV1, InteractionCancellationReasonV1,
@@ -55,6 +55,11 @@ impl WorldState {
         templates: Vec<NpcTemplateV1>,
         topics: Vec<DialogueTopicV1>,
     ) -> Result<(), SimError> {
+        let mission_ids = self
+            .mission_definitions
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         if !npc_dialogue_catalog_is_valid(&templates, &topics)
             || templates.iter().any(|template| {
                 !template.faction_id.is_empty()
@@ -64,6 +69,12 @@ impl WorldState {
             || !self.npc_templates.is_empty()
             || !self.dialogue_topics.is_empty()
             || !self.npcs.is_empty()
+            || !crate::eocs::mission_references_are_valid_for_ids(
+                self.eoc_definitions.values(),
+                topics.iter(),
+                self.mission_definitions.values(),
+                &mission_ids,
+            )
         {
             return Err(SimError::InvalidNpcDialogue);
         }
