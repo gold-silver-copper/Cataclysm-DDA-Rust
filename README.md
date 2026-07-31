@@ -1263,6 +1263,6 @@ adapters.
 
 ## License
 
-Original Rust source and documentation are licensed under CC BY-SA 3.0. Imported
-CDDA content retains its upstream attribution and compatible licenses; every
+This CDDA-derived Rust port is licensed under GPL-3.0-or-later. Imported CDDA
+code and content retain their upstream copyright and attribution; every
 vendored path is recorded in the content provenance manifest.

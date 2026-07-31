@@ -4534,8 +4534,7 @@ fn interest_snapshot(
         calendar: CalendarSnapshot::at_tick(snapshot.tick),
         natural_light: NaturalLightSnapshot::at_tick(snapshot.tick),
         weather: cdda_sim::weather_observation_from_snapshot(&snapshot),
-        detail_vision_available: NaturalLightSnapshot::at_tick(snapshot.tick).phase
-            == cdda_protocol::SkyPhase::Day
+        detail_vision_available: cdda_sim::weather_adjusted_natural_sight_radius(&snapshot) >= 18
             || personal_detail_light
             || position_has_external_detail_light(&snapshot, origin, &light_sources),
         controlled_actor,
@@ -4857,7 +4856,7 @@ fn can_see(
     target: WorldPosition,
     light_sources: &[ActiveLightSource],
 ) -> bool {
-    let sight_radius = u32::from(NaturalLightSnapshot::at_tick(snapshot.tick).sight_radius);
+    let sight_radius = u32::from(cdda_sim::weather_adjusted_natural_sight_radius(snapshot));
     if origin.z != target.z
         || origin.x.abs_diff(target.x) > CURRENT_VISION_RADIUS_TILES
         || origin.y.abs_diff(target.y) > CURRENT_VISION_RADIUS_TILES

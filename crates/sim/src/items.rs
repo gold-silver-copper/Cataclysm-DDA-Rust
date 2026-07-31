@@ -353,8 +353,12 @@ impl ItemInstance {
         }
     }
 
-    pub(super) fn process_temperature(&mut self, current_tick: SimTick) -> Result<(), SimError> {
-        self.process_temperature_and_rot(current_tick, false)
+    pub(super) fn process_temperature(
+        &mut self,
+        current_tick: SimTick,
+        ambient_temperature_millikelvin: i32,
+    ) -> Result<(), SimError> {
+        self.process_temperature_and_rot(current_tick, false, ambient_temperature_millikelvin)
             .map(|_| ())
     }
 
@@ -362,8 +366,14 @@ impl ItemInstance {
         &mut self,
         current_tick: SimTick,
         removable: bool,
+        ambient_temperature_millikelvin: i32,
     ) -> Result<bool, SimError> {
-        self.process_temperature_and_rot_with_insulation(current_tick, removable, 1.0)
+        self.process_temperature_and_rot_with_insulation(
+            current_tick,
+            removable,
+            1.0,
+            ambient_temperature_millikelvin,
+        )
     }
 
     fn process_temperature_and_rot_with_insulation(
@@ -371,16 +381,22 @@ impl ItemInstance {
         current_tick: SimTick,
         removable: bool,
         parent_insulation: f32,
+        ambient_temperature_millikelvin: i32,
     ) -> Result<bool, SimError> {
         let rotten_away = process_item_temperature_and_rot_state(
             &mut self.temperature,
             &mut self.variables,
             current_tick,
             parent_insulation,
+            ambient_temperature_millikelvin,
         )?;
         if let Some(components) = &mut self.component_provenance {
             for component in components {
-                process_component_temperature(component, current_tick)?;
+                process_component_temperature(
+                    component,
+                    current_tick,
+                    ambient_temperature_millikelvin,
+                )?;
             }
         }
         for pocket in &mut self.integral_magazines {
@@ -390,6 +406,7 @@ impl ItemInstance {
                     current_tick,
                     removable,
                     parent_insulation,
+                    ambient_temperature_millikelvin,
                 )?;
                 if remove {
                     pocket.loaded_ammunition = None;
@@ -403,6 +420,7 @@ impl ItemInstance {
                     current_tick,
                     removable,
                     parent_insulation,
+                    ambient_temperature_millikelvin,
                 )?;
                 if remove {
                     well.installed_magazine = None;
@@ -435,6 +453,7 @@ impl ItemInstance {
                     current_tick,
                     removable,
                     insulation,
+                    ambient_temperature_millikelvin,
                 )? {
                     pocket.contents.remove(index);
                 } else {
@@ -717,6 +736,13 @@ impl ItemInstance {
         Ok(())
     }
 
+    pub(super) fn is_active_and_water_extinguishable(&self) -> bool {
+        self.powered_tool
+            .as_ref()
+            .is_some_and(|powered| powered.active)
+            && item_profile_has_flag(&self.containment, "WATER_EXTINGUISH")
+    }
+
     pub(super) fn snapshot(&self) -> ItemSnapshot {
         ItemSnapshot {
             id: self.id,
@@ -840,8 +866,8 @@ fn process_temperature_state(
     Ok(Some(elapsed / SimTick::HZ))
 }
 
-const NORMAL_AMBIENT_HOURLY_ROT_TURNS: u64 = 4_099;
 const SECONDS_PER_HOUR: u64 = 60 * 60;
+const NORMAL_AMBIENT_HOURLY_ROT_TURNS: u64 = 4_099;
 const STATIC_CORPSE_REMOVAL_TURNS: u64 = 10 * 24 * 60 * 60;
 
 /// Exact integer projection of the pinned 20 C rot curve. Upstream produces
@@ -852,6 +878,36 @@ pub fn normal_ambient_rot_increment_turns(elapsed_seconds: u64) -> Option<u64> {
     elapsed_seconds
         .checked_mul(NORMAL_AMBIENT_HOURLY_ROT_TURNS)?
         .checked_div(SECONDS_PER_HOUR)
+}
+
+/// Pinned food-decay temperature curve. The final conversion truncates once,
+/// matching `time_delta * hourly_rot / 1_hours` for positive finite inputs.
+#[must_use]
+pub fn rot_increment_turns_at_temperature(
+    temperature_millikelvin: i32,
+    elapsed_seconds: u64,
+    insulation: f32,
+) -> Option<u64> {
+    if !insulation.is_finite() || insulation <= 0.0 {
+        return None;
+    }
+    if temperature_millikelvin == ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN && insulation == 1.0 {
+        return normal_ambient_rot_increment_turns(elapsed_seconds);
+    }
+    let celsius = f64::from(temperature_millikelvin) / 1_000.0 - 273.15;
+    let fahrenheit = celsius * 9.0 / 5.0 + 32.0;
+    let hourly_rot = if temperature_millikelvin <= 273_150 {
+        0.0
+    } else if fahrenheit < 38.0 {
+        600.0 * libm::exp2(-27.0 / 16.0) * (fahrenheit - 32.0)
+    } else if fahrenheit < 105.0 {
+        3_600.0 * libm::exp2((fahrenheit - 65.0) / 16.0)
+    } else {
+        3_600.0 * libm::exp2((105.0 - 65.0) / 16.0)
+    };
+    let increment =
+        elapsed_seconds as f64 * hourly_rot / SECONDS_PER_HOUR as f64 / f64::from(insulation);
+    increment.is_finite().then_some(increment as u64)
 }
 
 #[must_use]
@@ -908,6 +964,7 @@ fn process_item_temperature_and_rot_state(
     variables: &mut BTreeMap<String, ItemVariableValueV1>,
     current_tick: SimTick,
     insulation: f32,
+    ambient_temperature_millikelvin: i32,
 ) -> Result<bool, SimError> {
     if !insulation.is_finite() || insulation <= 0.0 {
         return Err(SimError::InvalidItem);
@@ -929,8 +986,12 @@ fn process_item_temperature_and_rot_state(
     {
         return Ok(true);
     }
-    let increment =
-        normal_ambient_rot_increment_turns(elapsed_seconds).ok_or(SimError::NumericOverflow)?;
+    let increment = rot_increment_turns_at_temperature(
+        ambient_temperature_millikelvin,
+        elapsed_seconds,
+        insulation,
+    )
+    .ok_or(SimError::NumericOverflow)?;
     let rot_turns = previous_rot_turns
         .checked_add(increment)
         .ok_or(SimError::NumericOverflow)?;
@@ -946,8 +1007,16 @@ fn process_item_temperature_and_rot_state(
 pub(super) fn process_item_snapshot_temperature(
     item: &mut ItemSnapshot,
     current_tick: SimTick,
+    ambient_temperature_millikelvin: i32,
 ) -> Result<(), SimError> {
-    process_item_snapshot_temperature_and_rot(item, current_tick, false, 1.0).map(|_| ())
+    process_item_snapshot_temperature_and_rot(
+        item,
+        current_tick,
+        false,
+        1.0,
+        ambient_temperature_millikelvin,
+    )
+    .map(|_| ())
 }
 
 fn process_item_snapshot_temperature_and_rot(
@@ -955,16 +1024,22 @@ fn process_item_snapshot_temperature_and_rot(
     current_tick: SimTick,
     removable: bool,
     parent_insulation: f32,
+    ambient_temperature_millikelvin: i32,
 ) -> Result<bool, SimError> {
     let rotten_away = process_item_temperature_and_rot_state(
         &mut item.temperature,
         &mut item.variables,
         current_tick,
         parent_insulation,
+        ambient_temperature_millikelvin,
     )?;
     if let Some(components) = &mut item.component_provenance {
         for component in components {
-            process_component_temperature(component, current_tick)?;
+            process_component_temperature(
+                component,
+                current_tick,
+                ambient_temperature_millikelvin,
+            )?;
         }
     }
     for pocket in &mut item.integral_magazines {
@@ -974,6 +1049,7 @@ fn process_item_snapshot_temperature_and_rot(
                 current_tick,
                 removable,
                 parent_insulation,
+                ambient_temperature_millikelvin,
             )?
         {
             pocket.loaded_ammunition = None;
@@ -986,6 +1062,7 @@ fn process_item_snapshot_temperature_and_rot(
                 current_tick,
                 removable,
                 parent_insulation,
+                ambient_temperature_millikelvin,
             )?
         {
             well.installed_magazine = None;
@@ -1017,6 +1094,7 @@ fn process_item_snapshot_temperature_and_rot(
                 current_tick,
                 removable,
                 insulation,
+                ambient_temperature_millikelvin,
             )? {
                 pocket.contents.remove(index);
             } else {
@@ -1030,8 +1108,15 @@ fn process_item_snapshot_temperature_and_rot(
 pub(super) fn process_vehicle_cargo_temperature_and_rot(
     item: &mut ItemSnapshot,
     current_tick: SimTick,
+    ambient_temperature_millikelvin: i32,
 ) -> Result<bool, SimError> {
-    process_item_snapshot_temperature_and_rot(item, current_tick, true, 1.0)
+    process_item_snapshot_temperature_and_rot(
+        item,
+        current_tick,
+        true,
+        1.0,
+        ambient_temperature_millikelvin,
+    )
 }
 
 pub(super) fn item_temperature_timestamps_are_valid(
@@ -1090,16 +1175,18 @@ fn component_temperature_timestamps_are_valid(
 fn process_component_temperature(
     component: &mut ItemComponentSnapshotV1,
     current_tick: SimTick,
+    ambient_temperature_millikelvin: i32,
 ) -> Result<(), SimError> {
     process_item_temperature_and_rot_state(
         &mut component.temperature,
         &mut component.variables,
         current_tick,
         1.0,
+        ambient_temperature_millikelvin,
     )?;
     if let Some(children) = &mut component.component_provenance {
         for child in children {
-            process_component_temperature(child, current_tick)?;
+            process_component_temperature(child, current_tick, ambient_temperature_millikelvin)?;
         }
     }
     Ok(())
@@ -4107,9 +4194,10 @@ mod tests {
             ))
         );
 
-        item.process_temperature(SimTick(
-            birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS - 1,
-        ))
+        item.process_temperature(
+            SimTick(birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS - 1),
+            ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
+        )
         .expect("temperature should remain pending before the boundary");
         assert_eq!(
             item.temperature
@@ -4119,7 +4207,7 @@ mod tests {
         );
 
         let processing_tick = SimTick(birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS);
-        item.process_temperature(processing_tick)
+        item.process_temperature(processing_tick, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN)
             .expect("the exact ten-minute boundary should process");
         let initialized = item.temperature.expect("temperature state should exist");
         assert_eq!(
@@ -4147,7 +4235,7 @@ mod tests {
         let mut material =
             item_from_craft_prototype(ItemId::new(1, 2), &material_prototype, birth_tick);
         material
-            .process_temperature(processing_tick)
+            .process_temperature(processing_tick, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN)
             .expect("material-backed temperature should initialize at the boundary");
         let material_state = material
             .temperature
@@ -4175,7 +4263,7 @@ mod tests {
         let mut whiskey =
             item_from_craft_prototype(ItemId::new(1, 3), &whiskey_prototype, birth_tick);
         whiskey
-            .process_temperature(processing_tick)
+            .process_temperature(processing_tick, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN)
             .expect("custom freezing should use the generalized thermal curve");
         let whiskey_state = whiskey
             .temperature
@@ -4217,12 +4305,15 @@ mod tests {
         assert_eq!(rot_has_rotten_away(86_400, 864_001, true), Some(true));
 
         let mut item = perishable_item(86_400);
-        assert!(!item
-            .process_temperature_and_rot(
-                SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
-                true,
-            )
-            .expect("ten-minute rot should process"));
+        assert!(
+            !item
+                .process_temperature_and_rot(
+                    SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                    true,
+                    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
+                )
+                .expect("ten-minute rot should process")
+        );
         assert_eq!(item_rot_state(&item.variables), Some((86_400, 683)));
 
         let mut carried = perishable_item(86_400);
@@ -4235,6 +4326,7 @@ mod tests {
                 .process_temperature_and_rot(
                     SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
                     false,
+                    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
                 )
                 .expect("carried rotten food should remain physical")
         );
@@ -4245,12 +4337,15 @@ mod tests {
             ITEM_ROT_TURNS_VARIABLE.to_owned(),
             ItemVariableValueV1::Integer(172_800),
         );
-        assert!(ground
-            .process_temperature_and_rot(
-                SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
-                true,
-            )
-            .expect("ground rotten food should be removable"));
+        assert!(
+            ground
+                .process_temperature_and_rot(
+                    SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                    true,
+                    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
+                )
+                .expect("ground rotten food should be removable")
+        );
     }
 
     #[test]
@@ -4278,12 +4373,15 @@ mod tests {
                 spawn_state: None,
                 contents: vec![content.snapshot()],
             });
-        assert!(!outer
-            .process_temperature_and_rot(
-                SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
-                true,
-            )
-            .expect("outer container should process nested rot"));
+        assert!(
+            !outer
+                .process_temperature_and_rot(
+                    SimTick(ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS),
+                    true,
+                    ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN,
+                )
+                .expect("outer container should process nested rot")
+        );
         assert!(outer.ammunition_containers[0].contents.is_empty());
     }
 
@@ -4320,7 +4418,7 @@ mod tests {
 
         let processing_tick = SimTick(birth_tick.0 + ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS);
         owner
-            .process_temperature(processing_tick)
+            .process_temperature(processing_tick, ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN)
             .expect("nested contents should process through their physical owner");
         let child_state = owner.ammunition_containers[0].contents[0]
             .temperature

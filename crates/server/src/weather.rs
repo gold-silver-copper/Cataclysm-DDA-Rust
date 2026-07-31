@@ -9,11 +9,11 @@ use cdda_protocol::{
 
 pub(crate) fn runtime_weather_catalog(
     registry: &WeatherRegistry,
-    generator_id: &str,
+    region_id: &str,
 ) -> Result<WeatherCatalogV1, Box<dyn std::error::Error>> {
     let generator = registry
-        .generator(generator_id)
-        .ok_or_else(|| format!("pinned content is missing weather generator {generator_id}"))?;
+        .generator_for_region(region_id)
+        .ok_or_else(|| format!("pinned content is missing weather for region {region_id}"))?;
     let mut definitions = registry.weather_types().collect::<Vec<_>>();
     definitions.sort_by_key(|definition| definition.load_order);
     let weather_types = definitions

@@ -143,6 +143,7 @@ pub struct WeatherGeneratorDefinition {
 pub struct WeatherRegistry {
     weather_types: BTreeMap<String, WeatherTypeDefinition>,
     generators: BTreeMap<String, WeatherGeneratorDefinition>,
+    region_generators: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -161,7 +162,8 @@ impl WeatherRegistry {
         let files = catalog
             .selected_json_files(manifest, enabled)
             .map_err(WeatherRegistryError::Catalog)?;
-        let (mut weather, mut generators) = read_weather(content_root.as_ref(), files)?;
+        let (mut weather, mut generators, region_generators) =
+            read_weather(content_root.as_ref(), files)?;
         let mut weather_types = BTreeMap::new();
         resolve_weather_types(&mut weather, &mut weather_types)?;
         let mut resolved_generators = BTreeMap::new();
@@ -184,9 +186,16 @@ impl WeatherRegistry {
                 ));
             }
         }
+        if region_generators
+            .values()
+            .any(|generator_id| !resolved_generators.contains_key(generator_id))
+        {
+            return Err(WeatherRegistryError::InvalidRegistry);
+        }
         Ok(Self {
             weather_types,
             generators: resolved_generators,
+            region_generators,
         })
     }
 
@@ -198,14 +207,29 @@ impl WeatherRegistry {
     pub fn generator(&self, id: &str) -> Option<&WeatherGeneratorDefinition> {
         self.generators.get(id)
     }
+
+    #[must_use]
+    pub fn generator_for_region(&self, region_id: &str) -> Option<&WeatherGeneratorDefinition> {
+        self.region_generators
+            .get(region_id)
+            .and_then(|generator_id| self.generator(generator_id))
+    }
 }
 
 fn read_weather(
     root: &Path,
     files: Vec<SelectedContentFile>,
-) -> Result<(VecDeque<RawWeather>, VecDeque<RawWeather>), WeatherRegistryError> {
+) -> Result<
+    (
+        VecDeque<RawWeather>,
+        VecDeque<RawWeather>,
+        BTreeMap<String, String>,
+    ),
+    WeatherRegistryError,
+> {
     let mut weather = VecDeque::new();
     let mut generators = VecDeque::new();
+    let mut region_generators = BTreeMap::new();
     for file in files {
         let bytes = fs::read(root.join(&file.destination))
             .map_err(|error| WeatherRegistryError::Io(file.destination.clone(), error))?;
@@ -226,11 +250,19 @@ fn read_weather(
             match object.get("type").and_then(Value::as_str) {
                 Some("weather_type") => weather.push_back(raw),
                 Some("weather_generator") => generators.push_back(raw),
+                Some("region_settings") => {
+                    if let (Some(region_id), Some(generator_id)) = (
+                        object.get("id").and_then(Value::as_str),
+                        object.get("weather").and_then(Value::as_str),
+                    ) {
+                        region_generators.insert(region_id.to_owned(), generator_id.to_owned());
+                    }
+                }
                 _ => {}
             }
         }
     }
-    Ok((weather, generators))
+    Ok((weather, generators, region_generators))
 }
 
 fn resolve_weather_types(
@@ -250,11 +282,13 @@ fn resolve_weather_types(
                 continue;
             }
             let raw_id = raw.object.get("id").and_then(Value::as_str);
+            let was_loaded = raw_id.is_some_and(|id| output.contains_key(id))
+                || inherited.is_some_and(|id| output.contains_key(id));
             let mut definition = raw_id
                 .and_then(|id| output.get(id).cloned())
                 .or_else(|| inherited.and_then(|id| output.get(id).cloned()))
                 .unwrap_or_default();
-            patch_weather_type(&raw, &mut definition)?;
+            patch_weather_type(&raw, &mut definition, was_loaded)?;
             definition.load_order = output.get(&definition.id).map_or(
                 u32::try_from(output.len()).map_err(|_| WeatherRegistryError::InvalidRegistry)?,
                 |existing| existing.load_order,
@@ -286,11 +320,13 @@ fn resolve_generators(
                 continue;
             }
             let raw_id = raw.object.get("id").and_then(Value::as_str);
+            let was_loaded = raw_id.is_some_and(|id| output.contains_key(id))
+                || inherited.is_some_and(|id| output.contains_key(id));
             let mut definition = raw_id
                 .and_then(|id| output.get(id).cloned())
                 .or_else(|| inherited.and_then(|id| output.get(id).cloned()))
                 .unwrap_or_default();
-            patch_generator(&raw, &mut definition)?;
+            patch_generator(&raw, &mut definition, was_loaded)?;
             output.insert(definition.id.clone(), definition);
             loaded += 1;
         }
@@ -304,9 +340,27 @@ fn resolve_generators(
 fn patch_weather_type(
     raw: &RawWeather,
     definition: &mut WeatherTypeDefinition,
+    was_loaded: bool,
 ) -> Result<(), WeatherRegistryError> {
     let source = raw.file.upstream_path.as_str();
     definition.id = text(&raw.object, "id", source)?.to_owned();
+    require_fields(
+        &raw.object,
+        was_loaded,
+        &[
+            "name",
+            "sym",
+            "ranged_penalty",
+            "sight_penalty",
+            "light_modifier",
+            "priority",
+            "sound_attn",
+            "dangerous",
+            "precip",
+            "rains",
+        ],
+        source,
+    )?;
     if let Some(value) = raw.object.get("name") {
         definition.name = translation(value, source)?;
     }
@@ -332,11 +386,9 @@ fn patch_weather_type(
         &mut definition.light_modifier,
         source,
     )?;
-    if raw.object.contains_key("temperature_modifier") {
-        let mut fixed = i64::from(definition.temperature_modifier_millikelvin) * 1_000;
-        patch_fixed(&raw.object, "temperature_modifier", &mut fixed, source)?;
+    if let Some(value) = raw.object.get("temperature_modifier") {
         definition.temperature_modifier_millikelvin =
-            i32::try_from(fixed / 1_000).map_err(|_| invalid(source, "temperature_modifier"))?;
+            temperature_delta_millikelvin(value, source, "temperature_modifier")?;
     }
     patch_fixed(
         &raw.object,
@@ -379,9 +431,9 @@ fn patch_weather_type(
     }
     if let Some(value) = raw.object.get("condition") {
         definition.condition = parse_condition(value, source, 0)?;
-    } else if raw.object.contains_key("copy-from") {
-        // Generic-factory inheritance retains the previous condition.
     } else {
+        // `read_condition(..., true)` resets an absent inherited condition to
+        // the pinned default predicate instead of retaining the source one.
         definition.condition = WeatherConditionDefinition::Always;
     }
     for field in ["passive_effects", "debug_cause_eoc", "debug_leave_eoc"] {
@@ -397,6 +449,7 @@ fn patch_weather_type(
     if definition.id.is_empty()
         || definition.name.is_empty()
         || definition.symbol.is_empty()
+        || definition.duration_min_seconds == 0
         || definition.duration_min_seconds > definition.duration_max_seconds
     {
         return Err(invalid(source, "weather identity"));
@@ -408,9 +461,21 @@ fn patch_weather_type(
 fn patch_generator(
     raw: &RawWeather,
     definition: &mut WeatherGeneratorDefinition,
+    was_loaded: bool,
 ) -> Result<(), WeatherRegistryError> {
     let source = raw.file.upstream_path.as_str();
     definition.id = text(&raw.object, "id", source)?.to_owned();
+    require_fields(
+        &raw.object,
+        was_loaded,
+        &[
+            "base_temperature",
+            "base_humidity",
+            "base_pressure",
+            "base_wind",
+        ],
+        source,
+    )?;
     patch_fixed(
         &raw.object,
         "base_temperature",
@@ -598,6 +663,49 @@ fn text<'a>(
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| invalid(source, field))
+}
+
+fn require_fields(
+    object: &Map<String, Value>,
+    was_loaded: bool,
+    fields: &[&str],
+    source: &str,
+) -> Result<(), WeatherRegistryError> {
+    if was_loaded {
+        return Ok(());
+    }
+    for field in fields {
+        if !object.contains_key(*field) {
+            return Err(invalid(source, field));
+        }
+    }
+    Ok(())
+}
+
+fn temperature_delta_millikelvin(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<i32, WeatherRegistryError> {
+    let delta_kelvin = if let Some(number) = value.as_f64() {
+        number
+    } else {
+        let text = value.as_str().ok_or_else(|| invalid(source, field))?;
+        let (number, unit) = text
+            .trim()
+            .split_once(' ')
+            .ok_or_else(|| invalid(source, field))?;
+        let number = number.parse::<f64>().map_err(|_| invalid(source, field))?;
+        match unit {
+            "C" | "K" => number,
+            "F" => number * 5.0 / 9.0,
+            _ => return Err(invalid(source, field)),
+        }
+    };
+    if !delta_kelvin.is_finite() {
+        return Err(invalid(source, field));
+    }
+    i32::try_from((delta_kelvin * 1_000.0) as i64).map_err(|_| invalid(source, field))
 }
 
 fn translation(value: &Value, source: &str) -> Result<String, WeatherRegistryError> {

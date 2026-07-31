@@ -23,6 +23,8 @@ mod vehicles;
 mod weather;
 
 #[cfg(test)]
+use cdda_protocol::SkyPhase;
+#[cfg(test)]
 use fields::exponential_decay_threshold;
 
 use std::cmp::Reverse;
@@ -62,10 +64,10 @@ use cdda_protocol::{
     MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1, MissionId,
     MissionSnapshotV1, NaturalLightSnapshot, NpcClassV1, NpcId, NpcTemplateV1, PoweredToolStateV1,
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
-    RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase,
-    SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId,
-    VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WeatherCatalogV1, WeatherObservationV1,
-    WeatherStateV1, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
+    RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SleepReason,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId, VehicleSnapshotV1,
+    WakeReason, WearableArmorTypeV1, WeatherCatalogV1, WeatherObservationV1, WeatherStateV1,
+    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
     adjusted_book_study_time_moves, eoc_catalog_is_valid, healing_item_catalog_is_valid,
     item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
     item_place_monster_catalog_is_valid, item_snapshot_is_compatible_with_spawn_rules,
@@ -123,7 +125,17 @@ pub fn weather_observation_from_snapshot(
     weather::weather_observation(
         snapshot.weather_catalog.as_ref()?,
         snapshot.weather_state.as_ref()?,
+        snapshot.tick,
     )
+}
+
+#[must_use]
+pub fn weather_adjusted_natural_sight_radius(snapshot: &WorldSnapshotV1) -> u16 {
+    let natural = NaturalLightSnapshot::at_tick(snapshot.tick).sight_radius;
+    let (Some(catalog), Some(state)) = (&snapshot.weather_catalog, &snapshot.weather_state) else {
+        return natural;
+    };
+    weather::effective_natural_sight_radius(catalog, state, natural).unwrap_or(0)
 }
 
 /// Persistent stores reserve counters in blocks large enough for one admitted
@@ -6432,12 +6444,7 @@ impl WorldState {
             &mut events,
         )?;
         self.advance_powered_tools(&mut events)?;
-        if let (Some(catalog), Some(state)) = (&self.weather_catalog, &self.weather_state)
-            && let Some(next) =
-                weather::advance_weather_state(catalog, state, self.world_seed, self.tick)?
-        {
-            self.weather_state = Some(next);
-        }
+        self.advance_weather_environment(&mut events)?;
         self.advance_item_temperatures()?;
         self.advance_fields(&mut events)?;
         self.advance_event_eocs(
@@ -6532,35 +6539,49 @@ impl WorldState {
     /// the canonical locations that can temporarily own an item.
     fn advance_item_temperatures(&mut self) -> Result<(), SimError> {
         let current_tick = self.tick;
+        let ambient_temperature_millikelvin = self.effective_weather_temperature_millikelvin();
         for actor in self.actors.values_mut() {
             for item in actor.inventory.values_mut() {
-                item.process_temperature(current_tick)?;
+                item.process_temperature(current_tick, ambient_temperature_millikelvin)?;
             }
             if let Some(activity) = &mut actor.craft_activity {
                 for consumed in &mut activity.consumed_items {
-                    process_item_snapshot_temperature(&mut consumed.item, current_tick)?;
+                    process_item_snapshot_temperature(
+                        &mut consumed.item,
+                        current_tick,
+                        ambient_temperature_millikelvin,
+                    )?;
                 }
             }
             if let Some(activity) = &mut actor.disassembly_activity {
-                process_item_snapshot_temperature(&mut activity.target_item, current_tick)?;
+                process_item_snapshot_temperature(
+                    &mut activity.target_item,
+                    current_tick,
+                    ambient_temperature_millikelvin,
+                )?;
             }
             if let Some(activity) = &mut actor.construction_activity {
                 for consumed in &mut activity.consumed_items {
-                    process_item_snapshot_temperature(&mut consumed.item, current_tick)?;
+                    process_item_snapshot_temperature(
+                        &mut consumed.item,
+                        current_tick,
+                        ambient_temperature_millikelvin,
+                    )?;
                 }
             }
         }
         for npc in self.npcs.values_mut() {
             for item in npc.inventory.values_mut() {
-                item.process_temperature(current_tick)?;
+                item.process_temperature(current_tick, ambient_temperature_millikelvin)?;
             }
         }
         let mut rotten_ground_items = Vec::new();
         for (item_id, ground) in &mut self.ground_items {
-            if ground
-                .item
-                .process_temperature_and_rot(current_tick, true)?
-            {
+            if ground.item.process_temperature_and_rot(
+                current_tick,
+                true,
+                ambient_temperature_millikelvin,
+            )? {
                 rotten_ground_items.push(*item_id);
             }
         }
@@ -6574,6 +6595,7 @@ impl WorldState {
                     if process_vehicle_cargo_temperature_and_rot(
                         part.cargo.get_mut(index).ok_or(SimError::InvalidItem)?,
                         current_tick,
+                        ambient_temperature_millikelvin,
                     )? {
                         part.cargo.remove(index);
                     } else {
@@ -9818,7 +9840,7 @@ impl WorldState {
     }
 
     fn position_has_detail_light(&self, position: WorldPosition) -> Result<bool, SimError> {
-        if NaturalLightSnapshot::at_tick(self.tick).phase == SkyPhase::Day {
+        if self.effective_natural_sight_radius() >= 18 {
             return Ok(true);
         }
         Ok(self.active_light_sources().into_iter().any(|source| {
@@ -9872,7 +9894,7 @@ impl WorldState {
         {
             return Ok(false);
         }
-        let natural_radius = u32::from(NaturalLightSnapshot::at_tick(self.tick).sight_radius);
+        let natural_radius = u32::from(self.effective_natural_sight_radius());
         if distance <= natural_radius {
             return Ok(true);
         }
@@ -9888,7 +9910,7 @@ impl WorldState {
             .iter()
             .map(|(coord, chunk)| (*coord, chunk.revision))
             .collect::<BTreeMap<_, _>>();
-        let sight_radius = NaturalLightSnapshot::at_tick(self.tick).sight_radius;
+        let sight_radius = self.effective_natural_sight_radius();
         let global_dynamic_light_changed = events.iter().any(|event| match event.kind {
             WorldEventKind::PoweredToolChanged { .. }
             | WorldEventKind::ItemPickedUp { .. }
@@ -9948,7 +9970,7 @@ impl WorldState {
             .position;
         let light_sources = self.active_light_sources();
         let radius = if light_sources.is_empty() {
-            i32::from(NaturalLightSnapshot::at_tick(self.tick).sight_radius)
+            i32::from(self.effective_natural_sight_radius())
         } else {
             i32::try_from(TERRAIN_MEMORY_RADIUS_TILES).map_err(|_| SimError::NumericOverflow)?
         };
@@ -11377,6 +11399,22 @@ impl WorldState {
             let Some((source, volume, provocative)) = stimulus else {
                 continue;
             };
+            let weather_attenuation = self
+                .weather_catalog
+                .as_ref()
+                .zip(self.weather_state.as_ref())
+                .and_then(|(catalog, state)| weather::sound_attenuation(catalog, state))
+                .unwrap_or(0);
+            let volume = u16::try_from(
+                i32::from(volume)
+                    .checked_sub(weather_attenuation)
+                    .ok_or(SimError::NumericOverflow)?
+                    .max(0),
+            )
+            .map_err(|_| SimError::NumericOverflow)?;
+            if volume == 0 {
+                continue;
+            }
             let creature_ids = self.creatures.keys().copied().collect::<Vec<_>>();
             for creature_id in creature_ids {
                 self.creature_hear_sound(
@@ -12203,7 +12241,7 @@ impl WorldState {
         if artificially_lit {
             return Ok(true);
         }
-        let natural_radius = i64::from(NaturalLightSnapshot::at_tick(self.tick).sight_radius);
+        let natural_radius = i64::from(self.effective_natural_sight_radius());
         let progress = natural_radius
             .saturating_sub(DARKEST_NATURAL_RADIUS)
             .min(natural_radius_span);
@@ -15220,10 +15258,10 @@ impl WorldState {
             || snapshot.weather_catalog.is_some() != snapshot.weather_state.is_some()
             || snapshot.weather_catalog.as_ref().is_some_and(|catalog| {
                 !weather_catalog_is_valid(catalog)
-                    || !snapshot
-                        .weather_state
-                        .as_ref()
-                        .is_some_and(|state| weather_state_is_valid(state, catalog))
+                    || !snapshot.weather_state.as_ref().is_some_and(|state| {
+                        weather_state_is_valid(state, catalog)
+                            && state.next_update_tick > snapshot.tick
+                    })
             })
             || !cdda_protocol::npc_dialogue_catalog_is_valid(
                 &snapshot.npc_templates,

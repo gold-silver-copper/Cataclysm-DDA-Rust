@@ -1,22 +1,190 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Weather formulas and the 4D simplex kernel are mechanically adapted from
+// pinned Cataclysm-DDA. Simplex kernel copyright (c) 2007-2012 Eliot Eshelman;
+// Cataclysm-DDA and this adaptation are distributed under GPL-3.0-or-later.
+
 use cdda_protocol::{
-    CalendarSnapshot, NaturalLightSnapshot, Season, SimTick, SkyPhase, WEATHER_SCALE,
-    WeatherCatalogV1, WeatherComparisonV1, WeatherConditionV1, WeatherMetricV1,
-    WeatherObservationV1, WeatherStateV1,
+    BookStudyInterruptionReason, CalendarSnapshot, ConstructionInterruptionReason,
+    DisassemblyInterruptionReason, NaturalLightSnapshot, PoweredToolTransitionReason, Season,
+    SimTick, SkyPhase, WEATHER_SCALE, WeatherCatalogV1, WeatherComparisonV1, WeatherConditionV1,
+    WeatherMetricV1, WeatherObservationV1, WeatherPrecipitationV1, WeatherStateV1,
+    WeatherTemperatureBandV1, WeatherTypeV1, WeatherWindBandV1, WorldEvent, WorldEventKind,
+    WorldPosition,
 };
 use rand_core::Rng;
 
-use crate::SimError;
+use crate::{ItemInstance, SimError, WorldState, powered_light_sight_radius};
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const DAYS_PER_YEAR: f64 = 364.0;
 const START_DAY_FROM_TURN_ZERO: f64 = 60.0 + 8.0 / 24.0;
 const SIMPLEX_NOISE_RANDOM_SEED_LIMIT: u32 = 32_768;
+const MAX_WEATHER_TRANSITIONS_PER_ADVANCE: usize = 4_096;
+
+impl WorldState {
+    pub(super) fn advance_weather_environment(
+        &mut self,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let reference_position = self
+            .actors
+            .values()
+            .find(|actor| actor.hp > 0)
+            .map(|actor| actor.position)
+            .or_else(|| {
+                self.weather_state
+                    .as_ref()
+                    .map(|state| state.reference_position)
+            })
+            .unwrap_or(WorldPosition { x: 0, y: 0, z: 0 });
+        let transition =
+            if let (Some(catalog), Some(state)) = (&self.weather_catalog, &self.weather_state) {
+                advance_weather_state(
+                    catalog,
+                    state,
+                    self.world_seed,
+                    self.tick,
+                    reference_position,
+                )?
+            } else {
+                None
+            };
+        if let Some(next) = transition {
+            let became_dangerous = self
+                .weather_catalog
+                .as_ref()
+                .zip(self.weather_state.as_ref())
+                .and_then(|(catalog, state)| is_dangerous(catalog, state))
+                == Some(false)
+                && self
+                    .weather_catalog
+                    .as_ref()
+                    .and_then(|catalog| is_dangerous(catalog, &next))
+                    == Some(true);
+            self.weather_state = Some(next);
+            if became_dangerous {
+                let actor_ids = self.actors.keys().copied().collect::<Vec<_>>();
+                for actor_id in actor_ids {
+                    self.interrupt_craft(actor_id, events)?;
+                    self.interrupt_book_study(
+                        actor_id,
+                        BookStudyInterruptionReason::DangerousWeather,
+                        events,
+                    )?;
+                    self.interrupt_disassembly(
+                        actor_id,
+                        DisassemblyInterruptionReason::DangerousWeather,
+                        events,
+                    )?;
+                    self.interrupt_construction(
+                        actor_id,
+                        ConstructionInterruptionReason::DangerousWeather,
+                        events,
+                    )?;
+                }
+            }
+        }
+        self.advance_precipitation(events)
+    }
+
+    pub(super) fn effective_natural_sight_radius(&self) -> u16 {
+        let natural = NaturalLightSnapshot::at_tick(self.tick).sight_radius;
+        let (Some(catalog), Some(state)) = (&self.weather_catalog, &self.weather_state) else {
+            return natural;
+        };
+        effective_natural_sight_radius(catalog, state, natural).unwrap_or(0)
+    }
+
+    pub(super) fn effective_weather_temperature_millikelvin(&self) -> i32 {
+        self.weather_catalog
+            .as_ref()
+            .zip(self.weather_state.as_ref())
+            .and_then(|(catalog, state)| effective_temperature_millikelvin(catalog, state))
+            .unwrap_or(cdda_protocol::ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN)
+    }
+
+    fn advance_precipitation(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        if !self.tick.0.is_multiple_of(SimTick::HZ) {
+            return Ok(());
+        }
+        let Some(one_in) = self
+            .weather_catalog
+            .as_ref()
+            .zip(self.weather_state.as_ref())
+            .and_then(|(catalog, state)| precipitation_extinguish_one_in(catalog, state))
+        else {
+            return Ok(());
+        };
+        let mut candidates = Vec::new();
+        // Canonical exposure boundary: carried inventory is protected except
+        // for the wielded item; surface ground items are exposed. A future
+        // roof/shelter family can refine this server-owned predicate.
+        for (actor_id, actor) in &self.actors {
+            if actor.position.z < 0 {
+                continue;
+            }
+            if let Some(item_id) = actor.wielded
+                && actor
+                    .inventory
+                    .get(&item_id)
+                    .is_some_and(ItemInstance::is_active_and_water_extinguishable)
+            {
+                candidates.push((Some(*actor_id), item_id));
+            }
+        }
+        candidates.extend(self.ground_items.values().filter_map(|ground| {
+            (ground.position.z >= 0 && ground.item.is_active_and_water_extinguishable())
+                .then_some((None, ground.item.id))
+        }));
+        for (actor_id, item_id) in candidates {
+            let mut rng = self.named_rng(
+                b"weather-precipitation-extinguish",
+                &[item_id.as_u128()],
+                self.tick.0,
+            );
+            if !rng.next_u32().is_multiple_of(one_in) {
+                continue;
+            }
+            let item = actor_id.map_or_else(
+                || {
+                    self.ground_items
+                        .get_mut(&item_id)
+                        .map(|ground| &mut ground.item)
+                        .ok_or(SimError::UnknownItem)
+                },
+                |actor_id| {
+                    self.actors
+                        .get_mut(&actor_id)
+                        .and_then(|actor| actor.inventory.get_mut(&item_id))
+                        .ok_or(SimError::UnknownItem)
+                },
+            )?;
+            item.set_powered_active(false)?;
+            let available_energy_millijoules = item.available_power_energy_millijoules()?;
+            events.push(self.make_event(WorldEventKind::PoweredToolChanged {
+                actor_id,
+                item_id,
+                active: false,
+                reason: PoweredToolTransitionReason::Precipitation,
+                available_energy_millijoules,
+            })?);
+        }
+        Ok(())
+    }
+}
 
 pub(super) fn initial_weather_state(
     catalog: &WeatherCatalogV1,
     world_seed: [u8; 32],
 ) -> Result<WeatherStateV1, SimError> {
-    calculate_weather(catalog, None, world_seed, SimTick(0), 1)
+    calculate_weather(
+        catalog,
+        None,
+        world_seed,
+        SimTick(0),
+        1,
+        WorldPosition { x: 0, y: 0, z: 0 },
+    )
 }
 
 pub(super) fn advance_weather_state(
@@ -24,20 +192,41 @@ pub(super) fn advance_weather_state(
     state: &WeatherStateV1,
     world_seed: [u8; 32],
     tick: SimTick,
+    reference_position: WorldPosition,
 ) -> Result<Option<WeatherStateV1>, SimError> {
     if tick < state.next_update_tick {
         return Ok(None);
     }
-    let sequence = state
-        .update_sequence
-        .checked_add(1)
-        .ok_or(SimError::NumericOverflow)?;
-    calculate_weather(catalog, Some(state), world_seed, tick, sequence).map(Some)
+    let mut next = state.clone();
+    let mut transitions = 0_usize;
+    while tick >= next.next_update_tick {
+        transitions = transitions
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        if transitions > MAX_WEATHER_TRANSITIONS_PER_ADVANCE {
+            return Err(SimError::NumericOverflow);
+        }
+        let transition_tick = next.next_update_tick;
+        let sequence = next
+            .update_sequence
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        next = calculate_weather(
+            catalog,
+            Some(&next),
+            world_seed,
+            transition_tick,
+            sequence,
+            reference_position,
+        )?;
+    }
+    Ok(Some(next))
 }
 
 pub(super) fn weather_observation(
     catalog: &WeatherCatalogV1,
     state: &WeatherStateV1,
+    tick: SimTick,
 ) -> Option<WeatherObservationV1> {
     let weather = catalog
         .weather_types
@@ -49,12 +238,113 @@ pub(super) fn weather_observation(
         dangerous: weather.dangerous,
         precipitation: weather.precipitation,
         rains: weather.rains,
-        temperature_millikelvin: state.temperature_millikelvin,
-        humidity_millionths: state.humidity_millionths,
-        pressure_millionths: state.pressure_millionths,
-        windpower_millionths: state.windpower_millionths,
-        wind_direction_degrees: state.wind_direction_degrees,
+        temperature_band: temperature_band(effective_temperature_millikelvin(catalog, state)?),
+        wind_band: wind_band(state.windpower_millionths),
+        effective_sight_radius: effective_natural_sight_radius(
+            catalog,
+            state,
+            NaturalLightSnapshot::at_tick(tick).sight_radius,
+        )?,
     })
+}
+
+pub(super) fn current_weather_type<'a>(
+    catalog: &'a WeatherCatalogV1,
+    state: &WeatherStateV1,
+) -> Option<&'a WeatherTypeV1> {
+    catalog
+        .weather_types
+        .get(usize::from(state.weather_type_index))
+}
+
+pub(super) fn effective_temperature_millikelvin(
+    catalog: &WeatherCatalogV1,
+    state: &WeatherStateV1,
+) -> Option<i32> {
+    state
+        .temperature_millikelvin
+        .checked_add(current_weather_type(catalog, state)?.temperature_modifier_millikelvin)
+}
+
+pub(super) fn effective_natural_sight_radius(
+    catalog: &WeatherCatalogV1,
+    state: &WeatherStateV1,
+    natural_sight_radius: u16,
+) -> Option<u16> {
+    let weather = current_weather_type(catalog, state)?;
+    let natural_light = (0_u16..=35)
+        .find(|light| powered_light_sight_radius(*light) >= u32::from(natural_sight_radius))?;
+    let adjusted_light = i128::from(natural_light)
+        .checked_mul(i128::from(weather.light_multiplier_millionths))?
+        .checked_div(i128::from(WEATHER_SCALE))?
+        .checked_add(i128::from(weather.light_modifier))?
+        .max(0);
+    let light_radius = powered_light_sight_radius(u16::try_from(adjusted_light).ok()?);
+    let attenuated = i128::from(light_radius)
+        .checked_mul(i128::from(WEATHER_SCALE))?
+        .checked_div(i128::from(
+            weather.sight_penalty_millionths.max(WEATHER_SCALE),
+        ))?;
+    u16::try_from(attenuated.min(60)).ok()
+}
+
+pub(super) fn sound_attenuation(catalog: &WeatherCatalogV1, state: &WeatherStateV1) -> Option<i32> {
+    Some(current_weather_type(catalog, state)?.sound_attenuation)
+}
+
+pub(super) fn is_dangerous(catalog: &WeatherCatalogV1, state: &WeatherStateV1) -> Option<bool> {
+    Some(current_weather_type(catalog, state)?.dangerous)
+}
+
+pub(super) fn precipitation_rate_micrometers_per_hour(
+    catalog: &WeatherCatalogV1,
+    state: &WeatherStateV1,
+) -> Option<u32> {
+    let weather = current_weather_type(catalog, state)?;
+    if !weather.rains {
+        return Some(0);
+    }
+    Some(match weather.precipitation {
+        WeatherPrecipitationV1::None => 0,
+        WeatherPrecipitationV1::VeryLight => 500,
+        WeatherPrecipitationV1::Light => 1_500,
+        WeatherPrecipitationV1::Heavy => 3_000,
+    })
+}
+
+pub(super) fn precipitation_extinguish_one_in(
+    catalog: &WeatherCatalogV1,
+    state: &WeatherStateV1,
+) -> Option<u32> {
+    Some(
+        match precipitation_rate_micrometers_per_hour(catalog, state)? {
+            0 => return None,
+            ..=500 => 100,
+            501..=1_500 => 50,
+            _ => 10,
+        },
+    )
+}
+
+fn temperature_band(temperature_millikelvin: i32) -> WeatherTemperatureBandV1 {
+    match temperature_millikelvin {
+        ..=263_149 => WeatherTemperatureBandV1::Frigid,
+        263_150..=278_149 => WeatherTemperatureBandV1::Cold,
+        278_150..=288_149 => WeatherTemperatureBandV1::Cool,
+        288_150..=298_149 => WeatherTemperatureBandV1::Mild,
+        298_150..=308_149 => WeatherTemperatureBandV1::Warm,
+        _ => WeatherTemperatureBandV1::Hot,
+    }
+}
+
+fn wind_band(windpower_millionths: i64) -> WeatherWindBandV1 {
+    match windpower_millionths / WEATHER_SCALE {
+        ..=1 => WeatherWindBandV1::Calm,
+        2..=7 => WeatherWindBandV1::Light,
+        8..=18 => WeatherWindBandV1::Moderate,
+        19..=31 => WeatherWindBandV1::Strong,
+        _ => WeatherWindBandV1::Gale,
+    }
 }
 
 fn calculate_weather(
@@ -63,6 +353,7 @@ fn calculate_weather(
     world_seed: [u8; 32],
     tick: SimTick,
     sequence: u64,
+    reference_position: WorldPosition,
 ) -> Result<WeatherStateV1, SimError> {
     let generator = &catalog.generator;
     let mut rng = weather_rng(world_seed, tick, sequence);
@@ -79,8 +370,8 @@ fn calculate_weather(
         + f64::from(calendar.second))
         / SECONDS_PER_DAY;
     let day_variation = libm::cos(core::f64::consts::TAU * (day_fraction + 0.5 - 5.0 / 24.0));
-    let x = previous.map_or(0.0, |state| f64::from(state.reference_position.x) / 2_000.0);
-    let y = previous.map_or(0.0, |state| f64::from(state.reference_position.y) / 2_000.0);
+    let x = f64::from(reference_position.x) / 2_000.0;
+    let y = f64::from(reference_position.y) / 2_000.0;
     let z = absolute_days;
     let mod_seed = u32::from_be_bytes(
         world_seed[..4]
@@ -161,7 +452,7 @@ fn calculate_weather(
         humidity_millionths: (humidity * WEATHER_SCALE as f64) as i64,
         pressure_millionths: (pressure * WEATHER_SCALE as f64) as i64,
         windpower_millionths,
-        is_day: NaturalLightSnapshot::at_tick(tick).phase == SkyPhase::Day,
+        is_day: NaturalLightSnapshot::at_tick(tick).phase != SkyPhase::Night,
     };
     let weather_type_index = select_weather(catalog, &precise)?;
     let weather = catalog
@@ -180,13 +471,12 @@ fn calculate_weather(
     };
     let duration_ticks = duration_seconds
         .checked_mul(SimTick::HZ)
-        .ok_or(SimError::NumericOverflow)?
-        .max(1);
+        .ok_or(SimError::NumericOverflow)?;
+    if duration_ticks == 0 {
+        return Err(SimError::InvalidSnapshot);
+    }
     Ok(WeatherStateV1 {
-        reference_position: previous
-            .map_or(cdda_protocol::WorldPosition { x: 0, y: 0, z: 0 }, |state| {
-                state.reference_position
-            }),
+        reference_position,
         weather_type_index,
         temperature_millikelvin,
         humidity_millionths: precise.humidity_millionths,
@@ -295,6 +585,9 @@ fn season_index(season: Season) -> usize {
 
 fn weather_rng(world_seed: [u8; 32], tick: SimTick, sequence: u64) -> rand_chacha::ChaCha8Rng {
     use rand_core::SeedableRng;
+    // Multiplayer adaptation: weather owns a deterministic named stream so
+    // unrelated authoritative actions cannot perturb its draw order. This is
+    // intentionally not claimed to reproduce C++'s process-global minstd RNG.
     let mut hasher = blake3::Hasher::new_derive_key("cdda-rust weather-manager RNG v1");
     hasher.update(&world_seed);
     hasher.update(&tick.0.to_be_bytes());
@@ -379,7 +672,11 @@ fn raw_noise_4d(x: f32, y: f32, z: f32, w: f32) -> f32 {
     let bases = [[0, 0, 0, 0], o1, o2, o3, [1, 1, 1, 1]];
     let mut total = 0.0;
     for (point, offset) in points.into_iter().zip(bases) {
-        let mut attenuation = 0.6 - point.iter().map(|value| value * value).sum::<f32>();
+        let mut attenuation = 0.6;
+        attenuation -= point[0] * point[0];
+        attenuation -= point[1] * point[1];
+        attenuation -= point[2] * point[2];
+        attenuation -= point[3] * point[3];
         if attenuation >= 0.0 {
             let gi = permutation4(i + offset[0], j + offset[1], k + offset[2], l + offset[3]) % 32;
             attenuation *= attenuation;

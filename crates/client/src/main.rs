@@ -5998,12 +5998,11 @@ fn gameplay_status(
         || String::from("unavailable"),
         |weather| {
             format!(
-                "{} ({:.1}°C, humidity {:.0}%, wind {:.1} mph at {}°)",
+                "{} ({:?}, {:?} wind, effective sight {})",
                 weather.name,
-                f64::from(weather.temperature_millikelvin) / 1_000.0 - 273.15,
-                weather.humidity_millionths as f64 / cdda_protocol::WEATHER_SCALE as f64,
-                weather.windpower_millionths as f64 / cdda_protocol::WEATHER_SCALE as f64,
-                weather.wind_direction_degrees,
+                weather.temperature_band,
+                weather.wind_band,
+                weather.effective_sight_radius,
             )
         },
     );

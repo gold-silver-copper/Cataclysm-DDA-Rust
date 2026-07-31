@@ -6,6 +6,7 @@ pub const MAX_WEATHER_TYPES: usize = 256;
 pub const MAX_WEATHER_CONDITION_NODES: usize = 256;
 pub const MAX_WEATHER_ID_BYTES: usize = 256;
 pub const MAX_WEATHER_TEXT_BYTES: usize = 512;
+pub const MAX_WEATHER_DURATION_SECONDS: u64 = 31 * 24 * 60 * 60;
 pub const WEATHER_SCALE: i64 = 1_000_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,8 +99,10 @@ pub struct WeatherCatalogV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WeatherStateV1 {
-    /// Pinned single-avatar weather-manager location adapted to a stable
-    /// multiplayer reference point. It is canonical rather than client-owned.
+    /// The position of the lowest stable-ID living player actor at the last
+    /// transition. With no living player, the previous position is retained.
+    /// This canonical multiplayer policy replaces upstream's process-global
+    /// avatar reference without accepting a client-supplied observation point.
     pub reference_position: WorldPosition,
     pub weather_type_index: u16,
     pub temperature_millikelvin: i32,
@@ -111,6 +114,25 @@ pub struct WeatherStateV1 {
     pub update_sequence: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WeatherTemperatureBandV1 {
+    Frigid,
+    Cold,
+    Cool,
+    Mild,
+    Warm,
+    Hot,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WeatherWindBandV1 {
+    Calm,
+    Light,
+    Moderate,
+    Strong,
+    Gale,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WeatherObservationV1 {
     pub weather_type_id: String,
@@ -119,11 +141,11 @@ pub struct WeatherObservationV1 {
     pub dangerous: bool,
     pub precipitation: WeatherPrecipitationV1,
     pub rains: bool,
-    pub temperature_millikelvin: i32,
-    pub humidity_millionths: i64,
-    pub pressure_millionths: i64,
-    pub windpower_millionths: i64,
-    pub wind_direction_degrees: i16,
+    /// Human-sensible bands are public. Instrument-only precise atmospheric
+    /// values remain canonical server state and never enter replication.
+    pub temperature_band: WeatherTemperatureBandV1,
+    pub wind_band: WeatherWindBandV1,
+    pub effective_sight_radius: u16,
 }
 
 #[must_use]
@@ -191,11 +213,7 @@ pub fn weather_observation_is_valid(observation: &WeatherObservationV1) -> bool 
     valid_id(&observation.weather_type_id)
         && valid_text(&observation.name)
         && valid_text(&observation.symbol)
-        && observation.humidity_millionths >= 0
-        && observation.humidity_millionths <= 100 * WEATHER_SCALE
-        && observation.pressure_millionths > 0
-        && observation.windpower_millionths >= 0
-        && (0..360).contains(&observation.wind_direction_degrees)
+        && observation.effective_sight_radius <= 60
 }
 
 fn weather_type_is_valid(weather: &WeatherTypeV1) -> bool {
@@ -203,10 +221,12 @@ fn weather_type_is_valid(weather: &WeatherTypeV1) -> bool {
         && valid_text(&weather.name)
         && valid_text(&weather.symbol)
         && valid_text(&weather.sun_symbol)
-        && weather.sight_penalty_millionths >= 0
+        && weather.sight_penalty_millionths > 0
         && weather.light_multiplier_millionths >= 0
         && weather.sun_multiplier_millionths >= 0
+        && weather.duration_min_seconds > 0
         && weather.duration_min_seconds <= weather.duration_max_seconds
+        && weather.duration_max_seconds <= MAX_WEATHER_DURATION_SECONDS
         && weather.required_weathers.len() <= MAX_WEATHER_TYPES
         && weather.required_weathers.iter().all(|id| valid_id(id))
         && weather_condition_is_valid(&weather.condition, 0, &mut 0)

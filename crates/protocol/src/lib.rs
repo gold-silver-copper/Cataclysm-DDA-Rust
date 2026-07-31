@@ -143,10 +143,12 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 pub use weather::{
-    MAX_WEATHER_CONDITION_NODES, MAX_WEATHER_ID_BYTES, MAX_WEATHER_TEXT_BYTES, MAX_WEATHER_TYPES,
-    WEATHER_SCALE, WeatherCatalogV1, WeatherComparisonV1, WeatherConditionV1, WeatherGeneratorV1,
-    WeatherMetricV1, WeatherObservationV1, WeatherPrecipitationV1, WeatherStateV1, WeatherTypeV1,
-    weather_catalog_is_valid, weather_observation_is_valid, weather_state_is_valid,
+    MAX_WEATHER_CONDITION_NODES, MAX_WEATHER_DURATION_SECONDS, MAX_WEATHER_ID_BYTES,
+    MAX_WEATHER_TEXT_BYTES, MAX_WEATHER_TYPES, WEATHER_SCALE, WeatherCatalogV1,
+    WeatherComparisonV1, WeatherConditionV1, WeatherGeneratorV1, WeatherMetricV1,
+    WeatherObservationV1, WeatherPrecipitationV1, WeatherStateV1, WeatherTemperatureBandV1,
+    WeatherTypeV1, WeatherWindBandV1, weather_catalog_is_valid, weather_observation_is_valid,
+    weather_state_is_valid,
 };
 
 pub const PROTOCOL_VERSION: u16 = 138;
@@ -2004,6 +2006,7 @@ pub enum BookStudyInterruptionReason {
     Needs,
     Exhaustion,
     Darkness,
+    DangerousWeather,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2012,6 +2015,7 @@ pub enum DisassemblyInterruptionReason {
     Needs,
     Exhaustion,
     Darkness,
+    DangerousWeather,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2020,6 +2024,7 @@ pub enum ConstructionInterruptionReason {
     Needs,
     Exhaustion,
     Darkness,
+    DangerousWeather,
     TargetChanged,
     MissingQualities,
 }
@@ -2029,6 +2034,7 @@ pub enum PoweredToolTransitionReason {
     Activated,
     Deactivated,
     EnergyDepleted,
+    Precipitation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
