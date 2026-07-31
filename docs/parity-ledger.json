@@ -410,7 +410,8 @@
         { "id": "wearable-armor-and-damage-absorption", "state": "implementation_complete" },
         { "id": "on-hit-effects", "state": "in_progress" },
         { "id": "dodge-and-stamina", "state": "implementation_complete" },
-        { "id": "healing", "state": "planned" }
+        { "id": "natural-healing", "state": "implementation_complete" },
+        { "id": "medical-item-healing", "state": "planned" }
       ],
       "priority": 22,
       "depends_on": ["cpp-differential-oracle", "simulation-actors-module", "simulation-combat-module", "simulation-canonical-state-module", "protocol-domain-modules", "persistence-domain-modules"],

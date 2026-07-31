@@ -5784,6 +5784,7 @@ impl WorldState {
         self.advance_item_temperatures()?;
         self.advance_fields(&mut events)?;
         self.advance_creature_corpses(&mut events)?;
+        self.advance_natural_healing()?;
         self.advance_needs(&mut events)?;
         self.advance_disconnected_autopilot(&mut events)?;
         self.advance_creature_hearing(&events[actor_sound_start..])?;

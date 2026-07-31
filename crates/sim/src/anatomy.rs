@@ -5,7 +5,7 @@ use cdda_protocol::{
 };
 use rand_core::Rng;
 
-use crate::SimError;
+use crate::{NEEDS_INTERVAL_TICKS, SimError, WorldState};
 
 pub(super) struct ActorDamageOutcome {
     pub body_part_id: String,
@@ -240,4 +240,61 @@ fn roll_scaled_value(
             < u64::try_from(remainder).map_err(|_| SimError::NumericOverflow)?;
     let rounded = whole + if round_up { 1 } else { 0 };
     i32::try_from(rounded).map_err(|_| SimError::NumericOverflow)
+}
+
+impl WorldState {
+    /// Pinned default avatar healing while fully at rest: 0.0001 HP per
+    /// upstream turn becomes a 0.03-HP deterministic remainder roll at the
+    /// existing five-minute needs boundary. Awake healing is zero without a
+    /// mutation or effect, and zero-HP limbs remain broken.
+    pub(super) fn advance_natural_healing(&mut self) -> Result<(), SimError> {
+        if !self.tick.0.is_multiple_of(NEEDS_INTERVAL_TICKS) {
+            return Ok(());
+        }
+        let interval = self.tick.0 / NEEDS_INTERVAL_TICKS;
+        let actor_ids = self.actors.keys().copied().collect::<Vec<_>>();
+        for actor_id in actor_ids {
+            let candidates = {
+                let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+                if actor.hp <= 0 || !actor.sleeping {
+                    continue;
+                }
+                actor
+                    .body_parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, part)| part.current_hp > 0 && part.current_hp < part.maximum_hp)
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>()
+            };
+            let healed = candidates
+                .into_iter()
+                .filter(|index| {
+                    let mut rng = self.named_rng(
+                        b"natural-healing",
+                        &[actor_id.as_u128(), *index as u128],
+                        interval,
+                    );
+                    rng.next_u32() % 100 < 3
+                })
+                .collect::<Vec<_>>();
+            if healed.is_empty() {
+                continue;
+            }
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            for index in healed {
+                let part = actor
+                    .body_parts
+                    .get_mut(index)
+                    .ok_or(SimError::InvalidActorAnatomy)?;
+                part.current_hp = part.current_hp.saturating_add(1).min(part.maximum_hp);
+            }
+            actor.hp = actor_body_part_summary_hp(&self.actor_anatomy, &actor.body_parts)
+                .ok_or(SimError::InvalidActorAnatomy)?;
+        }
+        Ok(())
+    }
 }
