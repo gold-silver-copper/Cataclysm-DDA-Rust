@@ -2112,6 +2112,12 @@ pub enum WorldEventKind {
         amount: u16,
         remaining_hp: i32,
     },
+    CreatureDamagedByCreature {
+        source: CreatureId,
+        target: CreatureId,
+        amount: u16,
+        remaining_hp: i32,
+    },
     /// A fully resolved authoritative melee attempt that dealt no damage.
     ActorMissedCreature {
         source: ActorId,
@@ -2120,6 +2126,10 @@ pub enum WorldEventKind {
     CreatureDied {
         creature_id: CreatureId,
         killer: ActorId,
+    },
+    CreatureKilledByCreature {
+        creature_id: CreatureId,
+        killer: CreatureId,
     },
     NpcDamaged {
         source: ActorId,
@@ -3065,6 +3075,14 @@ pub struct CreatureSnapshot {
     /// separate authoritative behavior family.
     #[serde(default)]
     pub pet: bool,
+    /// Multiplayer adaptation: the stable actor that deployed and commands
+    /// this friendly creature. Hostile/world monsters have no owner.
+    #[serde(default)]
+    pub deploying_owner: Option<ActorId>,
+    /// Authoritative monster faction identity. Successfully programmed
+    /// deployables use the explicit multiplayer `player` adaptation.
+    #[serde(default)]
+    pub faction_id: String,
     /// Private authoritative live morale used by pinned attitude selection.
     #[serde(default)]
     pub morale: i32,
@@ -3148,6 +3166,10 @@ pub struct VisibleCreatureSnapshot {
     /// Current HP may exceed the new type's maximum after a pinned
     /// `poly_keep_hp` transformation.
     pub max_hp: i32,
+    pub friendly: bool,
+    pub pet: bool,
+    pub deploying_owner: Option<ActorId>,
+    pub faction_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3528,6 +3550,7 @@ pub struct WorldgenMonsterPrototypeV1 {
     pub base: CreatureCorpsePrototypeV1,
     /// Final localized singular monster name used by authoritative messages.
     pub display_name: String,
+    pub default_faction_id: String,
     /// Whether the complete inherited behavior is admitted for ordinary
     /// runtime creation rather than retained only for fail-closed inspection.
     pub runtime_spawnable: bool,
@@ -4314,6 +4337,9 @@ pub struct ReplicationSnapshotV1 {
     /// Server-derived fine-detail light at the controlled actor's tile.
     pub detail_vision_available: bool,
     pub controlled_actor: ActorSnapshot,
+    /// Server-admitted deployable use actions. The client must not advertise
+    /// raw content actions rejected by the authoritative runtime projection.
+    pub item_place_monster_types: Vec<ItemPlaceMonsterTypeV1>,
     pub visible_actors: Vec<VisibleActorSnapshot>,
     pub npcs: Vec<VisibleNpcSnapshotV1>,
     /// Immutable definitions needed to render the controlled actor's missions.
@@ -6216,6 +6242,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                 && !prototype.display_name.is_empty()
                 && prototype.display_name.len() <= 1_024
                 && !prototype.display_name.chars().any(char::is_control)
+                && valid_worldgen_id(&prototype.default_faction_id)
                 && prototype.starting_ammunition.len() <= 256
                 && prototype
                     .starting_ammunition

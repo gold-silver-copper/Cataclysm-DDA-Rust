@@ -2907,6 +2907,51 @@ impl WorldState {
             / 1_000;
         u16::try_from(rounded).map_err(|_| SimError::NumericOverflow)
     }
+
+    pub(super) fn creature_melee_damage_against_creature(
+        &self,
+        source: CreatureId,
+        target: CreatureId,
+        rolled_bash_damage: u16,
+    ) -> Result<u16, SimError> {
+        let units = self.creature_melee_damage_units(source, rolled_bash_damage)?;
+        let mut total = 0_u32;
+        for unit in units {
+            let armor = i128::from(self.creature_armor_milli(target, &unit.damage_type_id)?);
+            let penetration = i128::from(unit.armor_penetration_milli);
+            let effective_armor = (armor - penetration)
+                .max(0)
+                .checked_mul(i128::from(unit.armor_multiplier_millionths))
+                .and_then(|value| value.checked_div(1_000_000))
+                .and_then(|value| {
+                    value.checked_mul(i128::from(unit.constant_armor_multiplier_millionths))
+                })
+                .and_then(|value| value.checked_div(1_000_000))
+                .ok_or(SimError::NumericOverflow)?;
+            let remaining = (i128::from(unit.amount_milli).max(0) - effective_armor).max(0);
+            let denominator = 1_000_000_i128
+                .checked_mul(1_000_000)
+                .and_then(|value| value.checked_mul(1_000_000))
+                .and_then(|value| value.checked_mul(i128::from(unit.damage_multiplier_divisor)))
+                .ok_or(SimError::NumericOverflow)?;
+            if unit.damage_multiplier_divisor == 0 {
+                return Err(SimError::NumericOverflow);
+            }
+            let dealt = remaining
+                .checked_mul(i128::from(unit.damage_multiplier_millionths))
+                .and_then(|value| {
+                    value.checked_mul(i128::from(unit.damage_multiplier_adjustment_millionths))
+                })
+                .and_then(|value| {
+                    value.checked_mul(i128::from(unit.constant_damage_multiplier_millionths))
+                })
+                .and_then(|value| value.checked_div(denominator))
+                .and_then(|value| u32::try_from(value / 1_000).ok())
+                .ok_or(SimError::NumericOverflow)?;
+            total = total.checked_add(dealt).ok_or(SimError::NumericOverflow)?;
+        }
+        u16::try_from(total).map_err(|_| SimError::NumericOverflow)
+    }
 }
 
 fn horizontal_euclidean_distance_floor(

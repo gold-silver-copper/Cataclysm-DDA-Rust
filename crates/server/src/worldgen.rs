@@ -2324,6 +2324,7 @@ fn runtime_monster_catalog(
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
                 display_name: monster.name.clone(),
+                default_faction_id: monster.default_faction.clone(),
                 runtime_spawnable: deferred_behavior_fields.is_empty(),
                 starting_ammunition: monster.starting_ammunition.clone(),
                 interior_ammunition: monster.flags.contains("INTERIOR_AMMO"),

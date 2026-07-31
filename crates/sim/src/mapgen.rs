@@ -558,6 +558,7 @@ pub(super) fn creature_spawn_from_worldgen(
     let base = &prototype.base;
     CreatureSpawn {
         type_id: base.monster_type_id.clone(),
+        faction_id: prototype.default_faction_id.clone(),
         position,
         hp: base.max_hp,
         speed: base.speed,

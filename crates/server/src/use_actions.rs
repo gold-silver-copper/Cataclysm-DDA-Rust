@@ -78,6 +78,12 @@ pub(super) fn runtime_item_place_monster_types(
                 || !source.healing_actions.is_empty()
                 || !source.eoc_actions.is_empty()
                 || !action.deferred_fields.is_empty()
+                // `monster::init_from_item` takes a distinct corpse branch
+                // that restores corpse identity, speed and HP. Do not apply
+                // the robot damage formula until that branch is modeled.
+                || source.flags.contains("CORPSE")
+                || !source.source_monster.is_empty()
+                || !source.subtypes.contains("TOOL")
             {
                 return None;
             }
@@ -91,6 +97,7 @@ pub(super) fn runtime_item_place_monster_types(
             let required_charges = u32::try_from(action.need_charges).ok()?;
             Some(ItemPlaceMonsterTypeV1 {
                 source_type_id: source.id.clone(),
+                source_display_name: source.name.clone(),
                 single_use: source.flags.contains("SINGLE_USE"),
                 maximum_raw_damage: runtime_item.maximum_raw_damage,
                 monster_type_id: prototype.base.monster_type_id.clone(),
@@ -101,6 +108,7 @@ pub(super) fn runtime_item_place_monster_types(
                 place_randomly: action.place_randomly,
                 is_pet: action.is_pet,
                 required_charges,
+                activation_charges: u32::try_from(source.charges_per_use).ok()?,
                 skills: action.skills.iter().cloned().collect(),
             })
         })

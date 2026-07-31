@@ -213,7 +213,8 @@ impl WorldState {
         activation_sequence: CommandSequence,
         item_id: ItemId,
         item_type_id: String,
-        monster_type_id: &str,
+        monster_display_name: &str,
+        activation_origin: cdda_protocol::WorldPosition,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
         if let Some(previous) = self
@@ -232,7 +233,7 @@ impl WorldState {
         let interaction_id = InteractionId::new(self.world_namespace, self.next_event_counter);
         let interaction = PendingInteractionV1 {
             interaction_id,
-            prompt: format!("Place the {monster_type_id} where?"),
+            prompt: format!("Place the {monster_display_name} where?"),
             choices: cdda_protocol::place_monster_interaction_choices(),
             created_at_tick: self.tick,
             expires_at_tick: SimTick(
@@ -245,6 +246,7 @@ impl WorldState {
                 item_id,
                 item_type_id,
                 activation_sequence,
+                activation_origin,
             },
         };
         if !cdda_protocol::pending_interaction_is_valid(&interaction, actor_id) {
@@ -288,8 +290,17 @@ impl WorldState {
                         .ok_or(SimError::NumericOverflow)
                 }),
             InteractionContextV1::EocConfirmation { .. } => Ok(0),
-            InteractionContextV1::PlaceMonster { item_id, .. } => self
-                .place_monster_action_cost(actor_id, *item_id, Some(choice_id))
+            InteractionContextV1::PlaceMonster {
+                item_id,
+                activation_origin,
+                ..
+            } => self
+                .place_monster_action_cost(
+                    actor_id,
+                    *item_id,
+                    Some(choice_id),
+                    Some(*activation_origin),
+                )
                 .map(|cost| cost.unwrap_or(0)),
             InteractionContextV1::NpcDialogue { .. } => Ok(0),
         }
@@ -398,6 +409,7 @@ impl WorldState {
                 item_id,
                 item_type_id,
                 activation_sequence,
+                activation_origin,
             } => {
                 if !self.apply_place_monster_item(
                     actor_id,
@@ -405,6 +417,7 @@ impl WorldState {
                     *item_id,
                     item_type_id,
                     Some(&choice_id),
+                    Some(*activation_origin),
                     events,
                 )? {
                     return self.invalidate_interaction(actor_id, sequence, interaction_id, events);

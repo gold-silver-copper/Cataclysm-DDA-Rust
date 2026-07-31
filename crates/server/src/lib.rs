@@ -4377,6 +4377,10 @@ fn interest_snapshot(
             position: creature.position,
             hp: creature.hp,
             max_hp: creature.max_hp,
+            friendly: creature.friendly == -1,
+            pet: creature.pet,
+            deploying_owner: creature.deploying_owner,
+            faction_id: creature.faction_id.clone(),
         })
         .collect();
     let vehicles = visible_vehicles(&snapshot, origin, &visible)?;
@@ -4534,6 +4538,7 @@ fn interest_snapshot(
             || personal_detail_light
             || position_has_external_detail_light(&snapshot, origin, &light_sources),
         controlled_actor,
+        item_place_monster_types: snapshot.item_place_monster_types.clone(),
         visible_actors,
         npcs,
         mission_definitions,
@@ -5383,6 +5388,8 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         WorldEventKind::CreatureTargetedActor { target, .. } => target == actor_id,
         WorldEventKind::VehicleSpawned { .. }
         | WorldEventKind::CreatureMoved { .. }
+        | WorldEventKind::CreatureDamagedByCreature { .. }
+        | WorldEventKind::CreatureKilledByCreature { .. }
         | WorldEventKind::CreatureCorpseCreated { .. }
         | WorldEventKind::CreatureRevived { .. }
         | WorldEventKind::CreaturePolymorphed { .. }

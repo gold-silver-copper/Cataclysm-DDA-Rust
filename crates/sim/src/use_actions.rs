@@ -8,8 +8,8 @@ use cdda_protocol::{
 use rand_core::Rng;
 
 use crate::{
-    ItemInstance, SimError, WorldState, actor_effective_intelligence, actor_skill_level,
-    inclusive_rng_u64, mapgen, validate_item_snapshot,
+    ItemInstance, SimError, WorldState, actor_effective_intelligence, actor_skill_level, mapgen,
+    validate_item_snapshot,
 };
 
 impl WorldState {
@@ -19,7 +19,16 @@ impl WorldState {
     ) -> Result<(), SimError> {
         if self.tick != SimTick(0)
             || !self.actors.is_empty()
+            || !self.item_place_monster_types.is_empty()
             || !item_place_monster_catalog_is_valid(&catalog)
+            || catalog.iter().any(|profile| {
+                self.worldgen.as_ref().is_none_or(|worldgen| {
+                    worldgen.monster_prototypes.iter().all(|prototype| {
+                        prototype.base.monster_type_id != profile.monster_type_id
+                            || !prototype.runtime_spawnable
+                    })
+                })
+            })
         {
             return Err(SimError::InvalidItem);
         }
@@ -35,6 +44,7 @@ impl WorldState {
         actor_id: ActorId,
         item_id: ItemId,
         choice_id: Option<&str>,
+        activation_origin: Option<WorldPosition>,
     ) -> Result<Option<i64>, SimError> {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
         let Some(item) = actor.inventory.get(&item_id) else {
@@ -43,21 +53,31 @@ impl WorldState {
         let Some(profile) = self.item_place_monster_types.get(&item.type_id) else {
             return Ok(None);
         };
-        if item.available_tool_charges()
-            < i32::try_from(profile.required_charges).map_err(|_| SimError::InvalidItem)?
+        if (profile.maximum_raw_damage > 0 && item.raw_damage >= profile.maximum_raw_damage)
+            || item.available_tool_charges()
+                < i32::try_from(profile.required_charges).map_err(|_| SimError::InvalidItem)?
+            || item.available_tool_charges()
+                < i32::try_from(profile.activation_charges).map_err(|_| SimError::InvalidItem)?
         {
             return Ok(Some(0));
         }
         let has_target = if profile.place_randomly {
             choice_id.is_none()
                 && !self
-                    .place_monster_candidate_positions(actor.position)
+                    .place_monster_candidate_positions(actor.position, &profile.monster_type_id)
                     .is_empty()
         } else {
-            choice_id
-                .and_then(parse_place_monster_choice)
-                .and_then(|(dx, dy)| actor.position.checked_offset(dx, dy, 0))
-                .is_some_and(|position| self.can_place_deployed_creature(position))
+            activation_origin.is_none_or(|origin| origin == actor.position)
+                && choice_id
+                    .and_then(parse_place_monster_choice)
+                    .and_then(|(dx, dy)| {
+                        activation_origin
+                            .unwrap_or(actor.position)
+                            .checked_offset(dx, dy, 0)
+                    })
+                    .is_some_and(|position| {
+                        self.can_place_deployed_creature(position, &profile.monster_type_id)
+                    })
         };
         if !has_target {
             return Ok(Some(0));
@@ -76,6 +96,7 @@ impl WorldState {
         item_id: ItemId,
         expected_item_type_id: &str,
         choice_id: Option<&str>,
+        activation_origin: Option<WorldPosition>,
         events: &mut Vec<WorldEvent>,
     ) -> Result<bool, SimError> {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
@@ -92,8 +113,11 @@ impl WorldState {
         else {
             return Ok(false);
         };
-        if item.available_tool_charges()
-            < i32::try_from(profile.required_charges).map_err(|_| SimError::InvalidItem)?
+        if (profile.maximum_raw_damage > 0 && item.raw_damage >= profile.maximum_raw_damage)
+            || item.available_tool_charges()
+                < i32::try_from(profile.required_charges).map_err(|_| SimError::InvalidItem)?
+            || item.available_tool_charges()
+                < i32::try_from(profile.activation_charges).map_err(|_| SimError::InvalidItem)?
         {
             return Ok(false);
         }
@@ -103,7 +127,9 @@ impl WorldState {
                 activation_sequence,
                 item_id,
                 expected_item_type_id.to_owned(),
-                &profile.monster_type_id,
+                &prototype_display_name(self, &profile.monster_type_id)
+                    .unwrap_or_else(|| profile.monster_type_id.clone()),
+                actor.position,
                 events,
             )?;
             return Ok(true);
@@ -130,51 +156,100 @@ impl WorldState {
             if choice_id.is_some() {
                 return Ok(false);
             }
-            let candidates = self.place_monster_candidate_positions(actor.position);
+            // Pinned `random_point` performs ten independent trials in the
+            // bounding 3x3 range, then enumerates all suitable points and
+            // selects one uniformly as a fallback.
+            let mut selected = None;
+            for _ in 0..10 {
+                let dx = i8::try_from(unbiased_inclusive_u64(&mut rng, 0, 2))
+                    .map_err(|_| SimError::NumericOverflow)?
+                    - 1;
+                let dy = i8::try_from(unbiased_inclusive_u64(&mut rng, 0, 2))
+                    .map_err(|_| SimError::NumericOverflow)?
+                    - 1;
+                let _z_roll = unbiased_inclusive_u64(&mut rng, 0, 0);
+                if let Some(candidate) = actor.position.checked_offset(dx, dy, 0)
+                    && self.can_place_deployed_creature(candidate, &profile.monster_type_id)
+                {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            selected.unwrap_or_else(|| actor.position)
+        } else {
+            let Some((dx, dy)) = choice_id.and_then(parse_place_monster_choice) else {
+                return Ok(false);
+            };
+            let Some(position) = activation_origin
+                .unwrap_or(actor.position)
+                .checked_offset(dx, dy, 0)
+            else {
+                return Ok(false);
+            };
+            // A pending prompt is tied to its activation origin. Movement
+            // invalidates it instead of shifting the eight relative choices.
+            if activation_origin.is_some_and(|origin| actor.position != origin)
+                || !self.can_place_deployed_creature(position, &profile.monster_type_id)
+            {
+                return Ok(false);
+            }
+            position
+        };
+
+        let position = if profile.place_randomly && position == actor.position {
+            let candidates =
+                self.place_monster_candidate_positions(actor.position, &profile.monster_type_id);
             if candidates.is_empty() {
                 return Ok(false);
             }
-            let selected = inclusive_rng_u64(
+            let selected = unbiased_inclusive_u64(
                 &mut rng,
                 0,
                 u64::try_from(candidates.len() - 1).map_err(|_| SimError::NumericOverflow)?,
             );
             candidates[usize::try_from(selected).map_err(|_| SimError::NumericOverflow)?]
         } else {
-            let Some((dx, dy)) = choice_id.and_then(parse_place_monster_choice) else {
-                return Ok(false);
-            };
-            let Some(position) = actor.position.checked_offset(dx, dy, 0) else {
-                return Ok(false);
-            };
-            if !self.can_place_deployed_creature(position) {
-                return Ok(false);
-            }
             position
         };
 
-        let friendly = deployment_is_friendly(actor, &profile, &mut rng)?;
         let item_raw_damage = item.raw_damage;
         let mut inventory = actor.inventory.clone();
+        let mut traversal_priority = actor.wielded.into_iter().collect::<Vec<_>>();
+        traversal_priority.extend(actor.worn.iter().copied());
         let mut ammunition = prototype.starting_ammunition.clone();
+        let mut ammunition_feedback = Vec::new();
         if !prototype.interior_ammunition {
             for (ammunition_type_id, loaded) in &mut ammunition {
                 *loaded = crate::items::debit_inventory_type(
                     &mut inventory,
+                    &traversal_priority,
                     ammunition_type_id,
                     *loaded,
                 )?;
+                if *loaded == 0 {
+                    ammunition_feedback.push(format!(
+                        "No {ammunition_type_id} ammunition was available for the {}.",
+                        prototype.display_name
+                    ));
+                } else {
+                    ammunition_feedback.push(format!(
+                        "You load {loaded} x {ammunition_type_id} into the {}.",
+                        prototype.display_name
+                    ));
+                }
             }
         }
-        if profile.single_use {
-            inventory.remove(&item_id);
-        } else {
+        let friendly = deployment_is_friendly(actor, &profile, &mut rng)?;
+        if profile.activation_charges > 0 {
             let Some(item) = inventory.get_mut(&item_id) else {
                 return Ok(false);
             };
-            if item.debit_tool_charges(1).is_err() {
-                return Ok(false);
-            }
+            item.debit_tool_charges(
+                i32::try_from(profile.activation_charges).map_err(|_| SimError::InvalidItem)?,
+            )?;
+        }
+        if profile.single_use {
+            inventory.remove(&item_id);
         }
 
         let spawn = mapgen::creature_spawn_from_worldgen(&prototype, position);
@@ -198,6 +273,10 @@ impl WorldState {
             .ok_or(SimError::UnknownCreature)?;
         creature.friendly = if friendly { -1 } else { 0 };
         creature.pet = friendly && profile.is_pet;
+        creature.deploying_owner = friendly.then_some(actor_id);
+        if friendly {
+            creature.faction_id = String::from("player");
+        }
         creature.hp = deployed_hp;
         creature.ammunition = ammunition;
         let actor = self
@@ -205,9 +284,13 @@ impl WorldState {
             .get_mut(&actor_id)
             .ok_or(SimError::UnknownActor)?;
         actor.inventory = inventory;
-        if !actor.inventory.contains_key(&item_id) && actor.wielded == Some(item_id) {
+        if actor
+            .wielded
+            .is_some_and(|id| !actor.inventory.contains_key(&id))
+        {
             actor.wielded = None;
         }
+        actor.worn.retain(|id| actor.inventory.contains_key(id));
         let message = if friendly {
             if profile.friendly_message.is_empty() {
                 format!("You deploy the {}.", prototype.display_name)
@@ -222,6 +305,20 @@ impl WorldState {
         } else {
             profile.hostile_message
         };
+        if !ammunition_feedback.is_empty() {
+            let feedback = ammunition_feedback.join(" ");
+            let message = format!("{feedback} {message}");
+            events.push(self.make_event(WorldEventKind::CreatureDeployed {
+                actor_id,
+                item_id,
+                creature_id,
+                position,
+                friendly,
+                pet: friendly && profile.is_pet,
+                message,
+            })?);
+            return Ok(true);
+        }
         events.push(self.make_event(WorldEventKind::CreatureDeployed {
             actor_id,
             item_id,
@@ -234,7 +331,11 @@ impl WorldState {
         Ok(true)
     }
 
-    fn place_monster_candidate_positions(&self, center: WorldPosition) -> Vec<WorldPosition> {
+    fn place_monster_candidate_positions(
+        &self,
+        center: WorldPosition,
+        monster_type_id: &str,
+    ) -> Vec<WorldPosition> {
         [
             (-1, -1),
             (0, -1),
@@ -247,16 +348,34 @@ impl WorldState {
         ]
         .into_iter()
         .filter_map(|(dx, dy)| center.checked_offset(dx, dy, 0))
-        .filter(|position| self.can_place_deployed_creature(*position))
+        .filter(|position| self.can_place_deployed_creature(*position, monster_type_id))
         .collect()
     }
 
-    fn can_place_deployed_creature(&self, position: WorldPosition) -> bool {
+    fn can_place_deployed_creature(&self, position: WorldPosition, monster_type_id: &str) -> bool {
+        let Some(prototype) = self.worldgen.as_ref().and_then(|catalog| {
+            catalog.monster_prototypes.iter().find(|prototype| {
+                prototype.base.monster_type_id == monster_type_id && prototype.runtime_spawnable
+            })
+        }) else {
+            return false;
+        };
         self.is_passable(position)
             && self.actor_at(position).is_none()
             && self.creature_at(position).is_none()
             && self.npc_at(position).is_none()
             && !self.vehicle_blocks_actor_at(position)
+            && (!prototype.base.path_settings.avoid_dangerous_fields
+                || !self.fields_at(position).is_some_and(|fields| {
+                    fields.iter().any(|field| {
+                        self.field_types
+                            .get(&field.field_type_id)
+                            .and_then(|kind| {
+                                kind.intensity_levels.get(usize::from(field.intensity - 1))
+                            })
+                            .is_some_and(|level| level.dangerous)
+                    })
+                }))
     }
 
     pub fn register_item_transform_types(
@@ -384,7 +503,12 @@ fn deployment_is_friendly(
     let intelligence_roll = if intelligence_maximum == 0 {
         0
     } else {
-        rng.next_u32() % (intelligence_maximum + 1)
+        u32::try_from(unbiased_inclusive_u64(
+            rng,
+            0,
+            u64::from(intelligence_maximum),
+        ))
+        .map_err(|_| SimError::NumericOverflow)?
     };
     let skill_sum = profile.skills.iter().try_fold(0_u32, |total, skill_id| {
         total
@@ -396,7 +520,12 @@ fn deployment_is_friendly(
     let difficulty_roll = if difficulty_maximum == 0 {
         0
     } else {
-        rng.next_u32() % (difficulty_maximum + 1)
+        u32::try_from(unbiased_inclusive_u64(
+            rng,
+            0,
+            u64::from(difficulty_maximum),
+        ))
+        .map_err(|_| SimError::NumericOverflow)?
     };
     Ok(intelligence_roll
         .checked_mul(2)
@@ -405,6 +534,32 @@ fn deployment_is_friendly(
         >= difficulty_roll
             .checked_mul(2)
             .ok_or(SimError::NumericOverflow)?)
+}
+
+fn unbiased_inclusive_u64(rng: &mut rand_chacha::ChaCha8Rng, minimum: u64, maximum: u64) -> u64 {
+    if minimum >= maximum {
+        return minimum;
+    }
+    let width = maximum - minimum + 1;
+    let threshold = width.wrapping_neg() % width;
+    loop {
+        let value = rng.next_u64();
+        if value >= threshold {
+            return minimum + value % width;
+        }
+    }
+}
+
+fn prototype_display_name(world: &WorldState, monster_type_id: &str) -> Option<String> {
+    world
+        .worldgen
+        .as_ref()?
+        .monster_prototypes
+        .iter()
+        .find_map(|prototype| {
+            (prototype.base.monster_type_id == monster_type_id)
+                .then(|| prototype.display_name.clone())
+        })
 }
 
 fn apply_transform_target(

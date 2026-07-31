@@ -32,8 +32,8 @@ use rand_core::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    IdAllocator, SimError, debit_integral_magazine_charges, debit_snapshot_ammunition_charges,
-    inclusive_rng_u64, powered_light_effective_emission, snapshot_ammunition_capacity,
+    IdAllocator, SimError, debit_snapshot_ammunition_charges, inclusive_rng_u64,
+    powered_light_effective_emission, snapshot_ammunition_capacity,
     snapshot_stored_ammunition_charges, validate_craft_item_prototype, validate_item_snapshot,
 };
 
@@ -89,11 +89,22 @@ pub(super) fn summarize_inventory_by_type<'a>(
 /// pinned deployable-monster ammunition loading.
 pub(super) fn debit_inventory_type(
     inventory: &mut BTreeMap<ItemId, ItemInstance>,
+    priority: &[ItemId],
     type_id: &str,
     requested: u32,
 ) -> Result<u32, SimError> {
     let mut remaining = requested;
-    let item_ids = inventory.keys().copied().collect::<Vec<_>>();
+    let mut item_ids = priority
+        .iter()
+        .copied()
+        .filter(|item_id| inventory.contains_key(item_id))
+        .collect::<Vec<_>>();
+    item_ids.extend(
+        inventory
+            .keys()
+            .copied()
+            .filter(|item_id| !priority.contains(item_id)),
+    );
     for item_id in item_ids {
         if remaining == 0 {
             break;
@@ -172,41 +183,66 @@ fn debit_nested_item_type(
     type_id: &str,
     remaining: &mut u32,
 ) -> Result<(), SimError> {
-    for pocket in integral_magazines {
-        if *remaining == 0 {
-            return Ok(());
-        }
-        let remove = pocket
-            .loaded_ammunition
-            .as_deref_mut()
-            .map(|item| debit_snapshot_type(item, type_id, remaining))
-            .transpose()?
-            .unwrap_or(false);
-        if remove {
-            pocket.loaded_ammunition = None;
-        }
+    enum NestedPocket {
+        Integral(usize),
+        Well(usize),
+        Container(usize),
     }
-    for well in magazine_wells {
+    let mut order = integral_magazines
+        .iter()
+        .enumerate()
+        .map(|(index, pocket)| (pocket.pocket_index, NestedPocket::Integral(index)))
+        .chain(
+            magazine_wells
+                .iter()
+                .enumerate()
+                .map(|(index, pocket)| (pocket.pocket_index, NestedPocket::Well(index))),
+        )
+        .chain(
+            containers
+                .iter()
+                .enumerate()
+                .map(|(index, pocket)| (pocket.pocket_index, NestedPocket::Container(index))),
+        )
+        .collect::<Vec<_>>();
+    order.sort_by_key(|(pocket_index, _)| *pocket_index);
+    for (_pocket_index, pocket) in order {
         if *remaining == 0 {
-            return Ok(());
+            break;
         }
-        let remove = well
-            .installed_magazine
-            .as_deref_mut()
-            .map(|item| debit_snapshot_type(item, type_id, remaining))
-            .transpose()?
-            .unwrap_or(false);
-        if remove {
-            well.installed_magazine = None;
-        }
-    }
-    for pocket in containers {
-        let mut index = 0;
-        while index < pocket.contents.len() && *remaining > 0 {
-            if debit_snapshot_type(&mut pocket.contents[index], type_id, remaining)? {
-                pocket.contents.remove(index);
-            } else {
-                index += 1;
+        match pocket {
+            NestedPocket::Integral(index) => {
+                let remove = integral_magazines[index]
+                    .loaded_ammunition
+                    .as_deref_mut()
+                    .map(|item| debit_snapshot_type(item, type_id, remaining))
+                    .transpose()?
+                    .unwrap_or(false);
+                if remove {
+                    integral_magazines[index].loaded_ammunition = None;
+                }
+            }
+            NestedPocket::Well(index) => {
+                let remove = magazine_wells[index]
+                    .installed_magazine
+                    .as_deref_mut()
+                    .map(|item| debit_snapshot_type(item, type_id, remaining))
+                    .transpose()?
+                    .unwrap_or(false);
+                if remove {
+                    magazine_wells[index].installed_magazine = None;
+                }
+            }
+            NestedPocket::Container(pocket_index) => {
+                let contents = &mut containers[pocket_index].contents;
+                let mut index = 0;
+                while index < contents.len() && *remaining > 0 {
+                    if debit_snapshot_type(&mut contents[index], type_id, remaining)? {
+                        contents.remove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
             }
         }
     }
@@ -433,13 +469,20 @@ impl ItemInstance {
     }
 
     pub(super) fn available_tool_charges(&self) -> i32 {
-        if self.magazine_wells.is_empty() {
-            return self.stored_ammunition_charges();
+        if self.magazine_wells.is_empty() && self.integral_magazines.is_empty() {
+            return self.charges;
         }
+        let integral = self
+            .integral_magazines
+            .iter()
+            .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+            .fold(0_i32, |total, ammunition| {
+                total.saturating_add(ammunition.charges)
+            });
         self.magazine_wells
             .iter()
             .filter_map(|well| well.installed_magazine.as_deref())
-            .fold(0, |total, magazine| {
+            .fold(integral, |total, magazine| {
                 total.saturating_add(snapshot_stored_ammunition_charges(magazine))
             })
     }
@@ -448,30 +491,59 @@ impl ItemInstance {
         if charges < 0 {
             return Err(SimError::InvalidItem);
         }
-        if self.magazine_wells.is_empty() {
-            if self.integral_magazines.is_empty() {
-                self.charges = self
-                    .charges
-                    .checked_sub(charges)
-                    .filter(|remaining| *remaining >= 0)
-                    .ok_or(SimError::InvalidItem)?;
-            } else {
-                debit_integral_magazine_charges(&mut self.integral_magazines, charges)?;
-            }
-            return Ok(self.stored_ammunition_charges());
+        if self.magazine_wells.is_empty() && self.integral_magazines.is_empty() {
+            self.charges = self
+                .charges
+                .checked_sub(charges)
+                .filter(|remaining| *remaining >= 0)
+                .ok_or(SimError::InvalidItem)?;
+            return Ok(self.charges);
         }
         if self.available_tool_charges() < charges {
             return Err(SimError::InvalidItem);
         }
+        enum ChargePocket {
+            Integral(usize),
+            Well(usize),
+        }
+        let mut pockets = self
+            .integral_magazines
+            .iter()
+            .enumerate()
+            .map(|(index, pocket)| (pocket.pocket_index, ChargePocket::Integral(index)))
+            .chain(
+                self.magazine_wells
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pocket)| (pocket.pocket_index, ChargePocket::Well(index))),
+            )
+            .collect::<Vec<_>>();
+        pockets.sort_by_key(|(pocket_index, _)| *pocket_index);
         let mut required = charges;
-        for magazine in self
-            .magazine_wells
-            .iter_mut()
-            .filter_map(|well| well.installed_magazine.as_deref_mut())
-        {
-            let debit = required.min(snapshot_stored_ammunition_charges(magazine));
-            debit_snapshot_ammunition_charges(magazine, debit)?;
-            required -= debit;
+        for (_pocket_index, pocket) in pockets {
+            match pocket {
+                ChargePocket::Integral(index) => {
+                    let Some(ammunition) = self.integral_magazines[index]
+                        .loaded_ammunition
+                        .as_deref_mut()
+                    else {
+                        continue;
+                    };
+                    let debit = required.min(ammunition.charges.max(0));
+                    debit_snapshot_ammunition_charges(ammunition, debit)?;
+                    required -= debit;
+                }
+                ChargePocket::Well(index) => {
+                    let Some(magazine) =
+                        self.magazine_wells[index].installed_magazine.as_deref_mut()
+                    else {
+                        continue;
+                    };
+                    let debit = required.min(snapshot_stored_ammunition_charges(magazine));
+                    debit_snapshot_ammunition_charges(magazine, debit)?;
+                    required -= debit;
+                }
+            }
             if required == 0 {
                 break;
             }

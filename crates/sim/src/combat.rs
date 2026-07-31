@@ -803,6 +803,45 @@ impl WorldState {
         Ok(Some((spread, stumbled, dodge_attempted)))
     }
 
+    pub(super) fn creature_creature_attack_roll(
+        &self,
+        source: CreatureId,
+        target: CreatureId,
+        turn_sequence: u64,
+    ) -> Result<Option<i64>, SimError> {
+        let attacker = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?;
+        let defender = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?;
+        if attacker.melee_dice == 0 {
+            return Ok(None);
+        }
+        let mut rng = self.named_rng(
+            b"creature-creature-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let hit = pinned_melee_hit_roll(i64::from(attacker.melee_skill), 1, &mut rng)?;
+        let dodge = i64::from(defender.dodge)
+            .checked_mul(5)
+            .and_then(|value| value.checked_add(super::creature_size_melee_penalty(defender.size)))
+            .and_then(|value| {
+                value.checked_sub(if defender.immobile {
+                    super::IMMOBILE_MELEE_HIT_BONUS
+                } else {
+                    0
+                })
+            })
+            .ok_or(SimError::NumericOverflow)?;
+        hit.checked_sub(dodge)
+            .map(Some)
+            .ok_or(SimError::NumericOverflow)
+    }
+
     pub(super) fn creature_actor_special_attack_roll(
         &self,
         source: CreatureId,

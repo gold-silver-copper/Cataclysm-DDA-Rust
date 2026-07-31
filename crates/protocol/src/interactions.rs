@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, MAX_DIALOGUE_TOPIC_STACK,
-    MissionId, NpcId, SimTick, eoc_confirmation_branches_are_valid,
+    MissionId, NpcId, SimTick, WorldPosition, eoc_confirmation_branches_are_valid,
 };
 
 pub const MAX_INTERACTION_CHOICES: usize = 64;
@@ -40,6 +40,9 @@ pub enum InteractionContextV1 {
         item_id: ItemId,
         item_type_id: String,
         activation_sequence: CommandSequence,
+        /// Position at activation time. Manual choices are offsets from this
+        /// immutable origin, matching the synchronous pinned C++ prompt.
+        activation_origin: WorldPosition,
     },
     NpcDialogue {
         npc_id: NpcId,
@@ -129,6 +132,7 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                 item_id,
                 item_type_id,
                 activation_sequence,
+                activation_origin: _,
             } => {
                 item_id.counter() > 0
                     && item_id.world_namespace() == actor_id.world_namespace()

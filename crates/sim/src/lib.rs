@@ -3086,6 +3086,7 @@ fn map_memory_from_snapshot(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatureSpawn {
     pub type_id: String,
+    pub faction_id: String,
     pub position: WorldPosition,
     pub hp: i32,
     pub speed: u16,
@@ -3128,6 +3129,8 @@ struct Creature {
     aggression: i16,
     friendly: i32,
     pet: bool,
+    deploying_owner: Option<ActorId>,
+    faction_id: String,
     morale: i32,
     melee_skill: u16,
     dodge: u16,
@@ -3292,6 +3295,8 @@ impl Creature {
             aggression: self.aggression,
             friendly: self.friendly,
             pet: self.pet,
+            deploying_owner: self.deploying_owner,
+            faction_id: self.faction_id.clone(),
             morale: self.morale,
             melee_skill: self.melee_skill,
             dodge: self.dodge,
@@ -3337,6 +3342,8 @@ impl Creature {
             aggression: snapshot.aggression,
             friendly: snapshot.friendly,
             pet: snapshot.pet,
+            deploying_owner: snapshot.deploying_owner,
+            faction_id: snapshot.faction_id.clone(),
             morale: snapshot.morale,
             melee_skill: snapshot.melee_skill,
             dodge: snapshot.dodge,
@@ -3379,6 +3386,15 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
         || snapshot.attack_cost_moves == 0
         || !matches!(snapshot.friendly, -1 | 0)
         || (snapshot.pet && snapshot.friendly != -1)
+        || snapshot.deploying_owner.is_some_and(|owner| {
+            snapshot.friendly != -1
+                || owner.counter() == 0
+                || owner.world_namespace() != snapshot.id.world_namespace()
+        })
+        || (snapshot.friendly == -1 && snapshot.deploying_owner.is_none())
+        || snapshot.faction_id.is_empty()
+        || snapshot.faction_id.len() > 512
+        || snapshot.faction_id.chars().any(char::is_control)
         || snapshot.melee_dice_sides == 0
         || (snapshot.group_bash && !snapshot.bashes)
         || (snapshot.good_hearing && !snapshot.hears)
@@ -5835,6 +5851,9 @@ impl WorldState {
         if spawn.hp <= 0
             || speed == 0
             || attack_cost_moves == 0
+            || spawn.faction_id.is_empty()
+            || spawn.faction_id.len() > 512
+            || spawn.faction_id.chars().any(char::is_control)
             || melee_dice_sides == 0
             || (spawn.group_bash && !spawn.bashes)
             || (spawn.good_hearing && !spawn.hears)
@@ -5866,6 +5885,8 @@ impl WorldState {
                 aggression,
                 friendly: 0,
                 pet: false,
+                deploying_owner: None,
+                faction_id: spawn.faction_id,
                 morale: spawn.morale,
                 melee_skill,
                 dodge,
@@ -7950,7 +7971,9 @@ impl WorldState {
                 if let Some(cost) = self.item_transform_action_cost(actor_id, *item_id)? {
                     return Ok(cost);
                 }
-                if let Some(cost) = self.place_monster_action_cost(actor_id, *item_id, None)? {
+                if let Some(cost) =
+                    self.place_monster_action_cost(actor_id, *item_id, None, None)?
+                {
                     return Ok(cost);
                 }
                 self.healing_item_types
@@ -11492,22 +11515,12 @@ impl WorldState {
             .get(&creature_id)
             .ok_or(SimError::UnknownCreature)?
             .position;
-        // The pinned deployable-monster actor uses `friendly = -1` for an
-        // indefinitely allied creature. Until authoritative monster-on-monster
-        // targeting is available, allied creatures must fail closed by holding
-        // position instead of selecting a player as an ordinary hostile target.
         if self
             .creatures
             .get(&creature_id)
             .is_some_and(|creature| creature.friendly == -1)
         {
-            let creature = self
-                .creatures
-                .get_mut(&creature_id)
-                .ok_or(SimError::UnknownCreature)?;
-            creature.goal = None;
-            creature.sound_goal = None;
-            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+            return self.take_friendly_creature_turn(creature_id, turn_sequence, events);
         }
         let candidates = self
             .actors
@@ -11804,6 +11817,147 @@ impl WorldState {
         i64::from(CREATURE_ACTION_THRESHOLD)
             .checked_add(special_cost)
             .ok_or(SimError::NumericOverflow)
+    }
+
+    fn take_friendly_creature_turn(
+        &mut self,
+        creature_id: CreatureId,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<i64, SimError> {
+        let creature = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        let position = creature.position;
+        let owner = creature.deploying_owner.ok_or(SimError::InvalidCreature)?;
+        let owner_position = self
+            .actors
+            .get(&owner)
+            .filter(|actor| actor.hp > 0)
+            .map(|actor| actor.position);
+        let light_sources = self.active_light_sources();
+        let mut target = None;
+        for candidate in self.creatures.values().filter(|candidate| {
+            candidate.id != creature_id
+                && candidate.hp > 0
+                && candidate.friendly == 0
+                && candidate.position.z == position.z
+                && monsters::creature_attitude(
+                    candidate.morale,
+                    candidate.aggression,
+                    candidate.hp,
+                    candidate.max_hp,
+                ) == monsters::CreatureAttitude::Attack
+        }) {
+            if !self.creature_can_see_position(creature_id, candidate.position, &light_sources)? {
+                continue;
+            }
+            let key = (tile_distance(position, candidate.position), candidate.id);
+            if target.as_ref().is_none_or(|(best, _position)| key < *best) {
+                target = Some((key, candidate.position));
+            }
+        }
+        if let Some(((_distance, target_id), target_position)) = target
+            && horizontally_adjacent(position, target_position)
+            && !creature.pacifist
+        {
+            let attack_cost = i64::from(creature.attack_cost_moves)
+                .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+                .ok_or(SimError::NumericOverflow)?;
+            if self
+                .creature_creature_attack_roll(creature_id, target_id, turn_sequence)?
+                .is_some_and(|spread| spread >= 0)
+            {
+                let mut rng = self.named_rng(
+                    b"creature-creature-melee",
+                    &[creature_id.as_u128(), target_id.as_u128()],
+                    self.next_event_counter,
+                );
+                let mut rolled = 0_u32;
+                for _ in 0..creature.melee_dice {
+                    rolled = rolled
+                        .checked_add(1 + rng.next_u32() % u32::from(creature.melee_dice_sides))
+                        .ok_or(SimError::NumericOverflow)?;
+                }
+                let damage = self.creature_melee_damage_against_creature(
+                    creature_id,
+                    target_id,
+                    u16::try_from(rolled).map_err(|_| SimError::NumericOverflow)?,
+                )?;
+                if self.creature_death_needs_corpse_id(target_id, damage)?
+                    && !self.allocator.can_allocate()
+                {
+                    return Ok(attack_cost);
+                }
+                let remaining_hp = self
+                    .creatures
+                    .get(&target_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .hp
+                    .checked_sub(i32::from(damage))
+                    .ok_or(SimError::NumericOverflow)?;
+                self.creatures
+                    .get_mut(&target_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .hp = remaining_hp;
+                events.push(self.make_event(WorldEventKind::CreatureDamagedByCreature {
+                    source: creature_id,
+                    target: target_id,
+                    amount: damage,
+                    remaining_hp,
+                })?);
+                if remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::CreatureKilledByCreature {
+                        creature_id: target_id,
+                        killer: creature_id,
+                    })?);
+                    self.finish_creature_death(target_id, remaining_hp, events)?;
+                }
+            }
+            return Ok(attack_cost);
+        }
+
+        let destination = target
+            .map(|(_key, position)| position)
+            .or_else(|| owner_position.filter(|owner| tile_distance(position, *owner) > 2));
+        let Some(destination) = destination else {
+            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+        };
+        if creature.immobile {
+            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+        }
+        let route = self.creature_route_step(creature_id, position, destination)?;
+        let movement_destination = route.unwrap_or(destination);
+        for (dx, dy) in squares_closer_steps(position, movement_destination) {
+            let Some(to) = position.checked_offset(dx, dy, 0) else {
+                continue;
+            };
+            if !self.is_passable(to)
+                || self.actor_at(to).is_some()
+                || self.creature_at(to).is_some()
+                || self.npc_at(to).is_some()
+                || self.vehicle_blocks_actor_at(to)
+            {
+                continue;
+            }
+            let Some(cost) =
+                self.creature_movement_action_cost(position, to, movement_destination)?
+            else {
+                continue;
+            };
+            self.creatures
+                .get_mut(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .position = to;
+            events.push(self.make_event(WorldEventKind::CreatureMoved {
+                creature_id,
+                from: position,
+                to,
+            })?);
+            return Ok(cost);
+        }
+        Ok(i64::from(CREATURE_ACTION_THRESHOLD))
     }
 
     fn creature_route_step(
@@ -12411,6 +12565,7 @@ impl WorldState {
                 sequence,
                 item_id,
                 &item_type_id,
+                None,
                 None,
                 events,
             )? {
@@ -14485,6 +14640,16 @@ impl WorldState {
                 // monster would have no HP. This can recur harmlessly.
                 continue;
             }
+            let faction_id = self
+                .worldgen
+                .as_ref()
+                .and_then(|catalog| {
+                    catalog.monster_prototypes.iter().find(|prototype| {
+                        prototype.base.monster_type_id == corpse.prototype.monster_type_id
+                    })
+                })
+                .map(|prototype| prototype.default_faction_id.clone())
+                .ok_or(SimError::InvalidCreature)?;
             if !self.allocator.can_allocate() {
                 break;
             }
@@ -14541,6 +14706,8 @@ impl WorldState {
                     aggression: corpse.prototype.aggression,
                     friendly: 0,
                     pet: false,
+                    deploying_owner: None,
+                    faction_id,
                     morale: corpse.prototype.morale,
                     melee_skill: corpse.prototype.melee_skill,
                     dodge: corpse.prototype.dodge,
@@ -15504,6 +15671,7 @@ impl WorldState {
                     let cdda_protocol::InteractionContextV1::PlaceMonster {
                         item_id,
                         item_type_id,
+                        activation_origin,
                         ..
                     } = &interaction.context
                     else {
@@ -15512,9 +15680,21 @@ impl WorldState {
                     inventory
                         .get(item_id)
                         .is_none_or(|item| item.type_id != *item_type_id)
+                        || *activation_origin != actor.position
                         || item_place_monster_types
                             .get(item_type_id)
-                            .is_none_or(|profile| profile.source_type_id != *item_type_id)
+                            .is_none_or(|profile| {
+                                profile.source_type_id != *item_type_id
+                                    || profile.place_randomly
+                                    || inventory.get(item_id).is_none_or(|item| {
+                                        item.available_tool_charges()
+                                            < i32::try_from(profile.activation_charges)
+                                                .unwrap_or(i32::MAX)
+                                            || item.available_tool_charges()
+                                                < i32::try_from(profile.required_charges)
+                                                    .unwrap_or(i32::MAX)
+                                    })
+                            })
                 })
             {
                 return Err(SimError::InvalidSnapshot);
@@ -15814,6 +15994,9 @@ impl WorldState {
                 )
                 || (!creature_snapshot.blood_field_type_id.is_empty()
                     && !field_types.contains_key(&creature_snapshot.blood_field_type_id))
+                || creature_snapshot
+                    .deploying_owner
+                    .is_some_and(|owner| !actors.contains_key(&owner))
                 || (creature_snapshot.hp > 0 && !occupied.insert(creature_snapshot.position))
                 || !is_passable_in_chunks(&chunks, creature_snapshot.position)
                 || creatures

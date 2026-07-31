@@ -3149,18 +3149,21 @@ fn item_menu_entries(
                         (!action.need_worn || actor.worn.contains(&item.id))
                             && (!action.need_wielding || actor.wielded == Some(item.id))
                             && (!action.consume || item.charges > 0)
-                    } else if let Some(required_charges) = definition.and_then(|definition| {
-                        let [action] = definition.place_monster_actions.as_slice() else {
-                            return None;
-                        };
-                        (!definition.has_unsupported_use_actions
-                            && definition.transform_actions.is_empty()
-                            && definition.healing_actions.is_empty()
-                            && definition.eoc_actions.is_empty()
-                            && action.deferred_fields.is_empty())
-                        .then_some(action.need_charges)
-                    }) {
-                        item_tool_charges(item) >= required_charges
+                    } else if let Some(profile) = snapshot
+                        .item_place_monster_types
+                        .iter()
+                        .find(|profile| profile.source_type_id == item.type_id)
+                    {
+                        (profile.maximum_raw_damage == 0
+                            || item.raw_damage < profile.maximum_raw_damage)
+                            && item_tool_charges(item)
+                                >= i32::try_from(profile.required_charges).unwrap_or(i32::MAX)
+                            && item_tool_charges(item)
+                                >= i32::try_from(profile.activation_charges).unwrap_or(i32::MAX)
+                    } else if definition
+                        .is_some_and(|definition| !definition.place_monster_actions.is_empty())
+                    {
+                        false
                     } else if let Some(required_charges) = definition.and_then(|definition| {
                         let [action] = definition.transform_actions.as_slice() else {
                             return None;
@@ -3435,13 +3438,20 @@ fn residual_power_suffix(residual_energy_millijoules: u32) -> String {
 }
 
 fn item_tool_charges(item: &ItemSnapshot) -> i32 {
-    if item.magazine_wells.is_empty() {
-        return item_stored_ammunition_charges(item);
+    if item.magazine_wells.is_empty() && item.integral_magazines.is_empty() {
+        return item.charges;
     }
+    let integral = item
+        .integral_magazines
+        .iter()
+        .filter_map(|pocket| pocket.loaded_ammunition.as_deref())
+        .fold(0_i32, |total, ammunition| {
+            total.saturating_add(ammunition.charges)
+        });
     item.magazine_wells
         .iter()
         .filter_map(|well| well.installed_magazine.as_deref())
-        .fold(0, |total, magazine| {
+        .fold(integral, |total, magazine| {
             total.saturating_add(item_stored_ammunition_charges(magazine))
         })
 }
@@ -4785,8 +4795,16 @@ fn event_message(event: &WorldEvent) -> String {
             remaining_hp,
             ..
         } => format!("Hit a creature for {amount}; {remaining_hp} HP remains."),
+        WorldEventKind::CreatureDamagedByCreature {
+            amount,
+            remaining_hp,
+            ..
+        } => format!("A creature hit another for {amount}; {remaining_hp} HP remains."),
         WorldEventKind::ActorMissedCreature { .. } => String::from("Missed the creature."),
         WorldEventKind::CreatureDied { .. } => String::from("The creature died."),
+        WorldEventKind::CreatureKilledByCreature { .. } => {
+            String::from("A creature killed another creature.")
+        }
         WorldEventKind::NpcDamaged {
             body_part_id,
             amount,
@@ -5367,10 +5385,12 @@ fn sync_creature_visuals(
     for creature in &snapshot.creatures {
         let x = ((creature.position.x - origin_x) as f32 - 5.5) * 36.0;
         let y = (5.5 - (creature.position.y - origin_y) as f32) * 36.0;
-        let color = if creature.hp > 0 {
-            Color::srgb(0.82, 0.18, 0.18)
-        } else {
+        let color = if creature.hp <= 0 {
             Color::srgb(0.28, 0.12, 0.12)
+        } else if creature.friendly {
+            Color::srgb(0.18, 0.72, 0.32)
+        } else {
+            Color::srgb(0.82, 0.18, 0.18)
         };
         if let Some((_entity, _visual, mut transform, mut sprite)) = visuals
             .iter_mut()
@@ -5684,7 +5704,7 @@ fn gameplay_status(
     let nearest_hostile = snapshot
         .creatures
         .iter()
-        .filter(|creature| creature.hp > 0)
+        .filter(|creature| creature.hp > 0 && !creature.friendly)
         .min_by_key(|creature| {
             creature.position.x.abs_diff(actor.position.x)
                 + creature.position.y.abs_diff(actor.position.y)

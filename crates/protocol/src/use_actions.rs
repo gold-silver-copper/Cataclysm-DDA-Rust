@@ -29,6 +29,9 @@ pub struct ItemTransformTypeV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItemPlaceMonsterTypeV1 {
     pub source_type_id: String,
+    /// Finalized translated item name used by authoritative prompts and
+    /// activation feedback.
+    pub source_display_name: String,
     /// `Character::invoke_item` removes successful SINGLE_USE deployables
     /// after the actor's fixed one-charge activation consumption.
     pub single_use: bool,
@@ -42,6 +45,9 @@ pub struct ItemPlaceMonsterTypeV1 {
     pub place_randomly: bool,
     pub is_pet: bool,
     pub required_charges: u32,
+    /// Charges consumed by `activation_consume(1, ...)`: for the pinned
+    /// legacy tool path this is the finalized `charges_per_use` value.
+    pub activation_charges: u32,
     /// Strictly sorted unique identities, matching pinned C++
     /// `std::set<skill_id>` iteration and floating-point accumulation order.
     pub skills: Vec<String>,
@@ -72,10 +78,13 @@ pub fn item_place_monster_catalog_is_valid(catalog: &[ItemPlaceMonsterTypeV1]) -
             .all(|pair| pair[0].source_type_id < pair[1].source_type_id)
         && catalog.iter().all(|profile| {
             valid_id(&profile.source_type_id)
+                && valid_message(&profile.source_display_name)
+                && !profile.source_display_name.is_empty()
                 && matches!(profile.maximum_raw_damage, 0 | MAX_ITEM_RAW_DAMAGE)
                 && valid_id(&profile.monster_type_id)
                 && profile.move_cost_moves <= i32::MAX as u32
                 && profile.required_charges <= i32::MAX as u32
+                && profile.activation_charges <= i32::MAX as u32
                 && valid_message(&profile.friendly_message)
                 && valid_message(&profile.hostile_message)
                 && profile.skills.len() <= MAX_ITEM_PLACE_MONSTER_SKILLS
