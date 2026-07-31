@@ -605,6 +605,7 @@ fn runtime_monster_catalog(
             };
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
+                armor_milli: monster.finalized_armor_milli(),
                 leaves_corpse: !monster.flags.contains("NO_CORPSE"),
                 deferred_behavior_fields: monster.unsupported_fields.iter().cloned().collect(),
             })

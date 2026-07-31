@@ -65,7 +65,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 103;
+pub const PROTOCOL_VERSION: u16 = 104;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3062,6 +3062,8 @@ pub struct WorldgenU16RangeV1 {
 pub struct WorldgenMonsterPrototypeV1 {
     pub base: CreatureCorpsePrototypeV1,
     pub leaves_corpse: bool,
+    /// Final inherited flat resistances in thousandths of one damage point.
+    pub armor_milli: BTreeMap<String, i32>,
     /// Sorted pinned MONSTER fields not yet consumed by the ordinary runtime
     /// creature model. They remain canonical instead of being silently lost.
     pub deferred_behavior_fields: Vec<String>,
@@ -5152,6 +5154,13 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
         || !catalog.monster_prototypes.iter().all(|prototype| {
             valid_creature_corpse_prototype(&prototype.base)
                 && valid_worldgen_id(&prototype.base.monster_type_id)
+                && prototype.armor_milli.len() <= 64
+                && prototype
+                    .armor_milli
+                    .iter()
+                    .all(|(damage_type, resistance)| {
+                        valid_worldgen_id(damage_type) && resistance.unsigned_abs() <= 1_000_000_000
+                    })
                 && prototype.deferred_behavior_fields.len() <= 64
                 && prototype
                     .deferred_behavior_fields

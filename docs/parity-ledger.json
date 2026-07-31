@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 103,
-  "persistence_schema_version": 81,
+  "protocol_version": 104,
+  "persistence_schema_version": 82,
   "replay_format_version": 3,
   "active_milestone": "anatomy-combat",
   "completion_gate": [
@@ -339,11 +339,11 @@
     {
       "id": "simulation-monsters-module",
       "title": "Simulation monster ownership module",
-      "state": "planned",
+      "state": "in_progress",
       "priority": 17,
       "depends_on": ["simulation-actors-module", "simulation-combat-module"],
       "upstream_sources": ["../Cataclysm-DDA/src/monster.cpp", "../Cataclysm-DDA/src/mattack_actors.cpp"],
-      "rust_paths": ["crates/sim/src/lib.rs"],
+      "rust_paths": ["crates/sim/src/monsters.rs", "crates/sim/src/lib.rs"],
       "scenario_families": ["monster-state-mechanical-extraction", "perception-movement-and-routing", "death-revival-and-drops"],
       "differential_oracle": "not_applicable",
       "multiplayer_adaptation": "Extraction preserves continuous zero-player scheduling, authoritative perception and intent, corpses, and deterministic creature ordering.",
@@ -408,7 +408,7 @@
       "submilestones": [
         { "id": "bodypart-hp-and-targeting", "state": "implementation_complete" },
         { "id": "wearable-armor-and-damage-absorption", "state": "implementation_complete" },
-        { "id": "on-hit-effects", "state": "in_progress" },
+        { "id": "on-hit-effects", "state": "implementation_complete_verification_deferred" },
         { "id": "dodge-and-stamina", "state": "implementation_complete" },
         { "id": "natural-healing", "state": "implementation_complete" },
         { "id": "medical-item-healing", "state": "implementation_complete_verification_deferred" }
@@ -451,7 +451,13 @@
     {
       "id": "monsters",
       "title": "Generic monster attacks, special attacks, perception, death, and spawning",
-      "state": "planned",
+      "state": "in_progress",
+      "submilestones": [
+        { "id": "ordinary-perception-movement-and-melee", "state": "implementation_complete_verification_deferred" },
+        { "id": "natural-armor-resistance", "state": "implementation_complete_verification_deferred" },
+        { "id": "ordinary-death-corpse-and-revival", "state": "implementation_complete_verification_deferred" },
+        { "id": "data-driven-special-attacks", "state": "planned" }
+      ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],
       "upstream_sources": ["../Cataclysm-DDA/src/monster.cpp", "../Cataclysm-DDA/src/mattack_actors.cpp"],

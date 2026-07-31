@@ -34,6 +34,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "flags",
     "species",
     "path_settings",
+    "armor",
 ];
 
 pub(crate) fn field_is_implemented(field: &str) -> bool {
@@ -92,6 +93,10 @@ pub struct MonsterDefinition {
     pub flags: BTreeSet<String>,
     pub species: BTreeSet<String>,
     pub path_settings: MonsterPathSettings,
+    /// Final inherited flat monster resistances in thousandths of one damage
+    /// point. Arbitrary pinned damage-type IDs are retained; runtime applies
+    /// every type it can actually deal and leaves the rest canonical.
+    pub armor_milli: BTreeMap<String, i32>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -122,9 +127,17 @@ impl Default for MonsterDefinition {
             flags: BTreeSet::new(),
             species: BTreeSet::new(),
             path_settings: MonsterPathSettings::default(),
+            armor_milli: BTreeMap::new(),
             unsupported_fields: BTreeSet::new(),
             source: String::new(),
         }
+    }
+}
+
+impl MonsterDefinition {
+    #[must_use]
+    pub fn finalized_armor_milli(&self) -> BTreeMap<String, i32> {
+        finalized_armor(&self.armor_milli)
     }
 }
 
@@ -353,6 +366,12 @@ fn apply_fields(
     apply_string_set(object, "flags", &mut monster.flags, source)?;
     apply_string_set(object, "species", &mut monster.species, source)?;
     apply_path_settings(object, &mut monster.path_settings, source)?;
+    apply_armor(object, &mut monster.armor_milli, source)?;
+    if modifier(object, "delete", "armor", source)?.is_some() {
+        monster
+            .unsupported_fields
+            .insert(String::from("delete.armor"));
+    }
     for field in object.keys() {
         if !field.starts_with("//")
             && !IMPLEMENTED_FIELDS.contains(&field.as_str())
@@ -374,6 +393,114 @@ fn apply_fields(
         }
     }
     Ok(())
+}
+
+fn apply_armor(
+    object: &Map<String, Value>,
+    armor: &mut BTreeMap<String, i32>,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    if let Some(value) = object.get("armor") {
+        *armor = parse_armor_map(value, source, "armor")?;
+    }
+    if let Some(value) = modifier(object, "extend", "armor", source)? {
+        for (damage_type, addition) in parse_armor_map(value, source, "extend.armor")? {
+            let resistance = armor.entry(damage_type).or_default();
+            *resistance = resistance
+                .checked_add(addition)
+                .ok_or_else(|| invalid(source, "extend.armor"))?;
+        }
+    }
+    if let Some(value) = modifier(object, "proportional", "armor", source)?
+        && value.is_object()
+    {
+        let multipliers = parse_armor_map(value, source, "proportional.armor")?;
+        let finalized = finalized_armor(armor);
+        for (damage_type, multiplier_milli) in multipliers {
+            let current = finalized.get(&damage_type).copied().unwrap_or_default();
+            let adjusted = i64::from(current)
+                .checked_mul(i64::from(multiplier_milli))
+                .and_then(|value| value.checked_div(1_000))
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or_else(|| invalid(source, "proportional.armor"))?;
+            armor.insert(damage_type, adjusted);
+        }
+    }
+    if let Some(value) = modifier(object, "relative", "armor", source)? {
+        let additions = parse_armor_map(value, source, "relative.armor")?;
+        let finalized = finalized_armor(armor);
+        for (damage_type, addition) in additions {
+            let current = finalized.get(&damage_type).copied().unwrap_or_default();
+            armor.insert(
+                damage_type,
+                current
+                    .checked_add(addition)
+                    .ok_or_else(|| invalid(source, "relative.armor"))?,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_armor_map(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<BTreeMap<String, i32>, MonsterRegistryError> {
+    value
+        .as_object()
+        .ok_or_else(|| invalid(source, field))?
+        .iter()
+        .filter(|(damage_type, _)| !damage_type.starts_with("//"))
+        .map(|(damage_type, value)| {
+            if damage_type.is_empty()
+                || damage_type.len() > 512
+                || damage_type.chars().any(char::is_control)
+            {
+                return Err(invalid(source, field));
+            }
+            let resistance = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| invalid(source, field))?;
+            let milli = resistance * 1_000.0;
+            if milli < f64::from(i32::MIN) || milli > f64::from(i32::MAX) {
+                return Err(invalid(source, field));
+            }
+            Ok((damage_type.clone(), milli.round() as i32))
+        })
+        .collect()
+}
+
+fn finalized_armor(armor: &BTreeMap<String, i32>) -> BTreeMap<String, i32> {
+    let all = armor.get("all").copied().unwrap_or_default();
+    let physical = armor.get("physical").copied().unwrap_or(all);
+    let non_physical = armor.get("non_physical").copied().unwrap_or(all);
+    let mut finalized = armor
+        .iter()
+        .filter(|(damage_type, _)| {
+            !matches!(damage_type.as_str(), "all" | "physical" | "non_physical")
+        })
+        .map(|(damage_type, resistance)| (damage_type.clone(), *resistance))
+        .collect::<BTreeMap<_, _>>();
+    for damage_type in ["bash", "cut", "bullet"] {
+        finalized
+            .entry(String::from(damage_type))
+            .or_insert(physical);
+    }
+    for damage_type in ["electric", "heat", "cold", "pure", "biological"] {
+        finalized
+            .entry(String::from(damage_type))
+            .or_insert(non_physical);
+    }
+    let cut = finalized.get("cut").copied().unwrap_or(physical);
+    finalized
+        .entry(String::from("stab"))
+        .or_insert_with(|| i32::try_from(i64::from(cut) * 8 / 10).unwrap_or(i32::MAX));
+    finalized
+        .entry(String::from("acid"))
+        .or_insert_with(|| i32::try_from(i64::from(cut) / 2).unwrap_or(i32::MAX));
+    finalized
 }
 
 fn apply_path_settings(

@@ -12,7 +12,8 @@ Run only when the user explicitly requests a verification checkpoint.
   exact C++ sector/rotation/city/uniqueness traces, multi-z atomic placement,
   recovery/replay modes, and real-Iroh two-client landmark exploration.
 - Monster-spawning checkpoint: run exact C++ group/mapgen density and pack
-  traces, production-content admission, canonical hash fixtures, four-mode
+  traces, finalized armor inheritance/resistance traces, production-content
+  admission, canonical hash fixtures, four-mode
   recovery/replay, and real-Iroh two-client population persistence. The broad
   `cdda-server --all-targets` check hit the mandatory 60-second timeout; bounded
   library, binary, and test-target checks are used during implementation.

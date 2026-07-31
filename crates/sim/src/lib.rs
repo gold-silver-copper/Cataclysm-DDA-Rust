@@ -5,6 +5,7 @@ mod cities;
 mod combat;
 mod items;
 mod mapgen;
+mod monsters;
 mod overmap;
 mod rivers;
 mod roads;
@@ -7881,19 +7882,26 @@ impl WorldState {
                 }
             }
             RangedTarget::Creature(target_id) => {
+                let damage = self.creature_damage_after_armor(
+                    target_id,
+                    "bullet",
+                    u32::from(ranged_weapon.damage)
+                        .checked_mul(1_000)
+                        .ok_or(SimError::NumericOverflow)?,
+                )?;
                 let creature = self
                     .creatures
                     .get_mut(&target_id)
                     .ok_or(SimError::UnknownCreature)?;
                 creature.hp = creature
                     .hp
-                    .checked_sub(i32::from(ranged_weapon.damage))
+                    .checked_sub(i32::from(damage))
                     .ok_or(SimError::NumericOverflow)?;
                 let remaining_hp = creature.hp;
                 events.push(self.make_event(WorldEventKind::CreatureDamaged {
                     source,
                     target: target_id,
-                    amount: ranged_weapon.damage,
+                    amount: damage,
                     remaining_hp,
                 })?);
                 if remaining_hp <= 0 {
@@ -9377,7 +9385,7 @@ impl WorldState {
             events.push(self.make_event(WorldEventKind::ActorMissedCreature { source, target })?);
             return Ok(());
         }
-        let damage = self.melee_damage(source)?;
+        let damage = self.actor_melee_damage_against_creature(source, target)?;
         if self.creature_death_needs_corpse_id(target, damage)? && !self.allocator.can_allocate() {
             events.push(self.rejection(
                 source,
@@ -9658,7 +9666,7 @@ impl WorldState {
             else {
                 continue;
             };
-            let damage = self.melee_damage(actor_id)?;
+            let damage = self.actor_melee_damage_against_creature(actor_id, target)?;
             let missed = self
                 .actor_creature_hit_spread(actor_id, target, self.tick.0)?
                 .is_some_and(|spread| spread < 0);
@@ -14261,7 +14269,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV79");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV80");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
