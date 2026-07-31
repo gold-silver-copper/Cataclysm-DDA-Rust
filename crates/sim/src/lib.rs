@@ -5131,6 +5131,16 @@ impl WorldState {
         field_type_id: &str,
         intensity: u8,
     ) -> Result<u8, SimError> {
+        self.add_field_with_age(position, field_type_id, intensity, 0)
+    }
+
+    pub(crate) fn add_field_with_age(
+        &mut self,
+        position: WorldPosition,
+        field_type_id: &str,
+        intensity: u8,
+        initial_age_seconds: i64,
+    ) -> Result<u8, SimError> {
         if intensity == 0 {
             return Err(SimError::InvalidField);
         }
@@ -5189,7 +5199,7 @@ impl WorldState {
                     FieldSnapshotV1 {
                         field_type_id: field_type_id.to_owned(),
                         intensity,
-                        age_seconds: 0,
+                        age_seconds: initial_age_seconds,
                         display_sequence,
                     },
                 );
@@ -5231,6 +5241,8 @@ impl WorldState {
                                 effect.area_fields.iter().chain(&effect.trail_fields)
                             })
                             .any(|field| !self.field_types.contains_key(&field.field_type_id))
+                        || (!attack.spell_field_type_id.is_empty()
+                            && !self.field_types.contains_key(&attack.spell_field_type_id))
                 })
             })
             || !mapgen::catalog_fits_one_id_reservation(
@@ -14714,7 +14726,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV103");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV104");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

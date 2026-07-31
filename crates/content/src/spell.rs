@@ -35,6 +35,12 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "min_duration",
     "max_duration",
     "duration_increment",
+    "field_id",
+    "field_chance",
+    "min_field_intensity",
+    "max_field_intensity",
+    "field_intensity_increment",
+    "field_intensity_variance",
     "message",
     "sound_description",
     "sound_type",
@@ -82,6 +88,12 @@ pub struct SpellDefinition {
     pub minimum_duration_moves: i32,
     pub maximum_duration_moves: i32,
     pub duration_increment_millionths: i64,
+    pub field_type_id: String,
+    pub field_chance: u32,
+    pub minimum_field_intensity: i32,
+    pub maximum_field_intensity: i32,
+    pub field_intensity_increment_millionths: i64,
+    pub field_intensity_variance_millionths: i64,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -112,6 +124,12 @@ impl Default for SpellDefinition {
             minimum_duration_moves: 0,
             maximum_duration_moves: 0,
             duration_increment_millionths: 0,
+            field_type_id: String::new(),
+            field_chance: 1,
+            minimum_field_intensity: 0,
+            maximum_field_intensity: 0,
+            field_intensity_increment_millionths: 0,
+            field_intensity_variance_millionths: 0,
             unsupported_fields: BTreeSet::new(),
             source: String::new(),
         }
@@ -119,6 +137,22 @@ impl Default for SpellDefinition {
 }
 
 impl SpellDefinition {
+    fn attack_field_is_supported(&self) -> bool {
+        if self.field_type_id.is_empty() {
+            return self.field_chance == 1
+                && self.minimum_field_intensity == 0
+                && self.maximum_field_intensity == 0
+                && self.field_intensity_increment_millionths == 0
+                && self.field_intensity_variance_millionths == 0;
+        }
+        (1..=1_000_000).contains(&self.field_chance)
+            && self.minimum_field_intensity > 0
+            && self.minimum_field_intensity <= self.maximum_field_intensity
+            && self.maximum_field_intensity <= 255
+            && self.field_intensity_increment_millionths.unsigned_abs() <= 1_000_000_000
+            && (0..=1_000_000).contains(&self.field_intensity_variance_millionths)
+    }
+
     #[must_use]
     pub fn supports_hostile_permanent_summoning(&self) -> bool {
         const ALLOWED_FLAGS: &[&str] = &[
@@ -156,6 +190,7 @@ impl SpellDefinition {
             && self.final_casting_time_moves >= 0
             && self.minimum_duration_moves == 0
             && self.maximum_duration_moves == 0
+            && self.field_type_id.is_empty()
     }
 
     #[must_use]
@@ -193,8 +228,9 @@ impl SpellDefinition {
             && self.maximum_aoe >= 0
             && self.base_casting_time_moves >= 0
             && self.final_casting_time_moves >= 0
-            && self.minimum_duration_moves == 0
-            && self.maximum_duration_moves == 0
+            && self.minimum_duration_moves >= 0
+            && self.maximum_duration_moves >= 0
+            && self.attack_field_is_supported()
     }
 
     #[must_use]
@@ -237,6 +273,7 @@ impl SpellDefinition {
             && self.maximum_duration_moves % 100 == 0
             && (!self.flags.contains("RANDOM_DURATION")
                 || self.minimum_duration_moves == self.maximum_duration_moves)
+            && self.attack_field_is_supported()
     }
 
     #[must_use]
@@ -270,6 +307,7 @@ impl SpellDefinition {
             && self.final_casting_time_moves >= 0
             && self.minimum_duration_moves == 0
             && self.maximum_duration_moves == 0
+            && self.field_type_id.is_empty()
     }
 }
 
@@ -393,6 +431,9 @@ fn load_one(
     } else {
         SpellDefinition::default()
     };
+    // Pinned spell loading deliberately does not inherit `field_id` even
+    // though the field's chance/intensity parameters do inherit.
+    spell.field_type_id.clear();
     spell.id = id.clone();
     spell.source = format!("{}#{id}", raw.file.upstream_path);
     apply_fields(&mut spell, &raw.object)?;
@@ -430,6 +471,17 @@ fn apply_fields(
             Ok(value) => spell.damage_type_id = value,
             Err(_) => {
                 spell.unsupported_fields.insert(String::from("damage_type"));
+            }
+        }
+    }
+    if let Some(value) = object.get("field_id") {
+        match value.as_str() {
+            Some("none") => spell.field_type_id.clear(),
+            Some(id) if !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control) => {
+                spell.field_type_id = id.to_owned();
+            }
+            _ => {
+                spell.unsupported_fields.insert(String::from("field_id"));
             }
         }
     }
@@ -471,6 +523,8 @@ fn apply_fields(
         ("final_casting_time", &mut spell.final_casting_time_moves),
         ("min_duration", &mut spell.minimum_duration_moves),
         ("max_duration", &mut spell.maximum_duration_moves),
+        ("min_field_intensity", &mut spell.minimum_field_intensity),
+        ("max_field_intensity", &mut spell.maximum_field_intensity),
     ] {
         if let Some(value) = object.get(field) {
             match parse_i32(value, &source, field) {
@@ -478,6 +532,18 @@ fn apply_fields(
                 Err(_) => {
                     spell.unsupported_fields.insert(field.to_owned());
                 }
+            }
+        }
+    }
+    if let Some(value) = object.get("field_chance") {
+        match parse_i32(value, &source, "field_chance")
+            .and_then(|value| u32::try_from(value).map_err(|_| invalid(&source, "field_chance")))
+        {
+            Ok(value) => spell.field_chance = value,
+            Err(_) => {
+                spell
+                    .unsupported_fields
+                    .insert(String::from("field_chance"));
             }
         }
     }
@@ -492,6 +558,14 @@ fn apply_fields(
         (
             "duration_increment",
             &mut spell.duration_increment_millionths,
+        ),
+        (
+            "field_intensity_increment",
+            &mut spell.field_intensity_increment_millionths,
+        ),
+        (
+            "field_intensity_variance",
+            &mut spell.field_intensity_variance_millionths,
         ),
     ] {
         if let Some(value) = object.get(field) {

@@ -703,27 +703,50 @@ impl WorldState {
         {
             return Ok(false);
         }
-        let targets = self
-            .actors
-            .iter()
-            .filter(|(_actor_id, actor)| {
-                actor.hp > 0
-                    && actor.position.z == center.z
-                    && ranged_distance(center, actor.position) <= u32::from(profile.spell_aoe)
-                    && self.has_clear_shot(center, actor.position)
-            })
-            .map(|(actor_id, _actor)| *actor_id)
-            .collect::<Vec<_>>();
-        for target in targets {
+        let radius = i32::from(profile.spell_aoe);
+        let mut area = Vec::new();
+        for offset_x in -radius..=radius {
+            for offset_y in -radius..=radius {
+                let Some(x) = center.x.checked_add(offset_x) else {
+                    continue;
+                };
+                let Some(y) = center.y.checked_add(offset_y) else {
+                    continue;
+                };
+                let position = WorldPosition { x, y, z: center.z };
+                if ranged_distance(center, position) > u32::from(profile.spell_aoe)
+                    || !self.has_clear_shot(center, position)
+                    || !self.chunks.contains_key(&position.chunk_and_local().0)
+                {
+                    continue;
+                }
+                let valid = self.actor_at(position).is_some_and(|actor_id| {
+                    self.actors.get(&actor_id).is_some_and(|actor| actor.hp > 0)
+                }) || (self.creature_at(position).is_none()
+                    && profile.spell_targets_ground);
+                if valid {
+                    area.push(position);
+                }
+            }
+        }
+        area.sort_unstable();
+        area.dedup();
+        let mut rng = self.named_rng(
+            b"creature-special-spell-attack",
+            &[source.as_u128()],
+            sequence,
+        );
+        for position in area {
+            if !profile.spell_field_type_id.is_empty() {
+                self.apply_creature_spell_field(position, profile, &mut rng, events)?;
+            }
+            let Some(target) = self.actor_at(position) else {
+                continue;
+            };
             if !profile.eoc_ids.is_empty() {
                 let _ = self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
                 continue;
             }
-            let mut rng = self.named_rng(
-                b"creature-special-spell-attack",
-                &[source.as_u128(), target.as_u128()],
-                sequence,
-            );
             if profile.damage.is_empty() {
                 self.apply_monster_attack_effects(target, "", false, &profile.effects, &mut rng)?;
                 continue;
@@ -797,6 +820,39 @@ impl WorldState {
             }
         }
         Ok(true)
+    }
+
+    fn apply_creature_spell_field(
+        &mut self,
+        position: WorldPosition,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        rng: &mut impl Rng,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let variance = u64::from(profile.spell_field_intensity)
+            .checked_mul(u64::from(profile.spell_field_intensity_variance_millionths))
+            .and_then(|value| value.checked_div(1_000_000))
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or(SimError::NumericOverflow)?;
+        let intensity = i32::from(profile.spell_field_intensity)
+            .checked_add(roll_inclusive_i32(-variance, variance, rng)?)
+            .ok_or(SimError::NumericOverflow)?;
+        if intensity <= 0 || roll_inclusive_u32(1, profile.spell_field_chance, rng)? != 1 {
+            return Ok(());
+        }
+        let initial_age = -i64::from(profile.spell_field_duration_turns);
+        let intensity = self.add_field_with_age(
+            position,
+            &profile.spell_field_type_id,
+            u8::try_from(intensity).map_err(|_| SimError::NumericOverflow)?,
+            initial_age,
+        )?;
+        events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+            position,
+            field_type_id: profile.spell_field_type_id.clone(),
+            intensity,
+        })?);
+        Ok(())
     }
 
     fn execute_creature_summon_spell(

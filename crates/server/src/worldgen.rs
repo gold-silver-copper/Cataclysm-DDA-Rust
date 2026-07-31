@@ -644,6 +644,12 @@ struct RuntimeMonsterSpellProfile {
     range: u32,
     aoe: u8,
     casting_time_moves: u32,
+    field_type_id: String,
+    field_chance: u32,
+    field_intensity: u8,
+    field_intensity_variance_millionths: u32,
+    field_duration_turns: u32,
+    targets_ground: bool,
 }
 
 fn runtime_monster_gun_profile(
@@ -1108,6 +1114,7 @@ fn finalized_spell_stat(
 fn runtime_monster_spell_profile(
     attack: &cdda_content::MonsterSpecialAttackDefinition,
     spells: &SpellRegistry,
+    fields: &FieldTypeRegistry,
     creature_eoc_ids: &BTreeSet<String>,
 ) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
     if attack.kind != MonsterSpecialAttackKind::Spell {
@@ -1181,14 +1188,24 @@ fn runtime_monster_spell_profile(
         spell.duration_increment_millionths,
         level,
     );
-    let Some((leveled_damage, range, aoe, casting_time, leveled_duration)) = leveled_damage
-        .zip(range)
-        .zip(aoe)
-        .zip(casting_time)
-        .zip(leveled_duration)
-        .map(|((((damage, range), aoe), casting_time), duration)| {
-            (damage, range, aoe, casting_time, duration)
-        })
+    let field_intensity = finalized_spell_stat(
+        spell.minimum_field_intensity,
+        spell.maximum_field_intensity,
+        spell.field_intensity_increment_millionths,
+        level,
+    );
+    let Some((leveled_damage, range, aoe, casting_time, leveled_duration, field_intensity)) =
+        leveled_damage
+            .zip(range)
+            .zip(aoe)
+            .zip(casting_time)
+            .zip(leveled_duration)
+            .zip(field_intensity)
+            .map(
+                |(((((damage, range), aoe), casting_time), duration), field_intensity)| {
+                    (damage, range, aoe, casting_time, duration, field_intensity)
+                },
+            )
     else {
         return Ok(None);
     };
@@ -1223,9 +1240,35 @@ fn runtime_monster_spell_profile(
             && minimum_duration_moves % 100 == 0
             && maximum_duration_moves % 100 == 0
             && (!random_duration || minimum_duration_moves == maximum_duration_moves)
-    } else {
+    } else if spell.field_type_id.is_empty() {
         minimum_duration_moves == 0 && maximum_duration_moves == 0
+    } else {
+        (0..=1_000_000_000).contains(&minimum_duration_moves)
+            && (minimum_duration_moves..=1_000_000_000).contains(&maximum_duration_moves)
+            && minimum_duration_moves == maximum_duration_moves
     };
+    let field_profile = if spell.field_type_id.is_empty() {
+        None
+    } else {
+        let field_intensity = u8::try_from(field_intensity).ok();
+        let variance = u32::try_from(spell.field_intensity_variance_millionths).ok();
+        field_intensity
+            .zip(variance)
+            .and_then(|(field_intensity, variance)| {
+                let variance_delta = u64::from(field_intensity)
+                    .checked_mul(u64::from(variance))?
+                    .checked_div(1_000_000)?;
+                let maximum_intensity =
+                    u8::try_from(u64::from(field_intensity).checked_add(variance_delta)?).ok()?;
+                let definition = fields.get(&spell.field_type_id)?;
+                (definition.unsupported_fields.is_empty()
+                    && definition.contact_effects_supported_at(maximum_intensity))
+                .then_some((field_intensity, variance))
+            })
+    };
+    if !spell.field_type_id.is_empty() && field_profile.is_none() {
+        return Ok(None);
+    }
     if !amount_is_bounded
         || !duration_is_bounded
         || !(0..=1_000).contains(&range)
@@ -1278,6 +1321,15 @@ fn runtime_monster_spell_profile(
         range: u32::try_from(range)?,
         aoe: u8::try_from(aoe)?,
         casting_time_moves: u32::try_from(casting_time)?,
+        field_type_id: spell.field_type_id.clone(),
+        field_chance: field_profile.map_or(0, |_| spell.field_chance),
+        field_intensity: field_profile.map_or(0, |profile| profile.0),
+        field_intensity_variance_millionths: field_profile.map_or(0, |profile| profile.1),
+        field_duration_turns: field_profile
+            .map(|_| u32::try_from(leveled_duration).map(|moves| moves.div_ceil(100)))
+            .transpose()?
+            .unwrap_or(0),
+        targets_ground: field_profile.is_some() && spell.valid_targets.contains("ground"),
     }))
 }
 
@@ -1366,12 +1418,11 @@ fn runtime_monster_catalog(
                     Some(attack.polymorph_monster_type_id.clone())
                 }
                 MonsterSpecialAttackKind::Spell => {
-                    runtime_monster_spell_profile(attack, spells, creature_eoc_ids)?.and_then(
-                        |profile| {
+                    runtime_monster_spell_profile(attack, spells, fields, creature_eoc_ids)?
+                        .and_then(|profile| {
                             (!profile.summoned_monster_type_id.is_empty())
                                 .then_some(profile.summoned_monster_type_id)
-                        },
-                    )
+                        })
                 }
                 MonsterSpecialAttackKind::Melee
                 | MonsterSpecialAttackKind::Bite
@@ -1545,7 +1596,7 @@ fn runtime_monster_catalog(
                     && attack.kind == MonsterSpecialAttackKind::Spell
             }) {
                 if let Some(profile) =
-                    runtime_monster_spell_profile(attack, spells, creature_eoc_ids)?
+                    runtime_monster_spell_profile(attack, spells, fields, creature_eoc_ids)?
                 {
                     spell_profiles.insert(attack.id.clone(), profile);
                 } else {
@@ -1744,6 +1795,18 @@ fn runtime_monster_catalog(
                         spell_random_summons: spell_profile
                             .is_some_and(|profile| profile.random_summons),
                         spell_aoe: spell_profile.map_or(0, |profile| profile.aoe),
+                        spell_field_type_id: spell_profile
+                            .map(|profile| profile.field_type_id.clone())
+                            .unwrap_or_default(),
+                        spell_field_chance: spell_profile.map_or(0, |profile| profile.field_chance),
+                        spell_field_intensity: spell_profile
+                            .map_or(0, |profile| profile.field_intensity),
+                        spell_field_intensity_variance_millionths: spell_profile
+                            .map_or(0, |profile| profile.field_intensity_variance_millionths),
+                        spell_field_duration_turns: spell_profile
+                            .map_or(0, |profile| profile.field_duration_turns),
+                        spell_targets_ground: spell_profile
+                            .is_some_and(|profile| profile.targets_ground),
                         gun_type_id: gun_profile
                             .map(|_| attack.gun_type_id.clone())
                             .unwrap_or_default(),

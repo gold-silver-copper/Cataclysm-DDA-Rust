@@ -954,7 +954,18 @@ fn open_world(
         .flat_map(|effect| effect.area_fields.iter().chain(&effect.trail_fields))
         .map(|field| field.field_type_id.clone())
         .collect::<BTreeSet<_>>();
-    for field_type_id in projectile_field_type_ids {
+    let spell_field_type_ids = worldgen
+        .monster_prototypes
+        .iter()
+        .flat_map(|prototype| prototype.special_attacks.iter())
+        .filter_map(|attack| {
+            (!attack.spell_field_type_id.is_empty()).then(|| attack.spell_field_type_id.clone())
+        });
+    for field_type_id in projectile_field_type_ids
+        .into_iter()
+        .chain(spell_field_type_ids)
+        .collect::<BTreeSet<_>>()
+    {
         let definition = fields.get(&field_type_id).ok_or_else(|| {
             format!("monster projectile references unknown field type {field_type_id}")
         })?;

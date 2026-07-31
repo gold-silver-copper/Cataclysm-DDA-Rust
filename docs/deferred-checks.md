@@ -53,8 +53,9 @@ Run only when the user explicitly requests a verification checkpoint.
   stat/speed/limb modifiers across ordinary, special and projectile hits;
   bounded multi-strike and spread-damage selection, shared-roll order and divided damage;
   supported creature-alpha/survivor-beta EOC spell closure and multi-target
-  activation; and combat scenarios at protocol 127/schema 105,
-  CanonicalStateV103,
+  activation; spell-created blast fields including chance, intensity variance,
+  ground/hostile area filtering, stacking, and negative-age decay delay; and
+  combat scenarios at protocol 128/schema 106, CanonicalStateV104,
   canonical-event-V26.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
@@ -78,7 +79,7 @@ Run only when the user explicitly requests a verification checkpoint.
   creature effect expiry and unsafe target-context/delayed graph rejection,
   two-client item activation, target/beta effect and variable reads and writes,
   target-context reference closure, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 127/schema 105, CanonicalStateV103,
+  expiry, stale-response, protocol 128/schema 106, CanonicalStateV104,
   canonical-event-V26, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
@@ -88,8 +89,8 @@ Run only when the user explicitly requests a verification checkpoint.
   stat/speed/limb-score modifier truncation and scaling, affected movement,
   melee, dodge, reading and disassembly, stationary/disconnected exposure, unsupported
   environmental/immunity fail-closed admission, death/activity-interruption,
-  CanonicalStateV103, canonical-event-V26, SQLite, portable replay, and
-  client-visible actor state/event coverage for protocol 127/schema 105.
+  CanonicalStateV104, canonical-event-V26, SQLite, portable replay, and
+  client-visible actor state/event coverage for protocol 128/schema 106.
 - Content test-target cleanup: `cargo check -p cdda-content --tests` currently
   fails in untouched `material.rs` because one test-only
   `MaterialThermalDefinition` literal lacks `damage_resistance_milli`; the

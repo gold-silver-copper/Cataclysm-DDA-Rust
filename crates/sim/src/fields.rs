@@ -71,10 +71,11 @@ impl WorldState {
             let age_seconds = previous_age
                 .checked_add(1)
                 .ok_or(SimError::NumericOverflow)?;
-            let decays = if field_type.half_life_seconds == 0 {
+            let decay_active = age_seconds > 0;
+            let decays = if !decay_active || field_type.half_life_seconds == 0 {
                 false
             } else if field_type.linear_half_life {
-                age_seconds >= field_type.half_life_seconds
+                u64::try_from(age_seconds).is_ok_and(|age| age >= field_type.half_life_seconds)
             } else {
                 let threshold = exponential_decay_threshold(field_type.half_life_seconds);
                 let mut hasher = blake3::Hasher::new_derive_key("cdda-rust FieldDecayV1");

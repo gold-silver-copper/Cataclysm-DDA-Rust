@@ -91,7 +91,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 127;
+pub const PROTOCOL_VERSION: u16 = 128;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2984,7 +2984,9 @@ pub struct FieldTypeSnapshotV1 {
 pub struct FieldSnapshotV1 {
     pub field_type_id: String,
     pub intensity: u8,
-    pub age_seconds: u64,
+    /// Pinned field age. Spell-created fields begin negative so their spell
+    /// duration delays normal field decay.
+    pub age_seconds: i64,
     pub display_sequence: u64,
 }
 
@@ -3367,6 +3369,13 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub spell_maximum_summons: u16,
     pub spell_random_summons: bool,
     pub spell_aoe: u8,
+    /// Optional field created on every valid tile in the spell area.
+    pub spell_field_type_id: String,
+    pub spell_field_chance: u32,
+    pub spell_field_intensity: u8,
+    pub spell_field_intensity_variance_millionths: u32,
+    pub spell_field_duration_turns: u32,
+    pub spell_targets_ground: bool,
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
     /// Empty for ammo-free pseudo guns; otherwise the concrete item ID whose
@@ -5614,6 +5623,17 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             let common = attack.spell_aoe <= 32
                                 && ((attack.spell_target_self && attack.range == 0)
                                     || (!attack.spell_target_self && attack.range > 0));
+                            let no_field = attack.spell_field_type_id.is_empty()
+                                && attack.spell_field_chance == 0
+                                && attack.spell_field_intensity == 0
+                                && attack.spell_field_intensity_variance_millionths == 0
+                                && attack.spell_field_duration_turns == 0
+                                && !attack.spell_targets_ground;
+                            let field = valid_worldgen_id(&attack.spell_field_type_id)
+                                && (1..=1_000_000).contains(&attack.spell_field_chance)
+                                && attack.spell_field_intensity > 0
+                                && attack.spell_field_intensity_variance_millionths <= 1_000_000
+                                && attack.spell_field_duration_turns <= 10_000_000;
                             let summon = valid_worldgen_id(&attack.spell_summoned_monster_type_id)
                                 && (1..=64).contains(&attack.spell_minimum_summons)
                                 && attack.spell_minimum_summons <= attack.spell_maximum_summons
@@ -5626,7 +5646,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.maximum_damage_multiplier_millionths == 0
                                 && attack.damage.is_empty()
                                 && attack.effects.is_empty()
-                                && attack.eoc_ids.is_empty();
+                                && attack.eoc_ids.is_empty()
+                                && no_field;
                             let typed_damage = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -5646,7 +5667,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.damage[0].constant_damage_multiplier_millionths
                                     == 1_000_000
                                 && attack.effects.is_empty()
-                                && attack.eoc_ids.is_empty();
+                                && attack.eoc_ids.is_empty()
+                                && (no_field || field);
                             let status_effect = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -5664,7 +5686,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.effects[0].duration_minimum_turns > 0
                                 && attack.effects[0].intensity_minimum == 1
                                 && attack.effects[0].intensity_maximum == 1
-                                && attack.eoc_ids.is_empty();
+                                && attack.eoc_ids.is_empty()
+                                && (no_field || field);
                             let eoc = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -5674,7 +5697,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.maximum_damage_multiplier_millionths == 0
                                 && attack.damage.is_empty()
                                 && attack.effects.is_empty()
-                                && !attack.eoc_ids.is_empty();
+                                && !attack.eoc_ids.is_empty()
+                                && no_field;
                             common && (summon || typed_damage || status_effect || eoc)
                         } else {
                             attack.spell_summoned_monster_type_id.is_empty()
@@ -5683,6 +5707,12 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.spell_maximum_summons == 0
                                 && !attack.spell_random_summons
                                 && attack.spell_aoe == 0
+                                && attack.spell_field_type_id.is_empty()
+                                && attack.spell_field_chance == 0
+                                && attack.spell_field_intensity == 0
+                                && attack.spell_field_intensity_variance_millionths == 0
+                                && attack.spell_field_duration_turns == 0
+                                && !attack.spell_targets_ground
                         })
                         && attack.gun_ranges.len() <= 64
                         && attack.infection_chance_millionths <= 1_000_000
