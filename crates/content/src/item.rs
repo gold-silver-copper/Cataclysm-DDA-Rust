@@ -127,6 +127,11 @@ pub struct ItemDefinition {
     /// Strict `effect_on_conditions` actors retained with stable top-level
     /// references and typed inline activation EOCs.
     pub eoc_actions: Vec<ItemEocActionDefinition>,
+    /// Strict finalized `place_monster` actor. The vector is empty or has one
+    /// element because pinned use methods are keyed by action type.
+    /// Skill identities use a sorted set because pinned C++ stores them in
+    /// `std::set<skill_id>` and consumes them in that order.
+    pub place_monster_actions: Vec<ItemPlaceMonsterActionDefinition>,
     /// Whether the finalized `use_action` value also contains any action that
     /// is not an inline transform. Strict runtime projections use this to
     /// avoid silently discarding link-up, firestarter, or actor behavior.
@@ -756,6 +761,22 @@ pub struct ItemEocActionDefinition {
     pub consume: bool,
     pub need_worn: bool,
     pub need_wielding: bool,
+    pub deferred_fields: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ItemPlaceMonsterActionDefinition {
+    pub monster_id: String,
+    pub friendly_msg: String,
+    pub hostile_msg: String,
+    pub difficulty: i32,
+    pub moves: i32,
+    pub place_randomly: bool,
+    pub is_pet: bool,
+    pub need_charges: i32,
+    pub skills: BTreeSet<String>,
+    /// Unrecognized actor members are retained so runtime admission can stay
+    /// fail-closed without discarding the rest of the finalized item.
     pub deferred_fields: BTreeSet<String>,
 }
 
@@ -2125,6 +2146,7 @@ fn apply_transform_action_projection(
     item.has_unsupported_use_actions = false;
     item.healing_actions.clear();
     item.eoc_actions.clear();
+    item.place_monster_actions.clear();
     const PROJECTED_OR_COSMETIC_TRANSFORM_FIELDS: &[&str] = &[
         "type",
         "target",
@@ -2151,6 +2173,17 @@ fn apply_transform_action_projection(
         }
         if action_type == Some("effect_on_conditions") {
             item.eoc_actions.push(parse_eoc_action(action, source)?);
+            continue;
+        }
+        if action_type == Some("place_monster") {
+            if !item.place_monster_actions.is_empty() {
+                // Pinned `use_methods` is keyed by action type. A second
+                // `place_monster` fails insertion rather than coexisting.
+                return Err(invalid_field(source, "use_action.place_monster"));
+            }
+            let action = parse_place_monster_action(action, source)?;
+            item.has_unsupported_use_actions |= !action.deferred_fields.is_empty();
+            item.place_monster_actions.push(action);
             continue;
         }
         if action_type != Some("transform") {
@@ -2205,6 +2238,103 @@ fn apply_transform_action_projection(
     }
     item.transform_actions = actions;
     Ok(())
+}
+
+fn parse_place_monster_action(
+    action: &Map<String, Value>,
+    source: &str,
+) -> Result<ItemPlaceMonsterActionDefinition, ItemRegistryError> {
+    const SUPPORTED: &[&str] = &[
+        "type",
+        "monster_id",
+        "friendly_msg",
+        "hostile_msg",
+        "difficulty",
+        "moves",
+        "place_randomly",
+        "is_pet",
+        "need_charges",
+        "skills",
+    ];
+    let field_context = |field: &str| format!("use_action.{field}");
+    let integer = |field: &str, default: i32| -> Result<i32, ItemRegistryError> {
+        action.get(field).map_or(Ok(default), |value| {
+            i32::try_from(
+                value
+                    .as_i64()
+                    .ok_or_else(|| invalid_field(source, &field_context(field)))?,
+            )
+            .map_err(|_| invalid_field(source, &field_context(field)))
+        })
+    };
+    let boolean = |field: &str, default: bool| -> Result<bool, ItemRegistryError> {
+        action.get(field).map_or(Ok(default), |value| {
+            value
+                .as_bool()
+                .ok_or_else(|| invalid_field(source, &field_context(field)))
+        })
+    };
+    let message = |field: &str| -> Result<String, ItemRegistryError> {
+        let Some(value) = action.get(field) else {
+            return Ok(String::new());
+        };
+        match value {
+            Value::String(value) => Ok(value.clone()),
+            Value::Object(value) => ["str", "str_sp", "str_pl"]
+                .into_iter()
+                .find_map(|key| value.get(key).and_then(Value::as_str))
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_field(source, &field_context(field))),
+            _ => Err(invalid_field(source, &field_context(field))),
+        }
+    };
+
+    let monster_id = action
+        .get("monster_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or_else(|| invalid_field(source, "use_action.monster_id"))?
+        .to_owned();
+    let need_charges = integer("need_charges", 0)?;
+    if need_charges < 0 {
+        return Err(invalid_field(source, "use_action.need_charges"));
+    }
+    let skills = action.get("skills").map_or_else(
+        || Ok(BTreeSet::new()),
+        |value| {
+            value
+                .as_array()
+                .ok_or_else(|| invalid_field(source, "use_action.skills"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|id| {
+                            !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid_field(source, "use_action.skills"))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()
+        },
+    )?;
+
+    Ok(ItemPlaceMonsterActionDefinition {
+        monster_id,
+        friendly_msg: message("friendly_msg")?,
+        hostile_msg: message("hostile_msg")?,
+        difficulty: integer("difficulty", 0)?,
+        moves: integer("moves", 100)?,
+        place_randomly: boolean("place_randomly", false)?,
+        is_pet: boolean("is_pet", false)?,
+        need_charges,
+        skills,
+        deferred_fields: action
+            .keys()
+            .filter(|field| !field.starts_with("//") && !SUPPORTED.contains(&field.as_str()))
+            .cloned()
+            .collect(),
+    })
 }
 
 fn parse_eoc_action(
