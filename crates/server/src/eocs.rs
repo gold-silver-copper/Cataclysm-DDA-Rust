@@ -350,6 +350,23 @@ fn runtime_effect_body_parts_are_supported(
     })
 }
 
+pub(super) fn runtime_dialogue_effects_are_supported(
+    effects: &[EocEffectDefinition],
+    anatomy: &AnatomyDefinitionV1,
+) -> bool {
+    let runtime = effects.iter().map(runtime_effect).collect::<Vec<_>>();
+    let valid_part = |body_part_id: &Option<String>| {
+        body_part_id.as_ref().is_none_or(|body_part_id| {
+            anatomy
+                .parts
+                .iter()
+                .any(|part| part.body_part_id == *body_part_id)
+        })
+    };
+    cdda_protocol::eoc_effects_are_valid(&runtime)
+        && runtime_effect_body_parts_are_supported(&runtime, &valid_part)
+}
+
 fn runtime_eoc_definition(definition: &EffectOnConditionDefinition) -> EocDefinitionV1 {
     EocDefinitionV1 {
         eoc_id: definition.id.clone(),
@@ -504,7 +521,7 @@ pub(super) fn runtime_condition(condition: &EocConditionDefinition) -> EocCondit
     }
 }
 
-fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
+pub(super) fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
     match effect {
         EocEffectDefinition::Message { text } => EocEffectV1::Message { text: text.clone() },
         EocEffectDefinition::AddEffect {

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
+use crate::eoc::{EocEffectDefinition, parse_inline_effect_list};
 use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
 
 const NPC_FIELDS: &[&str] = &[
@@ -20,7 +21,7 @@ const NPC_FIELDS: &[&str] = &[
     "chat",
 ];
 const TOPIC_FIELDS: &[&str] = &["type", "id", "dynamic_line", "responses"];
-const RESPONSE_FIELDS: &[&str] = &["text", "topic", "opinion"];
+const RESPONSE_FIELDS: &[&str] = &["text", "topic", "opinion", "effect"];
 const OPINION_FIELDS: &[&str] = &["trust", "fear", "value", "anger", "owed"];
 
 pub(crate) fn npc_field_is_implemented(field: &str) -> bool {
@@ -45,6 +46,7 @@ pub struct DialogueResponseDefinition {
     pub text: String,
     pub next_topic_id: String,
     pub opinion: DialogueOpinionDefinition,
+    pub effects: Vec<EocEffectDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,6 +277,9 @@ fn response_shapes_are_supported(value: &Value) -> bool {
                                     })
                             })
                         })
+                        && response.get("effect").is_none_or(|effect| {
+                            parse_inline_effect_list(effect, "effect").is_some()
+                        })
                 })
             })
     })
@@ -331,6 +336,14 @@ fn responses(
                 opinion: response
                     .get("opinion")
                     .map(|value| opinion(value, file))
+                    .transpose()?
+                    .unwrap_or_default(),
+                effects: response
+                    .get("effect")
+                    .map(|effect| {
+                        parse_inline_effect_list(effect, "effect")
+                            .ok_or_else(|| invalid(file, "effect"))
+                    })
                     .transpose()?
                     .unwrap_or_default(),
             })

@@ -80,7 +80,7 @@ mod use_actions;
 mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
-use eocs::runtime_eoc_catalog;
+use eocs::{runtime_dialogue_effects_are_supported, runtime_effect, runtime_eoc_catalog};
 use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
     runtime_bash_item_group_catalog, runtime_bash_item_group_source,
@@ -862,7 +862,8 @@ fn open_world(
     };
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
-    let (npc_templates, dialogue_topics) = runtime_npc_dialogue(content.dialogue)?;
+    let (npc_templates, dialogue_topics) =
+        runtime_npc_dialogue(content.dialogue, &eoc_catalog.0, &actor_anatomy)?;
     initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
     initial.register_actor_anatomy(actor_anatomy)?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
@@ -1691,6 +1692,8 @@ fn build_reading_catalog(
 
 fn runtime_npc_dialogue(
     registry: &DialogueRegistry,
+    eoc_definitions: &[cdda_protocol::EocDefinitionV1],
+    anatomy: &cdda_protocol::AnatomyDefinitionV1,
 ) -> Result<
     (
         Vec<cdda_protocol::NpcTemplateV1>,
@@ -1698,6 +1701,38 @@ fn runtime_npc_dialogue(
     ),
     Box<dyn std::error::Error>,
 > {
+    let eocs = eoc_definitions
+        .iter()
+        .map(|definition| (definition.eoc_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let mut unavailable_dialogue_eocs = eoc_definitions
+        .iter()
+        .filter(|definition| {
+            definition.recurrence.is_some()
+                || definition.event_trigger.is_some()
+                || cdda_protocol::eoc_definition_requires_target_context(definition)
+                || cdda_protocol::eoc_effects_contain_confirmation(&definition.effects)
+                || cdda_protocol::eoc_effects_contain_confirmation(&definition.false_effects)
+        })
+        .map(|definition| definition.eoc_id.as_str())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let inherited = eoc_definitions
+            .iter()
+            .filter(|definition| {
+                !unavailable_dialogue_eocs.contains(definition.eoc_id.as_str())
+                    && definition
+                        .referenced_eocs()
+                        .iter()
+                        .any(|id| unavailable_dialogue_eocs.contains(*id))
+            })
+            .map(|definition| definition.eoc_id.as_str())
+            .collect::<Vec<_>>();
+        if inherited.is_empty() {
+            break;
+        }
+        unavailable_dialogue_eocs.extend(inherited);
+    }
     let done = cdda_protocol::DialogueTopicV1 {
         topic_id: String::from("TALK_DONE"),
         dynamic_line: String::from("The conversation has reached its end."),
@@ -1706,6 +1741,7 @@ fn runtime_npc_dialogue(
             text: String::from("Goodbye."),
             next_topic_id: String::from("TALK_DONE"),
             opinion_delta: cdda_protocol::NpcOpinionV1::default(),
+            effects: Vec::new(),
         }],
     };
     let mut topics = registry
@@ -1724,6 +1760,22 @@ fn runtime_npc_dialogue(
                             anger: response.opinion.anger,
                             owed: response.opinion.owed,
                         })
+                        && runtime_dialogue_effects_are_supported(&response.effects, anatomy)
+                        && {
+                            let effects = response
+                                .effects
+                                .iter()
+                                .map(runtime_effect)
+                                .collect::<Vec<_>>();
+                            !cdda_protocol::eoc_effects_require_target_context(&effects)
+                                && !cdda_protocol::eoc_effects_contain_confirmation(&effects)
+                                && cdda_protocol::eoc_effect_referenced_ids(&effects)
+                                    .iter()
+                                    .all(|id| {
+                                        eocs.contains_key(id)
+                                            && !unavailable_dialogue_eocs.contains(*id)
+                                    })
+                        }
                 })
         })
         .map(|(topic_id, topic)| {
@@ -1747,6 +1799,7 @@ fn runtime_npc_dialogue(
                                 anger: response.opinion.anger,
                                 owed: response.opinion.owed,
                             },
+                            effects: response.effects.iter().map(runtime_effect).collect(),
                         })
                         .collect(),
                 },

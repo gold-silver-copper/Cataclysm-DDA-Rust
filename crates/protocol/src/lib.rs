@@ -35,6 +35,8 @@ pub use eocs::{
     creature_eoc_condition_is_supported, creature_eoc_supported_ids, eoc_catalog_is_valid,
     eoc_condition_is_valid, eoc_condition_requires_target_context,
     eoc_confirmation_branches_are_valid, eoc_definition_requires_target_context,
+    eoc_effect_referenced_ids, eoc_effects_are_valid, eoc_effects_contain_confirmation,
+    eoc_effects_require_target_context,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -98,7 +100,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 129;
+pub const PROTOCOL_VERSION: u16 = 130;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";

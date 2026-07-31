@@ -532,6 +532,46 @@ fn effects_require_target_context(effects: &[EocEffectV1]) -> bool {
 }
 
 #[must_use]
+pub fn eoc_effects_require_target_context(effects: &[EocEffectV1]) -> bool {
+    effects_require_target_context(effects)
+}
+
+#[must_use]
+pub fn eoc_effects_contain_confirmation(effects: &[EocEffectV1]) -> bool {
+    effects.iter().any(|effect| match effect {
+        EocEffectV1::Confirmation { .. } => true,
+        EocEffectV1::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        } => {
+            eoc_effects_contain_confirmation(then_effects)
+                || eoc_effects_contain_confirmation(else_effects)
+        }
+        EocEffectV1::Message { .. }
+        | EocEffectV1::AddEffect { .. }
+        | EocEffectV1::RemoveEffects { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::AddTargetEffect { .. }
+        | EocEffectV1::RemoveTargetEffects { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::MathAssignment { .. }
+        | EocEffectV1::RunEocs { .. } => false,
+    })
+}
+
+#[must_use]
+pub fn eoc_effect_referenced_ids(effects: &[EocEffectV1]) -> Vec<&str> {
+    let mut references = Vec::new();
+    for effect in effects {
+        effect.collect_references(&mut references);
+    }
+    references
+}
+
+#[must_use]
 pub fn creature_eoc_supported_ids(definitions: &[EocDefinitionV1]) -> BTreeSet<String> {
     let mut supported = definitions
         .iter()
@@ -744,6 +784,12 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             }
         }
     })
+}
+
+#[must_use]
+pub fn eoc_effects_are_valid(effects: &[EocEffectV1]) -> bool {
+    let mut nodes = 0;
+    valid_effects(effects, 0, &mut nodes) && nodes <= MAX_EOC_TREE_NODES
 }
 
 #[must_use]

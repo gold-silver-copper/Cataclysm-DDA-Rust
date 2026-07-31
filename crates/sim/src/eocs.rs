@@ -6,9 +6,10 @@ use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, CreatureId, EocActorStatV1,
     EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1,
     EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathAssignmentTargetV1, EocMathExpressionV1,
-    EocStringValueV1, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
-    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, ScheduledEocV1, SimTick, WORLDGEN_OMT_SIZE,
-    WorldEvent, WorldEventKind, eoc_catalog_is_valid,
+    EocStringValueV1, InteractionId, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
+    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, NpcId, ScheduledEocV1, SimTick,
+    WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid, eoc_effects_are_valid,
+    eoc_effects_contain_confirmation, eoc_effects_require_target_context,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -349,6 +350,79 @@ impl WorldState {
             )?;
         } else {
             self.finish_eoc_item_activation(actor_id, item_id, &profile, events)?;
+        }
+        Ok(true)
+    }
+
+    pub(super) fn apply_dialogue_response_effects(
+        &mut self,
+        actor_id: ActorId,
+        npc_id: NpcId,
+        interaction_id: InteractionId,
+        sequence: CommandSequence,
+        effects: &[EocEffectV1],
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        if effects.is_empty() {
+            return Ok(true);
+        }
+        let valid_part = |body_part_id: &Option<String>| {
+            body_part_id.as_ref().is_none_or(|body_part_id| {
+                self.actor_anatomy
+                    .parts
+                    .iter()
+                    .any(|part| part.body_part_id == *body_part_id)
+            })
+        };
+        if !eoc_effects_are_valid(effects)
+            || eoc_effects_require_target_context(effects)
+            || eoc_effects_contain_confirmation(effects)
+            || !effects_body_parts_are_valid(effects, &valid_part)
+        {
+            return Ok(false);
+        }
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let mut execution = EocExecution {
+            actor: eoc_actor_context(actor),
+            effects: actor.effects.clone(),
+            variables: actor.eoc_variables.clone(),
+            target_effects: None,
+            target_variables: None,
+            next_schedule_sequence: actor.next_eoc_schedule_sequence,
+            scheduled_eocs: actor.scheduled_eocs.clone(),
+            inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
+            messages: Vec::new(),
+            interactive: false,
+            confirmation: None,
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(
+                b"npc-dialogue-effects",
+                &[
+                    actor_id.as_u128(),
+                    npc_id.as_u128(),
+                    interaction_id.as_u128(),
+                ],
+                sequence.0,
+            ),
+        };
+        if execute_effects(&self.eoc_definitions, effects, &mut execution, 0).is_err()
+            || execution.effects.len() > 1_024
+            || execution.confirmation.is_some()
+        {
+            return Ok(false);
+        }
+        execution.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        execution
+            .scheduled_eocs
+            .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        let messages = std::mem::take(&mut execution.messages);
+        self.commit_eoc_execution_state(actor_id, &mut execution)?;
+        for text in messages {
+            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
         }
         Ok(true)
     }

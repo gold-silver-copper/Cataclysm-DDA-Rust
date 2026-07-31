@@ -195,6 +195,16 @@ impl WorldState {
         else {
             return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
         };
+        if !self.apply_dialogue_response_effects(
+            actor_id,
+            npc_id,
+            interaction_id,
+            sequence,
+            &response.effects,
+            events,
+        )? {
+            return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
+        }
         let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
         npc.social.insert(actor_id, opinion);
         self.actors
