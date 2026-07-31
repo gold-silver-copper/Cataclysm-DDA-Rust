@@ -6105,31 +6105,12 @@ fn valid_worldgen_monster_extra_spell_effect(effect: &WorldgenMonsterExtraSpellE
         && effect.field_intensity > 0
         && effect.field_intensity_variance_millionths <= 1_000_000
         && effect.field_duration_turns <= 10_000_000;
-    let summon = valid_worldgen_id(&effect.summoned_monster_type_id)
-        && (1..=64).contains(&effect.minimum_summons)
-        && effect.minimum_summons <= effect.maximum_summons
-        && effect.maximum_summons <= 64
-        && effect.minimum_damage_multiplier_millionths == 0
-        && effect.maximum_damage_multiplier_millionths == 0
-        && effect.damage.is_empty()
-        && effect.effects.is_empty()
-        && effect.eoc_ids.is_empty()
-        && effect.targets_ground
-        && !effect.targets_hostile
-        && no_field;
-    let typed_damage = effect.summoned_monster_type_id.is_empty()
-        && !effect.target_self
-        && effect.minimum_summons == 0
-        && effect.maximum_summons == 0
-        && !effect.random_summons
-        && effect.minimum_damage_multiplier_millionths > 0
-        && effect.minimum_damage_multiplier_millionths
-            <= effect.maximum_damage_multiplier_millionths
-        && effect.maximum_damage_multiplier_millionths <= 1_000_000_000
-        && !effect.damage.is_empty()
-        && effect.effects.is_empty()
-        && effect.eoc_ids.is_empty()
-        && (effect.targets_hostile || field);
+    let summon = false;
+    // Pinned typed spell attacks require projectile accuracy, block, dodge,
+    // spell resistance, and creature-general body-part resolution.  Reject
+    // persisted or hostile canonical catalogs until that complete kernel is
+    // represented rather than accepting the older direct-damage shortcut.
+    let typed_damage = false;
     let status = effect.summoned_monster_type_id.is_empty()
         && !effect.target_self
         && effect.minimum_summons == 0
@@ -6149,6 +6130,8 @@ fn valid_worldgen_monster_extra_spell_effect(effect: &WorldgenMonsterExtraSpellE
         && effect.effects[0].intensity_minimum == 1
         && effect.effects[0].intensity_maximum == 1
         && effect.eoc_ids.is_empty()
+        && effect.shape == WorldgenMonsterSpellShapeV1::Blast
+        && effect.aoe == 0
         && effect.targets_hostile
         && !effect.targets_ground
         && !effect.targets_self;
@@ -6162,6 +6145,8 @@ fn valid_worldgen_monster_extra_spell_effect(effect: &WorldgenMonsterExtraSpellE
         && effect.damage.is_empty()
         && effect.effects.is_empty()
         && !effect.eoc_ids.is_empty()
+        && effect.shape == WorldgenMonsterSpellShapeV1::Blast
+        && effect.aoe == 0
         && effect.targets_hostile
         && !effect.targets_ground
         && !effect.targets_self;
@@ -6177,7 +6162,11 @@ fn valid_worldgen_monster_extra_spell_effect(effect: &WorldgenMonsterExtraSpellE
         && effect.targets_ground
         && field;
     shape_is_valid
-        && ((effect.target_self && effect.range == 0) || (!effect.target_self && effect.range > 0))
+        && effect.target_self
+        && effect.shape == WorldgenMonsterSpellShapeV1::Blast
+        && effect.range == 0
+        && effect.targets_self
+        && !effect.targets_hostile
         && effect.range <= 1_000
         && (effect.targets_hostile || effect.targets_ground || effect.targets_self)
         && valid_worldgen_monster_damage(&effect.damage)
@@ -6186,6 +6175,36 @@ fn valid_worldgen_monster_extra_spell_effect(effect: &WorldgenMonsterExtraSpellE
         && effect.eoc_ids.iter().all(|id| valid_worldgen_id(id))
         && (no_field || field)
         && (summon || typed_damage || status || eoc || field_only)
+}
+
+fn worldgen_monster_spell_geometry_work(
+    shape: WorldgenMonsterSpellShapeV1,
+    range: u32,
+    aoe: u16,
+) -> Option<u64> {
+    match shape {
+        WorldgenMonsterSpellShapeV1::Blast => {
+            let diameter = u64::from(aoe).checked_mul(2)?.checked_add(1)?;
+            diameter.checked_mul(diameter)
+        }
+        WorldgenMonsterSpellShapeV1::Line | WorldgenMonsterSpellShapeV1::Cone => {
+            u64::from(range).checked_mul(u64::from(aoe).checked_add(1)?)
+        }
+    }
+}
+
+fn worldgen_monster_spell_work_is_bounded(attack: &WorldgenMonsterSpecialAttackV1) -> bool {
+    std::iter::once((attack.spell_shape, attack.range, attack.spell_aoe))
+        .chain(
+            attack
+                .spell_extra_effects
+                .iter()
+                .map(|effect| (effect.shape, effect.range, effect.aoe)),
+        )
+        .try_fold(0_u64, |total, (shape, range, aoe)| {
+            total.checked_add(worldgen_monster_spell_geometry_work(shape, range, aoe)?)
+        })
+        .is_some_and(|work| work <= 100_000)
 }
 
 fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
@@ -6274,8 +6293,11 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 }
                             };
                             let common = shape_is_valid
-                                && ((attack.spell_target_self && attack.range == 0)
-                                    || (!attack.spell_target_self && attack.range > 0))
+                                && attack.spell_target_self
+                                && attack.spell_shape == WorldgenMonsterSpellShapeV1::Blast
+                                && attack.range == 0
+                                && attack.spell_targets_self
+                                && !attack.spell_targets_hostile
                                 && attack.range <= 1_000
                                 && (attack.spell_targets_hostile
                                     || attack.spell_targets_ground
@@ -6290,31 +6312,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.spell_field_intensity > 0
                                 && attack.spell_field_intensity_variance_millionths <= 1_000_000
                                 && attack.spell_field_duration_turns <= 10_000_000;
-                            let summon = valid_worldgen_id(&attack.spell_summoned_monster_type_id)
-                                && (1..=64).contains(&attack.spell_minimum_summons)
-                                && attack.spell_minimum_summons <= attack.spell_maximum_summons
-                                && attack.spell_maximum_summons <= 64
-                                && (1..=360).contains(&attack.spell_aoe)
-                                && attack.minimum_damage_multiplier_millionths == 0
-                                && attack.maximum_damage_multiplier_millionths == 0
-                                && attack.damage.is_empty()
-                                && attack.effects.is_empty()
-                                && attack.eoc_ids.is_empty()
-                                && attack.spell_targets_ground
-                                && !attack.spell_targets_hostile
-                                && no_field;
-                            let typed_damage = attack.spell_summoned_monster_type_id.is_empty()
-                                && !attack.spell_target_self
-                                && attack.spell_minimum_summons == 0
-                                && attack.spell_maximum_summons == 0
-                                && !attack.spell_random_summons
-                                && attack.minimum_damage_multiplier_millionths > 0
-                                && attack.minimum_damage_multiplier_millionths
-                                    <= attack.maximum_damage_multiplier_millionths
-                                && !attack.damage.is_empty()
-                                && attack.effects.is_empty()
-                                && attack.eoc_ids.is_empty()
-                                && (attack.spell_targets_hostile || field);
+                            let summon = false;
+                            let typed_damage = false;
                             let status_effect = attack.spell_summoned_monster_type_id.is_empty()
                                 && !attack.spell_target_self
                                 && attack.spell_minimum_summons == 0
@@ -6335,6 +6334,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.effects[0].intensity_minimum == 1
                                 && attack.effects[0].intensity_maximum == 1
                                 && attack.eoc_ids.is_empty()
+                                && attack.spell_shape == WorldgenMonsterSpellShapeV1::Blast
+                                && attack.spell_aoe == 0
                                 && attack.spell_targets_hostile
                                 && !attack.spell_targets_ground
                                 && !attack.spell_targets_self
@@ -6350,6 +6351,8 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.damage.is_empty()
                                 && attack.effects.is_empty()
                                 && !attack.eoc_ids.is_empty()
+                                && attack.spell_shape == WorldgenMonsterSpellShapeV1::Blast
+                                && attack.spell_aoe == 0
                                 && attack.spell_targets_hostile
                                 && !attack.spell_targets_self
                                 && no_field;
@@ -6365,6 +6368,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                 && attack.spell_targets_ground
                                 && field;
                             common
+                                && worldgen_monster_spell_work_is_bounded(attack)
                                 && attack.spell_extra_effects.len() <= 256
                                 && attack
                                     .spell_extra_effects

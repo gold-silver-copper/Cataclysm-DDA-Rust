@@ -150,6 +150,10 @@ pub struct MonsterSpecialAttackDefinition {
     pub spell_min_level: u32,
     pub spell_max_level: Option<u32>,
     pub spell_allow_no_target: bool,
+    /// Resolved pinned monster cast message. Runtime admission currently
+    /// accepts only an explicitly empty message because spell-cast message
+    /// events are not yet canonical.
+    pub spell_monster_message: String,
     pub gun_type_id: String,
     pub gun_ammunition_type_id: String,
     pub gun_fake_skills: BTreeMap<String, u16>,
@@ -810,6 +814,7 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         spell_min_level: 0,
         spell_max_level: None,
         spell_allow_no_target: false,
+        spell_monster_message: String::from("%1$s casts %2$s at %3$s!"),
         gun_type_id: String::new(),
         gun_ammunition_type_id: String::new(),
         gun_fake_skills: BTreeMap::new(),
@@ -996,6 +1001,7 @@ fn parse_special_attack(
         attack.spell_min_level = 0;
         attack.spell_max_level = None;
         attack.spell_allow_no_target = false;
+        attack.spell_monster_message = String::from("%1$s casts %2$s at %3$s!");
         attack.gun_type_id.clear();
         attack.gun_ammunition_type_id.clear();
         attack.gun_ranges.clear();
@@ -1231,6 +1237,12 @@ fn parse_special_attack(
                 .as_bool()
                 .ok_or_else(|| invalid(source, "special_attacks.allow_no_target"))?;
         }
+        apply_text(
+            fields,
+            "monster_message",
+            &mut attack.spell_monster_message,
+            source,
+        )?;
     }
     if kind == MonsterSpecialAttackKind::Gun {
         if let Some(value) = fields.get("gun_type") {

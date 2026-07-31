@@ -229,7 +229,7 @@ impl SpellDefinition {
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Attack
-            && self.area_shape_is_supported()
+            && self.shape == "blast"
             && !self.damage_type_id.is_empty()
             && self.effect_str.is_empty()
             && self
@@ -271,7 +271,7 @@ impl SpellDefinition {
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::Attack
-            && self.area_shape_is_supported()
+            && self.shape == "blast"
             && self.damage_type_id.is_empty()
             && !self.effect_str.is_empty()
             && self.minimum_damage == 0
@@ -307,7 +307,7 @@ impl SpellDefinition {
         ];
         self.unsupported_fields.is_empty()
             && self.effect == SpellEffectKind::EffectOnCondition
-            && self.area_shape_is_supported()
+            && self.shape == "blast"
             && self.damage_type_id.is_empty()
             && !self.effect_str.is_empty()
             && self.minimum_damage == 0

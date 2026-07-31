@@ -725,6 +725,22 @@ fn runtime_spell_summoned_monster_ids(
     }
 }
 
+fn runtime_spell_geometry_work(profile: &RuntimeMonsterSpellProfile) -> Option<u64> {
+    let own = match profile.shape {
+        cdda_protocol::WorldgenMonsterSpellShapeV1::Blast => {
+            let diameter = u64::from(profile.aoe).checked_mul(2)?.checked_add(1)?;
+            diameter.checked_mul(diameter)?
+        }
+        cdda_protocol::WorldgenMonsterSpellShapeV1::Line
+        | cdda_protocol::WorldgenMonsterSpellShapeV1::Cone => {
+            u64::from(profile.range).checked_mul(u64::from(profile.aoe).checked_add(1)?)?
+        }
+    };
+    profile.extra_effects.iter().try_fold(own, |total, child| {
+        total.checked_add(runtime_spell_geometry_work(child)?)
+    })
+}
+
 fn runtime_spell_damage(
     profile: &RuntimeMonsterSpellProfile,
 ) -> Vec<cdda_protocol::WorldgenMonsterMeleeDamageUnitV1> {
@@ -1262,20 +1278,38 @@ fn rounded_millionths_product(level: u32, increment_millionths: i64) -> Option<i
     i64::try_from(rounded).ok()
 }
 
+fn leveled_spell_stat(minimum: i32, increment_millionths: i64, level: u32) -> Option<i32> {
+    let value =
+        i64::from(minimum).checked_add(rounded_millionths_product(level, increment_millionths)?)?;
+    i32::try_from(value).ok()
+}
+
 fn finalized_spell_stat(
     minimum: i32,
     maximum: i32,
     increment_millionths: i64,
     level: u32,
 ) -> Option<i32> {
-    let value =
-        i64::from(minimum).checked_add(rounded_millionths_product(level, increment_millionths)?)?;
-    let clamped = if minimum <= maximum {
-        value.min(i64::from(maximum))
+    let value = leveled_spell_stat(minimum, increment_millionths, level)?;
+    Some(if minimum <= maximum {
+        value.min(maximum)
     } else {
-        value.max(i64::from(maximum))
-    };
-    i32::try_from(clamped).ok()
+        value.max(maximum)
+    })
+}
+
+fn finalized_spell_damage(
+    minimum: i32,
+    maximum: i32,
+    increment_millionths: i64,
+    level: u32,
+) -> Option<i32> {
+    let value = leveled_spell_stat(minimum, increment_millionths, level)?;
+    Some(if minimum >= 0 || maximum >= minimum {
+        value.min(maximum)
+    } else {
+        value.max(maximum)
+    })
 }
 
 fn runtime_monster_spell_profile(
@@ -1300,7 +1334,16 @@ fn runtime_monster_spell_profile(
     {
         return Ok(None);
     }
-    let target_self = attack.spell_hit_self || attack.spell_allow_no_target;
+    // Pinned `allow_no_target` supplies the caster position as the ordinary
+    // target, but it does not turn the fake spell into `hit_self`.  The
+    // canonical attack profile cannot represent that distinction yet.
+    if attack.spell_allow_no_target {
+        return Ok(None);
+    }
+    if !attack.spell_monster_message.is_empty() {
+        return Ok(None);
+    }
+    let target_self = attack.spell_hit_self;
     if target_self
         && attack.condition.as_ref().is_some_and(|condition| {
             cdda_protocol::eoc_condition_requires_target_context(&crate::eocs::runtime_condition(
@@ -1322,7 +1365,7 @@ fn runtime_monster_spell_profile(
     };
     let mut stack = BTreeSet::new();
     let mut node_count = 0_usize;
-    runtime_monster_spell_program(
+    let profile = runtime_monster_spell_program(
         spell,
         effective_level,
         target_self,
@@ -1332,7 +1375,9 @@ fn runtime_monster_spell_profile(
         &mut stack,
         &mut node_count,
         0,
-    )
+    )?;
+    Ok(profile
+        .filter(|profile| runtime_spell_geometry_work(profile).is_some_and(|work| work <= 100_000)))
 }
 
 fn runtime_monster_spell_program(
@@ -1376,8 +1421,16 @@ fn runtime_monster_spell_program_inner(
     node_count: &mut usize,
     depth: usize,
 ) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
-    let summon = spell.supports_hostile_permanent_summoning();
-    let typed_damage = spell.supports_hostile_typed_damage();
+    // `game::place_critter_at` delegates to the summoned prototype's full
+    // `will_move_to` and `know_danger_at` kernels.  Terrain movement flags,
+    // monster movement modes, traps, and every danger predicate are not yet
+    // all canonical, so the earlier passability shortcut is fail-closed.
+    let summon = false;
+    // Typed attack spells pass through the pinned projectile, accuracy,
+    // block, dodge, spell-resistance, and body-part kernels.  Until those
+    // creature-general kernels are canonical, admitting their damage would
+    // invent combat behavior.
+    let typed_damage = false;
     let status_effect = spell.supports_hostile_status_effect();
     let effect_on_condition = spell.supports_hostile_effect_on_condition()
         && creature_spell_eoc_ids.contains(&spell.effect_str);
@@ -1385,6 +1438,11 @@ fn runtime_monster_spell_program_inner(
     if (!summon && !typed_damage && !status_effect && !effect_on_condition && !field_attack)
         || !spell.flags.contains("SILENT")
         || !spell.flags.contains("NO_EXPLOSION_SFX")
+        // Canonical NPC vulnerability and monster-faction attitudes are not
+        // yet complete.  A hostile spell is Creature-general upstream, so an
+        // ActorId-only application would be an invented restriction.
+        || spell.valid_targets.contains("hostile")
+        || !target_self
     {
         return Ok(None);
     }
@@ -1395,7 +1453,12 @@ fn runtime_monster_spell_program_inner(
     {
         return Ok(None);
     }
-    let leveled_damage = finalized_spell_stat(
+    let raw_leveled_damage = leveled_spell_stat(
+        spell.minimum_damage,
+        spell.damage_increment_millionths,
+        level,
+    );
+    let finalized_damage = finalized_spell_damage(
         spell.minimum_damage,
         spell.maximum_damage,
         spell.damage_increment_millionths,
@@ -1419,7 +1482,12 @@ fn runtime_monster_spell_program_inner(
         spell.casting_time_increment_millionths,
         level,
     );
-    let leveled_duration = finalized_spell_stat(
+    let raw_leveled_duration = leveled_spell_stat(
+        spell.minimum_duration_moves,
+        spell.duration_increment_millionths,
+        level,
+    );
+    let finalized_duration = finalized_spell_stat(
         spell.minimum_duration_moves,
         spell.maximum_duration_moves,
         spell.duration_increment_millionths,
@@ -1431,29 +1499,51 @@ fn runtime_monster_spell_program_inner(
         spell.field_intensity_increment_millionths,
         level,
     );
-    let Some((leveled_damage, range, aoe, casting_time, leveled_duration, field_intensity)) =
-        leveled_damage
-            .zip(range)
-            .zip(aoe)
-            .zip(casting_time)
-            .zip(leveled_duration)
-            .zip(field_intensity)
-            .map(
-                |(((((damage, range), aoe), casting_time), duration), field_intensity)| {
-                    (damage, range, aoe, casting_time, duration, field_intensity)
-                },
-            )
+    let Some((
+        raw_leveled_damage,
+        finalized_damage,
+        range,
+        aoe,
+        casting_time,
+        raw_leveled_duration,
+        finalized_duration,
+        field_intensity,
+    )) = raw_leveled_damage
+        .zip(finalized_damage)
+        .zip(range)
+        .zip(aoe)
+        .zip(casting_time)
+        .zip(raw_leveled_duration)
+        .zip(finalized_duration)
+        .zip(field_intensity)
+        .map(
+            |(
+                ((((((raw_damage, damage), range), aoe), casting_time), raw_duration), duration),
+                field_intensity,
+            )| {
+                (
+                    raw_damage,
+                    damage,
+                    range,
+                    aoe,
+                    casting_time,
+                    raw_duration,
+                    duration,
+                    field_intensity,
+                )
+            },
+        )
     else {
         return Ok(None);
     };
     let random_damage = spell.flags.contains("RANDOM_DAMAGE");
     let (minimum_damage, maximum_damage) = if random_damage {
         (
-            leveled_damage.min(spell.maximum_damage),
-            leveled_damage.max(spell.maximum_damage),
+            raw_leveled_damage.min(spell.maximum_damage),
+            raw_leveled_damage.max(spell.maximum_damage),
         )
     } else {
-        (leveled_damage, leveled_damage)
+        (finalized_damage, finalized_damage)
     };
     let amount_is_bounded = if summon {
         (1..=64).contains(&minimum_damage) && (minimum_damage..=64).contains(&maximum_damage)
@@ -1465,11 +1555,11 @@ fn runtime_monster_spell_program_inner(
     let random_duration = spell.flags.contains("RANDOM_DURATION");
     let (minimum_duration_moves, maximum_duration_moves) = if random_duration {
         (
-            leveled_duration.min(spell.maximum_duration_moves),
-            leveled_duration.max(spell.maximum_duration_moves),
+            raw_leveled_duration.min(spell.maximum_duration_moves),
+            raw_leveled_duration.max(spell.maximum_duration_moves),
         )
     } else {
-        (leveled_duration, leveled_duration)
+        (finalized_duration, finalized_duration)
     };
     let duration_is_bounded = if status_effect {
         (1..=1_000_000_000).contains(&minimum_duration_moves)
@@ -1517,8 +1607,10 @@ fn runtime_monster_spell_program_inner(
         || !(0..=1_000_000_000).contains(&casting_time)
         || (target_self && range != 0)
         || (!target_self && range == 0)
+        || (target_self && spell.shape != "blast")
         || (summon && aoe == 0)
         || (spell.shape == "blast" && (status_effect || effect_on_condition) && aoe != 0)
+        || (spell.shape == "blast" && aoe > 32)
         || (spell.shape == "line" && aoe > 32)
         || (spell.shape == "cone" && aoe == 0)
         || ((typed_damage || status_effect || effect_on_condition) && target_self)
@@ -1578,7 +1670,7 @@ fn runtime_monster_spell_program_inner(
         field_intensity: field_profile.map_or(0, |profile| profile.0),
         field_intensity_variance_millionths: field_profile.map_or(0, |profile| profile.1),
         field_duration_turns: field_profile
-            .map(|_| u32::try_from(leveled_duration).map(|moves| moves / 100))
+            .map(|_| u32::try_from(finalized_duration).map(|moves| moves / 100))
             .transpose()?
             .unwrap_or(0),
         targets_hostile: spell.valid_targets.contains("hostile"),
@@ -1602,18 +1694,28 @@ fn runtime_monster_spell_program_inner(
                 spell.id, extra.spell_id
             )
         })?;
-        let child_maximum = extra.maximum_level.unwrap_or(child.maximum_level);
-        let minimum_override = i32::try_from(level)?.max(extra.minimum_level);
-        let child_level = if minimum_override > child_maximum && child_maximum > 0 {
-            child_maximum
+        let mut spell_limiter = extra.maximum_level.unwrap_or(child.maximum_level);
+        let mut minimum_override = i32::try_from(level)?.max(extra.minimum_level);
+        if minimum_override > spell_limiter {
+            if spell_limiter <= 0 {
+                spell_limiter = minimum_override;
+            } else {
+                minimum_override = spell_limiter;
+            }
+        }
+        spell_limiter = spell_limiter.max(minimum_override);
+        let child_level = if extra.minimum_level > spell_limiter {
+            // `fake_spell::get_spell` reports the invalid bound and returns
+            // its freshly constructed level-zero spell sentinel.
+            0
         } else {
-            minimum_override
+            extra.minimum_level.clamp(minimum_override, spell_limiter)
         };
-        let child_level = u32::try_from(child_level.max(0))?;
+        let child_level = u32::try_from(child_level)?;
         let Some(child) = runtime_monster_spell_program(
             child,
             child_level,
-            extra.hit_self,
+            target_self || extra.hit_self,
             spells,
             fields,
             creature_spell_eoc_ids,

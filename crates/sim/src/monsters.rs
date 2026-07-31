@@ -854,6 +854,23 @@ impl WorldState {
         )?;
         let intensity =
             roll_inclusive_u32(effect.intensity_minimum, effect.intensity_maximum, rng)?;
+        self.apply_monster_attack_effect_resolved(
+            target,
+            hit_body_part_id,
+            effect,
+            duration_turns,
+            intensity,
+        )
+    }
+
+    fn apply_monster_attack_effect_resolved(
+        &mut self,
+        target: ActorId,
+        hit_body_part_id: &str,
+        effect: &WorldgenMonsterAttackEffectV1,
+        duration_turns: u32,
+        intensity: u32,
+    ) -> Result<(), SimError> {
         if (duration_turns == 0 && !effect.permanent) || intensity == 0 {
             return Ok(());
         }
@@ -942,6 +959,33 @@ impl WorldState {
             actor.effects.sort_by(|left, right| {
                 (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
             });
+        }
+        Ok(())
+    }
+
+    fn apply_creature_spell_status_effects(
+        &mut self,
+        target: ActorId,
+        effects: &[WorldgenMonsterAttackEffectV1],
+        rng: &mut impl Rng,
+    ) -> Result<(), SimError> {
+        for effect in effects {
+            if effect.chance_millionths != 1_000_000
+                || effect.permanent
+                || effect.affect_hit_body_part
+                || effect.requires_cut_or_stab_damage
+                || effect.body_part_id.is_some()
+                || effect.intensity_minimum != 1
+                || effect.intensity_maximum != 1
+            {
+                return Err(SimError::InvalidCreature);
+            }
+            let duration_turns = roll_spell_inclusive_u32(
+                effect.duration_minimum_turns,
+                effect.duration_maximum_turns,
+                rng,
+            )?;
+            self.apply_monster_attack_effect_resolved(target, "", effect, duration_turns, 1)?;
         }
         Ok(())
     }
@@ -1204,6 +1248,12 @@ impl WorldState {
             }
             target_position
         };
+        if origin.z != intended_target.z {
+            // The current canonical area kernel is two-dimensional.  Do not
+            // charge moves or begin cooldown for a cast whose complete area
+            // would otherwise be silently discarded.
+            return Ok(false);
+        }
         let mut rng = self.named_rng(
             b"creature-special-spell-program",
             &[source.as_u128()],
@@ -1291,12 +1341,15 @@ impl WorldState {
                 continue;
             }
             if profile.damage().is_empty() {
-                self.apply_monster_attack_effects(target, "", false, profile.effects(), rng)?;
+                self.apply_creature_spell_status_effects(target, profile.effects(), rng)?;
                 continue;
             }
             let (minimum_damage, maximum_damage) = profile.damage_bounds();
-            let damage_points =
-                roll_inclusive_i32(minimum_damage / 1_000_000, maximum_damage / 1_000_000, rng)?;
+            let damage_points = roll_spell_inclusive_i32(
+                minimum_damage / 1_000_000,
+                maximum_damage / 1_000_000,
+                rng,
+            )?;
             let multiplier = damage_points
                 .checked_mul(1_000_000)
                 .ok_or(SimError::NumericOverflow)?;
@@ -1797,6 +1850,8 @@ impl WorldState {
                 .creatures
                 .values()
                 .any(|creature| creature.position == position)
+            && self.npc_at(position).is_none()
+            && !self.vehicle_blocks_actor_at(position)
             && (!prototype.base.path_settings.avoid_dangerous_fields
                 || !self.fields_at(position).is_some_and(|fields| {
                     fields.iter().any(|field| {
@@ -1852,13 +1907,13 @@ impl WorldState {
             .and_then(|value| i32::try_from(value).ok())
             .ok_or(SimError::NumericOverflow)?;
         let intensity = i32::from(field_intensity)
-            .checked_add(roll_inclusive_i32(-variance, variance, rng)?)
+            .checked_add(roll_spell_inclusive_i32(-variance, variance, rng)?)
             .ok_or(SimError::NumericOverflow)?;
         if intensity <= 0 {
             return Ok(());
         }
         let intensity = u16::try_from(intensity).map_err(|_| SimError::NumericOverflow)?;
-        if field_chance > 1 && roll_inclusive_u32(1, field_chance, rng)? != 1 {
+        if field_chance > 1 && roll_spell_inclusive_u32(1, field_chance, rng)? != 1 {
             return Ok(());
         }
         let initial_age = -i64::from(field_duration);
@@ -1903,13 +1958,13 @@ impl WorldState {
         let mut candidates = self.creature_spell_area(source, intended_target, profile)?;
         let (minimum_summons, maximum_summons, random_summons) = profile.summon_bounds();
         let requested = if random_summons {
-            roll_inclusive_u32(u32::from(minimum_summons), u32::from(maximum_summons), rng)?
+            roll_spell_inclusive_u32(u32::from(minimum_summons), u32::from(maximum_summons), rng)?
         } else {
             u32::from(minimum_summons)
         };
         let mut remaining = requested;
         while remaining > 0 && !candidates.is_empty() {
-            let index = usize::try_from(rng.next_u64() % candidates.len() as u64)
+            let index = usize::try_from(uniform_bounded_u64(rng, candidates.len() as u64)?)
                 .map_err(|_| SimError::NumericOverflow)?;
             let position = candidates.remove(index);
             if !self.summoned_creature_can_enter(&prototype, position) {
@@ -2879,6 +2934,53 @@ fn roll_inclusive_i32(minimum: i32, maximum: i32, rng: &mut impl Rng) -> Result<
         .ok_or(SimError::NumericOverflow)?;
     let offset = i64::try_from(rng.next_u64() % span).map_err(|_| SimError::NumericOverflow)?;
     i32::try_from(i64::from(minimum) + offset).map_err(|_| SimError::NumericOverflow)
+}
+
+fn roll_spell_inclusive_u32(
+    minimum: u32,
+    maximum: u32,
+    rng: &mut impl Rng,
+) -> Result<u32, SimError> {
+    if minimum == maximum {
+        return Ok(minimum);
+    }
+    let span = u64::from(maximum)
+        .checked_sub(u64::from(minimum))
+        .and_then(|span| span.checked_add(1))
+        .ok_or(SimError::NumericOverflow)?;
+    let offset = uniform_bounded_u64(rng, span)?;
+    u32::try_from(u64::from(minimum) + offset).map_err(|_| SimError::NumericOverflow)
+}
+
+fn roll_spell_inclusive_i32(
+    minimum: i32,
+    maximum: i32,
+    rng: &mut impl Rng,
+) -> Result<i32, SimError> {
+    if minimum == maximum {
+        return Ok(minimum);
+    }
+    let span = i64::from(maximum)
+        .checked_sub(i64::from(minimum))
+        .and_then(|span| span.checked_add(1))
+        .and_then(|span| u64::try_from(span).ok())
+        .ok_or(SimError::NumericOverflow)?;
+    let offset =
+        i64::try_from(uniform_bounded_u64(rng, span)?).map_err(|_| SimError::NumericOverflow)?;
+    i32::try_from(i64::from(minimum) + offset).map_err(|_| SimError::NumericOverflow)
+}
+
+fn uniform_bounded_u64(rng: &mut impl Rng, bound: u64) -> Result<u64, SimError> {
+    if bound == 0 {
+        return Err(SimError::NumericOverflow);
+    }
+    let rejection_threshold = bound.wrapping_neg() % bound;
+    loop {
+        let value = rng.next_u64();
+        if value >= rejection_threshold {
+            return Ok(value % bound);
+        }
+    }
 }
 
 fn merge_rolled_bash_damage(
