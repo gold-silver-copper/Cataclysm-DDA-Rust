@@ -15357,6 +15357,13 @@ impl WorldState {
             }
         }
         for vehicle in &snapshot.vehicles {
+            if vehicle.id.world_namespace() != snapshot.world_namespace
+                || vehicle.id.counter() == 0
+                || !stable_counters.insert(vehicle.id.counter())
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            maximum_counter = maximum_counter.max(vehicle.id.counter());
             for item in vehicle.parts.iter().flat_map(|part| part.cargo.iter()) {
                 if !item_temperature_timestamps_are_valid(item, snapshot.tick) {
                     return Err(SimError::InvalidSnapshot);
@@ -15366,6 +15373,7 @@ impl WorldState {
                     item,
                     snapshot.world_namespace,
                     &mut item_ids,
+                    &mut stable_counters,
                     &mut maximum_counter,
                 )?;
             }
@@ -15374,10 +15382,7 @@ impl WorldState {
             .vehicles
             .iter()
             .cloned()
-            .map(|vehicle| {
-                maximum_counter = maximum_counter.max(vehicle.id.counter());
-                (vehicle.id, vehicle)
-            })
+            .map(|vehicle| (vehicle.id, vehicle))
             .collect::<BTreeMap<_, _>>();
         if snapshot.allocator_high_water < maximum_counter
             || snapshot.allocator_next == 0
