@@ -317,6 +317,8 @@ impl WorldState {
         if let Some(transition) = self.apply_builtin_mission_choice(
             actor_id,
             npc_id,
+            interaction_id,
+            sequence,
             selected_mission_id,
             choice_id,
             events,
@@ -765,6 +767,8 @@ impl WorldState {
         &mut self,
         actor_id: ActorId,
         npc_id: NpcId,
+        interaction_id: InteractionId,
+        sequence: CommandSequence,
         selected_mission_id: Option<cdda_protocol::MissionId>,
         choice_id: &str,
         events: &mut Vec<WorldEvent>,
@@ -809,8 +813,14 @@ impl WorldState {
             match choice_id {
                 BUILTIN_MISSION_ACCEPT => {
                     let mission_id = mission_id.ok_or(SimError::InvalidMission)?;
-                    let lifecycle = self.accept_npc_mission(actor_id, npc_id, mission_id)?;
-                    self.emit_mission_lifecycle_events(actor_id, vec![lifecycle], events)?;
+                    self.apply_npc_mission_accept(
+                        actor_id,
+                        npc_id,
+                        mission_id,
+                        interaction_id,
+                        sequence,
+                        events,
+                    )?;
                     BuiltinMissionTransition {
                         next_topic_id: Some(String::from("TALK_MISSION_ACCEPTED")),
                         selected_mission_id: Some(mission_id),
@@ -833,22 +843,19 @@ impl WorldState {
                     if !self.mission_goal_is_complete(actor_id, mission_id)? {
                         return Err(SimError::InvalidMission);
                     }
-                    let mission_type_id = self
-                        .actors
+                    self.actors
                         .get(&actor_id)
                         .and_then(|actor| actor.missions.get(&mission_id))
                         .filter(|mission| mission.origin_npc_id == Some(npc_id))
-                        .map(|mission| mission.mission_type_id.clone())
                         .ok_or(SimError::InvalidMission)?;
-                    let lifecycle = self.commit_mission_operations(
+                    self.apply_mission_finish(
                         actor_id,
-                        vec![crate::missions::MissionOperation::Finish {
-                            mission_type_id,
-                            mission_id: Some(mission_id),
-                            success: true,
-                        }],
+                        mission_id,
+                        true,
+                        b"npc-mission-end",
+                        sequence.0,
+                        events,
                     )?;
-                    self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
                     BuiltinMissionTransition {
                         next_topic_id: Some(String::from("TALK_MISSION_SUCCESS")),
                         selected_mission_id: Some(mission_id),

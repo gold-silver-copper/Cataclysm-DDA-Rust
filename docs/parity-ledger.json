@@ -488,7 +488,7 @@
         { "id": "resolved-effect-type-applications-for-melee-spell-and-projectile-statuses", "state": "implementation_complete_verification_deferred" },
         { "id": "bounded-shared-roll-multi-strike-and-spread-damage-melee-and-bite-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "blast-field-producing-spell-special-actors", "state": "implementation_complete_verification_deferred" },
-        { "id": "extra-spell-chains-and-line-cone-shapes", "state": "implementation_complete_verification_deferred" }
+        { "id": "extra-spell-chains-and-line-cone-shapes", "state": "review_fixes_in_progress" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],
@@ -506,7 +506,8 @@
       "submilestones": [
         { "id": "stable-npc-identity-and-factions", "state": "implementation_complete_verification_deferred" },
         { "id": "leased-dialogue-and-mission-lifecycle", "state": "implementation_complete_verification_deferred" },
-        { "id": "find-item-owned-world-source-turn-in", "state": "implementation_complete_verification_deferred" },
+        { "id": "find-item-owned-world-source-turn-in", "state": "review_fixes_in_progress" },
+        { "id": "mission-phase-eoc-callbacks", "state": "implementation_complete_review_pending" },
         { "id": "npc-class-generation-and-ordinary-ai", "state": "planned" },
         { "id": "dialogue-effects-missions-and-faction-closure", "state": "planned" }
       ],

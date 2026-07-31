@@ -84,7 +84,7 @@ mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
 use eocs::{
-    runtime_condition, runtime_dialogue_condition_is_supported,
+    runtime_actor_only_eoc_ids, runtime_condition, runtime_dialogue_condition_is_supported,
     runtime_dialogue_effects_are_supported, runtime_effect, runtime_eoc_catalog,
 };
 use item_groups::{
@@ -858,8 +858,16 @@ fn open_world(
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let eocs = content.eocs;
-    let (preliminary_missions, preliminary_mission_ids) =
-        runtime_mission_catalog(content.missions, content.items, content.monsters, None)?;
+    let (preliminary_missions, preliminary_mission_ids) = runtime_mission_catalog(
+        content.missions,
+        content.items,
+        content.monsters,
+        &actor_anatomy,
+        content.proficiencies,
+        content.recipes,
+        None,
+        None,
+    )?;
     let preliminary_npc_offer_mission_ids = runtime_npc_offer_mission_ids(&preliminary_missions);
     let mut eoc_catalog = runtime_eoc_catalog(
         eocs,
@@ -1016,21 +1024,58 @@ fn open_world(
         .filter(|prototype| prototype.runtime_spawnable)
         .map(|prototype| prototype.base.monster_type_id.clone())
         .collect::<BTreeSet<_>>();
-    let (mission_catalog, mission_ids) = runtime_mission_catalog(
-        content.missions,
-        content.items,
-        content.monsters,
-        Some(&runtime_monster_type_ids),
-    )?;
+    let mut mission_catalog = preliminary_missions;
+    let mut mission_ids = preliminary_mission_ids;
+    let mut closure_stabilized = false;
+    let maximum_closure_rounds = content
+        .missions
+        .iter()
+        .count()
+        .saturating_add(eocs.iter().count())
+        .saturating_add(1);
+    for _ in 0..maximum_closure_rounds {
+        let actor_only_eoc_ids = runtime_actor_only_eoc_ids(&eoc_catalog.0);
+        let (next_missions, next_mission_ids) = runtime_mission_catalog(
+            content.missions,
+            content.items,
+            content.monsters,
+            &actor_anatomy,
+            content.proficiencies,
+            content.recipes,
+            Some(&runtime_monster_type_ids),
+            Some(&actor_only_eoc_ids),
+        )?;
+        let next_eoc_catalog = runtime_eoc_catalog(
+            eocs,
+            items,
+            &actor_anatomy,
+            content.proficiencies,
+            content.recipes,
+            &next_mission_ids,
+        )?;
+        let previous_eoc_ids = eoc_catalog
+            .0
+            .iter()
+            .map(|definition| definition.eoc_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let next_eoc_ids = next_eoc_catalog
+            .0
+            .iter()
+            .map(|definition| definition.eoc_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let stable = mission_ids == next_mission_ids && previous_eoc_ids == next_eoc_ids;
+        mission_catalog = next_missions;
+        mission_ids = next_mission_ids;
+        eoc_catalog = next_eoc_catalog;
+        if stable {
+            closure_stabilized = true;
+            break;
+        }
+    }
+    if !closure_stabilized {
+        return Err("runtime mission/EOC dependency closure did not stabilize".into());
+    }
     let npc_offer_mission_ids = runtime_npc_offer_mission_ids(&mission_catalog);
-    eoc_catalog = runtime_eoc_catalog(
-        eocs,
-        items,
-        &actor_anatomy,
-        content.proficiencies,
-        content.recipes,
-        &mission_ids,
-    )?;
     let admitted_eoc_ids = eoc_catalog
         .0
         .iter()

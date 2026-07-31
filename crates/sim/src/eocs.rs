@@ -65,6 +65,11 @@ impl WorldState {
             || definitions
                 .iter()
                 .any(|definition| !eoc_body_parts_are_valid(definition, &self.actor_anatomy))
+            || !mission_phase_eoc_closure_is_valid(
+                self.mission_definitions.values(),
+                definitions.iter(),
+                &self.actor_anatomy,
+            )
             || !mission_references_are_valid_for_ids(
                 definitions.iter(),
                 self.dialogue_topics.values(),
@@ -135,7 +140,7 @@ impl WorldState {
             next_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
-            messages: Vec::new(),
+            outputs: Vec::new(),
             mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
@@ -170,7 +175,7 @@ impl WorldState {
                 .target_variables
                 .as_ref()
                 .is_none_or(|variables| !cdda_protocol::actor_eoc_variables_are_valid(variables))
-            || !execution.messages.is_empty()
+            || !execution.outputs.is_empty()
             || execution.confirmation.is_some()
             || !execution.scheduled_eocs.is_empty()
             || !execution.inactive_recurring_eocs.is_empty()
@@ -221,7 +226,7 @@ impl WorldState {
             next_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
-            messages: Vec::new(),
+            outputs: Vec::new(),
             mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
@@ -257,7 +262,7 @@ impl WorldState {
                 .target_variables
                 .as_ref()
                 .is_none_or(|variables| !cdda_protocol::actor_eoc_variables_are_valid(variables))
-            || !execution.messages.is_empty()
+            || !execution.outputs.is_empty()
             || execution.confirmation.is_some()
             || !execution.scheduled_eocs.is_empty()
             || !execution.inactive_recurring_eocs.is_empty()
@@ -323,7 +328,7 @@ impl WorldState {
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
-            messages: Vec::new(),
+            outputs: Vec::new(),
             mission_operations: Vec::new(),
             interactive: actor.connected,
             confirmation: None,
@@ -377,11 +382,7 @@ impl WorldState {
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
         let confirmation = execution.confirmation.take();
-        let messages = std::mem::take(&mut execution.messages);
         self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
-        for text in messages {
-            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
-        }
         if let Some(confirmation) = confirmation {
             self.request_eoc_confirmation(
                 actor_id,
@@ -448,7 +449,7 @@ impl WorldState {
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
-            messages: Vec::new(),
+            outputs: Vec::new(),
             mission_operations: Vec::new(),
             interactive: interactive && actor.connected,
             confirmation: None,
@@ -480,11 +481,7 @@ impl WorldState {
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
         let confirmation = execution.confirmation.take();
-        let messages = std::mem::take(&mut execution.messages);
         self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
-        for text in messages {
-            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
-        }
         if let Some(confirmation) = confirmation {
             self.request_eoc_confirmation(
                 actor_id,
@@ -540,7 +537,7 @@ impl WorldState {
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
-            messages: Vec::new(),
+            outputs: Vec::new(),
             mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
@@ -576,12 +573,131 @@ impl WorldState {
         execution
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
-        let messages = std::mem::take(&mut execution.messages);
         self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
-        for text in messages {
-            events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
-        }
         Ok(true)
+    }
+
+    pub(super) fn apply_npc_mission_accept(
+        &mut self,
+        actor_id: ActorId,
+        npc_id: NpcId,
+        mission_id: cdda_protocol::MissionId,
+        interaction_id: InteractionId,
+        sequence: CommandSequence,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let mission_type_id = self
+            .npcs
+            .get(&npc_id)
+            .and_then(|npc| npc.mission_offers.get(&mission_id))
+            .cloned()
+            .ok_or(SimError::InvalidMission)?;
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let mut execution = EocExecution {
+            actor: eoc_actor_context(actor),
+            effects: actor.effects.clone(),
+            variables: actor.eoc_variables.clone(),
+            target_effects: None,
+            target_variables: None,
+            next_schedule_sequence: actor.next_eoc_schedule_sequence,
+            scheduled_eocs: actor.scheduled_eocs.clone(),
+            inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
+            outputs: Vec::new(),
+            mission_operations: Vec::new(),
+            interactive: false,
+            confirmation: None,
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(
+                b"npc-mission-start",
+                &[
+                    actor_id.as_u128(),
+                    npc_id.as_u128(),
+                    mission_id.as_u128(),
+                    interaction_id.as_u128(),
+                ],
+                sequence.0,
+            ),
+        };
+        queue_mission_assignment(
+            &self.eoc_definitions,
+            &self.mission_definitions,
+            &mission_type_id,
+            Some(mission_id),
+            Some(npc_id),
+            &mut execution,
+            0,
+        )?;
+        if execution.effects.len() > 1_024 || execution.confirmation.is_some() {
+            return Err(SimError::InvalidMission);
+        }
+        execution.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        execution
+            .scheduled_eocs
+            .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        self.commit_eoc_execution_state(actor_id, &mut execution, events)
+    }
+
+    pub(super) fn apply_mission_finish(
+        &mut self,
+        actor_id: ActorId,
+        mission_id: cdda_protocol::MissionId,
+        success: bool,
+        rng_domain: &'static [u8],
+        rng_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let mission_type_id = actor
+            .missions
+            .get(&mission_id)
+            .filter(|mission| mission.status == cdda_protocol::MissionStatusV1::InProgress)
+            .map(|mission| mission.mission_type_id.clone())
+            .ok_or(SimError::InvalidMission)?;
+        let mut execution = EocExecution {
+            actor: eoc_actor_context(actor),
+            effects: actor.effects.clone(),
+            variables: actor.eoc_variables.clone(),
+            target_effects: None,
+            target_variables: None,
+            next_schedule_sequence: actor.next_eoc_schedule_sequence,
+            scheduled_eocs: actor.scheduled_eocs.clone(),
+            inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
+            outputs: Vec::new(),
+            mission_operations: Vec::new(),
+            interactive: false,
+            confirmation: None,
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(
+                rng_domain,
+                &[actor_id.as_u128(), mission_id.as_u128()],
+                rng_sequence,
+            ),
+        };
+        queue_mission_finish(
+            &self.eoc_definitions,
+            &self.mission_definitions,
+            &mission_type_id,
+            Some(mission_id),
+            success,
+            &mut execution,
+            0,
+        )?;
+        if execution.effects.len() > 1_024 || execution.confirmation.is_some() {
+            return Err(SimError::InvalidMission);
+        }
+        execution.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
+        execution
+            .scheduled_eocs
+            .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        self.commit_eoc_execution_state(actor_id, &mut execution, events)
     }
 
     fn commit_eoc_execution_state(
@@ -590,7 +706,7 @@ impl WorldState {
         execution: &mut EocExecution,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        let lifecycle = self.commit_mission_operations(
+        let mut lifecycle = self.commit_mission_operations(
             actor_id,
             std::mem::take(&mut execution.mission_operations),
         )?;
@@ -604,7 +720,25 @@ impl WorldState {
         actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
         actor.scheduled_eocs = std::mem::take(&mut execution.scheduled_eocs);
         actor.inactive_recurring_eocs = std::mem::take(&mut execution.inactive_recurring_eocs);
-        self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
+        for output in std::mem::take(&mut execution.outputs) {
+            match output {
+                EocOutput::Message(text) => {
+                    events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
+                }
+                EocOutput::MissionLifecycle(operation_index) => {
+                    let lifecycle_event = lifecycle
+                        .get_mut(operation_index)
+                        .ok_or(SimError::InvalidMission)?
+                        .take();
+                    if let Some(lifecycle_event) = lifecycle_event {
+                        self.emit_mission_lifecycle_event(actor_id, lifecycle_event, events)?;
+                    }
+                }
+            }
+        }
+        if lifecycle.iter().any(Option::is_some) {
+            return Err(SimError::InvalidMission);
+        }
         Ok(())
     }
 
@@ -687,7 +821,7 @@ impl WorldState {
                     next_schedule_sequence: actor.next_eoc_schedule_sequence,
                     scheduled_eocs,
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
-                    messages: Vec::new(),
+                    outputs: Vec::new(),
                     mission_operations: Vec::new(),
                     interactive: false,
                     confirmation: None,
@@ -751,24 +885,7 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
-            let lifecycle = self.commit_mission_operations(
-                actor_id,
-                std::mem::take(&mut execution.mission_operations),
-            )?;
-            let actor = self
-                .actors
-                .get_mut(&actor_id)
-                .ok_or(SimError::UnknownActor)?;
-            commit_eoc_actor_context(actor, &execution.actor);
-            actor.effects = execution.effects;
-            actor.eoc_variables = execution.variables;
-            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
-            actor.scheduled_eocs = execution.scheduled_eocs;
-            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
-            self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
-            for text in execution.messages {
-                events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
-            }
+            self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
         }
         Ok(())
     }
@@ -868,7 +985,7 @@ impl WorldState {
                 next_schedule_sequence: actor.next_eoc_schedule_sequence,
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
-                messages: Vec::new(),
+                outputs: Vec::new(),
                 mission_operations: Vec::new(),
                 interactive: false,
                 confirmation: None,
@@ -899,24 +1016,7 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
-            let lifecycle = self.commit_mission_operations(
-                actor_id,
-                std::mem::take(&mut execution.mission_operations),
-            )?;
-            let actor = self
-                .actors
-                .get_mut(&actor_id)
-                .ok_or(SimError::UnknownActor)?;
-            commit_eoc_actor_context(actor, &execution.actor);
-            actor.effects = execution.effects;
-            actor.eoc_variables = execution.variables;
-            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
-            actor.scheduled_eocs = execution.scheduled_eocs;
-            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
-            self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
-            for text in execution.messages {
-                events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
-            }
+            self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
         }
         *source_event_cursor = events.len();
         Ok(())
@@ -935,7 +1035,7 @@ impl WorldState {
             next_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
-            messages: Vec::new(),
+            outputs: Vec::new(),
             mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
@@ -994,7 +1094,7 @@ impl WorldState {
                 next_schedule_sequence: actor.next_eoc_schedule_sequence,
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
-                messages: Vec::new(),
+                outputs: Vec::new(),
                 mission_operations: Vec::new(),
                 interactive: false,
                 confirmation: None,
@@ -1059,7 +1159,7 @@ struct EocExecution {
     next_schedule_sequence: u64,
     scheduled_eocs: Vec<ScheduledEocV1>,
     inactive_recurring_eocs: Vec<String>,
-    messages: Vec<String>,
+    outputs: Vec<EocOutput>,
     mission_operations: Vec<MissionOperation>,
     interactive: bool,
     confirmation: Option<EocConfirmationRequest>,
@@ -1074,6 +1174,11 @@ struct EocConfirmationRequest {
     default: bool,
     accept_effects: Vec<EocEffectV1>,
     decline_effects: Vec<EocEffectV1>,
+}
+
+enum EocOutput {
+    Message(String),
+    MissionLifecycle(usize),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1567,6 +1672,106 @@ fn safe_math_result(value: Option<i64>) -> Result<i64, SimError> {
         .ok_or(SimError::NumericOverflow)
 }
 
+fn queue_mission_assignment(
+    catalog: &BTreeMap<String, EocDefinitionV1>,
+    mission_catalog: &BTreeMap<String, MissionDefinitionV1>,
+    mission_type_id: &str,
+    mission_id: Option<cdda_protocol::MissionId>,
+    origin_npc_id: Option<NpcId>,
+    execution: &mut EocExecution,
+    depth: usize,
+) -> Result<(), SimError> {
+    if execution.actor.active_mission_types.len() >= cdda_protocol::MAX_ACTOR_MISSIONS {
+        return Err(SimError::InvalidMission);
+    }
+    let start_effects = mission_catalog
+        .get(mission_type_id)
+        .ok_or(SimError::InvalidMission)?
+        .start_effects
+        .clone();
+    execution
+        .actor
+        .active_mission_types
+        .push(mission_type_id.to_owned());
+    let operation_index = execution.mission_operations.len();
+    execution.mission_operations.push(MissionOperation::Assign {
+        mission_type_id: mission_type_id.to_owned(),
+        mission_id,
+        origin_npc_id,
+    });
+    // Pinned `mission::assign` exposes the mission through the avatar's active
+    // list while the start callback runs, then changes the mission status to
+    // in-progress after the callback returns.
+    execute_effects(
+        catalog,
+        mission_catalog,
+        &start_effects,
+        execution,
+        depth + 1,
+    )?;
+    execution
+        .outputs
+        .push(EocOutput::MissionLifecycle(operation_index));
+    Ok(())
+}
+
+fn queue_mission_finish(
+    catalog: &BTreeMap<String, EocDefinitionV1>,
+    mission_catalog: &BTreeMap<String, MissionDefinitionV1>,
+    mission_type_id: &str,
+    mission_id: Option<cdda_protocol::MissionId>,
+    success: bool,
+    execution: &mut EocExecution,
+    depth: usize,
+) -> Result<(), SimError> {
+    let Some(index) = execution
+        .actor
+        .active_mission_types
+        .iter()
+        .position(|active| active == mission_type_id)
+    else {
+        // Pinned dynamic `finish_mission` is a no-op when no active mission of
+        // the requested type exists.
+        return Ok(());
+    };
+    let definition = mission_catalog
+        .get(mission_type_id)
+        .ok_or(SimError::InvalidMission)?;
+    let phase_effects = if success {
+        definition.end_effects.clone()
+    } else {
+        definition.fail_effects.clone()
+    };
+    execution.actor.active_mission_types.remove(index);
+    if success {
+        crate::missions::consume_mission_items_from_inventory(
+            &mut execution.actor.mission_inventory,
+            &mut execution.actor.mission_worn,
+            &mut execution.actor.mission_wielded,
+            &definition.goal,
+        )?;
+        refresh_eoc_item_context(&mut execution.actor);
+    }
+    let operation_index = execution.mission_operations.len();
+    execution.mission_operations.push(MissionOperation::Finish {
+        mission_type_id: mission_type_id.to_owned(),
+        mission_id,
+        success,
+    });
+    // Pinned completion/failure removes the mission from the active list and
+    // publishes its terminal state before running the corresponding callback.
+    execution
+        .outputs
+        .push(EocOutput::MissionLifecycle(operation_index));
+    execute_effects(
+        catalog,
+        mission_catalog,
+        &phase_effects,
+        execution,
+        depth + 1,
+    )
+}
+
 fn execute_effects(
     catalog: &BTreeMap<String, EocDefinitionV1>,
     mission_catalog: &BTreeMap<String, MissionDefinitionV1>,
@@ -1583,7 +1788,9 @@ fn execute_effects(
             return Err(SimError::InvalidItem);
         }
         match effect {
-            EocEffectV1::Message { text } => execution.messages.push(text.clone()),
+            EocEffectV1::Message { text } => {
+                execution.outputs.push(EocOutput::Message(text.clone()));
+            }
             EocEffectV1::AddEffect {
                 effect_id,
                 body_part_id,
@@ -1766,50 +1973,32 @@ fn execute_effects(
                 }
             }
             EocEffectV1::AssignMission { mission_type_id } => {
-                if execution.actor.active_mission_types.len() >= cdda_protocol::MAX_ACTOR_MISSIONS {
-                    return Err(SimError::InvalidMission);
-                }
-                execution
-                    .actor
-                    .active_mission_types
-                    .push(mission_type_id.clone());
-                execution.mission_operations.push(MissionOperation::Assign {
-                    mission_type_id: mission_type_id.clone(),
+                queue_mission_assignment(
+                    catalog,
+                    mission_catalog,
+                    mission_type_id,
+                    None,
                     // Pinned dynamic `assign_mission` reserves with an invalid
                     // NPC character id; dialogue context does not become the
                     // mission giver implicitly.
-                    origin_npc_id: None,
-                });
+                    None,
+                    execution,
+                    depth,
+                )?;
             }
             EocEffectV1::FinishMission {
                 mission_type_id,
                 success,
             } => {
-                if let Some(index) = execution
-                    .actor
-                    .active_mission_types
-                    .iter()
-                    .position(|active| active == mission_type_id)
-                {
-                    execution.actor.active_mission_types.remove(index);
-                    if *success {
-                        let definition = mission_catalog
-                            .get(mission_type_id)
-                            .ok_or(SimError::InvalidMission)?;
-                        crate::missions::consume_mission_items_from_inventory(
-                            &mut execution.actor.mission_inventory,
-                            &mut execution.actor.mission_worn,
-                            &mut execution.actor.mission_wielded,
-                            &definition.goal,
-                        )?;
-                        refresh_eoc_item_context(&mut execution.actor);
-                    }
-                    execution.mission_operations.push(MissionOperation::Finish {
-                        mission_type_id: mission_type_id.clone(),
-                        mission_id: None,
-                        success: *success,
-                    });
-                }
+                queue_mission_finish(
+                    catalog,
+                    mission_catalog,
+                    mission_type_id,
+                    None,
+                    *success,
+                    execution,
+                    depth,
+                )?;
             }
             EocEffectV1::Conditional {
                 condition,
@@ -2024,6 +2213,82 @@ pub(super) fn mission_references_are_valid(
         mission_definitions.iter(),
         &mission_ids,
     )
+}
+
+pub(super) fn mission_phase_effects_are_actor_only<'a>(
+    mission_definitions: impl IntoIterator<Item = &'a cdda_protocol::MissionDefinitionV1>,
+    anatomy: &cdda_protocol::AnatomyDefinitionV1,
+) -> bool {
+    let valid_part = |part: &Option<String>| {
+        part.as_ref().is_none_or(|part| {
+            anatomy
+                .parts
+                .iter()
+                .any(|prototype| prototype.body_part_id == *part)
+        })
+    };
+    mission_definitions.into_iter().all(|definition| {
+        [
+            definition.start_effects.as_slice(),
+            definition.end_effects.as_slice(),
+            definition.fail_effects.as_slice(),
+        ]
+        .into_iter()
+        .all(|effects| {
+            !eoc_effects_require_target_context(effects)
+                && !eoc_effects_contain_confirmation(effects)
+                && effects_body_parts_are_valid(effects, &valid_part)
+        })
+    })
+}
+
+pub(super) fn mission_phase_eoc_closure_is_valid<'a>(
+    mission_definitions: impl IntoIterator<Item = &'a cdda_protocol::MissionDefinitionV1>,
+    eoc_definitions: impl IntoIterator<Item = &'a EocDefinitionV1>,
+    anatomy: &cdda_protocol::AnatomyDefinitionV1,
+) -> bool {
+    let mission_definitions = mission_definitions.into_iter().collect::<Vec<_>>();
+    if !mission_phase_effects_are_actor_only(mission_definitions.iter().copied(), anatomy) {
+        return false;
+    }
+    let mut available = eoc_definitions
+        .into_iter()
+        .filter(|definition| {
+            eoc_body_parts_are_valid(definition, anatomy)
+                && !cdda_protocol::eoc_definition_requires_target_context(definition)
+                && !eoc_effects_contain_confirmation(&definition.effects)
+                && !eoc_effects_contain_confirmation(&definition.false_effects)
+        })
+        .map(|definition| (definition.eoc_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    loop {
+        let unavailable = available
+            .iter()
+            .filter(|(_id, definition)| {
+                definition
+                    .referenced_eocs()
+                    .iter()
+                    .any(|reference| !available.contains_key(*reference))
+            })
+            .map(|(id, _definition)| *id)
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            break;
+        }
+        for id in unavailable {
+            available.remove(id);
+        }
+    }
+    mission_definitions.iter().all(|definition| {
+        [
+            definition.start_effects.as_slice(),
+            definition.end_effects.as_slice(),
+            definition.fail_effects.as_slice(),
+        ]
+        .into_iter()
+        .flat_map(cdda_protocol::eoc_effect_referenced_ids)
+        .all(|reference| available.contains_key(reference))
+    })
 }
 
 pub(super) fn mission_references_are_valid_for_ids<'a>(

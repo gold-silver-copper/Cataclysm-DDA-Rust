@@ -251,7 +251,7 @@ fn condition_references_are_supported(
     }
 }
 
-fn effects_references_are_supported(
+pub(super) fn effects_references_are_supported(
     effects: &[EocEffectDefinition],
     items: &ItemRegistry,
     proficiencies: &ProficiencyRegistry,
@@ -319,6 +319,37 @@ fn effects_references_are_supported(
         | EocEffectDefinition::MathAssignment(_)
         | EocEffectDefinition::RunEocs { .. } => true,
     })
+}
+
+pub(super) fn runtime_actor_only_eoc_ids(definitions: &[EocDefinitionV1]) -> BTreeSet<String> {
+    let mut available = definitions
+        .iter()
+        .filter(|definition| {
+            !cdda_protocol::eoc_definition_requires_target_context(definition)
+                && !cdda_protocol::eoc_effects_contain_confirmation(&definition.effects)
+                && !cdda_protocol::eoc_effects_contain_confirmation(&definition.false_effects)
+        })
+        .map(|definition| (definition.eoc_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    loop {
+        let unavailable = available
+            .iter()
+            .filter(|(_id, definition)| {
+                definition
+                    .referenced_eocs()
+                    .iter()
+                    .any(|reference| !available.contains_key(*reference))
+            })
+            .map(|(id, _definition)| *id)
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            break;
+        }
+        for id in unavailable {
+            available.remove(id);
+        }
+    }
+    available.keys().map(|id| (*id).to_owned()).collect()
 }
 
 fn runtime_eoc_body_parts_are_supported(

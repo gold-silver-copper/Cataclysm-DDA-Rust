@@ -2,22 +2,45 @@ use std::collections::BTreeSet;
 
 use cdda_content::{
     EocEffectDefinition, ItemRegistry, MissionDefinition, MissionGoalDefinition, MissionRegistry,
-    MonsterRegistry,
+    MonsterRegistry, ProficiencyRegistry, RecipeRegistry,
 };
-use cdda_protocol::{EocConditionV1, EocEffectV1, MissionDefinitionV1, MissionGoalV1};
+use cdda_protocol::{
+    AnatomyDefinitionV1, EocConditionV1, EocEffectV1, MissionDefinitionV1, MissionGoalV1,
+};
 
-use crate::eocs::runtime_effect;
+use crate::eocs::{
+    effects_references_are_supported, runtime_dialogue_effects_are_supported, runtime_effect,
+};
 
 pub(super) fn runtime_mission_catalog(
     registry: &MissionRegistry,
     items: &ItemRegistry,
     monsters: &MonsterRegistry,
+    anatomy: &AnatomyDefinitionV1,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
     runtime_monster_type_ids: Option<&BTreeSet<String>>,
+    runtime_actor_only_eoc_ids: Option<&BTreeSet<String>>,
 ) -> Result<(Vec<MissionDefinitionV1>, BTreeSet<String>), Box<dyn std::error::Error>> {
+    let candidate_mission_ids = registry
+        .iter()
+        .filter(|(_id, definition)| definition.is_fully_supported())
+        .map(|(id, _definition)| id.to_owned())
+        .collect::<BTreeSet<_>>();
     let mut definitions = registry
         .iter()
         .filter_map(|(_id, definition)| {
-            runtime_mission_candidate(definition, items, monsters, runtime_monster_type_ids)
+            runtime_mission_candidate(
+                definition,
+                items,
+                monsters,
+                anatomy,
+                proficiencies,
+                recipes,
+                &candidate_mission_ids,
+                runtime_monster_type_ids,
+                runtime_actor_only_eoc_ids,
+            )
         })
         .collect::<Vec<_>>();
     loop {
@@ -54,12 +77,41 @@ fn runtime_mission_candidate(
     definition: &MissionDefinition,
     items: &ItemRegistry,
     monsters: &MonsterRegistry,
+    anatomy: &AnatomyDefinitionV1,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
+    candidate_mission_ids: &BTreeSet<String>,
     runtime_monster_type_ids: Option<&BTreeSet<String>>,
+    runtime_actor_only_eoc_ids: Option<&BTreeSet<String>>,
 ) -> Option<MissionDefinitionV1> {
     if !definition.is_fully_supported()
-        || !phase_is_supported(&definition.start_effects)
-        || !phase_is_supported(&definition.end_effects)
-        || !phase_is_supported(&definition.fail_effects)
+        || !phase_is_supported(
+            &definition.start_effects,
+            items,
+            anatomy,
+            proficiencies,
+            recipes,
+            candidate_mission_ids,
+            runtime_actor_only_eoc_ids,
+        )
+        || !phase_is_supported(
+            &definition.end_effects,
+            items,
+            anatomy,
+            proficiencies,
+            recipes,
+            candidate_mission_ids,
+            runtime_actor_only_eoc_ids,
+        )
+        || !phase_is_supported(
+            &definition.fail_effects,
+            items,
+            anatomy,
+            proficiencies,
+            recipes,
+            candidate_mission_ids,
+            runtime_actor_only_eoc_ids,
+        )
     {
         return None;
     }
@@ -151,11 +203,25 @@ fn runtime_mission_candidate(
     })
 }
 
-fn phase_is_supported(effects: &[EocEffectDefinition]) -> bool {
-    // Mission phase callbacks execute during assignment/completion in pinned
-    // CDDA. Until that ordered callback kernel is present, only the exact
-    // standard no-op phase is admitted.
-    effects.is_empty()
+fn phase_is_supported(
+    effects: &[EocEffectDefinition],
+    items: &ItemRegistry,
+    anatomy: &AnatomyDefinitionV1,
+    proficiencies: &ProficiencyRegistry,
+    recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
+    runtime_actor_only_eoc_ids: Option<&BTreeSet<String>>,
+) -> bool {
+    let runtime = effects.iter().map(runtime_effect).collect::<Vec<_>>();
+    runtime_dialogue_effects_are_supported(effects, anatomy, mission_ids)
+        && effects_references_are_supported(effects, items, proficiencies, recipes, mission_ids)
+        && !cdda_protocol::eoc_effects_require_target_context(&runtime)
+        && !cdda_protocol::eoc_effects_contain_confirmation(&runtime)
+        && runtime_actor_only_eoc_ids.is_none_or(|admitted| {
+            cdda_protocol::eoc_effect_referenced_ids(&runtime)
+                .into_iter()
+                .all(|reference| admitted.contains(reference))
+        })
 }
 
 fn phases_reference_only_admitted_missions<const N: usize>(

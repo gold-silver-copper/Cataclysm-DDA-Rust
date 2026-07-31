@@ -12,6 +12,7 @@ use crate::{Actor, SimError, WorldState};
 pub(super) enum MissionOperation {
     Assign {
         mission_type_id: String,
+        mission_id: Option<MissionId>,
         origin_npc_id: Option<NpcId>,
     },
     Finish {
@@ -47,11 +48,10 @@ impl WorldState {
             || !self.actors.is_empty()
             || !self.mission_definitions.is_empty()
             || !cdda_protocol::mission_catalog_is_valid(&definitions)
-            || definitions.iter().any(|definition| {
-                !definition.start_effects.is_empty()
-                    || !definition.end_effects.is_empty()
-                    || !definition.fail_effects.is_empty()
-            })
+            || !crate::eocs::mission_phase_effects_are_actor_only(
+                definitions.iter(),
+                &self.actor_anatomy,
+            )
             || !crate::eocs::mission_references_are_valid_for_ids(
                 self.eoc_definitions.values(),
                 self.dialogue_topics.values(),
@@ -72,7 +72,7 @@ impl WorldState {
         &mut self,
         actor_id: ActorId,
         operations: Vec<MissionOperation>,
-    ) -> Result<Vec<MissionLifecycleEvent>, SimError> {
+    ) -> Result<Vec<Option<MissionLifecycleEvent>>, SimError> {
         if operations.is_empty() {
             return Ok(Vec::new());
         }
@@ -84,11 +84,13 @@ impl WorldState {
         let mut allocator = self.allocator.clone();
         let mut ground_items = None;
         let mut vehicles = None;
+        let mut npc_updates = BTreeMap::new();
         let mut lifecycle = Vec::with_capacity(operations.len());
         for operation in operations {
             match operation {
                 MissionOperation::Assign {
                     mission_type_id,
+                    mission_id,
                     origin_npc_id,
                 } => {
                     let definition = self
@@ -100,9 +102,7 @@ impl WorldState {
                         .values()
                         .filter(|mission| mission.status == MissionStatusV1::InProgress)
                         .count();
-                    if active_count >= cdda_protocol::MAX_ACTOR_MISSIONS
-                        || origin_npc_id.is_some_and(|npc_id| !self.npcs.contains_key(&npc_id))
-                    {
+                    if active_count >= cdda_protocol::MAX_ACTOR_MISSIONS {
                         return Err(SimError::InvalidMission);
                     }
                     prune_finished_mission_history(&mut actor)?;
@@ -115,7 +115,26 @@ impl WorldState {
                         ),
                         MissionGoalV1::Null | MissionGoalV1::FindItem { .. } => None,
                     };
-                    let mission_id = allocator.allocate_mission()?;
+                    let mission_id = match (mission_id, origin_npc_id) {
+                        (None, None) => allocator.allocate_mission()?,
+                        (Some(mission_id), Some(npc_id)) => {
+                            if actor.missions.contains_key(&mission_id) {
+                                return Err(SimError::InvalidMission);
+                            }
+                            let mut npc = npc_updates
+                                .remove(&npc_id)
+                                .or_else(|| self.npcs.get(&npc_id).cloned())
+                                .ok_or(SimError::InvalidMission)?;
+                            if npc.mission_offers.remove(&mission_id).as_deref()
+                                != Some(mission_type_id.as_str())
+                            {
+                                return Err(SimError::InvalidMission);
+                            }
+                            npc_updates.insert(npc_id, npc);
+                            mission_id
+                        }
+                        _ => return Err(SimError::InvalidMission),
+                    };
                     actor.missions.insert(
                         mission_id,
                         MissionSnapshotV1 {
@@ -137,10 +156,10 @@ impl WorldState {
                             }),
                         },
                     );
-                    lifecycle.push(MissionLifecycleEvent::Assigned {
+                    lifecycle.push(Some(MissionLifecycleEvent::Assigned {
                         mission_id,
                         mission_type_id,
-                    });
+                    }));
                 }
                 MissionOperation::Finish {
                     mission_type_id,
@@ -164,6 +183,7 @@ impl WorldState {
                     let Some(mission_id) = mission_id else {
                         // Pinned `finish_mission` silently does nothing when no
                         // active mission of the requested type exists.
+                        lifecycle.push(None);
                         continue;
                     };
                     if actor.missions.get(&mission_id).is_none_or(|mission| {
@@ -190,11 +210,11 @@ impl WorldState {
                         MissionStatusV1::Failure
                     };
                     mission.finished_at_tick = Some(self.tick);
-                    lifecycle.push(MissionLifecycleEvent::Finished {
+                    lifecycle.push(Some(MissionLifecycleEvent::Finished {
                         mission_id,
                         mission_type_id,
                         success,
-                    });
+                    }));
                 }
             }
         }
@@ -206,38 +226,39 @@ impl WorldState {
         if let Some(vehicles) = vehicles {
             self.vehicles = vehicles;
         }
+        for (npc_id, npc) in npc_updates {
+            self.npcs.insert(npc_id, npc);
+        }
         Ok(lifecycle)
     }
 
-    pub(super) fn emit_mission_lifecycle_events(
+    pub(super) fn emit_mission_lifecycle_event(
         &mut self,
         actor_id: ActorId,
-        lifecycle: Vec<MissionLifecycleEvent>,
+        event: MissionLifecycleEvent,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        for event in lifecycle {
-            let kind = match event {
-                MissionLifecycleEvent::Assigned {
-                    mission_id,
-                    mission_type_id,
-                } => WorldEventKind::MissionAssigned {
-                    actor_id,
-                    mission_id,
-                    mission_type_id,
-                },
-                MissionLifecycleEvent::Finished {
-                    mission_id,
-                    mission_type_id,
-                    success,
-                } => WorldEventKind::MissionFinished {
-                    actor_id,
-                    mission_id,
-                    mission_type_id,
-                    success,
-                },
-            };
-            events.push(self.make_event(kind)?);
-        }
+        let kind = match event {
+            MissionLifecycleEvent::Assigned {
+                mission_id,
+                mission_type_id,
+            } => WorldEventKind::MissionAssigned {
+                actor_id,
+                mission_id,
+                mission_type_id,
+            },
+            MissionLifecycleEvent::Finished {
+                mission_id,
+                mission_type_id,
+                success,
+            } => WorldEventKind::MissionFinished {
+                actor_id,
+                mission_id,
+                mission_type_id,
+                success,
+            },
+        };
+        events.push(self.make_event(kind)?);
         Ok(())
     }
 
@@ -515,81 +536,6 @@ impl WorldState {
         Ok(())
     }
 
-    pub(super) fn accept_npc_mission(
-        &mut self,
-        actor_id: ActorId,
-        npc_id: NpcId,
-        mission_id: MissionId,
-    ) -> Result<MissionLifecycleEvent, SimError> {
-        let mut actor = self
-            .actors
-            .get(&actor_id)
-            .cloned()
-            .ok_or(SimError::UnknownActor)?;
-        let mut npc = self
-            .npcs
-            .get(&npc_id)
-            .cloned()
-            .ok_or(SimError::UnknownNpc)?;
-        let mission_type_id = npc
-            .mission_offers
-            .remove(&mission_id)
-            .ok_or(SimError::InvalidMission)?;
-        let definition = self
-            .mission_definitions
-            .get(&mission_type_id)
-            .ok_or(SimError::InvalidMission)?;
-        if actor
-            .missions
-            .values()
-            .filter(|mission| mission.status == MissionStatusV1::InProgress)
-            .count()
-            >= cdda_protocol::MAX_ACTOR_MISSIONS
-            || actor.missions.contains_key(&mission_id)
-        {
-            return Err(SimError::InvalidMission);
-        }
-        prune_finished_mission_history(&mut actor)?;
-        let kill_count_at_assignment = match &definition.goal {
-            MissionGoalV1::KillMonsterType { .. } | MissionGoalV1::KillMonsterSpecies { .. } => {
-                Some(current_kill_count(
-                    &definition.goal,
-                    &actor.creature_kill_counts,
-                )?)
-            }
-            MissionGoalV1::Null | MissionGoalV1::FindItem { .. } => None,
-        };
-        let kill_count_to_reach = match (&definition.goal, kill_count_at_assignment) {
-            (MissionGoalV1::KillMonsterType { count, .. }, Some(baseline))
-            | (MissionGoalV1::KillMonsterSpecies { count, .. }, Some(baseline)) => Some(
-                baseline
-                    .checked_add(u64::from(*count))
-                    .ok_or(SimError::NumericOverflow)?,
-            ),
-            (MissionGoalV1::Null | MissionGoalV1::FindItem { .. }, None) => None,
-            _ => return Err(SimError::InvalidMission),
-        };
-        actor.missions.insert(
-            mission_id,
-            MissionSnapshotV1 {
-                mission_id,
-                mission_type_id: mission_type_id.clone(),
-                origin_npc_id: Some(npc_id),
-                assigned_at_tick: self.tick,
-                finished_at_tick: None,
-                status: MissionStatusV1::InProgress,
-                kill_count_to_reach,
-                kill_count_at_assignment,
-            },
-        );
-        self.actors.insert(actor_id, actor);
-        self.npcs.insert(npc_id, npc);
-        Ok(MissionLifecycleEvent::Assigned {
-            mission_id,
-            mission_type_id,
-        })
-    }
-
     pub(super) fn advance_missions(
         &mut self,
         events: &mut Vec<WorldEvent>,
@@ -599,27 +545,22 @@ impl WorldState {
             for mission in actor.missions.values() {
                 if mission.status == MissionStatusV1::InProgress && mission.origin_npc_id.is_none()
                 {
-                    candidates.push((
-                        *actor_id,
-                        mission.mission_id,
-                        mission.mission_type_id.clone(),
-                    ));
+                    candidates.push((*actor_id, mission.mission_id));
                 }
             }
         }
-        for (actor_id, mission_id, mission_type_id) in candidates {
+        for (actor_id, mission_id) in candidates {
             if !self.mission_goal_is_complete(actor_id, mission_id)? {
                 continue;
             }
-            let lifecycle = self.commit_mission_operations(
+            self.apply_mission_finish(
                 actor_id,
-                vec![MissionOperation::Finish {
-                    mission_type_id,
-                    mission_id: Some(mission_id),
-                    success: true,
-                }],
+                mission_id,
+                true,
+                b"automatic-mission-end",
+                self.tick.0,
+                events,
             )?;
-            self.emit_mission_lifecycle_events(actor_id, lifecycle, events)?;
         }
         Ok(())
     }

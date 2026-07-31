@@ -14815,11 +14815,11 @@ impl WorldState {
                         .any(|faction| faction.faction_id == template.faction_id)
             })
             || !cdda_protocol::mission_catalog_is_valid(&snapshot.mission_definitions)
-            || snapshot.mission_definitions.iter().any(|definition| {
-                !definition.start_effects.is_empty()
-                    || !definition.end_effects.is_empty()
-                    || !definition.fail_effects.is_empty()
-            })
+            || !eocs::mission_phase_eoc_closure_is_valid(
+                snapshot.mission_definitions.iter(),
+                snapshot.eoc_definitions.iter(),
+                &snapshot.actor_anatomy,
+            )
             || !eocs::mission_references_are_valid(
                 &snapshot.eoc_definitions,
                 &snapshot.dialogue_topics,
