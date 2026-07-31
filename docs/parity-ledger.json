@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 109,
-  "persistence_schema_version": 87,
+  "protocol_version": 110,
+  "persistence_schema_version": 88,
   "replay_format_version": 3,
   "active_milestone": "eoc-use-actions",
   "completion_gate": [
@@ -429,7 +429,8 @@
       "submilestones": [
         { "id": "bounded-conditions-effects-transitive-eocs-item-activation-and-strict-transforms", "state": "implementation_complete_verification_deferred" },
         { "id": "actor-string-variables-and-comparisons", "state": "implementation_complete_verification_deferred" },
-        { "id": "dynamic-math-delays-recurrence-events-and-interactions", "state": "planned" }
+        { "id": "persistent-bounded-delayed-actor-eoc-queue", "state": "implementation_complete_verification_deferred" },
+        { "id": "dynamic-math-recurrence-events-and-interactions", "state": "planned" }
       ],
       "priority": 23,
       "depends_on": ["item-containment", "cpp-differential-oracle", "simulation-items-module", "simulation-activities-module", "simulation-canonical-state-module", "protocol-domain-modules", "persistence-domain-modules"],

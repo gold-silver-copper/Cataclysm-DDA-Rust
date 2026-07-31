@@ -4,16 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocConditionV1,
-    EocDefinitionV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1, ItemId,
-    MAX_EOC_ACTOR_VARIABLES, SimTick, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
+    EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1, ItemId,
+    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, ScheduledEocV1, SimTick, WorldEvent,
+    WorldEventKind, eoc_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
 
-use crate::{SimError, WorldState};
+use crate::{SimError, WorldState, inclusive_rng_u64};
 
 const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
 const MAX_EOC_OPERATIONS_PER_COMMAND: usize = 16_384;
+const MAX_SCHEDULED_EOC_ACTIVATIONS_PER_TICK: usize = 256;
 
 impl WorldState {
     pub fn register_eoc_catalog(
@@ -70,6 +72,8 @@ impl WorldState {
         let mut execution = EocExecution {
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
+            next_schedule_sequence: actor.next_eoc_schedule_sequence,
+            scheduled_eocs: actor.scheduled_eocs.clone(),
             messages: Vec::new(),
             activations: 0,
             operations: 0,
@@ -101,6 +105,9 @@ impl WorldState {
         execution.effects.sort_by(|left, right| {
             (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
         });
+        execution
+            .scheduled_eocs
+            .sort_by_key(|entry| (entry.due_tick, entry.sequence));
         let remaining_charges = {
             let actor = self
                 .actors
@@ -108,6 +115,8 @@ impl WorldState {
                 .ok_or(SimError::UnknownActor)?;
             actor.effects = execution.effects;
             actor.eoc_variables = execution.variables;
+            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
+            actor.scheduled_eocs = execution.scheduled_eocs;
             let item = actor
                 .inventory
                 .get_mut(&item_id)
@@ -135,11 +144,83 @@ impl WorldState {
         })?);
         Ok(true)
     }
+
+    pub(super) fn advance_scheduled_eocs(
+        &mut self,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let mut due = self
+            .actors
+            .iter()
+            .flat_map(|(actor_id, actor)| {
+                actor
+                    .scheduled_eocs
+                    .iter()
+                    .filter(|entry| entry.due_tick <= self.tick)
+                    .map(|entry| (*actor_id, entry.due_tick, entry.sequence))
+            })
+            .collect::<Vec<_>>();
+        due.sort_by_key(|(actor_id, due_tick, sequence)| (*due_tick, *actor_id, *sequence));
+        due.truncate(MAX_SCHEDULED_EOC_ACTIVATIONS_PER_TICK);
+
+        for (actor_id, _due_tick, sequence) in due {
+            let rng = self.named_rng(b"scheduled-eoc-activation", &[actor_id.as_u128()], sequence);
+            let (entry, mut execution) = {
+                let actor = self
+                    .actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?;
+                let index = actor
+                    .scheduled_eocs
+                    .iter()
+                    .position(|entry| entry.sequence == sequence)
+                    .ok_or(SimError::InvalidItem)?;
+                let entry = actor.scheduled_eocs.remove(index);
+                let execution = EocExecution {
+                    effects: actor.effects.clone(),
+                    variables: actor.eoc_variables.clone(),
+                    next_schedule_sequence: actor.next_eoc_schedule_sequence,
+                    scheduled_eocs: actor.scheduled_eocs.clone(),
+                    messages: Vec::new(),
+                    activations: 0,
+                    operations: 0,
+                    tick: self.tick,
+                    rng,
+                };
+                (entry, execution)
+            };
+            if execute_eoc(&self.eoc_definitions, &entry.eoc_id, &mut execution, 0).is_err()
+                || execution.effects.len() > 1_024
+            {
+                continue;
+            }
+            execution.effects.sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
+            execution
+                .scheduled_eocs
+                .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            actor.effects = execution.effects;
+            actor.eoc_variables = execution.variables;
+            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
+            actor.scheduled_eocs = execution.scheduled_eocs;
+            for text in execution.messages {
+                events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
+            }
+        }
+        Ok(())
+    }
 }
 
 struct EocExecution {
     effects: Vec<ActorEffectSnapshotV1>,
     variables: BTreeMap<String, String>,
+    next_schedule_sequence: u64,
+    scheduled_eocs: Vec<ScheduledEocV1>,
     messages: Vec<String>,
     activations: usize,
     operations: usize,
@@ -311,9 +392,15 @@ fn execute_effects(
             EocEffectV1::RemoveActorVariable { variable_id } => {
                 execution.variables.remove(variable_id);
             }
-            EocEffectV1::RunEocs { eoc_ids } => {
-                for eoc_id in eoc_ids {
-                    execute_eoc(catalog, eoc_id, execution, depth + 1)?;
+            EocEffectV1::RunEocs { eoc_ids, delay } => {
+                if let Some(delay) = delay {
+                    for eoc_id in eoc_ids {
+                        schedule_eoc(execution, eoc_id, *delay)?;
+                    }
+                } else {
+                    for eoc_id in eoc_ids {
+                        execute_eoc(catalog, eoc_id, execution, depth + 1)?;
+                    }
                 }
             }
             EocEffectV1::Conditional {
@@ -335,6 +422,40 @@ fn execute_effects(
             }
         }
     }
+    Ok(())
+}
+
+fn schedule_eoc(
+    execution: &mut EocExecution,
+    eoc_id: &str,
+    delay: EocDelayV1,
+) -> Result<(), SimError> {
+    if execution.scheduled_eocs.len() >= MAX_ACTOR_SCHEDULED_EOCS {
+        return Err(SimError::InvalidItem);
+    }
+    let delay_turns = inclusive_rng_u64(
+        &mut execution.rng,
+        u64::from(delay.minimum_turns),
+        u64::from(delay.maximum_turns),
+    );
+    let delay_ticks = delay_turns
+        .checked_mul(SimTick::HZ)
+        .ok_or(SimError::NumericOverflow)?;
+    execution.next_schedule_sequence = execution
+        .next_schedule_sequence
+        .checked_add(1)
+        .ok_or(SimError::NumericOverflow)?;
+    execution.scheduled_eocs.push(ScheduledEocV1 {
+        sequence: execution.next_schedule_sequence,
+        due_tick: SimTick(
+            execution
+                .tick
+                .0
+                .checked_add(delay_ticks)
+                .ok_or(SimError::NumericOverflow)?,
+        ),
+        eoc_id: eoc_id.to_owned(),
+    });
     Ok(())
 }
 

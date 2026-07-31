@@ -17,6 +17,12 @@ pub enum EocStringValueDefinition {
     ActorVariable(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EocDelayDefinition {
+    pub minimum_turns: u32,
+    pub maximum_turns: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EocConditionDefinition {
     Constant(bool),
@@ -56,6 +62,7 @@ pub enum EocEffectDefinition {
     },
     RunEocs {
         eoc_ids: Vec<String>,
+        delay: Option<EocDelayDefinition>,
     },
     Conditional {
         condition: EocConditionDefinition,
@@ -67,7 +74,7 @@ pub enum EocEffectDefinition {
 impl EocEffectDefinition {
     pub fn collect_referenced_eocs<'a>(&'a self, target: &mut Vec<&'a str>) {
         match self {
-            Self::RunEocs { eoc_ids } => target.extend(eoc_ids.iter().map(String::as_str)),
+            Self::RunEocs { eoc_ids, .. } => target.extend(eoc_ids.iter().map(String::as_str)),
             Self::Conditional {
                 then_effects,
                 else_effects,
@@ -657,7 +664,10 @@ fn parse_effects(
             continue;
         }
         if let Some(run) = object.get("run_eocs") {
-            if object.len() != 1 {
+            if object
+                .keys()
+                .any(|field| !matches!(field.as_str(), "run_eocs" | "time_in_future"))
+            {
                 unsupported.insert(item_path);
                 continue;
             }
@@ -665,7 +675,17 @@ fn parse_effects(
                 unsupported.insert(format!("{item_path}.run_eocs"));
                 continue;
             };
-            effects.push(EocEffectDefinition::RunEocs { eoc_ids });
+            let delay = match object.get("time_in_future") {
+                Some(value) => match parse_delay(value) {
+                    Some(delay) => Some(delay),
+                    None => {
+                        unsupported.insert(format!("{item_path}.time_in_future"));
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            effects.push(EocEffectDefinition::RunEocs { eoc_ids, delay });
             continue;
         }
         unsupported.insert(item_path);
@@ -741,6 +761,24 @@ fn parse_duration_turns(value: &Value) -> Option<(u32, bool)> {
     };
     let turns = (number * multiplier).round();
     (turns > 0.0 && turns <= f64::from(u32::MAX)).then(|| (turns as u32, false))
+}
+
+fn parse_delay(value: &Value) -> Option<EocDelayDefinition> {
+    let values = match value {
+        Value::Array(values) if values.len() == 2 => values.as_slice(),
+        Value::Array(_) => return None,
+        value => std::slice::from_ref(value),
+    };
+    let minimum_turns = parse_duration_turns(values.first()?)
+        .filter(|(_turns, permanent)| !permanent)?
+        .0;
+    let maximum_turns = parse_duration_turns(values.last()?)
+        .filter(|(_turns, permanent)| !permanent)?
+        .0;
+    (maximum_turns >= minimum_turns).then_some(EocDelayDefinition {
+        minimum_turns,
+        maximum_turns,
+    })
 }
 
 fn valid_id(id: &str) -> bool {

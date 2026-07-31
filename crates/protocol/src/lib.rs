@@ -23,10 +23,11 @@ pub use anatomy::{
     wearable_armor_type_is_valid,
 };
 pub use eocs::{
-    EocConditionV1, EocDefinitionV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1,
-    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_DEFINITIONS, MAX_EOC_EFFECTS, MAX_EOC_ITEM_USE_TYPES,
-    MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES, MAX_EOC_TREE_DEPTH, MAX_EOC_TREE_NODES,
-    MAX_EOC_VARIABLE_VALUE_BYTES, actor_eoc_variables_are_valid, eoc_catalog_is_valid,
+    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1, EocStringValueV1,
+    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_DEFINITIONS, MAX_EOC_EFFECTS,
+    MAX_EOC_ITEM_USE_TYPES, MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES, MAX_EOC_TREE_DEPTH,
+    MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES, ScheduledEocV1, actor_eoc_schedule_is_valid,
+    actor_eoc_variables_are_valid, eoc_catalog_is_valid,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -84,7 +85,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 109;
+pub const PROTOCOL_VERSION: u16 = 110;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2674,6 +2675,10 @@ pub struct ActorSnapshot {
     pub effects: Vec<ActorEffectSnapshotV1>,
     /// Stable actor-scoped CDDA dialogue/EOC string variables.
     pub eoc_variables: BTreeMap<String, String>,
+    /// Monotonic high-water sequence for stable delayed-EOC ordering.
+    pub next_eoc_schedule_sequence: u64,
+    /// Due-tick/sequence sorted server-authoritative delayed activations.
+    pub scheduled_eocs: Vec<ScheduledEocV1>,
     /// Base Strength. Until limb anatomy lands, a healthy actor's arm-strength
     /// modifier is exactly one and structural smashing derives from this.
     pub base_strength: u16,
@@ -7305,6 +7310,10 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
         && snapshot.calendar == CalendarSnapshot::at_tick(snapshot.tick)
         && snapshot.natural_light == NaturalLightSnapshot::at_tick(snapshot.tick)
         && actor_eoc_variables_are_valid(&snapshot.controlled_actor.eoc_variables)
+        && actor_eoc_schedule_is_valid(
+            &snapshot.controlled_actor.scheduled_eocs,
+            snapshot.controlled_actor.next_eoc_schedule_sequence,
+        )
         && snapshot.visible_actors.len() <= 65_536
         && snapshot.creatures.len() <= 65_536
         && snapshot.ground_items.len() <= 65_536

@@ -53,7 +53,7 @@ use cdda_protocol::{
     MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
     MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
     PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
-    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, SimTick,
+    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick,
     SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
     TerrainTileSnapshot, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind,
     WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves,
@@ -2646,6 +2646,8 @@ struct Actor {
     body_parts: Vec<ActorBodyPartSnapshotV1>,
     effects: Vec<ActorEffectSnapshotV1>,
     eoc_variables: BTreeMap<String, String>,
+    next_eoc_schedule_sequence: u64,
+    scheduled_eocs: Vec<ScheduledEocV1>,
     base_strength: u16,
     base_dexterity: u16,
     base_intelligence: u16,
@@ -2688,6 +2690,8 @@ impl Actor {
             body_parts: self.body_parts.clone(),
             effects: self.effects.clone(),
             eoc_variables: self.eoc_variables.clone(),
+            next_eoc_schedule_sequence: self.next_eoc_schedule_sequence,
+            scheduled_eocs: self.scheduled_eocs.clone(),
             base_strength: self.base_strength,
             base_dexterity: self.base_dexterity,
             base_intelligence: self.base_intelligence,
@@ -2803,6 +2807,10 @@ fn valid_actor_schedule(
     if !anatomy::actor_anatomy_state_is_valid(anatomy, &snapshot.body_parts, snapshot.hp)
         || !cdda_protocol::actor_effects_are_valid(anatomy, &snapshot.effects, current_tick)
         || !cdda_protocol::actor_eoc_variables_are_valid(&snapshot.eoc_variables)
+        || !cdda_protocol::actor_eoc_schedule_is_valid(
+            &snapshot.scheduled_eocs,
+            snapshot.next_eoc_schedule_sequence,
+        )
         || [
             snapshot.base_strength,
             snapshot.base_dexterity,
@@ -5577,6 +5585,8 @@ impl WorldState {
                 body_parts,
                 effects: Vec::new(),
                 eoc_variables: BTreeMap::new(),
+                next_eoc_schedule_sequence: 0,
+                scheduled_eocs: Vec::new(),
                 base_strength: base_stats.strength,
                 base_dexterity: base_stats.dexterity,
                 base_intelligence: base_stats.intelligence,
@@ -5699,6 +5709,10 @@ impl WorldState {
             || actor.id.counter() != self.allocator.next()
             || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
             || !valid_actor_schedule(&actor, self.tick, &self.actor_anatomy)
+            || actor
+                .scheduled_eocs
+                .iter()
+                .any(|entry| !self.eoc_definitions.contains_key(&entry.eoc_id))
             || actor.craft_activity.is_some()
             || actor.read_activity.is_some()
             || actor.disassembly_activity.is_some()
@@ -5787,6 +5801,8 @@ impl WorldState {
                 body_parts: actor.body_parts,
                 effects: actor.effects,
                 eoc_variables: actor.eoc_variables,
+                next_eoc_schedule_sequence: actor.next_eoc_schedule_sequence,
+                scheduled_eocs: actor.scheduled_eocs,
                 base_strength: actor.base_strength,
                 base_dexterity: actor.base_dexterity,
                 base_intelligence: actor.base_intelligence,
@@ -5887,6 +5903,7 @@ impl WorldState {
             self.admit_command(command, &mut events)?;
         }
         self.advance_actor_effects(&mut events)?;
+        self.advance_scheduled_eocs(&mut events)?;
         let actor_sound_start = events.len();
         self.advance_actor_actions(&mut events)?;
         self.advance_powered_tools(&mut events)?;
@@ -13983,7 +14000,7 @@ impl WorldState {
         {
             return Err(SimError::InvalidSnapshot);
         }
-        let eoc_definitions = snapshot
+        let eoc_definitions: BTreeMap<String, EocDefinitionV1> = snapshot
             .eoc_definitions
             .iter()
             .cloned()
@@ -14013,6 +14030,10 @@ impl WorldState {
                 || actors.contains_key(&actor.id)
                 || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
                 || !valid_actor_schedule(actor, snapshot.tick, &snapshot.actor_anatomy)
+                || actor
+                    .scheduled_eocs
+                    .iter()
+                    .any(|entry| !eoc_definitions.contains_key(&entry.eoc_id))
                 || (actor.hp > 0 && !occupied.insert(actor.position))
             {
                 return Err(SimError::InvalidSnapshot);
@@ -14147,6 +14168,8 @@ impl WorldState {
                     body_parts: actor.body_parts.clone(),
                     effects: actor.effects.clone(),
                     eoc_variables: actor.eoc_variables.clone(),
+                    next_eoc_schedule_sequence: actor.next_eoc_schedule_sequence,
+                    scheduled_eocs: actor.scheduled_eocs.clone(),
                     base_strength: actor.base_strength,
                     base_dexterity: actor.base_dexterity,
                     base_intelligence: actor.base_intelligence,
@@ -14363,7 +14386,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV85");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV86");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -21334,6 +21357,8 @@ mod tests {
             }],
             effects: Vec::new(),
             eoc_variables: BTreeMap::new(),
+            next_eoc_schedule_sequence: 0,
+            scheduled_eocs: Vec::new(),
             base_strength: DEFAULT_ACTOR_BASE_STAT,
             base_dexterity: DEFAULT_ACTOR_BASE_STAT,
             base_intelligence: DEFAULT_ACTOR_BASE_STAT,
@@ -21382,6 +21407,8 @@ mod tests {
                 }],
                 effects: Vec::new(),
                 eoc_variables: BTreeMap::new(),
+                next_eoc_schedule_sequence: 0,
+                scheduled_eocs: Vec::new(),
                 base_strength: DEFAULT_ACTOR_BASE_STAT,
                 base_dexterity: DEFAULT_ACTOR_BASE_STAT,
                 base_intelligence: DEFAULT_ACTOR_BASE_STAT,

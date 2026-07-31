@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 87;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 109
-/// retained actor-scoped EOC variables and variable-aware programs.
+pub const SCHEMA_VERSION: i64 = 88;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 110
+/// retained delayed actor EOC queues and delayed program effects.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 87;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 88;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -12016,6 +12016,8 @@ mod tests {
             }],
             effects: Vec::new(),
             eoc_variables: BTreeMap::new(),
+            next_eoc_schedule_sequence: 0,
+            scheduled_eocs: Vec::new(),
             base_strength: cdda_sim::DEFAULT_ACTOR_BASE_STAT,
             base_dexterity: cdda_sim::DEFAULT_ACTOR_BASE_STAT,
             base_intelligence: cdda_sim::DEFAULT_ACTOR_BASE_STAT,
@@ -12516,6 +12518,8 @@ mod tests {
             }],
             effects: Vec::new(),
             eoc_variables: BTreeMap::new(),
+            next_eoc_schedule_sequence: 0,
+            scheduled_eocs: Vec::new(),
             base_strength: cdda_sim::DEFAULT_ACTOR_BASE_STAT,
             base_dexterity: cdda_sim::DEFAULT_ACTOR_BASE_STAT,
             base_intelligence: cdda_sim::DEFAULT_ACTOR_BASE_STAT,

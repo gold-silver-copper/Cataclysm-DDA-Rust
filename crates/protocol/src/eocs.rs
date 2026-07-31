@@ -11,6 +11,20 @@ pub const MAX_EOC_TREE_NODES: usize = 8_192;
 pub const MAX_EOC_MESSAGE_BYTES: usize = 16 * 1_024;
 pub const MAX_EOC_ACTOR_VARIABLES: usize = 1_024;
 pub const MAX_EOC_VARIABLE_VALUE_BYTES: usize = 16 * 1_024;
+pub const MAX_ACTOR_SCHEDULED_EOCS: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EocDelayV1 {
+    pub minimum_turns: u32,
+    pub maximum_turns: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScheduledEocV1 {
+    pub sequence: u64,
+    pub due_tick: crate::SimTick,
+    pub eoc_id: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EocStringValueV1 {
@@ -60,6 +74,7 @@ pub enum EocEffectV1 {
     },
     RunEocs {
         eoc_ids: Vec<String>,
+        delay: Option<EocDelayV1>,
     },
     Conditional {
         condition: EocConditionV1,
@@ -71,7 +86,7 @@ pub enum EocEffectV1 {
 impl EocEffectV1 {
     fn collect_references<'a>(&'a self, target: &mut Vec<&'a str>) {
         match self {
-            Self::RunEocs { eoc_ids } => target.extend(eoc_ids.iter().map(String::as_str)),
+            Self::RunEocs { eoc_ids, .. } => target.extend(eoc_ids.iter().map(String::as_str)),
             Self::Conditional {
                 then_effects,
                 else_effects,
@@ -246,10 +261,13 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                         .all(|value| valid_variable_value(value))
             }
             EocEffectV1::RemoveActorVariable { variable_id } => valid_id(variable_id),
-            EocEffectV1::RunEocs { eoc_ids } => {
+            EocEffectV1::RunEocs { eoc_ids, delay } => {
                 !eoc_ids.is_empty()
                     && eoc_ids.len() <= MAX_EOC_REFERENCES
                     && eoc_ids.iter().all(|id| valid_id(id))
+                    && delay.as_ref().is_none_or(|delay| {
+                        delay.minimum_turns > 0 && delay.maximum_turns >= delay.minimum_turns
+                    })
             }
             EocEffectV1::Conditional {
                 condition,
@@ -279,6 +297,26 @@ pub fn actor_eoc_variables_are_valid(
         && variables
             .iter()
             .all(|(variable_id, value)| valid_id(variable_id) && valid_variable_value(value))
+}
+
+#[must_use]
+pub fn actor_eoc_schedule_is_valid(schedule: &[ScheduledEocV1], next_sequence: u64) -> bool {
+    schedule.len() <= MAX_ACTOR_SCHEDULED_EOCS
+        && schedule
+            .windows(2)
+            .all(|pair| (pair[0].due_tick, pair[0].sequence) < (pair[1].due_tick, pair[1].sequence))
+        && schedule
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == schedule.len()
+        && schedule.iter().all(|entry| {
+            entry.sequence > 0
+                && entry.sequence <= next_sequence
+                && entry.due_tick > crate::SimTick(0)
+                && valid_id(&entry.eoc_id)
+        })
 }
 
 fn valid_variable_value(value: &str) -> bool {

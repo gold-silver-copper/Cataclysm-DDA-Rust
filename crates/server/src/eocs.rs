@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EocConditionDefinition,
-    EocEffectDefinition, EocStringValueDefinition, ItemRegistry,
+    EocDelayDefinition, EocEffectDefinition, EocStringValueDefinition, ItemRegistry,
 };
 use cdda_protocol::{
-    AnatomyDefinitionV1, EocConditionV1, EocDefinitionV1, EocEffectV1, EocItemUseTypeV1,
-    EocStringValueV1, eoc_catalog_is_valid,
+    AnatomyDefinitionV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
+    EocItemUseTypeV1, EocStringValueV1, eoc_catalog_is_valid,
 };
 
 pub(super) fn runtime_eoc_catalog(
@@ -259,8 +259,17 @@ fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
                 variable_id: variable_id.clone(),
             }
         }
-        EocEffectDefinition::RunEocs { eoc_ids } => EocEffectV1::RunEocs {
+        EocEffectDefinition::RunEocs { eoc_ids, delay } => EocEffectV1::RunEocs {
             eoc_ids: eoc_ids.clone(),
+            delay: delay.map(
+                |EocDelayDefinition {
+                     minimum_turns,
+                     maximum_turns,
+                 }| EocDelayV1 {
+                    minimum_turns,
+                    maximum_turns,
+                },
+            ),
         },
         EocEffectDefinition::Conditional {
             condition,
