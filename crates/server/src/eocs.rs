@@ -19,6 +19,7 @@ pub(super) fn runtime_eoc_catalog(
     anatomy: &AnatomyDefinitionV1,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
 ) -> Result<(Vec<EocDefinitionV1>, Vec<EocItemUseTypeV1>), Box<dyn std::error::Error>> {
     let mut definitions = registry
         .iter()
@@ -49,7 +50,7 @@ pub(super) fn runtime_eoc_catalog(
     }
     definitions.retain(|_id, definition| {
         runtime_eoc_body_parts_are_supported(&runtime_eoc_definition(definition), anatomy)
-            && eoc_references_are_supported(definition, items, proficiencies, recipes)
+            && eoc_references_are_supported(definition, items, proficiencies, recipes, mission_ids)
     });
 
     loop {
@@ -170,21 +171,35 @@ fn eoc_references_are_supported(
     items: &ItemRegistry,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
 ) -> bool {
     definition.condition.as_ref().is_none_or(|condition| {
-        condition_references_are_supported(condition, items, proficiencies, recipes)
+        condition_references_are_supported(condition, items, proficiencies, recipes, mission_ids)
     }) && definition
         .deactivate_condition
         .as_ref()
         .is_none_or(|condition| {
-            condition_references_are_supported(condition, items, proficiencies, recipes)
+            condition_references_are_supported(
+                condition,
+                items,
+                proficiencies,
+                recipes,
+                mission_ids,
+            )
         })
-        && effects_references_are_supported(&definition.effects, items, proficiencies, recipes)
+        && effects_references_are_supported(
+            &definition.effects,
+            items,
+            proficiencies,
+            recipes,
+            mission_ids,
+        )
         && effects_references_are_supported(
             &definition.false_effects,
             items,
             proficiencies,
             recipes,
+            mission_ids,
         )
 }
 
@@ -193,6 +208,7 @@ fn condition_references_are_supported(
     items: &ItemRegistry,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
 ) -> bool {
     match condition {
         EocConditionDefinition::HasItem { item_type_id, .. }
@@ -201,12 +217,25 @@ fn condition_references_are_supported(
             proficiencies.get(proficiency_id).is_some()
         }
         EocConditionDefinition::KnowsRecipe { recipe_id } => recipes.get(recipe_id).is_some(),
-        EocConditionDefinition::Not(condition) => {
-            condition_references_are_supported(condition, items, proficiencies, recipes)
+        EocConditionDefinition::HasMission { mission_type_id } => {
+            mission_ids.contains(mission_type_id)
         }
+        EocConditionDefinition::Not(condition) => condition_references_are_supported(
+            condition,
+            items,
+            proficiencies,
+            recipes,
+            mission_ids,
+        ),
         EocConditionDefinition::And(conditions) | EocConditionDefinition::Or(conditions) => {
             conditions.iter().all(|condition| {
-                condition_references_are_supported(condition, items, proficiencies, recipes)
+                condition_references_are_supported(
+                    condition,
+                    items,
+                    proficiencies,
+                    recipes,
+                    mission_ids,
+                )
             })
         }
         EocConditionDefinition::Constant(_)
@@ -227,6 +256,7 @@ fn effects_references_are_supported(
     items: &ItemRegistry,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
 ) -> bool {
     effects.iter().all(|effect| match effect {
         EocEffectDefinition::Conditional {
@@ -234,18 +264,49 @@ fn effects_references_are_supported(
             then_effects,
             else_effects,
         } => {
-            condition_references_are_supported(condition, items, proficiencies, recipes)
-                && effects_references_are_supported(then_effects, items, proficiencies, recipes)
-                && effects_references_are_supported(else_effects, items, proficiencies, recipes)
+            condition_references_are_supported(
+                condition,
+                items,
+                proficiencies,
+                recipes,
+                mission_ids,
+            ) && effects_references_are_supported(
+                then_effects,
+                items,
+                proficiencies,
+                recipes,
+                mission_ids,
+            ) && effects_references_are_supported(
+                else_effects,
+                items,
+                proficiencies,
+                recipes,
+                mission_ids,
+            )
         }
         EocEffectDefinition::Confirmation {
             accept_effects,
             decline_effects,
             ..
         } => {
-            effects_references_are_supported(accept_effects, items, proficiencies, recipes)
-                && effects_references_are_supported(decline_effects, items, proficiencies, recipes)
+            effects_references_are_supported(
+                accept_effects,
+                items,
+                proficiencies,
+                recipes,
+                mission_ids,
+            ) && effects_references_are_supported(
+                decline_effects,
+                items,
+                proficiencies,
+                recipes,
+                mission_ids,
+            )
         }
+        EocEffectDefinition::AssignMission { mission_type_id }
+        | EocEffectDefinition::FinishMission {
+            mission_type_id, ..
+        } => mission_ids.contains(mission_type_id),
         EocEffectDefinition::Message { .. }
         | EocEffectDefinition::AddEffect { .. }
         | EocEffectDefinition::RemoveEffects { .. }
@@ -299,6 +360,7 @@ fn runtime_condition_body_parts_are_supported(
         | EocConditionV1::IsWearing { .. }
         | EocConditionV1::HasProficiency { .. }
         | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::HasMission { .. }
         | EocConditionV1::StatAtLeast { .. }
         | EocConditionV1::Math(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
@@ -346,13 +408,16 @@ fn runtime_effect_body_parts_are_supported(
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
         | EocEffectV1::MathAssignment { .. }
-        | EocEffectV1::RunEocs { .. } => true,
+        | EocEffectV1::RunEocs { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => true,
     })
 }
 
 pub(super) fn runtime_dialogue_effects_are_supported(
     effects: &[EocEffectDefinition],
     anatomy: &AnatomyDefinitionV1,
+    mission_ids: &BTreeSet<String>,
 ) -> bool {
     let runtime = effects.iter().map(runtime_effect).collect::<Vec<_>>();
     let valid_part = |body_part_id: &Option<String>| {
@@ -365,6 +430,33 @@ pub(super) fn runtime_dialogue_effects_are_supported(
     };
     cdda_protocol::eoc_effects_are_valid(&runtime)
         && runtime_effect_body_parts_are_supported(&runtime, &valid_part)
+        && dialogue_mission_references_are_supported(effects, mission_ids)
+}
+
+fn dialogue_mission_references_are_supported(
+    effects: &[EocEffectDefinition],
+    mission_ids: &BTreeSet<String>,
+) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectDefinition::AssignMission { mission_type_id }
+        | EocEffectDefinition::FinishMission {
+            mission_type_id, ..
+        } => mission_ids.contains(mission_type_id),
+        EocEffectDefinition::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        }
+        | EocEffectDefinition::Confirmation {
+            accept_effects: then_effects,
+            decline_effects: else_effects,
+            ..
+        } => {
+            dialogue_mission_references_are_supported(then_effects, mission_ids)
+                && dialogue_mission_references_are_supported(else_effects, mission_ids)
+        }
+        _ => true,
+    })
 }
 
 pub(super) fn runtime_dialogue_condition_is_supported(
@@ -373,6 +465,7 @@ pub(super) fn runtime_dialogue_condition_is_supported(
     anatomy: &AnatomyDefinitionV1,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
 ) -> bool {
     let runtime = runtime_condition(condition);
     let valid_part = |body_part_id: &Option<String>| {
@@ -385,7 +478,7 @@ pub(super) fn runtime_dialogue_condition_is_supported(
     };
     cdda_protocol::eoc_condition_is_valid(&runtime)
         && runtime_condition_body_parts_are_supported(&runtime, &valid_part)
-        && condition_references_are_supported(condition, items, proficiencies, recipes)
+        && condition_references_are_supported(condition, items, proficiencies, recipes, mission_ids)
 }
 
 fn runtime_eoc_definition(definition: &EffectOnConditionDefinition) -> EocDefinitionV1 {
@@ -517,6 +610,9 @@ pub(super) fn runtime_condition(condition: &EocConditionDefinition) -> EocCondit
         }
         EocConditionDefinition::KnowsRecipe { recipe_id } => EocConditionV1::KnowsRecipe {
             recipe_id: recipe_id.clone(),
+        },
+        EocConditionDefinition::HasMission { mission_type_id } => EocConditionV1::HasMission {
+            mission_type_id: mission_type_id.clone(),
         },
         EocConditionDefinition::StatAtLeast { stat, minimum } => EocConditionV1::StatAtLeast {
             stat: match stat {
@@ -659,6 +755,16 @@ pub(super) fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
                     maximum_turns,
                 },
             ),
+        },
+        EocEffectDefinition::AssignMission { mission_type_id } => EocEffectV1::AssignMission {
+            mission_type_id: mission_type_id.clone(),
+        },
+        EocEffectDefinition::FinishMission {
+            mission_type_id,
+            success,
+        } => EocEffectV1::FinishMission {
+            mission_type_id: mission_type_id.clone(),
+            success: *success,
         },
         EocEffectDefinition::Conditional {
             condition,

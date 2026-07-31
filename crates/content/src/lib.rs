@@ -14,6 +14,7 @@ mod item;
 mod item_group;
 mod mapgen;
 mod material;
+mod mission;
 mod monster;
 mod monster_group;
 mod npc_dialogue;
@@ -97,6 +98,9 @@ pub use mapgen::{
 };
 pub use material::{
     ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,
+};
+pub use mission::{
+    MissionDefinition, MissionGoalDefinition, MissionRegistry, MissionRegistryError,
 };
 pub use monster::{
     MonsterAttackEffectDefinition, MonsterDefinition, MonsterRegistry, MonsterRegistryError,
@@ -539,6 +543,7 @@ fn definition_support(kind: &str) -> SupportStatus {
             | "field_type"
             | "faction"
             | "item_group"
+            | "mission_definition"
             | "npc"
             | "talk_topic"
             | "SPELL"
@@ -557,6 +562,7 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "ITEM" && item::field_is_implemented(field))
         || (kind == "item_group" && item_group::field_is_implemented(field))
         || (kind == "MONSTER" && monster::field_is_implemented(field))
+        || (kind == "mission_definition" && mission::field_is_implemented(field))
         || (kind == "field_type" && field::field_is_implemented(field))
         || (kind == "faction" && npc_faction::field_is_implemented(field))
         || (kind == "npc" && npc_dialogue::npc_field_is_implemented(field))

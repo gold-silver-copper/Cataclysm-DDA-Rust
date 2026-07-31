@@ -18,6 +18,7 @@ use rand_core::Rng;
 use crate::{
     SLEEPINESS_MAX, SimError, WorldState, inclusive_rng_u64,
     items::{InventoryTypeSummary, summarize_inventory_by_type},
+    missions::MissionOperation,
 };
 
 const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
@@ -124,6 +125,7 @@ impl WorldState {
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
             messages: Vec::new(),
+            mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
             activations: 0,
@@ -153,6 +155,7 @@ impl WorldState {
             || execution.confirmation.is_some()
             || !execution.scheduled_eocs.is_empty()
             || !execution.inactive_recurring_eocs.is_empty()
+            || !execution.mission_operations.is_empty()
         {
             return Ok(false);
         }
@@ -214,6 +217,7 @@ impl WorldState {
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
             messages: Vec::new(),
+            mission_operations: Vec::new(),
             interactive: actor.connected,
             confirmation: None,
             activations: 0,
@@ -330,6 +334,7 @@ impl WorldState {
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
             messages: Vec::new(),
+            mission_operations: Vec::new(),
             interactive: interactive && actor.connected,
             confirmation: None,
             activations: 0,
@@ -414,6 +419,7 @@ impl WorldState {
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
             messages: Vec::new(),
+            mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
             activations: 0,
@@ -454,6 +460,10 @@ impl WorldState {
         actor_id: ActorId,
         execution: &mut EocExecution,
     ) -> Result<(), SimError> {
+        self.commit_mission_operations(
+            actor_id,
+            std::mem::take(&mut execution.mission_operations),
+        )?;
         let actor = self
             .actors
             .get_mut(&actor_id)
@@ -546,6 +556,7 @@ impl WorldState {
                     scheduled_eocs: actor.scheduled_eocs.clone(),
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                     messages: Vec::new(),
+                    mission_operations: Vec::new(),
                     interactive: false,
                     confirmation: None,
                     activations: 0,
@@ -604,6 +615,10 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+            self.commit_mission_operations(
+                actor_id,
+                std::mem::take(&mut execution.mission_operations),
+            )?;
             let actor = self
                 .actors
                 .get_mut(&actor_id)
@@ -717,6 +732,7 @@ impl WorldState {
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                 messages: Vec::new(),
+                mission_operations: Vec::new(),
                 interactive: false,
                 confirmation: None,
                 activations: 0,
@@ -739,6 +755,10 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+            self.commit_mission_operations(
+                actor_id,
+                std::mem::take(&mut execution.mission_operations),
+            )?;
             let actor = self
                 .actors
                 .get_mut(&actor_id)
@@ -771,6 +791,7 @@ impl WorldState {
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
             messages: Vec::new(),
+            mission_operations: Vec::new(),
             interactive: false,
             confirmation: None,
             activations: 0,
@@ -829,6 +850,7 @@ impl WorldState {
                 scheduled_eocs: actor.scheduled_eocs.clone(),
                 inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                 messages: Vec::new(),
+                mission_operations: Vec::new(),
                 interactive: false,
                 confirmation: None,
                 activations: 0,
@@ -893,6 +915,7 @@ struct EocExecution {
     scheduled_eocs: Vec<ScheduledEocV1>,
     inactive_recurring_eocs: Vec<String>,
     messages: Vec<String>,
+    mission_operations: Vec<MissionOperation>,
     interactive: bool,
     confirmation: Option<EocConfirmationRequest>,
     activations: usize,
@@ -915,6 +938,7 @@ struct EocActorContext {
     has_weapon: bool,
     learned_recipes: BTreeSet<String>,
     learned_proficiencies: BTreeSet<String>,
+    active_mission_types: Vec<String>,
     base_strength: u16,
     base_dexterity: u16,
     base_intelligence: u16,
@@ -942,6 +966,7 @@ fn eoc_actor_context(actor: &crate::Actor) -> EocActorContext {
             .filter(|(_id, proficiency)| proficiency.learned)
             .map(|(id, _proficiency)| id.clone())
             .collect(),
+        active_mission_types: crate::missions::active_mission_types(actor),
         base_strength: actor.base_strength,
         base_dexterity: actor.base_dexterity,
         base_intelligence: actor.base_intelligence,
@@ -1111,6 +1136,10 @@ fn evaluate_condition(
             actor.learned_proficiencies.contains(proficiency_id)
         }
         EocConditionV1::KnowsRecipe { recipe_id } => actor.learned_recipes.contains(recipe_id),
+        EocConditionV1::HasMission { mission_type_id } => actor
+            .active_mission_types
+            .iter()
+            .any(|active| active == mission_type_id),
         EocConditionV1::StatAtLeast { stat, minimum } => {
             let actual = i32::from(match stat {
                 EocActorStatV1::Strength => actor.base_strength,
@@ -1583,6 +1612,39 @@ fn execute_effects(
                     }
                 }
             }
+            EocEffectV1::AssignMission { mission_type_id } => {
+                if execution.actor.active_mission_types.len() >= cdda_protocol::MAX_ACTOR_MISSIONS {
+                    return Err(SimError::InvalidMission);
+                }
+                execution
+                    .actor
+                    .active_mission_types
+                    .push(mission_type_id.clone());
+                execution.mission_operations.push(MissionOperation::Assign {
+                    mission_type_id: mission_type_id.clone(),
+                    // Pinned dynamic `assign_mission` reserves with an invalid
+                    // NPC character id; dialogue context does not become the
+                    // mission giver implicitly.
+                    origin_npc_id: None,
+                });
+            }
+            EocEffectV1::FinishMission {
+                mission_type_id,
+                success,
+            } => {
+                if let Some(index) = execution
+                    .actor
+                    .active_mission_types
+                    .iter()
+                    .position(|active| active == mission_type_id)
+                {
+                    execution.actor.active_mission_types.remove(index);
+                    execution.mission_operations.push(MissionOperation::Finish {
+                        mission_type_id: mission_type_id.clone(),
+                        success: *success,
+                    });
+                }
+            }
             EocEffectV1::Conditional {
                 condition,
                 then_effects,
@@ -1770,6 +1832,86 @@ pub(super) fn actor_recurring_eoc_state_is_valid(
         })
 }
 
+pub(super) fn mission_references_are_valid(
+    eoc_definitions: &[EocDefinitionV1],
+    dialogue_topics: &[cdda_protocol::DialogueTopicV1],
+    mission_definitions: &[cdda_protocol::MissionDefinitionV1],
+) -> bool {
+    let mission_ids = mission_definitions
+        .iter()
+        .map(|definition| definition.mission_type_id.as_str())
+        .collect::<BTreeSet<_>>();
+    eoc_definitions.iter().all(|definition| {
+        definition
+            .condition
+            .as_ref()
+            .is_none_or(|condition| condition_references_known_missions(condition, &mission_ids))
+            && definition
+                .deactivate_condition
+                .as_ref()
+                .is_none_or(|condition| {
+                    condition_references_known_missions(condition, &mission_ids)
+                })
+            && effects_reference_known_missions(&definition.effects, &mission_ids)
+            && effects_reference_known_missions(&definition.false_effects, &mission_ids)
+    }) && dialogue_topics.iter().all(|topic| {
+        topic.responses.iter().all(|response| {
+            response.condition.as_ref().is_none_or(|condition| {
+                condition_references_known_missions(condition, &mission_ids)
+            }) && effects_reference_known_missions(&response.effects, &mission_ids)
+        })
+    }) && mission_definitions.iter().all(|definition| {
+        effects_reference_known_missions(&definition.start_effects, &mission_ids)
+            && effects_reference_known_missions(&definition.end_effects, &mission_ids)
+            && effects_reference_known_missions(&definition.fail_effects, &mission_ids)
+    })
+}
+
+fn condition_references_known_missions(
+    condition: &EocConditionV1,
+    mission_ids: &BTreeSet<&str>,
+) -> bool {
+    match condition {
+        EocConditionV1::HasMission { mission_type_id } => {
+            mission_ids.contains(mission_type_id.as_str())
+        }
+        EocConditionV1::Not(condition) => {
+            condition_references_known_missions(condition, mission_ids)
+        }
+        EocConditionV1::And(conditions) | EocConditionV1::Or(conditions) => conditions
+            .iter()
+            .all(|condition| condition_references_known_missions(condition, mission_ids)),
+        _ => true,
+    }
+}
+
+fn effects_reference_known_missions(effects: &[EocEffectV1], mission_ids: &BTreeSet<&str>) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectV1::AssignMission { mission_type_id }
+        | EocEffectV1::FinishMission {
+            mission_type_id, ..
+        } => mission_ids.contains(mission_type_id.as_str()),
+        EocEffectV1::Conditional {
+            condition,
+            then_effects,
+            else_effects,
+        } => {
+            condition_references_known_missions(condition, mission_ids)
+                && effects_reference_known_missions(then_effects, mission_ids)
+                && effects_reference_known_missions(else_effects, mission_ids)
+        }
+        EocEffectV1::Confirmation {
+            accept_effects,
+            decline_effects,
+            ..
+        } => {
+            effects_reference_known_missions(accept_effects, mission_ids)
+                && effects_reference_known_missions(decline_effects, mission_ids)
+        }
+        _ => true,
+    })
+}
+
 fn condition_body_parts_are_valid(
     condition: &EocConditionV1,
     valid_part: &impl Fn(&Option<String>) -> bool,
@@ -1783,6 +1925,7 @@ fn condition_body_parts_are_valid(
         | EocConditionV1::IsWearing { .. }
         | EocConditionV1::HasProficiency { .. }
         | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::HasMission { .. }
         | EocConditionV1::StatAtLeast { .. }
         | EocConditionV1::Math(_) => true,
         EocConditionV1::HasEffect { body_part_id, .. }
@@ -1828,6 +1971,8 @@ fn effects_body_parts_are_valid(
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
         | EocEffectV1::MathAssignment { .. }
-        | EocEffectV1::RunEocs { .. } => true,
+        | EocEffectV1::RunEocs { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => true,
     })
 }

@@ -4478,6 +4478,17 @@ fn interest_snapshot(
             }
         })
         .collect();
+    let active_mission_types = controlled_actor
+        .missions
+        .iter()
+        .map(|mission| mission.mission_type_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mission_definitions = snapshot
+        .mission_definitions
+        .iter()
+        .filter(|definition| active_mission_types.contains(definition.mission_type_id.as_str()))
+        .cloned()
+        .collect();
     Ok(ReplicationSnapshotV1 {
         tick: snapshot.tick,
         calendar: CalendarSnapshot::at_tick(snapshot.tick),
@@ -4489,6 +4500,7 @@ fn interest_snapshot(
         controlled_actor,
         visible_actors,
         npcs,
+        mission_definitions,
         creatures,
         ground_items,
         chunks,

@@ -87,6 +87,9 @@ pub enum EocConditionV1 {
     KnowsRecipe {
         recipe_id: String,
     },
+    HasMission {
+        mission_type_id: String,
+    },
     StatAtLeast {
         stat: EocActorStatV1,
         minimum: i32,
@@ -210,6 +213,13 @@ pub enum EocEffectV1 {
         eoc_ids: Vec<String>,
         delay: Option<EocDelayV1>,
     },
+    AssignMission {
+        mission_type_id: String,
+    },
+    FinishMission {
+        mission_type_id: String,
+        success: bool,
+    },
     Conditional {
         condition: EocConditionV1,
         then_effects: Vec<Self>,
@@ -244,7 +254,9 @@ impl EocEffectV1 {
             | Self::RemoveTargetEffects { .. }
             | Self::SetTargetVariable { .. }
             | Self::RemoveTargetVariable { .. }
-            | Self::MathAssignment { .. } => {}
+            | Self::MathAssignment { .. }
+            | Self::AssignMission { .. }
+            | Self::FinishMission { .. } => {}
         }
     }
 }
@@ -432,6 +444,7 @@ fn valid_condition(condition: &EocConditionV1, depth: usize, nodes: &mut usize) 
         EocConditionV1::IsWearing { item_type_id } => valid_id(item_type_id),
         EocConditionV1::HasProficiency { proficiency_id } => valid_id(proficiency_id),
         EocConditionV1::KnowsRecipe { recipe_id } => valid_id(recipe_id),
+        EocConditionV1::HasMission { mission_type_id } => valid_id(mission_type_id),
         EocConditionV1::StatAtLeast { .. } => true,
         EocConditionV1::Math(expression) => {
             valid_math_expression_tree(expression, depth + 1, nodes)
@@ -488,6 +501,7 @@ fn condition_requires_target_context(condition: &EocConditionV1) -> bool {
         | EocConditionV1::IsWearing { .. }
         | EocConditionV1::HasProficiency { .. }
         | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::HasMission { .. }
         | EocConditionV1::StatAtLeast { .. }
         | EocConditionV1::Math(_) => false,
     }
@@ -527,7 +541,9 @@ fn effects_require_target_context(effects: &[EocEffectV1]) -> bool {
         | EocEffectV1::SetActorVariable { .. }
         | EocEffectV1::RemoveActorVariable { .. }
         | EocEffectV1::MathAssignment { .. }
-        | EocEffectV1::RunEocs { .. } => false,
+        | EocEffectV1::RunEocs { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => false,
     })
 }
 
@@ -558,7 +574,9 @@ pub fn eoc_effects_contain_confirmation(effects: &[EocEffectV1]) -> bool {
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
         | EocEffectV1::MathAssignment { .. }
-        | EocEffectV1::RunEocs { .. } => false,
+        | EocEffectV1::RunEocs { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => false,
     })
 }
 
@@ -627,6 +645,7 @@ pub fn creature_eoc_condition_is_supported(condition: &EocConditionV1) -> bool {
         | EocConditionV1::IsWearing { .. }
         | EocConditionV1::HasProficiency { .. }
         | EocConditionV1::KnowsRecipe { .. }
+        | EocConditionV1::HasMission { .. }
         | EocConditionV1::StatAtLeast { .. } => false,
     }
 }
@@ -655,7 +674,10 @@ fn creature_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
                 && creature_eoc_effects_are_supported(then_effects)
                 && creature_eoc_effects_are_supported(else_effects)
         }
-        EocEffectV1::Message { .. } | EocEffectV1::Confirmation { .. } => false,
+        EocEffectV1::Message { .. }
+        | EocEffectV1::Confirmation { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => false,
     })
 }
 
@@ -773,6 +795,10 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
                         delay.minimum_turns > 0 && delay.maximum_turns >= delay.minimum_turns
                     })
             }
+            EocEffectV1::AssignMission { mission_type_id }
+            | EocEffectV1::FinishMission {
+                mission_type_id, ..
+            } => valid_id(mission_type_id),
             EocEffectV1::Conditional {
                 condition,
                 then_effects,

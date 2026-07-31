@@ -5470,8 +5470,28 @@ fn gameplay_status(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let missions = actor
+        .missions
+        .iter()
+        .map(|mission| {
+            let name = snapshot
+                .mission_definitions
+                .iter()
+                .find(|definition| definition.mission_type_id == mission.mission_type_id)
+                .map_or(mission.mission_type_id.as_str(), |definition| {
+                    definition.name.as_str()
+                });
+            let status = match mission.status {
+                cdda_protocol::MissionStatusV1::InProgress => "active",
+                cdda_protocol::MissionStatusV1::Success => "completed",
+                cdda_protocol::MissionStatusV1::Failure => "failed",
+            };
+            format!("{name} ({status})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; talk to adjacent NPC: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; talk to adjacent NPC: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Missions: [{}]. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5503,6 +5523,7 @@ fn gameplay_status(
         reading,
         disassembly,
         construction,
+        missions,
         actor.learned_recipes.len(),
         skills,
         proficiency_progress,
@@ -5858,6 +5879,7 @@ mod tests {
                 disassembly_activity: None,
                 construction_activity: None,
                 pending_interaction: None,
+                missions: Vec::new(),
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -5865,6 +5887,7 @@ mod tests {
             },
             visible_actors: Vec::new(),
             npcs: Vec::new(),
+            mission_definitions: Vec::new(),
             creatures: Vec::new(),
             ground_items: vec![
                 cdda_protocol::GroundItemSnapshot {
@@ -6366,6 +6389,7 @@ mod tests {
                 disassembly_activity: None,
                 construction_activity: None,
                 pending_interaction: None,
+                missions: Vec::new(),
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -6373,6 +6397,7 @@ mod tests {
             },
             visible_actors: Vec::new(),
             npcs: Vec::new(),
+            mission_definitions: Vec::new(),
             creatures: Vec::new(),
             ground_items: Vec::new(),
             chunks: Vec::new(),
@@ -7073,6 +7098,7 @@ mod tests {
                 disassembly_activity: None,
                 construction_activity: None,
                 pending_interaction: None,
+                missions: Vec::new(),
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -7086,6 +7112,7 @@ mod tests {
                 sleeping: false,
             }],
             npcs: Vec::new(),
+            mission_definitions: Vec::new(),
             creatures: vec![creature(21, 5, 80), creature(20, 1, 80), creature(22, 1, 0)],
             ground_items: Vec::new(),
             chunks: Vec::new(),
@@ -7211,6 +7238,7 @@ mod tests {
                 disassembly_activity: None,
                 construction_activity: None,
                 pending_interaction: None,
+                missions: Vec::new(),
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -7218,6 +7246,7 @@ mod tests {
             },
             visible_actors: Vec::new(),
             npcs: Vec::new(),
+            mission_definitions: Vec::new(),
             creatures: Vec::new(),
             ground_items: Vec::new(),
             chunks: vec![cdda_protocol::VisibleChunkSnapshot {

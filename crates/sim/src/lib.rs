@@ -8,6 +8,7 @@ mod fields;
 mod interactions;
 mod items;
 mod mapgen;
+mod missions;
 mod monsters;
 mod npc_dialogue;
 mod npc_faction;
@@ -53,16 +54,17 @@ use cdda_protocol::{
     MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
     MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
     MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
-    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
-    NpcId, NpcTemplateV1, PoweredToolStateV1, PoweredToolTransitionReason,
-    ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot,
-    SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
-    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WearableArmorTypeV1,
-    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
-    adjusted_book_study_time_moves, eoc_catalog_is_valid, healing_item_catalog_is_valid,
-    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
-    item_snapshot_is_compatible_with_spawn_rules, item_snapshots_can_combine_for_containment,
-    item_transform_catalog_is_valid, worldgen_catalog_is_valid,
+    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1,
+    MissionId, MissionSnapshotV1, NaturalLightSnapshot, NpcId, NpcTemplateV1, PoweredToolStateV1,
+    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
+    RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase,
+    SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason,
+    WearableArmorTypeV1, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
+    WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
+    healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
+    item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
+    item_snapshots_can_combine_for_containment, item_transform_catalog_is_valid,
+    worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -299,6 +301,13 @@ impl IdAllocator {
 
     pub fn allocate_npc(&mut self) -> Result<NpcId, SimError> {
         Ok(NpcId::new(self.world_namespace, self.allocate_counter()?))
+    }
+
+    pub fn allocate_mission(&mut self) -> Result<MissionId, SimError> {
+        Ok(MissionId::new(
+            self.world_namespace,
+            self.allocate_counter()?,
+        ))
     }
 
     #[must_use]
@@ -2715,6 +2724,7 @@ struct Actor {
     disassembly_activity: Option<DisassemblyActivitySnapshotV1>,
     construction_activity: Option<ConstructionActivitySnapshotV1>,
     pending_interaction: Option<cdda_protocol::PendingInteractionV1>,
+    missions: BTreeMap<MissionId, MissionSnapshotV1>,
     learned_recipes: BTreeSet<String>,
     skills: BTreeMap<String, SkillLevelSnapshot>,
     proficiencies: BTreeMap<String, ProficiencyLevelSnapshot>,
@@ -2764,6 +2774,7 @@ impl Actor {
             disassembly_activity: self.disassembly_activity.clone(),
             construction_activity: self.construction_activity.clone(),
             pending_interaction: self.pending_interaction.clone(),
+            missions: self.missions.values().cloned().collect(),
             learned_recipes: self.learned_recipes.iter().cloned().collect(),
             skills: self.skills.values().cloned().collect(),
             proficiencies: self.proficiencies.values().cloned().collect(),
@@ -4848,6 +4859,8 @@ pub struct WorldState {
     factions: BTreeMap<String, FactionStateV1>,
     npc_templates: BTreeMap<String, NpcTemplateV1>,
     dialogue_topics: BTreeMap<String, DialogueTopicV1>,
+    mission_definitions: BTreeMap<String, MissionDefinitionV1>,
+    monster_kill_counts: BTreeMap<String, u64>,
     actors: BTreeMap<ActorId, Actor>,
     npcs: BTreeMap<NpcId, npc_dialogue::Npc>,
     creatures: BTreeMap<CreatureId, Creature>,
@@ -4886,6 +4899,8 @@ impl WorldState {
             factions: BTreeMap::new(),
             npc_templates: BTreeMap::new(),
             dialogue_topics: BTreeMap::new(),
+            mission_definitions: BTreeMap::new(),
+            monster_kill_counts: BTreeMap::new(),
             actors: BTreeMap::new(),
             npcs: BTreeMap::new(),
             creatures: BTreeMap::new(),
@@ -5848,6 +5863,7 @@ impl WorldState {
                 disassembly_activity: None,
                 construction_activity: None,
                 pending_interaction: None,
+                missions: BTreeMap::new(),
                 learned_recipes: BTreeSet::new(),
                 skills: BTreeMap::new(),
                 proficiencies: BTreeMap::new(),
@@ -5945,7 +5961,12 @@ impl WorldState {
     /// the actor was originally created; gaps would hide missing journaled
     /// state and are therefore rejected.
     pub fn restore_actor(&mut self, actor: ActorSnapshot) -> Result<(), SimError> {
-        let mut expected_counter = actor.id.counter();
+        #[derive(Clone, Copy)]
+        enum RestoredStableId {
+            Item(ItemId),
+            Mission(MissionId),
+        }
+
         if actor.id.world_namespace() != self.world_namespace
             || actor.id.counter() == 0
             || self.actors.contains_key(&actor.id)
@@ -5961,6 +5982,21 @@ impl WorldState {
                 &actor.scheduled_eocs,
                 &actor.inactive_recurring_eocs,
             )
+            || !missions::actor_missions_are_valid(
+                &actor.missions,
+                self.world_namespace,
+                &self.mission_definitions,
+            )
+            || actor.missions.iter().any(|mission| {
+                mission.assigned_at_tick > self.tick
+                    || mission
+                        .finished_at_tick
+                        .is_some_and(|finished| finished > self.tick)
+                    || self
+                        .actors
+                        .values()
+                        .any(|existing| existing.missions.contains_key(&mission.mission_id))
+            })
             || actor.craft_activity.is_some()
             || actor.read_activity.is_some()
             || actor.disassembly_activity.is_some()
@@ -5985,11 +6021,33 @@ impl WorldState {
             )
             .map_err(|_| SimError::InvalidActorRestore)?;
         }
+        let mut restored_ids = BTreeMap::new();
         for item_id in &restored_item_ids {
+            if restored_ids
+                .insert(item_id.counter(), RestoredStableId::Item(*item_id))
+                .is_some()
+            {
+                return Err(SimError::InvalidActorRestore);
+            }
+        }
+        for mission in &actor.missions {
+            maximum_restored_counter = maximum_restored_counter.max(mission.mission_id.counter());
+            if restored_ids
+                .insert(
+                    mission.mission_id.counter(),
+                    RestoredStableId::Mission(mission.mission_id),
+                )
+                .is_some()
+            {
+                return Err(SimError::InvalidActorRestore);
+            }
+        }
+        let mut expected_counter = actor.id.counter();
+        for counter in restored_ids.keys() {
             expected_counter = expected_counter
                 .checked_add(1)
                 .ok_or(SimError::NumericOverflow)?;
-            if item_id.counter() != expected_counter || self.item_id_exists(*item_id) {
+            if *counter != expected_counter {
                 return Err(SimError::InvalidActorRestore);
             }
         }
@@ -6032,12 +6090,26 @@ impl WorldState {
             .cloned()
             .map(|proficiency| (proficiency.proficiency_id.clone(), proficiency))
             .collect::<BTreeMap<_, _>>();
+        let restored_missions = actor
+            .missions
+            .iter()
+            .cloned()
+            .map(|mission| (mission.mission_id, mission))
+            .collect::<BTreeMap<_, _>>();
         let allocated = self.allocator.allocate_actor()?;
         if allocated != actor.id {
             return Err(SimError::InvalidActorRestore);
         }
-        for expected in &restored_item_ids {
-            if self.allocator.allocate_item()? != *expected {
+        for restored in restored_ids.values() {
+            let matches = match restored {
+                RestoredStableId::Item(expected) => {
+                    !self.item_id_exists(*expected) && self.allocator.allocate_item()? == *expected
+                }
+                RestoredStableId::Mission(expected) => {
+                    self.allocator.allocate_mission()? == *expected
+                }
+            };
+            if !matches {
                 return Err(SimError::InvalidActorRestore);
             }
         }
@@ -6082,6 +6154,7 @@ impl WorldState {
                 disassembly_activity: actor.disassembly_activity,
                 construction_activity: actor.construction_activity,
                 pending_interaction: actor.pending_interaction,
+                missions: restored_missions,
                 learned_recipes: actor.learned_recipes.into_iter().collect(),
                 skills: restored_skills,
                 proficiencies: restored_proficiencies,
@@ -8378,6 +8451,12 @@ impl WorldState {
                 }
             }
             RangedTarget::Creature(target_id) => {
+                let creature_type_id = self
+                    .creatures
+                    .get(&target_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .type_id
+                    .clone();
                 let damage = self.creature_damage_after_armor(
                     target_id,
                     "bullet",
@@ -8405,6 +8484,7 @@ impl WorldState {
                         creature_id: target_id,
                         killer: source,
                     })?);
+                    self.record_actor_creature_kill(source, &creature_type_id)?;
                     self.finish_creature_death(target_id, remaining_hp, events)?;
                 }
             }
@@ -9908,6 +9988,12 @@ impl WorldState {
         damage: u16,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        let creature_type_id = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .type_id
+            .clone();
         let remaining_hp = self
             .creatures
             .get(&target)
@@ -9930,6 +10016,7 @@ impl WorldState {
                 creature_id: target,
                 killer: source,
             })?);
+            self.record_actor_creature_kill(source, &creature_type_id)?;
             self.finish_creature_death(target, remaining_hp, events)?;
         }
         Ok(())
@@ -14251,6 +14338,8 @@ impl WorldState {
             factions: self.factions.values().cloned().collect(),
             npc_templates: self.npc_templates.values().cloned().collect(),
             dialogue_topics: self.dialogue_topics.values().cloned().collect(),
+            mission_definitions: self.mission_definitions.values().cloned().collect(),
+            monster_kill_counts: self.monster_kill_counts.clone(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
             npcs: self
                 .npcs
@@ -14286,6 +14375,17 @@ impl WorldState {
                         .factions
                         .iter()
                         .any(|faction| faction.faction_id == template.faction_id)
+            })
+            || !cdda_protocol::mission_catalog_is_valid(&snapshot.mission_definitions)
+            || !eocs::mission_references_are_valid(
+                &snapshot.eoc_definitions,
+                &snapshot.dialogue_topics,
+                &snapshot.mission_definitions,
+            )
+            || snapshot.monster_kill_counts.iter().any(|(id, _count)| {
+                id.is_empty()
+                    || id.len() > cdda_protocol::MAX_INTERACTION_CHOICE_ID_BYTES
+                    || id.chars().any(char::is_control)
             })
         {
             return Err(SimError::InvalidSnapshot);
@@ -14478,15 +14578,27 @@ impl WorldState {
             .cloned()
             .map(|topic| (topic.topic_id.clone(), topic))
             .collect::<BTreeMap<_, _>>();
+        let mission_definitions = snapshot
+            .mission_definitions
+            .iter()
+            .cloned()
+            .map(|definition| (definition.mission_type_id.clone(), definition))
+            .collect::<BTreeMap<_, _>>();
         let mut actors = BTreeMap::new();
         let mut occupied = BTreeSet::new();
         let mut item_ids = BTreeSet::new();
+        let mut mission_ids = BTreeSet::new();
         let mut maximum_counter = 0_u64;
         for actor in &snapshot.actors {
             if actor.id.world_namespace() != snapshot.world_namespace
                 || actors.contains_key(&actor.id)
                 || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
                 || !valid_actor_schedule(actor, snapshot.tick, &snapshot.actor_anatomy)
+                || !missions::actor_missions_are_valid(
+                    &actor.missions,
+                    snapshot.world_namespace,
+                    &mission_definitions,
+                )
                 || actor
                     .scheduled_eocs
                     .iter()
@@ -14506,6 +14618,17 @@ impl WorldState {
                 return Err(SimError::InvalidSnapshot);
             }
             maximum_counter = maximum_counter.max(actor.id.counter());
+            for mission in &actor.missions {
+                if mission.assigned_at_tick > snapshot.tick
+                    || mission
+                        .finished_at_tick
+                        .is_some_and(|finished| finished > snapshot.tick)
+                    || !mission_ids.insert(mission.mission_id)
+                {
+                    return Err(SimError::InvalidSnapshot);
+                }
+                maximum_counter = maximum_counter.max(mission.mission_id.counter());
+            }
             let mut inventory = BTreeMap::new();
             for item in &actor.inventory {
                 if !item_temperature_timestamps_are_valid(item, snapshot.tick) {
@@ -14665,6 +14788,12 @@ impl WorldState {
                     disassembly_activity: actor.disassembly_activity.clone(),
                     construction_activity: actor.construction_activity.clone(),
                     pending_interaction: actor.pending_interaction.clone(),
+                    missions: actor
+                        .missions
+                        .iter()
+                        .cloned()
+                        .map(|mission| (mission.mission_id, mission))
+                        .collect(),
                     learned_recipes: actor.learned_recipes.iter().cloned().collect(),
                     skills,
                     proficiencies,
@@ -14949,6 +15078,8 @@ impl WorldState {
             factions,
             npc_templates,
             dialogue_topics,
+            mission_definitions,
+            monster_kill_counts: snapshot.monster_kill_counts.clone(),
             actors,
             npcs,
             creatures,
@@ -15015,6 +15146,7 @@ pub enum SimError {
     InvalidItem,
     InvalidNpcFaction,
     InvalidLocalCoordinate,
+    InvalidMission,
     InvalidNpcDialogue,
     InvalidReservation,
     InvalidSnapshot,
@@ -15050,6 +15182,7 @@ impl fmt::Display for SimError {
             Self::InvalidItem => formatter.write_str("invalid item state"),
             Self::InvalidNpcFaction => formatter.write_str("invalid NPC faction state"),
             Self::InvalidLocalCoordinate => formatter.write_str("invalid local tile coordinate"),
+            Self::InvalidMission => formatter.write_str("invalid mission state"),
             Self::InvalidNpcDialogue => formatter.write_str("invalid NPC dialogue state"),
             Self::InvalidReservation => formatter.write_str("invalid stable ID reservation"),
             Self::InvalidSnapshot => formatter.write_str("invalid canonical snapshot"),
@@ -21975,6 +22108,7 @@ mod tests {
             disassembly_activity: None,
             construction_activity: None,
             pending_interaction: None,
+            missions: Vec::new(),
             learned_recipes: Vec::new(),
             skills: Vec::new(),
             proficiencies: Vec::new(),
@@ -22026,6 +22160,7 @@ mod tests {
                 disassembly_activity: None,
                 construction_activity: None,
                 pending_interaction: None,
+                missions: Vec::new(),
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),

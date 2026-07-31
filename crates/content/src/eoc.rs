@@ -78,6 +78,9 @@ pub enum EocConditionDefinition {
     KnowsRecipe {
         recipe_id: String,
     },
+    HasMission {
+        mission_type_id: String,
+    },
     StatAtLeast {
         stat: EocActorStatDefinition,
         minimum: i32,
@@ -150,6 +153,13 @@ pub enum EocEffectDefinition {
         eoc_ids: Vec<String>,
         delay: Option<EocDelayDefinition>,
     },
+    AssignMission {
+        mission_type_id: String,
+    },
+    FinishMission {
+        mission_type_id: String,
+        success: bool,
+    },
     Conditional {
         condition: EocConditionDefinition,
         then_effects: Vec<Self>,
@@ -184,7 +194,9 @@ impl EocEffectDefinition {
             | Self::RemoveTargetEffects { .. }
             | Self::SetTargetVariable { .. }
             | Self::RemoveTargetVariable { .. }
-            | Self::MathAssignment(_) => {}
+            | Self::MathAssignment(_)
+            | Self::AssignMission { .. }
+            | Self::FinishMission { .. } => {}
         }
     }
 }
@@ -630,6 +642,19 @@ pub(crate) fn parse_condition(
             });
         }
     }
+    if let Some(mission) = object.get("u_has_mission") {
+        if object.len() != 1 {
+            unsupported.insert(path.to_owned());
+            return None;
+        }
+        let Some(mission_type_id) = mission.as_str().filter(|id| valid_id(id)) else {
+            unsupported.insert(format!("{path}.u_has_mission"));
+            return None;
+        };
+        return Some(EocConditionDefinition::HasMission {
+            mission_type_id: mission_type_id.to_owned(),
+        });
+    }
     if let Some(item) = object.get("u_has_item") {
         if object.len() != 1 {
             unsupported.insert(path.to_owned());
@@ -876,6 +901,42 @@ fn parse_effects(
                 continue;
             };
             effects.push(EocEffectDefinition::MathAssignment(assignment));
+            continue;
+        }
+        if let Some(mission) = object.get("assign_mission") {
+            let Some(mission_type_id) = mission.as_str().filter(|id| valid_id(id)) else {
+                unsupported.insert(format!("{item_path}.assign_mission"));
+                continue;
+            };
+            if object.len() != 1 {
+                unsupported.insert(item_path);
+                continue;
+            }
+            effects.push(EocEffectDefinition::AssignMission {
+                mission_type_id: mission_type_id.to_owned(),
+            });
+            continue;
+        }
+        if let Some(mission) = object.get("finish_mission") {
+            let Some(mission_type_id) = mission.as_str().filter(|id| valid_id(id)) else {
+                unsupported.insert(format!("{item_path}.finish_mission"));
+                continue;
+            };
+            let Some(success) = object.get("success").and_then(Value::as_bool) else {
+                unsupported.insert(format!("{item_path}.success"));
+                continue;
+            };
+            if object
+                .keys()
+                .any(|field| !matches!(field.as_str(), "finish_mission" | "success"))
+            {
+                unsupported.insert(item_path);
+                continue;
+            }
+            effects.push(EocEffectDefinition::FinishMission {
+                mission_type_id: mission_type_id.to_owned(),
+                success,
+            });
             continue;
         }
         if let Some(condition) = object.get("if") {

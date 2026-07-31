@@ -15,7 +15,8 @@ use cdda_content::{
     DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, DialogueRegistry,
     EffectOnConditionRegistry, EffectTypeRegistry, FactionRegistry, FieldTypeDefinition,
     FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry,
-    ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition,
+    ItemRegistry, MapgenRegistry, MaterialRegistry, MissionRegistry, ModCatalog,
+    MonsterDefinition,
     MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
     ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry,
     StartLocationRegistry, TerrainDefinition, TerrainRegistry,
@@ -74,6 +75,7 @@ use tracing_subscriber::EnvFilter;
 mod anatomy;
 mod eocs;
 mod item_groups;
+mod missions;
 mod npc_faction;
 #[cfg(test)]
 mod regional_field_acceptance;
@@ -97,6 +99,7 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
+use missions::runtime_mission_catalog;
 use npc_faction::runtime_npc_factions;
 use use_actions::runtime_item_transform_types;
 use worldgen::{
@@ -151,6 +154,7 @@ struct RuntimeWorldContent<'a> {
     river_settings: &'a RiverSettingsRegistry,
     factions: &'a FactionRegistry,
     dialogue: &'a DialogueRegistry,
+    missions: &'a MissionRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -293,6 +297,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let items =
         ItemRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let eocs = EffectOnConditionRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
+    let missions = MissionRegistry::load_selected(
         &content_manifest,
         content_root,
         &mod_catalog,
@@ -513,6 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             river_settings: &river_settings,
             factions: &factions,
             dialogue: &dialogue,
+            missions: &missions,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -839,12 +850,15 @@ fn open_world(
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let eocs = content.eocs;
+    let (mission_catalog, mission_ids) =
+        runtime_mission_catalog(content.missions, items, content.monsters)?;
     let eoc_catalog = runtime_eoc_catalog(
         eocs,
         items,
         &actor_anatomy,
         content.proficiencies,
         content.recipes,
+        &mission_ids,
     )?;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
@@ -884,8 +898,10 @@ fn open_world(
         items,
         content.proficiencies,
         content.recipes,
+        &mission_ids,
     )?;
     initial.register_npc_faction_catalog(faction_templates, factions)?;
+    initial.register_mission_catalog(mission_catalog)?;
     initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
     initial.register_actor_anatomy(actor_anatomy)?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
@@ -1720,6 +1736,7 @@ fn runtime_npc_dialogue(
     items: &ItemRegistry,
     proficiencies: &ProficiencyRegistry,
     recipes: &RecipeRegistry,
+    mission_ids: &BTreeSet<String>,
 ) -> Result<
     (
         Vec<cdda_protocol::NpcTemplateV1>,
@@ -1785,7 +1802,11 @@ fn runtime_npc_dialogue(
                                 owed: response.opinion.owed,
                             },
                         )
-                        && runtime_dialogue_effects_are_supported(&response.effects, anatomy)
+                        && runtime_dialogue_effects_are_supported(
+                            &response.effects,
+                            anatomy,
+                            mission_ids,
+                        )
                         && {
                             let effects = response
                                 .effects
@@ -1808,6 +1829,7 @@ fn runtime_npc_dialogue(
                                 anatomy,
                                 proficiencies,
                                 recipes,
+                                mission_ids,
                             ) && !cdda_protocol::eoc_condition_requires_target_context(
                                 &runtime_condition(condition),
                             )
@@ -1884,6 +1906,7 @@ fn runtime_npc_dialogue(
                 && (template.faction_id.is_empty()
                     || template.faction_id == cdda_protocol::NO_FACTION_ID
                     || faction_ids.contains(template.faction_id.as_str()))
+                && template.mission.is_empty()
         })
         .map(|(template_id, template)| cdda_protocol::NpcTemplateV1 {
             template_id: template_id.to_owned(),
