@@ -36,6 +36,11 @@ pub enum InteractionContextV1 {
         accept_effects: Vec<EocEffectV1>,
         decline_effects: Vec<EocEffectV1>,
     },
+    PlaceMonster {
+        item_id: ItemId,
+        item_type_id: String,
+        activation_sequence: CommandSequence,
+    },
     NpcDialogue {
         npc_id: NpcId,
         topic_stack: Vec<String>,
@@ -120,6 +125,17 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                         ]
                     && eoc_confirmation_branches_are_valid(accept_effects, decline_effects)
             }
+            InteractionContextV1::PlaceMonster {
+                item_id,
+                item_type_id,
+                activation_sequence,
+            } => {
+                item_id.counter() > 0
+                    && item_id.world_namespace() == actor_id.world_namespace()
+                    && valid_id(item_type_id, MAX_INTERACTION_CHOICE_ID_BYTES)
+                    && activation_sequence.0 > 0
+                    && interaction.choices == place_monster_interaction_choices()
+            }
             InteractionContextV1::NpcDialogue {
                 npc_id,
                 topic_stack,
@@ -138,6 +154,26 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                     })
             }
         }
+}
+
+#[must_use]
+pub fn place_monster_interaction_choices() -> Vec<InteractionChoiceV1> {
+    [
+        ("-1,-1", "northwest"),
+        ("0,-1", "north"),
+        ("1,-1", "northeast"),
+        ("-1,0", "west"),
+        ("1,0", "east"),
+        ("-1,1", "southwest"),
+        ("0,1", "south"),
+        ("1,1", "southeast"),
+    ]
+    .into_iter()
+    .map(|(choice_id, label)| InteractionChoiceV1 {
+        choice_id: choice_id.to_owned(),
+        label: label.to_owned(),
+    })
+    .collect()
 }
 
 fn valid_id(id: &str, maximum_bytes: usize) -> bool {

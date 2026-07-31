@@ -3137,6 +3137,18 @@ fn item_menu_entries(
                             && (!action.need_wielding || actor.wielded == Some(item.id))
                             && (!action.consume || item.charges > 0)
                     } else if let Some(required_charges) = definition.and_then(|definition| {
+                        let [action] = definition.place_monster_actions.as_slice() else {
+                            return None;
+                        };
+                        (!definition.has_unsupported_use_actions
+                            && definition.transform_actions.is_empty()
+                            && definition.healing_actions.is_empty()
+                            && definition.eoc_actions.is_empty()
+                            && action.deferred_fields.is_empty())
+                        .then_some(action.need_charges)
+                    }) {
+                        item_tool_charges(item) >= required_charges
+                    } else if let Some(required_charges) = definition.and_then(|definition| {
                         let [action] = definition.transform_actions.as_slice() else {
                             return None;
                         };
@@ -4848,6 +4860,7 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!(
             "Transformed {from_type_id} into {to_type_id}; {remaining_charges} charge(s) remain."
         ),
+        WorldEventKind::CreatureDeployed { message, .. } => message.clone(),
         WorldEventKind::InteractionRequested { interaction, .. } => {
             format!("Interaction requested: {}", interaction.prompt)
         }

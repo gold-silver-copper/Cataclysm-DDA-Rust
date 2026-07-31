@@ -1593,6 +1593,7 @@ fn runtime_monster_catalog(
                 "VENOM",
                 "BADVENOM",
                 "PARALYZEVENOM",
+                "INTERIOR_AMMO",
             ];
             deferred_behavior_fields.extend(
                 monster
@@ -1969,8 +1970,10 @@ fn runtime_monster_catalog(
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
+                display_name: monster.name.clone(),
                 runtime_spawnable: deferred_behavior_fields.is_empty(),
                 starting_ammunition: monster.starting_ammunition.clone(),
+                interior_ammunition: monster.flags.contains("INTERIOR_AMMO"),
                 armor_milli: monster.finalized_armor_milli(),
                 melee_dice_armor_penetration_milli: monster.melee_dice_armor_penetration_milli,
                 melee_damage: melee_damage_supported
@@ -2551,6 +2554,13 @@ pub(super) fn runtime_mapgen_worldgen(
     let mut monster_group_roots = BTreeSet::new();
     let mut individual_monster_roots = BTreeSet::new();
     let mut vehicle_group_roots = BTreeSet::new();
+    individual_monster_roots.extend(
+        content
+            .items
+            .iter()
+            .flat_map(|(_item_id, item)| &item.place_monster_actions)
+            .map(|action| action.monster_id.clone()),
+    );
     monster_group_roots.extend(
         specials
             .iter()

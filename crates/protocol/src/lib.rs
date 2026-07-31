@@ -46,7 +46,7 @@ pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
     MAX_INTERACTION_CHOICE_ID_BYTES, MAX_INTERACTION_CHOICE_LABEL_BYTES, MAX_INTERACTION_CHOICES,
     MAX_INTERACTION_LIFETIME_TICKS, MAX_INTERACTION_PROMPT_BYTES, PendingInteractionV1,
-    pending_interaction_is_valid,
+    pending_interaction_is_valid, place_monster_interaction_choices,
 };
 pub use missions::{
     MAX_ACTOR_MISSIONS, MAX_CREATURE_KILL_COUNT_TYPES, MAX_MISSION_DEFINITIONS,
@@ -116,8 +116,9 @@ use item_groups::{
     valid_item_temperature_state,
 };
 pub use use_actions::{
-    ItemTransformTypeV1, MAX_ITEM_TRANSFORM_MOVES, MAX_ITEM_TRANSFORM_TYPES,
-    item_transform_catalog_is_valid,
+    ItemPlaceMonsterTypeV1, ItemTransformTypeV1, MAX_ITEM_PLACE_MONSTER_MESSAGE_BYTES,
+    MAX_ITEM_PLACE_MONSTER_SKILLS, MAX_ITEM_PLACE_MONSTER_TYPES, MAX_ITEM_TRANSFORM_MOVES,
+    MAX_ITEM_TRANSFORM_TYPES, item_place_monster_catalog_is_valid, item_transform_catalog_is_valid,
 };
 pub use vehicles::{
     MAX_LIVE_VEHICLES, MAX_VEHICLE_CARGO_ITEMS_PER_PART, MAX_VEHICLE_CARGO_VOLUME_MILLILITERS,
@@ -139,7 +140,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 134;
+pub const PROTOCOL_VERSION: u16 = 135;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2261,6 +2262,15 @@ pub enum WorldEventKind {
         to_type_id: String,
         remaining_charges: i32,
     },
+    CreatureDeployed {
+        actor_id: ActorId,
+        item_id: ItemId,
+        creature_id: CreatureId,
+        position: WorldPosition,
+        friendly: bool,
+        pet: bool,
+        message: String,
+    },
     InteractionRequested {
         actor_id: ActorId,
         interaction: PendingInteractionV1,
@@ -2981,6 +2991,16 @@ pub struct CreatureSnapshot {
     #[serde(default = "default_creature_attack_cost_moves")]
     pub attack_cost_moves: u16,
     pub aggression: i16,
+    /// Upstream monster friendliness. `-1` is the indefinite friendly state
+    /// assigned by successful deployable-monster programming; zero is
+    /// ordinary faction behavior.
+    #[serde(default)]
+    pub friendly: i32,
+    /// Whether the deployable was admitted through an `is_pet` use action.
+    /// This retains the pinned pet effect while companion movement remains a
+    /// separate authoritative behavior family.
+    #[serde(default)]
+    pub pet: bool,
     /// Private authoritative live morale used by pinned attitude selection.
     #[serde(default)]
     pub morale: i32,
@@ -3442,6 +3462,8 @@ pub struct WorldgenU16RangeV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenMonsterPrototypeV1 {
     pub base: CreatureCorpsePrototypeV1,
+    /// Final localized singular monster name used by authoritative messages.
+    pub display_name: String,
     /// Whether the complete inherited behavior is admitted for ordinary
     /// runtime creation rather than retained only for fail-closed inspection.
     pub runtime_spawnable: bool,
@@ -3449,6 +3471,10 @@ pub struct WorldgenMonsterPrototypeV1 {
     /// Final inherited concrete item-ID ammunition assigned to each new
     /// creature of this type.
     pub starting_ammunition: BTreeMap<String, u32>,
+    /// Pinned `INTERIOR_AMMO`: deployment keeps the prototype ammunition and
+    /// does not draw matching ammunition items from the activating character.
+    #[serde(default)]
+    pub interior_ammunition: bool,
     /// Final inherited flat resistances in thousandths of one damage point.
     pub armor_milli: BTreeMap<String, i32>,
     /// Armor penetration applied to the ordinary rolled bash dice, in
@@ -4125,6 +4151,9 @@ pub struct WorldSnapshotV1 {
     /// Strict conversions with compatible storage/temperature layouts and a
     /// complete validated target static prototype.
     pub item_transform_types: Vec<ItemTransformTypeV1>,
+    /// Strict server-authoritative deployable-monster item profiles whose
+    /// referenced monster behavior is fully admitted by `worldgen`.
+    pub item_place_monster_types: Vec<ItemPlaceMonsterTypeV1>,
     /// Immutable coordinate-owned layout and normalized mapgen definitions,
     /// plus the server-authoritative start selector.
     /// Generated four-submap cells live in `chunks`; the catalog is retained
@@ -5953,6 +5982,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
         || !catalog.monster_prototypes.iter().all(|prototype| {
             valid_creature_corpse_prototype(&prototype.base)
                 && valid_worldgen_id(&prototype.base.monster_type_id)
+                && !prototype.display_name.is_empty()
+                && prototype.display_name.len() <= 1_024
+                && !prototype.display_name.chars().any(char::is_control)
                 && prototype.starting_ammunition.len() <= 256
                 && prototype
                     .starting_ammunition

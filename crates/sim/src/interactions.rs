@@ -10,6 +10,7 @@ use crate::{SimError, WorldState};
 
 const MEDICAL_INTERACTION_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
 const EOC_CONFIRMATION_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
+const PLACE_MONSTER_INTERACTION_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
 
 impl WorldState {
     pub(super) fn resolve_disconnected_eoc_confirmations(
@@ -206,6 +207,60 @@ impl WorldState {
         Ok(())
     }
 
+    pub(super) fn request_place_monster_position(
+        &mut self,
+        actor_id: ActorId,
+        activation_sequence: CommandSequence,
+        item_id: ItemId,
+        item_type_id: String,
+        monster_type_id: &str,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if let Some(previous) = self
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction
+            .take()
+        {
+            events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                actor_id,
+                interaction_id: previous.interaction_id,
+                reason: InteractionCancellationReasonV1::Replaced,
+            })?);
+        }
+        let interaction_id = InteractionId::new(self.world_namespace, self.next_event_counter);
+        let interaction = PendingInteractionV1 {
+            interaction_id,
+            prompt: format!("Place the {monster_type_id} where?"),
+            choices: cdda_protocol::place_monster_interaction_choices(),
+            created_at_tick: self.tick,
+            expires_at_tick: SimTick(
+                self.tick
+                    .0
+                    .checked_add(PLACE_MONSTER_INTERACTION_LIFETIME_TICKS)
+                    .ok_or(SimError::NumericOverflow)?,
+            ),
+            context: InteractionContextV1::PlaceMonster {
+                item_id,
+                item_type_id,
+                activation_sequence,
+            },
+        };
+        if !cdda_protocol::pending_interaction_is_valid(&interaction, actor_id) {
+            return Err(SimError::InvalidItem);
+        }
+        self.actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .pending_interaction = Some(interaction.clone());
+        events.push(self.make_event(WorldEventKind::InteractionRequested {
+            actor_id,
+            interaction,
+        })?);
+        Ok(())
+    }
+
     pub(super) fn interaction_action_cost(
         &self,
         actor_id: ActorId,
@@ -233,6 +288,9 @@ impl WorldState {
                         .ok_or(SimError::NumericOverflow)
                 }),
             InteractionContextV1::EocConfirmation { .. } => Ok(0),
+            InteractionContextV1::PlaceMonster { item_id, .. } => self
+                .place_monster_action_cost(actor_id, *item_id, Some(choice_id))
+                .map(|cost| cost.unwrap_or(0)),
             InteractionContextV1::NpcDialogue { .. } => Ok(0),
         }
     }
@@ -335,6 +393,26 @@ impl WorldState {
                 )? {
                     return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
                 }
+            }
+            InteractionContextV1::PlaceMonster {
+                item_id,
+                item_type_id,
+                activation_sequence,
+            } => {
+                if !self.apply_place_monster_item(
+                    actor_id,
+                    *activation_sequence,
+                    *item_id,
+                    item_type_id,
+                    Some(&choice_id),
+                    events,
+                )? {
+                    return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
+                }
+                self.actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?
+                    .pending_interaction = None;
             }
             InteractionContextV1::NpcDialogue {
                 npc_id,
@@ -490,6 +568,7 @@ impl WorldState {
                     )?
                 }
                 InteractionContextV1::MedicalBodyPart { .. } => false,
+                InteractionContextV1::PlaceMonster { .. } => false,
                 InteractionContextV1::NpcDialogue { .. } => false,
             };
             if !resolved {

@@ -83,6 +83,135 @@ pub(super) fn summarize_inventory_by_type<'a>(
     inventory
 }
 
+/// Removes at most `requested` charges/items of one concrete type in canonical
+/// owner-ID and pocket order, matching the inventory-wide behavior needed by
+/// pinned deployable-monster ammunition loading.
+pub(super) fn debit_inventory_type(
+    inventory: &mut BTreeMap<ItemId, ItemInstance>,
+    type_id: &str,
+    requested: u32,
+) -> Result<u32, SimError> {
+    let mut remaining = requested;
+    let item_ids = inventory.keys().copied().collect::<Vec<_>>();
+    for item_id in item_ids {
+        if remaining == 0 {
+            break;
+        }
+        let mut item = inventory.remove(&item_id).ok_or(SimError::UnknownItem)?;
+        let remove = debit_item_instance_type(&mut item, type_id, &mut remaining)?;
+        if !remove && inventory.insert(item_id, item).is_some() {
+            return Err(SimError::InvalidItem);
+        }
+    }
+    Ok(requested - remaining)
+}
+
+fn debit_item_instance_type(
+    item: &mut ItemInstance,
+    type_id: &str,
+    remaining: &mut u32,
+) -> Result<bool, SimError> {
+    if item.type_id == type_id && *remaining > 0 {
+        if item.containment.count_by_charges {
+            let available = u32::try_from(item.charges).map_err(|_| SimError::InvalidItem)?;
+            let debit = available.min(*remaining);
+            item.charges = item
+                .charges
+                .checked_sub(i32::try_from(debit).map_err(|_| SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+            *remaining -= debit;
+            return Ok(item.charges == 0);
+        }
+        *remaining -= 1;
+        return Ok(true);
+    }
+    debit_nested_item_type(
+        &mut item.integral_magazines,
+        &mut item.magazine_wells,
+        &mut item.ammunition_containers,
+        type_id,
+        remaining,
+    )?;
+    Ok(false)
+}
+
+fn debit_snapshot_type(
+    item: &mut ItemSnapshot,
+    type_id: &str,
+    remaining: &mut u32,
+) -> Result<bool, SimError> {
+    if item.type_id == type_id && *remaining > 0 {
+        if item.containment.count_by_charges {
+            let available = u32::try_from(item.charges).map_err(|_| SimError::InvalidItem)?;
+            let debit = available.min(*remaining);
+            item.charges = item
+                .charges
+                .checked_sub(i32::try_from(debit).map_err(|_| SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+            *remaining -= debit;
+            return Ok(item.charges == 0);
+        }
+        *remaining -= 1;
+        return Ok(true);
+    }
+    debit_nested_item_type(
+        &mut item.integral_magazines,
+        &mut item.magazine_wells,
+        &mut item.ammunition_containers,
+        type_id,
+        remaining,
+    )?;
+    Ok(false)
+}
+
+fn debit_nested_item_type(
+    integral_magazines: &mut [IntegralMagazinePocketSnapshotV1],
+    magazine_wells: &mut [MagazineWellSnapshotV1],
+    containers: &mut [AmmunitionContainerPocketSnapshotV1],
+    type_id: &str,
+    remaining: &mut u32,
+) -> Result<(), SimError> {
+    for pocket in integral_magazines {
+        if *remaining == 0 {
+            return Ok(());
+        }
+        let remove = pocket
+            .loaded_ammunition
+            .as_deref_mut()
+            .map(|item| debit_snapshot_type(item, type_id, remaining))
+            .transpose()?
+            .unwrap_or(false);
+        if remove {
+            pocket.loaded_ammunition = None;
+        }
+    }
+    for well in magazine_wells {
+        if *remaining == 0 {
+            return Ok(());
+        }
+        let remove = well
+            .installed_magazine
+            .as_deref_mut()
+            .map(|item| debit_snapshot_type(item, type_id, remaining))
+            .transpose()?
+            .unwrap_or(false);
+        if remove {
+            well.installed_magazine = None;
+        }
+    }
+    for pocket in containers {
+        let mut index = 0;
+        while index < pocket.contents.len() && *remaining > 0 {
+            if debit_snapshot_type(&mut pocket.contents[index], type_id, remaining)? {
+                pocket.contents.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn summarize_item_instance(
     item: &ItemInstance,
     inventory: &mut BTreeMap<String, InventoryTypeSummary>,

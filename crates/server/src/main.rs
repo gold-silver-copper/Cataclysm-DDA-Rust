@@ -101,7 +101,7 @@ use item_groups::{
 };
 use missions::runtime_mission_catalog;
 use npc_faction::runtime_npc_factions;
-use use_actions::runtime_item_transform_types;
+use use_actions::{runtime_item_place_monster_types, runtime_item_transform_types};
 use worldgen::{
     RuntimeMapgenContent, bootstrap_regional_special_overmap, runtime_mapgen_item_group_roots,
     runtime_mapgen_npc_template_ids, runtime_mapgen_worldgen,
@@ -1108,6 +1108,11 @@ fn open_world(
     initial.register_eoc_catalog(eoc_definitions, eoc_item_use_types)?;
     initial
         .register_item_transform_types(runtime_item_transform_types(items, item_group_content))?;
+    initial.register_item_place_monster_types(runtime_item_place_monster_types(
+        items,
+        item_group_content,
+        &worldgen,
+    ))?;
     for definition in furniture
         .iter()
         .filter(|definition| definition.bash.is_some())

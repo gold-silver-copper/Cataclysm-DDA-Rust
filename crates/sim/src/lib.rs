@@ -43,29 +43,30 @@ use cdda_protocol::{
     FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot,
     HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1,
     HorizontalDirection, IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1,
-    ItemComponentSnapshotV1, ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot,
-    ItemTransformTypeV1, LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
-    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
-    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
-    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
-    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
-    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
-    MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
-    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
-    MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
-    MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
-    MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
-    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1,
-    MissionId, MissionSnapshotV1, NaturalLightSnapshot, NpcId, NpcTemplateV1, PoweredToolStateV1,
+    ItemComponentSnapshotV1, ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId,
+    ItemPlaceMonsterTypeV1, ItemSnapshot, ItemTransformTypeV1, LocalTileCoord, MAX_ACTOR_BASE_STAT,
+    MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES,
+    MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES,
+    MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES,
+    MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS,
+    MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
+    MAX_DISASSEMBLY_COMPONENT_TYPES, MAX_ITEM_AMMUNITION_CONTAINER_POCKETS,
+    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL,
+    MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
+    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
+    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
+    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
+    MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1, MissionId,
+    MissionSnapshotV1, NaturalLightSnapshot, NpcId, NpcTemplateV1, PoweredToolStateV1,
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
     RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase,
     SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId,
     VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind, WorldPosition,
     WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
     healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
-    item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
-    item_snapshots_can_combine_for_containment, item_transform_catalog_is_valid,
-    worldgen_catalog_is_valid,
+    item_group_sources_are_valid, item_place_monster_catalog_is_valid,
+    item_snapshot_is_compatible_with_spawn_rules, item_snapshots_can_combine_for_containment,
+    item_transform_catalog_is_valid, worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -3103,6 +3104,8 @@ struct Creature {
     speed: u16,
     attack_cost_moves: u16,
     aggression: i16,
+    friendly: i32,
+    pet: bool,
     morale: i32,
     melee_skill: u16,
     dodge: u16,
@@ -3265,6 +3268,8 @@ impl Creature {
             speed: self.speed,
             attack_cost_moves: self.attack_cost_moves,
             aggression: self.aggression,
+            friendly: self.friendly,
+            pet: self.pet,
             morale: self.morale,
             melee_skill: self.melee_skill,
             dodge: self.dodge,
@@ -3308,6 +3313,8 @@ impl Creature {
             speed: snapshot.speed,
             attack_cost_moves: snapshot.attack_cost_moves,
             aggression: snapshot.aggression,
+            friendly: snapshot.friendly,
+            pet: snapshot.pet,
             morale: snapshot.morale,
             melee_skill: snapshot.melee_skill,
             dodge: snapshot.dodge,
@@ -3348,6 +3355,8 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
         || snapshot.hp <= 0
         || snapshot.speed == 0
         || snapshot.attack_cost_moves == 0
+        || !matches!(snapshot.friendly, -1 | 0)
+        || (snapshot.pet && snapshot.friendly != -1)
         || snapshot.melee_dice_sides == 0
         || (snapshot.group_bash && !snapshot.bashes)
         || (snapshot.good_hearing && !snapshot.hears)
@@ -4883,7 +4892,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV29");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV30");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4908,6 +4917,7 @@ pub struct WorldState {
     eoc_definitions: BTreeMap<String, EocDefinitionV1>,
     eoc_item_use_types: BTreeMap<String, EocItemUseTypeV1>,
     item_transform_types: BTreeMap<String, ItemTransformTypeV1>,
+    item_place_monster_types: BTreeMap<String, ItemPlaceMonsterTypeV1>,
     worldgen: Option<WorldgenCatalogV1>,
     faction_templates: BTreeMap<String, FactionTemplateV1>,
     factions: BTreeMap<String, FactionStateV1>,
@@ -4948,6 +4958,7 @@ impl WorldState {
             eoc_definitions: BTreeMap::new(),
             eoc_item_use_types: BTreeMap::new(),
             item_transform_types: BTreeMap::new(),
+            item_place_monster_types: BTreeMap::new(),
             worldgen: None,
             faction_templates: BTreeMap::new(),
             factions: BTreeMap::new(),
@@ -5817,6 +5828,8 @@ impl WorldState {
                 speed,
                 attack_cost_moves,
                 aggression,
+                friendly: 0,
+                pet: false,
                 morale: spawn.morale,
                 melee_skill,
                 dodge,
@@ -7807,6 +7820,9 @@ impl WorldState {
                     return Ok(0);
                 };
                 if let Some(cost) = self.item_transform_action_cost(actor_id, *item_id)? {
+                    return Ok(cost);
+                }
+                if let Some(cost) = self.place_monster_action_cost(actor_id, *item_id, None)? {
                     return Ok(cost);
                 }
                 self.healing_item_types
@@ -11247,6 +11263,23 @@ impl WorldState {
             .get(&creature_id)
             .ok_or(SimError::UnknownCreature)?
             .position;
+        // The pinned deployable-monster actor uses `friendly = -1` for an
+        // indefinitely allied creature. Until authoritative monster-on-monster
+        // targeting is available, allied creatures must fail closed by holding
+        // position instead of selecting a player as an ordinary hostile target.
+        if self
+            .creatures
+            .get(&creature_id)
+            .is_some_and(|creature| creature.friendly == -1)
+        {
+            let creature = self
+                .creatures
+                .get_mut(&creature_id)
+                .ok_or(SimError::UnknownCreature)?;
+            creature.goal = None;
+            creature.sound_goal = None;
+            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+        }
         let candidates = self
             .actors
             .values()
@@ -12112,6 +12145,38 @@ impl WorldState {
             return Ok(());
         }
         if self.apply_item_transform(actor_id, sequence, item_id, events)? {
+            return Ok(());
+        }
+        if let Some(profile) = self.item_place_monster_types.get(&item_type_id) {
+            let required =
+                i32::try_from(profile.required_charges).map_err(|_| SimError::InvalidItem)?;
+            let available = self
+                .actors
+                .get(&actor_id)
+                .and_then(|actor| actor.inventory.get(&item_id))
+                .map_or(0, ItemInstance::available_tool_charges);
+            if available < required {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::ItemHasNoPower,
+                )?);
+                return Ok(());
+            }
+            if !self.apply_place_monster_item(
+                actor_id,
+                sequence,
+                item_id,
+                &item_type_id,
+                None,
+                events,
+            )? {
+                events.push(self.rejection(
+                    actor_id,
+                    sequence,
+                    CommandRejection::ItemNotActivatable,
+                )?);
+            }
             return Ok(());
         }
         if let Some(healing) = self.healing_item_types.get(&item_type_id).cloned() {
@@ -14228,6 +14293,8 @@ impl WorldState {
                     speed: u16::try_from(speed).map_err(|_| SimError::NumericOverflow)?,
                     attack_cost_moves: corpse.prototype.attack_cost_moves,
                     aggression: corpse.prototype.aggression,
+                    friendly: 0,
+                    pet: false,
                     morale: corpse.prototype.morale,
                     melee_skill: corpse.prototype.melee_skill,
                     dodge: corpse.prototype.dodge,
@@ -14661,6 +14728,7 @@ impl WorldState {
             eoc_definitions: self.eoc_definitions.values().cloned().collect(),
             eoc_item_use_types: self.eoc_item_use_types.values().cloned().collect(),
             item_transform_types: self.item_transform_types.values().cloned().collect(),
+            item_place_monster_types: self.item_place_monster_types.values().cloned().collect(),
             worldgen: self.worldgen.clone(),
             faction_templates: self.faction_templates.values().cloned().collect(),
             factions: self.factions.values().cloned().collect(),
@@ -14879,6 +14947,24 @@ impl WorldState {
         }
         let item_transform_types = snapshot
             .item_transform_types
+            .iter()
+            .cloned()
+            .map(|profile| (profile.source_type_id.clone(), profile))
+            .collect();
+        if !item_place_monster_catalog_is_valid(&snapshot.item_place_monster_types)
+            || snapshot.item_place_monster_types.iter().any(|profile| {
+                snapshot.worldgen.as_ref().is_none_or(|worldgen| {
+                    worldgen.monster_prototypes.iter().all(|prototype| {
+                        prototype.base.monster_type_id != profile.monster_type_id
+                            || !prototype.runtime_spawnable
+                    })
+                })
+            })
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let item_place_monster_types: BTreeMap<String, ItemPlaceMonsterTypeV1> = snapshot
+            .item_place_monster_types
             .iter()
             .cloned()
             .map(|profile| (profile.source_type_id.clone(), profile))
@@ -15108,6 +15194,28 @@ impl WorldState {
                         .get(item_id)
                         .and_then(|item| wearable_armor_types.get(&item.type_id))
                         .is_none_or(|armor| !runtime_armor_is_supported(armor))
+                })
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            if actor
+                .pending_interaction
+                .as_ref()
+                .is_some_and(|interaction| {
+                    let cdda_protocol::InteractionContextV1::PlaceMonster {
+                        item_id,
+                        item_type_id,
+                        ..
+                    } = &interaction.context
+                    else {
+                        return false;
+                    };
+                    inventory
+                        .get(item_id)
+                        .is_none_or(|item| item.type_id != *item_type_id)
+                        || item_place_monster_types
+                            .get(item_type_id)
+                            .is_none_or(|profile| profile.source_type_id != *item_type_id)
                 })
             {
                 return Err(SimError::InvalidSnapshot);
@@ -15441,6 +15549,7 @@ impl WorldState {
             eoc_definitions,
             eoc_item_use_types,
             item_transform_types,
+            item_place_monster_types,
             worldgen: snapshot.worldgen.clone(),
             faction_templates,
             factions,
@@ -15468,7 +15577,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV109");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV110");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

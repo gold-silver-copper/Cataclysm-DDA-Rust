@@ -1,5 +1,5 @@
 use cdda_content::ItemRegistry;
-use cdda_protocol::ItemTransformTypeV1;
+use cdda_protocol::{ItemPlaceMonsterTypeV1, ItemTransformTypeV1, WorldgenCatalogV1};
 
 use crate::item_groups::{RuntimeItemGroupContent, runtime_item_group_item};
 
@@ -57,6 +57,51 @@ pub(super) fn runtime_item_transform_types(
                 required_charges: u32::try_from(action.need_charges).ok()?,
                 consumed_charges: u32::try_from(consumed_charges).ok()?,
                 move_cost_moves: u32::try_from(action.moves).ok()?,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn runtime_item_place_monster_types(
+    items: &ItemRegistry,
+    content: RuntimeItemGroupContent<'_>,
+    worldgen: &WorldgenCatalogV1,
+) -> Vec<ItemPlaceMonsterTypeV1> {
+    items
+        .iter()
+        .filter_map(|(_id, source)| {
+            let [action] = source.place_monster_actions.as_slice() else {
+                return None;
+            };
+            if source.has_unsupported_use_actions
+                || !source.transform_actions.is_empty()
+                || !source.healing_actions.is_empty()
+                || !source.eoc_actions.is_empty()
+                || !action.deferred_fields.is_empty()
+            {
+                return None;
+            }
+            let prototype = worldgen
+                .monster_prototypes
+                .iter()
+                .find(|prototype| prototype.base.monster_type_id == action.monster_id)
+                .filter(|prototype| prototype.runtime_spawnable)?;
+            let runtime_item = runtime_item_group_item(source, None, content).ok()?;
+            let move_cost_moves = u32::try_from(action.moves).ok()?;
+            let required_charges = u32::try_from(action.need_charges).ok()?;
+            Some(ItemPlaceMonsterTypeV1 {
+                source_type_id: source.id.clone(),
+                single_use: source.flags.contains("SINGLE_USE"),
+                maximum_raw_damage: runtime_item.maximum_raw_damage,
+                monster_type_id: prototype.base.monster_type_id.clone(),
+                friendly_message: action.friendly_msg.clone(),
+                hostile_message: action.hostile_msg.clone(),
+                difficulty: action.difficulty,
+                move_cost_moves,
+                place_randomly: action.place_randomly,
+                is_pet: action.is_pet,
+                required_charges,
+                skills: action.skills.iter().cloned().collect(),
             })
         })
         .collect()
