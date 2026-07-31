@@ -65,7 +65,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 105;
+pub const PROTOCOL_VERSION: u16 = 106;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2758,10 +2758,20 @@ pub struct CreatureSnapshot {
     /// Private down-effect deadline. Revival uses five seconds; an admitted
     /// clumsy attack miss uses two seconds.
     pub downed_until_tick: Option<SimTick>,
+    /// ID-sorted private runtime state for immutable special-attack profiles.
+    #[serde(default)]
+    pub special_attacks: Vec<CreatureSpecialAttackStateV1>,
     /// Empty means this creature leaves no splatter on ordinary death.
     pub blood_field_type_id: String,
     /// `None` means this runtime creature has no modeled ordinary corpse.
     pub corpse: Option<CreatureCorpsePrototypeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreatureSpecialAttackStateV1 {
+    pub attack_id: String,
+    pub cooldown_turns: u32,
+    pub enabled: bool,
 }
 
 /// Public state for a currently visible creature. AI intent, action debt,
@@ -3073,9 +3083,47 @@ pub struct WorldgenMonsterPrototypeV1 {
     /// Source-ordered effects applied only after an ordinary melee hit deals
     /// positive damage.
     pub attack_effects: Vec<WorldgenMonsterAttackEffectV1>,
+    /// ID-sorted generic special-attack actor profiles attempted before
+    /// ordinary attacks and movement.
+    pub special_attacks: Vec<WorldgenMonsterSpecialAttackV1>,
     /// Sorted pinned MONSTER fields not yet consumed by the ordinary runtime
     /// creature model. They remain canonical instead of being silently lost.
     pub deferred_behavior_fields: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenMonsterSpecialAttackKindV1 {
+    Melee,
+    Bite,
+    Leap,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterSpecialAttackV1 {
+    pub attack_id: String,
+    pub kind: WorldgenMonsterSpecialAttackKindV1,
+    pub cooldown_turns: u32,
+    pub move_cost_moves: u32,
+    /// `None` uses the owning monster's ordinary melee skill.
+    pub accuracy: Option<i32>,
+    pub range: u32,
+    pub no_adjacent: bool,
+    pub dodgeable: bool,
+    pub minimum_damage_multiplier_millionths: i32,
+    pub maximum_damage_multiplier_millionths: i32,
+    pub damage: Vec<WorldgenMonsterMeleeDamageUnitV1>,
+    pub effects: Vec<WorldgenMonsterAttackEffectV1>,
+    pub effects_require_damage: bool,
+    pub infection_chance_millionths: u32,
+    /// Leap distances are thousandths of one map tile.
+    pub leap_minimum_range_milli: u32,
+    pub leap_maximum_range_milli: u32,
+    pub leap_minimum_consider_range_milli: u32,
+    pub leap_maximum_consider_range_milli: u32,
+    pub leap_allow_no_target: bool,
+    pub leap_prefer: bool,
+    pub leap_random: bool,
+    pub leap_ignore_destination_danger: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -5197,40 +5245,56 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         valid_worldgen_id(damage_type) && resistance.unsigned_abs() <= 1_000_000_000
                     })
                 && prototype.melee_dice_armor_penetration_milli.unsigned_abs() <= 1_000_000_000
-                && prototype.melee_damage.len() <= 64
+                && valid_worldgen_monster_damage(&prototype.melee_damage)
+                && valid_worldgen_monster_effects(&prototype.attack_effects)
+                && prototype.special_attacks.len() <= 64
                 && prototype
-                    .melee_damage
-                    .iter()
-                    .map(|unit| unit.damage_type_id.as_str())
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    == prototype.melee_damage.len()
-                && prototype.melee_damage.iter().all(|unit| {
-                    valid_worldgen_id(&unit.damage_type_id)
-                        && unit.amount_milli.unsigned_abs() <= 1_000_000_000
-                        && unit.armor_penetration_milli.unsigned_abs() <= 1_000_000_000
-                        && unit.armor_multiplier_millionths.unsigned_abs() <= 1_000_000_000
-                        && unit.damage_multiplier_millionths > 0
-                        && unit.damage_multiplier_millionths <= 1_000_000_000
-                        && unit.constant_armor_multiplier_millionths.unsigned_abs() <= 1_000_000_000
-                        && unit.constant_damage_multiplier_millionths.unsigned_abs()
-                            <= 1_000_000_000
+                    .special_attacks
+                    .windows(2)
+                    .all(|pair| pair[0].attack_id < pair[1].attack_id)
+                && prototype.special_attacks.iter().all(|attack| {
+                    valid_worldgen_id(&attack.attack_id)
+                        && attack.cooldown_turns <= 1_000_000_000
+                        && attack.move_cost_moves <= 1_000_000_000
+                        && attack
+                            .accuracy
+                            .is_none_or(|accuracy| (0..=1_000_000).contains(&accuracy))
+                        && (1..=1_000_000).contains(&attack.range)
+                        && (0..=1_000_000_000)
+                            .contains(&attack.minimum_damage_multiplier_millionths)
+                        && attack.minimum_damage_multiplier_millionths
+                            <= attack.maximum_damage_multiplier_millionths
+                        && attack.maximum_damage_multiplier_millionths <= 1_000_000_000
+                        && valid_worldgen_monster_damage(&attack.damage)
+                        && valid_worldgen_monster_effects(&attack.effects)
+                        && attack.infection_chance_millionths <= 1_000_000
+                        && (matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Bite)
+                            || attack.infection_chance_millionths == 0)
+                        && match attack.kind {
+                            WorldgenMonsterSpecialAttackKindV1::Leap => {
+                                attack.damage.is_empty()
+                                    && attack.effects.is_empty()
+                                    && attack.leap_maximum_range_milli > 0
+                                    && attack.leap_maximum_range_milli <= 100_000
+                                    && attack.leap_minimum_range_milli
+                                        <= attack.leap_maximum_range_milli
+                                    && attack.leap_minimum_consider_range_milli
+                                        <= attack.leap_maximum_consider_range_milli
+                            }
+                            WorldgenMonsterSpecialAttackKindV1::Melee
+                            | WorldgenMonsterSpecialAttackKindV1::Bite => {
+                                attack.leap_minimum_range_milli == 0
+                                    && attack.leap_maximum_range_milli == 0
+                                    && attack.leap_minimum_consider_range_milli == 0
+                                    && attack.leap_maximum_consider_range_milli == 0
+                                    && !attack.leap_allow_no_target
+                                    && !attack.leap_prefer
+                                    && !attack.leap_random
+                                    && !attack.leap_ignore_destination_danger
+                            }
+                        }
                 })
-                && prototype.attack_effects.len() <= 64
-                && prototype.attack_effects.iter().all(|effect| {
-                    valid_worldgen_id(&effect.effect_id)
-                        && effect.chance_millionths <= 1_000_000
-                        && effect
-                            .body_part_id
-                            .as_ref()
-                            .is_none_or(|body_part_id| valid_worldgen_id(body_part_id))
-                        && effect.duration_minimum_turns <= effect.duration_maximum_turns
-                        && effect.duration_maximum_turns <= 1_000_000_000
-                        && effect.intensity_minimum > 0
-                        && effect.intensity_minimum <= effect.intensity_maximum
-                        && effect.intensity_maximum <= 1_000_000
-                })
-                && prototype.deferred_behavior_fields.len() <= 64
+                && prototype.deferred_behavior_fields.len() <= 1_024
                 && prototype
                     .deferred_behavior_fields
                     .windows(2)
@@ -5302,6 +5366,43 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
         edges.push(group_edges);
     }
     valid_worldgen_bounded_graph(&edges, MAX_WORLDGEN_MONSTER_GROUP_DEPTH)
+}
+
+fn valid_worldgen_monster_damage(units: &[WorldgenMonsterMeleeDamageUnitV1]) -> bool {
+    units.len() <= 64
+        && units
+            .iter()
+            .map(|unit| unit.damage_type_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            == units.len()
+        && units.iter().all(|unit| {
+            valid_worldgen_id(&unit.damage_type_id)
+                && unit.amount_milli.unsigned_abs() <= 1_000_000_000
+                && unit.armor_penetration_milli.unsigned_abs() <= 1_000_000_000
+                && unit.armor_multiplier_millionths.unsigned_abs() <= 1_000_000_000
+                && unit.damage_multiplier_millionths > 0
+                && unit.damage_multiplier_millionths <= 1_000_000_000
+                && unit.constant_armor_multiplier_millionths.unsigned_abs() <= 1_000_000_000
+                && unit.constant_damage_multiplier_millionths.unsigned_abs() <= 1_000_000_000
+        })
+}
+
+fn valid_worldgen_monster_effects(effects: &[WorldgenMonsterAttackEffectV1]) -> bool {
+    effects.len() <= 64
+        && effects.iter().all(|effect| {
+            valid_worldgen_id(&effect.effect_id)
+                && effect.chance_millionths <= 1_000_000
+                && effect
+                    .body_part_id
+                    .as_ref()
+                    .is_none_or(|body_part_id| valid_worldgen_id(body_part_id))
+                && effect.duration_minimum_turns <= effect.duration_maximum_turns
+                && effect.duration_maximum_turns <= 1_000_000_000
+                && effect.intensity_minimum > 0
+                && effect.intensity_minimum <= effect.intensity_maximum
+                && effect.intensity_maximum <= 1_000_000
+        })
 }
 
 fn valid_worldgen_neighbor_condition(

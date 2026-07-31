@@ -30,6 +30,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "melee_dice_ap",
     "melee_damage",
     "attack_effs",
+    "special_attacks",
     "dodge",
     "vision_day",
     "vision_night",
@@ -80,6 +81,66 @@ pub struct MonsterAttackEffectDefinition {
     pub intensity: (u32, u32),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MonsterSpecialAttackKind {
+    Melee,
+    Bite,
+    Leap,
+    Unsupported,
+}
+
+/// One finalized generic monster attack actor. Definitions with behavior
+/// outside this profile are retained with explicit deferred fields and are not
+/// admitted by the authoritative runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonsterSpecialAttackDefinition {
+    pub id: String,
+    pub kind: MonsterSpecialAttackKind,
+    pub cooldown_turns: u32,
+    pub move_cost_moves: u32,
+    pub accuracy: Option<i32>,
+    pub range: u32,
+    pub no_adjacent: bool,
+    pub dodgeable: bool,
+    pub minimum_damage_multiplier_millionths: i32,
+    pub maximum_damage_multiplier_millionths: i32,
+    pub damage: Vec<MonsterMeleeDamageUnitDefinition>,
+    pub effects: Vec<MonsterAttackEffectDefinition>,
+    pub effects_require_damage: bool,
+    pub infection_chance_millionths: u32,
+    pub leap_minimum_range_milli: u32,
+    pub leap_maximum_range_milli: u32,
+    pub leap_minimum_consider_range_milli: u32,
+    pub leap_maximum_consider_range_milli: u32,
+    pub leap_allow_no_target: bool,
+    pub leap_prefer: bool,
+    pub leap_random: bool,
+    pub leap_ignore_destination_danger: bool,
+    pub unsupported_fields: BTreeSet<String>,
+}
+
+impl MonsterSpecialAttackDefinition {
+    #[must_use]
+    pub fn is_fully_supported(&self) -> bool {
+        self.unsupported_fields.is_empty()
+            && self.maximum_damage_multiplier_millionths
+                >= self.minimum_damage_multiplier_millionths
+            && self.minimum_damage_multiplier_millionths >= 0
+            && self
+                .damage
+                .iter()
+                .all(|unit| unit.damage_multiplier_millionths > 0)
+            && (self.kind != MonsterSpecialAttackKind::Leap
+                || (self.leap_maximum_range_milli <= 100_000
+                    && self.damage.is_empty()
+                    && self.effects.is_empty()
+                    && self.infection_chance_millionths == 0
+                    && self.leap_minimum_range_milli <= self.leap_maximum_range_milli
+                    && self.leap_minimum_consider_range_milli
+                        <= self.leap_maximum_consider_range_milli))
+    }
+}
+
 impl Default for MonsterPathSettings {
     fn default() -> Self {
         Self {
@@ -120,6 +181,9 @@ pub struct MonsterDefinition {
     pub melee_damage: Vec<MonsterMeleeDamageUnitDefinition>,
     /// Final inherited post-damage ordinary melee effects in source order.
     pub attack_effects: Vec<MonsterAttackEffectDefinition>,
+    /// ID-sorted finalized generic special attacks. The pinned engine stores
+    /// these in a map and attempts them in key order.
+    pub special_attacks: BTreeMap<String, MonsterSpecialAttackDefinition>,
     pub dodge: i32,
     pub vision_day: i32,
     pub vision_night: i32,
@@ -157,6 +221,7 @@ impl Default for MonsterDefinition {
             melee_dice_armor_penetration_milli: 0,
             melee_damage: Vec::new(),
             attack_effects: Vec::new(),
+            special_attacks: BTreeMap::new(),
             dodge: 0,
             vision_day: 40,
             vision_night: 1,
@@ -216,7 +281,14 @@ impl MonsterRegistry {
         let files = catalog
             .selected_json_files(manifest, enabled)
             .map_err(MonsterRegistryError::Catalog)?;
-        let mut pending = read_monsters(content_root.as_ref(), files)?;
+        let (mut pending, raw_attacks) = read_definitions(content_root.as_ref(), files)?;
+        let attacks = raw_attacks
+            .into_iter()
+            .map(|raw| {
+                let attack = parse_special_attack(&raw.object, None, &raw.file.upstream_path)?;
+                Ok((attack.id.clone(), attack))
+            })
+            .collect::<Result<BTreeMap<_, _>, MonsterRegistryError>>()?;
         let mut monsters = BTreeMap::new();
         let mut abstracts = BTreeMap::new();
         while !pending.is_empty() {
@@ -226,7 +298,7 @@ impl MonsterRegistry {
                 let raw = pending
                     .pop_front()
                     .ok_or(MonsterRegistryError::InternalQueue)?;
-                if load_one(&raw, &mut monsters, &mut abstracts)? {
+                if load_one(&raw, &attacks, &mut monsters, &mut abstracts)? {
                     loaded += 1;
                 } else {
                     pending.push_back(raw);
@@ -276,11 +348,12 @@ impl MonsterRegistry {
     }
 }
 
-fn read_monsters(
+fn read_definitions(
     root: &Path,
     files: Vec<SelectedContentFile>,
-) -> Result<VecDeque<RawMonster>, MonsterRegistryError> {
+) -> Result<(VecDeque<RawMonster>, Vec<RawMonster>), MonsterRegistryError> {
     let mut monsters = VecDeque::new();
+    let mut attacks = Vec::new();
     for file in files {
         let bytes = fs::read(root.join(&file.destination))
             .map_err(|error| MonsterRegistryError::Io(file.destination.clone(), error))?;
@@ -289,24 +362,35 @@ fn read_monsters(
         match value {
             Value::Array(values) => {
                 for value in values {
-                    collect_monster(&file, value, &mut monsters)?;
+                    collect_definition(&file, value, &mut monsters, &mut attacks)?;
                 }
             }
-            value => collect_monster(&file, value, &mut monsters)?,
+            value => collect_definition(&file, value, &mut monsters, &mut attacks)?,
         }
     }
-    Ok(monsters)
+    Ok((monsters, attacks))
 }
 
-fn collect_monster(
+fn collect_definition(
     file: &SelectedContentFile,
     value: Value,
     monsters: &mut VecDeque<RawMonster>,
+    attacks: &mut Vec<RawMonster>,
 ) -> Result<(), MonsterRegistryError> {
-    if value.get("type").and_then(Value::as_str) != Some("MONSTER") {
-        return Ok(());
-    }
-    monsters.push_back(RawMonster {
+    let target = match value.get("type").and_then(Value::as_str) {
+        Some("MONSTER") => monsters,
+        Some("monster_attack") => {
+            attacks.push(RawMonster {
+                file: file.clone(),
+                object: value.as_object().cloned().ok_or_else(|| {
+                    MonsterRegistryError::InvalidDefinition(file.upstream_path.clone())
+                })?,
+            });
+            return Ok(());
+        }
+        _ => return Ok(()),
+    };
+    target.push_back(RawMonster {
         file: file.clone(),
         object: value
             .as_object()
@@ -318,6 +402,7 @@ fn collect_monster(
 
 fn load_one(
     raw: &RawMonster,
+    attacks: &BTreeMap<String, MonsterSpecialAttackDefinition>,
     monsters: &mut BTreeMap<String, MonsterDefinition>,
     abstracts: &mut BTreeMap<String, MonsterDefinition>,
 ) -> Result<bool, MonsterRegistryError> {
@@ -334,7 +419,7 @@ fn load_one(
     monster.id = id.to_owned();
     monster.source.clone_from(&raw.file.upstream_path);
     let context = format!("{}#{id}", raw.file.upstream_path);
-    apply_fields(&mut monster, &raw.object, &context)?;
+    apply_fields(&mut monster, &raw.object, attacks, &context)?;
     if !is_abstract
         && (monster.name.is_empty()
             || monster.symbol.is_empty()
@@ -365,6 +450,7 @@ fn definition_key(object: &Map<String, Value>) -> Result<(&str, bool), MonsterRe
 fn apply_fields(
     monster: &mut MonsterDefinition,
     object: &Map<String, Value>,
+    attacks: &BTreeMap<String, MonsterSpecialAttackDefinition>,
     source: &str,
 ) -> Result<(), MonsterRegistryError> {
     apply_text(object, "name", &mut monster.name, source)?;
@@ -424,6 +510,7 @@ fn apply_fields(
     )?;
     apply_melee_damage(monster, object, source)?;
     apply_attack_effects(monster, object, source)?;
+    apply_special_attacks(monster, object, attacks, source)?;
     apply_string_set(object, "material", &mut monster.materials, source)?;
     apply_string_set(object, "flags", &mut monster.flags, source)?;
     apply_string_set(object, "species", &mut monster.species, source)?;
@@ -455,6 +542,552 @@ fn apply_fields(
         }
     }
     Ok(())
+}
+
+fn apply_special_attacks(
+    monster: &mut MonsterDefinition,
+    object: &Map<String, Value>,
+    attacks: &BTreeMap<String, MonsterSpecialAttackDefinition>,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    monster
+        .unsupported_fields
+        .retain(|field| field != "special_attacks" && !field.starts_with("special_attacks."));
+    if let Some(value) = object.get("special_attacks") {
+        monster.special_attacks.clear();
+        insert_special_attacks(&mut monster.special_attacks, value, attacks, source)?;
+    } else {
+        if let Some(value) = modifier(object, "extend", "special_attacks", source)? {
+            insert_special_attacks(&mut monster.special_attacks, value, attacks, source)?;
+        }
+        if let Some(value) = modifier(object, "delete", "special_attacks", source)? {
+            let values = value
+                .as_array()
+                .map_or_else(|| vec![value], |values| values.iter().collect());
+            for value in values {
+                let id = value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| invalid(source, "delete.special_attacks"))?;
+                monster.special_attacks.remove(id);
+            }
+        }
+        for modifier_name in ["relative", "proportional"] {
+            if modifier(object, modifier_name, "special_attacks", source)?.is_some() {
+                monster
+                    .unsupported_fields
+                    .insert(format!("special_attacks.{modifier_name}"));
+            }
+        }
+    }
+    for attack in monster.special_attacks.values() {
+        for field in &attack.unsupported_fields {
+            monster
+                .unsupported_fields
+                .insert(format!("special_attacks.{}.{}", attack.id, field));
+        }
+    }
+    Ok(())
+}
+
+fn insert_special_attacks(
+    target: &mut BTreeMap<String, MonsterSpecialAttackDefinition>,
+    value: &Value,
+    attacks: &BTreeMap<String, MonsterSpecialAttackDefinition>,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    let values = value
+        .as_array()
+        .map_or_else(|| vec![value], |values| values.iter().collect());
+    for value in values {
+        let attack = if let Some(pair) = value.as_array() {
+            if pair.len() != 2 {
+                return Err(invalid(source, "special_attacks"));
+            }
+            let id = pair[0]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| invalid(source, "special_attacks.id"))?;
+            let mut attack = attacks
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| unsupported_special_attack(id, "unresolved_id"));
+            attack.cooldown_turns = parse_u32(&pair[1], source, "special_attacks.cooldown")?;
+            attack
+        } else {
+            let fields = value
+                .as_object()
+                .ok_or_else(|| invalid(source, "special_attacks"))?;
+            let actor_type = fields
+                .get("attack_type")
+                .or_else(|| fields.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("monster_attack");
+            let base = (actor_type == "monster_attack")
+                .then(|| {
+                    fields
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| attacks.get(id))
+                })
+                .flatten();
+            parse_special_attack(fields, base, source)?
+        };
+        if target.insert(attack.id.clone(), attack).is_some() {
+            return Err(invalid(source, "special_attacks.duplicate_id"));
+        }
+    }
+    Ok(())
+}
+
+fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefinition {
+    MonsterSpecialAttackDefinition {
+        id: id.to_owned(),
+        kind: MonsterSpecialAttackKind::Unsupported,
+        cooldown_turns: 0,
+        move_cost_moves: 100,
+        accuracy: None,
+        range: 1,
+        no_adjacent: false,
+        dodgeable: true,
+        minimum_damage_multiplier_millionths: 500_000,
+        maximum_damage_multiplier_millionths: 1_000_000,
+        damage: vec![MonsterMeleeDamageUnitDefinition {
+            damage_type_id: String::from("bash"),
+            amount_milli: 9_000,
+            armor_penetration_milli: 0,
+            armor_multiplier_millionths: 1_000_000,
+            damage_multiplier_millionths: 1_000_000,
+            constant_armor_multiplier_millionths: 1_000_000,
+            constant_damage_multiplier_millionths: 1_000_000,
+        }],
+        effects: Vec::new(),
+        effects_require_damage: true,
+        infection_chance_millionths: 0,
+        leap_minimum_range_milli: 0,
+        leap_maximum_range_milli: 0,
+        leap_minimum_consider_range_milli: 0,
+        leap_maximum_consider_range_milli: 0,
+        leap_allow_no_target: false,
+        leap_prefer: false,
+        leap_random: false,
+        leap_ignore_destination_danger: false,
+        unsupported_fields: BTreeSet::from([field.to_owned()]),
+    }
+}
+
+fn parse_special_attack(
+    fields: &Map<String, Value>,
+    base: Option<&MonsterSpecialAttackDefinition>,
+    source: &str,
+) -> Result<MonsterSpecialAttackDefinition, MonsterRegistryError> {
+    let declared_type = fields
+        .get("attack_type")
+        .or_else(|| fields.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("monster_attack");
+    let id = fields
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| (declared_type != "monster_attack").then_some(declared_type))
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or_else(|| invalid(source, "special_attacks.id"))?;
+    let kind = match declared_type {
+        "melee" => MonsterSpecialAttackKind::Melee,
+        "bite" => MonsterSpecialAttackKind::Bite,
+        "leap" => MonsterSpecialAttackKind::Leap,
+        "monster_attack" => base
+            .map(|base| base.kind)
+            .unwrap_or(MonsterSpecialAttackKind::Unsupported),
+        _ => MonsterSpecialAttackKind::Unsupported,
+    };
+    let mut attack = base
+        .cloned()
+        .unwrap_or_else(|| unsupported_special_attack(id, "missing_actor_type"));
+    attack.id = id.to_owned();
+    attack.kind = kind;
+    if kind != MonsterSpecialAttackKind::Unsupported {
+        attack.unsupported_fields.remove("missing_actor_type");
+    }
+    if declared_type != "monster_attack" && !matches!(declared_type, "melee" | "bite" | "leap") {
+        attack
+            .unsupported_fields
+            .insert(format!("attack_type.{declared_type}"));
+    }
+
+    if let Some(value) = fields.get("cooldown") {
+        attack.cooldown_turns = parse_u32(value, source, "special_attacks.cooldown")?;
+    } else if base.is_none() {
+        return Err(invalid(source, "special_attacks.cooldown"));
+    }
+    if kind == MonsterSpecialAttackKind::Leap && base.is_none() {
+        attack.move_cost_moves = 150;
+        attack.damage.clear();
+        attack.effects.clear();
+        attack.minimum_damage_multiplier_millionths = 0;
+        attack.maximum_damage_multiplier_millionths = 0;
+        attack.leap_minimum_range_milli = 1_000;
+        attack.leap_maximum_consider_range_milli = 200_000;
+    }
+    if let Some(value) = fields.get("move_cost") {
+        attack.move_cost_moves = parse_u32(value, source, "special_attacks.move_cost")?;
+    }
+    if let Some(value) = fields.get("accuracy") {
+        let accuracy = parse_i32(value, source, "special_attacks.accuracy")?;
+        attack.accuracy = (accuracy >= 0).then_some(accuracy);
+    }
+    if let Some(value) = fields.get("range") {
+        attack.range = parse_u32(value, source, "special_attacks.range")?;
+    }
+    for (field, target) in [
+        ("no_adjacent", &mut attack.no_adjacent),
+        ("dodgeable", &mut attack.dodgeable),
+        ("effects_require_dmg", &mut attack.effects_require_damage),
+    ] {
+        if let Some(value) = fields.get(field) {
+            *target = value
+                .as_bool()
+                .ok_or_else(|| invalid(source, &format!("special_attacks.{field}")))?;
+        }
+    }
+    if let Some(value) = fields.get("min_mul") {
+        attack.minimum_damage_multiplier_millionths =
+            parse_scaled_number(value, 1_000_000, source, "special_attacks.min_mul")?;
+    }
+    if let Some(value) = fields.get("max_mul") {
+        attack.maximum_damage_multiplier_millionths =
+            parse_scaled_number(value, 1_000_000, source, "special_attacks.max_mul")?;
+    }
+    if let Some(value) = fields.get("damage_max_instance") {
+        let (damage, deferred) = parse_melee_damage(value, source, "damage_max_instance")?;
+        attack.damage = damage;
+        attack.unsupported_fields.extend(
+            deferred
+                .into_iter()
+                .map(|field| field.replacen("melee_damage", "damage_max_instance", 1)),
+        );
+    }
+    if let Some(value) = fields.get("effects") {
+        let (effects, deferred) = parse_monster_effects(value, source, "special_attacks.effects")?;
+        attack.effects = effects;
+        attack.unsupported_fields.extend(deferred);
+    }
+    if kind == MonsterSpecialAttackKind::Bite {
+        if let Some(value) = fields.get("infection_chance") {
+            let percent = parse_u32(value, source, "special_attacks.infection_chance")?;
+            if percent > 100 {
+                return Err(invalid(source, "special_attacks.infection_chance"));
+            }
+            attack.infection_chance_millionths = percent * 10_000;
+        } else if base.is_none() || base.is_some_and(|base| base.kind != kind) {
+            attack.infection_chance_millionths = 50_000;
+        }
+    } else {
+        attack.infection_chance_millionths = 0;
+    }
+    if kind == MonsterSpecialAttackKind::Leap {
+        if let Some(maximum_range) = fields.get("max_range") {
+            attack.leap_maximum_range_milli =
+                parse_u32_scaled(maximum_range, 1_000, source, "special_attacks.max_range")?;
+        } else if base.is_none() || attack.leap_maximum_range_milli == 0 {
+            return Err(invalid(source, "special_attacks.max_range"));
+        }
+        for (field, target) in [
+            ("min_range", &mut attack.leap_minimum_range_milli),
+            (
+                "min_consider_range",
+                &mut attack.leap_minimum_consider_range_milli,
+            ),
+            (
+                "max_consider_range",
+                &mut attack.leap_maximum_consider_range_milli,
+            ),
+        ] {
+            if let Some(value) = fields.get(field) {
+                *target =
+                    parse_u32_scaled(value, 1_000, source, &format!("special_attacks.{field}"))?;
+            }
+        }
+        for (field, target) in [
+            ("allow_no_target", &mut attack.leap_allow_no_target),
+            ("prefer_leap", &mut attack.leap_prefer),
+            ("random_leap", &mut attack.leap_random),
+            (
+                "ignore_dest_danger",
+                &mut attack.leap_ignore_destination_danger,
+            ),
+        ] {
+            if let Some(value) = fields.get(field) {
+                *target = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, &format!("special_attacks.{field}")))?;
+            }
+        }
+        if fields
+            .get("ignore_dest_terrain")
+            .is_some_and(|value| value.as_bool() != Some(false))
+        {
+            attack
+                .unsupported_fields
+                .insert(String::from("ignore_dest_terrain"));
+        }
+    }
+
+    const COSMETIC_FIELDS: &[&str] = &[
+        "miss_msg_u",
+        "no_dmg_msg_u",
+        "hit_dmg_u",
+        "miss_msg_npc",
+        "no_dmg_msg_npc",
+        "hit_dmg_npc",
+        "throw_msg_u",
+        "throw_msg_npc",
+    ];
+    const IMPLEMENTED: &[&str] = &[
+        "type",
+        "attack_type",
+        "id",
+        "cooldown",
+        "damage_max_instance",
+        "accuracy",
+        "min_mul",
+        "max_mul",
+        "move_cost",
+        "range",
+        "no_adjacent",
+        "dodgeable",
+        "uncanny_dodgeable",
+        "blockable",
+        "effects_require_dmg",
+        "effects_require_organic",
+        "attack_amount",
+        "spread_damage",
+        "throw_strength",
+        "effects",
+        "infection_chance",
+        "max_range",
+        "min_range",
+        "allow_no_target",
+        "prefer_leap",
+        "random_leap",
+        "ignore_dest_terrain",
+        "ignore_dest_danger",
+        "min_consider_range",
+        "max_consider_range",
+        "message",
+    ];
+    for field in fields.keys().filter(|field| !field.starts_with("//")) {
+        if COSMETIC_FIELDS.contains(&field.as_str()) {
+            continue;
+        }
+        if !IMPLEMENTED.contains(&field.as_str())
+            || matches!(
+                field.as_str(),
+                "grab"
+                    | "grab_data"
+                    | "condition"
+                    | "eoc"
+                    | "body_part_types"
+                    | "self_effects_always"
+                    | "self_effects_onhit"
+                    | "self_effects_ondmg"
+            )
+        {
+            attack.unsupported_fields.insert(field.clone());
+        }
+    }
+    const MELEE_ONLY_FIELDS: &[&str] = &[
+        "damage_max_instance",
+        "accuracy",
+        "min_mul",
+        "max_mul",
+        "range",
+        "no_adjacent",
+        "dodgeable",
+        "uncanny_dodgeable",
+        "blockable",
+        "effects_require_dmg",
+        "effects_require_organic",
+        "attack_amount",
+        "spread_damage",
+        "throw_strength",
+        "effects",
+        "infection_chance",
+    ];
+    const LEAP_ONLY_FIELDS: &[&str] = &[
+        "max_range",
+        "min_range",
+        "allow_no_target",
+        "prefer_leap",
+        "random_leap",
+        "ignore_dest_terrain",
+        "ignore_dest_danger",
+        "min_consider_range",
+        "max_consider_range",
+    ];
+    let inapplicable = match kind {
+        MonsterSpecialAttackKind::Leap => MELEE_ONLY_FIELDS,
+        MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite => LEAP_ONLY_FIELDS,
+        MonsterSpecialAttackKind::Unsupported => &[],
+    };
+    attack.unsupported_fields.extend(
+        inapplicable
+            .iter()
+            .filter(|field| fields.contains_key(**field))
+            .map(|field| (*field).to_owned()),
+    );
+    if kind != MonsterSpecialAttackKind::Bite && fields.contains_key("infection_chance") {
+        attack
+            .unsupported_fields
+            .insert(String::from("infection_chance"));
+    }
+    if fields
+        .get("effects_require_organic")
+        .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        attack
+            .unsupported_fields
+            .insert(String::from("effects_require_organic"));
+    }
+    if fields.get("attack_amount").is_some_and(|value| {
+        value.as_array().is_none_or(|range| {
+            range.len() != 2 || range[0].as_i64() != Some(1) || range[1].as_i64() != Some(1)
+        })
+    }) {
+        attack
+            .unsupported_fields
+            .insert(String::from("attack_amount"));
+    }
+    for (field, expected) in [("spread_damage", false), ("grab", false)] {
+        if fields
+            .get(field)
+            .is_some_and(|value| value.as_bool() != Some(expected))
+        {
+            attack.unsupported_fields.insert(field.to_owned());
+        }
+    }
+    if fields
+        .get("throw_strength")
+        .is_some_and(|value| value.as_i64() != Some(0))
+    {
+        attack
+            .unsupported_fields
+            .insert(String::from("throw_strength"));
+    }
+    if attack.range == 0
+        || attack.maximum_damage_multiplier_millionths < attack.minimum_damage_multiplier_millionths
+        || attack.minimum_damage_multiplier_millionths < 0
+        || (kind == MonsterSpecialAttackKind::Leap
+            && (attack.leap_maximum_range_milli == 0
+                || attack.leap_minimum_range_milli > attack.leap_maximum_range_milli
+                || attack.leap_minimum_consider_range_milli
+                    > attack.leap_maximum_consider_range_milli))
+    {
+        return Err(invalid(source, "special_attacks.bounds"));
+    }
+    Ok(attack)
+}
+
+fn parse_monster_effects(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<(Vec<MonsterAttackEffectDefinition>, BTreeSet<String>), MonsterRegistryError> {
+    let values = value.as_array().ok_or_else(|| invalid(source, field))?;
+    let mut effects = Vec::with_capacity(values.len());
+    let mut deferred = BTreeSet::new();
+    for value in values {
+        let fields = value.as_object().ok_or_else(|| invalid(source, field))?;
+        let effect_id = fields
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+            .ok_or_else(|| invalid(source, &format!("{field}.id")))?
+            .to_owned();
+        for key in fields.keys().filter(|key| !key.starts_with("//")) {
+            if ![
+                "id",
+                "chance",
+                "permanent",
+                "affect_hit_bp",
+                "bp",
+                "duration",
+                "intensity",
+                "message",
+            ]
+            .contains(&key.as_str())
+            {
+                deferred.insert(format!("effects.{key}"));
+            }
+        }
+        let chance = fields.get("chance").map_or(Ok(100.0), |value| {
+            value
+                .as_f64()
+                .filter(|chance| chance.is_finite() && (0.0..=100.0).contains(chance))
+                .ok_or_else(|| invalid(source, &format!("{field}.chance")))
+        })?;
+        effects.push(MonsterAttackEffectDefinition {
+            effect_id,
+            chance_millionths: (chance * 10_000.0).round() as u32,
+            permanent: fields.get("permanent").map_or(Ok(false), |value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, &format!("{field}.permanent")))
+            })?,
+            affect_hit_body_part: fields.get("affect_hit_bp").map_or(Ok(false), |value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, &format!("{field}.affect_hit_bp")))
+            })?,
+            body_part_id: fields
+                .get("bp")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid(source, &format!("{field}.bp")))
+                })
+                .transpose()?,
+            duration_turns: parse_attack_effect_range(
+                fields.get("duration"),
+                1,
+                source,
+                &format!("{field}.duration"),
+            )?,
+            intensity: parse_attack_effect_range(
+                fields.get("intensity"),
+                1,
+                source,
+                &format!("{field}.intensity"),
+            )?,
+        });
+    }
+    Ok((effects, deferred))
+}
+
+fn parse_u32(value: &Value, source: &str, field: &str) -> Result<u32, MonsterRegistryError> {
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| invalid(source, field))
+}
+
+fn parse_i32(value: &Value, source: &str, field: &str) -> Result<i32, MonsterRegistryError> {
+    value
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| invalid(source, field))
+}
+
+fn parse_u32_scaled(
+    value: &Value,
+    scale: i32,
+    source: &str,
+    field: &str,
+) -> Result<u32, MonsterRegistryError> {
+    let scaled = parse_scaled_number(value, scale, source, field)?;
+    u32::try_from(scaled).map_err(|_| invalid(source, field))
 }
 
 fn apply_attack_effects(

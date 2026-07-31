@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
     MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, MonsterGroupRegistry,
-    MonsterGroupTarget, MonsterRegistry, OvermapSpecialDefinition, OvermapSpecialRegistry,
-    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition,
-    StartLocationDefinition, StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice,
-    StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
+    MonsterGroupTarget, MonsterRegistry, MonsterSpecialAttackKind, OvermapSpecialDefinition,
+    OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    RiverSettingsDefinition, StartLocationDefinition, StrictMapgenAreaItemPlacement,
+    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
     TerrainRegistry,
@@ -18,6 +18,7 @@ use cdda_protocol::{
     WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
     WorldgenMonsterGroupEntryV1, WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1,
     WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1,
+    WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
     WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
     WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
     WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
@@ -660,6 +661,80 @@ fn runtime_monster_catalog(
                     });
                 }
             }
+            let special_attacks = monster
+                .special_attacks
+                .values()
+                .filter(|attack| attack.is_fully_supported())
+                .map(|attack| {
+                    let kind = match attack.kind {
+                        MonsterSpecialAttackKind::Melee => {
+                            WorldgenMonsterSpecialAttackKindV1::Melee
+                        }
+                        MonsterSpecialAttackKind::Bite => WorldgenMonsterSpecialAttackKindV1::Bite,
+                        MonsterSpecialAttackKind::Leap => WorldgenMonsterSpecialAttackKindV1::Leap,
+                        MonsterSpecialAttackKind::Unsupported => {
+                            return Err(
+                                "unsupported special attack reached runtime admission".into()
+                            );
+                        }
+                    };
+                    Ok(WorldgenMonsterSpecialAttackV1 {
+                        attack_id: attack.id.clone(),
+                        kind,
+                        cooldown_turns: attack.cooldown_turns,
+                        move_cost_moves: attack.move_cost_moves,
+                        accuracy: attack.accuracy,
+                        range: attack.range,
+                        no_adjacent: attack.no_adjacent,
+                        dodgeable: attack.dodgeable,
+                        minimum_damage_multiplier_millionths: attack
+                            .minimum_damage_multiplier_millionths,
+                        maximum_damage_multiplier_millionths: attack
+                            .maximum_damage_multiplier_millionths,
+                        damage: attack
+                            .damage
+                            .iter()
+                            .map(|unit| WorldgenMonsterMeleeDamageUnitV1 {
+                                damage_type_id: unit.damage_type_id.clone(),
+                                amount_milli: unit.amount_milli,
+                                armor_penetration_milli: unit.armor_penetration_milli,
+                                armor_multiplier_millionths: unit.armor_multiplier_millionths,
+                                damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                                constant_armor_multiplier_millionths: unit
+                                    .constant_armor_multiplier_millionths,
+                                constant_damage_multiplier_millionths: unit
+                                    .constant_damage_multiplier_millionths,
+                            })
+                            .collect(),
+                        effects: attack
+                            .effects
+                            .iter()
+                            .map(|effect| WorldgenMonsterAttackEffectV1 {
+                                effect_id: effect.effect_id.clone(),
+                                chance_millionths: effect.chance_millionths,
+                                permanent: effect.permanent,
+                                affect_hit_body_part: effect.affect_hit_body_part,
+                                requires_cut_or_stab_damage: false,
+                                body_part_id: effect.body_part_id.clone(),
+                                duration_minimum_turns: effect.duration_turns.0,
+                                duration_maximum_turns: effect.duration_turns.1,
+                                intensity_minimum: effect.intensity.0,
+                                intensity_maximum: effect.intensity.1,
+                            })
+                            .collect(),
+                        effects_require_damage: attack.effects_require_damage,
+                        infection_chance_millionths: attack.infection_chance_millionths,
+                        leap_minimum_range_milli: attack.leap_minimum_range_milli,
+                        leap_maximum_range_milli: attack.leap_maximum_range_milli,
+                        leap_minimum_consider_range_milli: attack.leap_minimum_consider_range_milli,
+                        leap_maximum_consider_range_milli: attack.leap_maximum_consider_range_milli,
+                        leap_allow_no_target: attack.leap_allow_no_target,
+                        leap_prefer: attack.leap_prefer,
+                        leap_random: attack.leap_random,
+                        leap_ignore_destination_danger: attack.leap_ignore_destination_danger,
+                    })
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
                 armor_milli: monster.finalized_armor_milli(),
@@ -684,6 +759,7 @@ fn runtime_monster_catalog(
                     })
                     .unwrap_or_default(),
                 attack_effects,
+                special_attacks,
                 leaves_corpse: !monster.flags.contains("NO_CORPSE"),
                 deferred_behavior_fields: deferred_behavior_fields.into_iter().collect(),
             })

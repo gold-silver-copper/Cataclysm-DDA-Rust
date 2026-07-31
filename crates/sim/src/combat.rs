@@ -452,6 +452,33 @@ impl WorldState {
         Ok(Some((spread, stumbled, dodge_attempted)))
     }
 
+    pub(super) fn creature_actor_special_attack_roll(
+        &self,
+        source: CreatureId,
+        target: ActorId,
+        turn_sequence: u64,
+        accuracy: i32,
+        dodgeable: bool,
+    ) -> Result<(i64, bool), SimError> {
+        let mut rng = self.named_rng(
+            b"creature-special-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let hit_roll = pinned_melee_hit_roll(i64::from(accuracy), 1, &mut rng)?;
+        let (dodge_roll, dodge_attempted) = if dodgeable {
+            self.actor_dodge_roll(target)?
+        } else {
+            (0, false)
+        };
+        Ok((
+            hit_roll
+                .checked_sub(dodge_roll)
+                .ok_or(SimError::NumericOverflow)?,
+            dodge_attempted,
+        ))
+    }
+
     /// Retained as a direct characterization boundary for the already pinned
     /// sleeping-target subset. Runtime attacks use the generalized method.
     #[cfg(test)]

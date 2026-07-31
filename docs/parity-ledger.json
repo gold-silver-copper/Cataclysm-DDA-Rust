@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 105,
-  "persistence_schema_version": 83,
+  "protocol_version": 106,
+  "persistence_schema_version": 84,
   "replay_format_version": 3,
-  "active_milestone": "anatomy-combat",
+  "active_milestone": "monsters",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -458,7 +458,8 @@
         { "id": "typed-melee-damage-and-penetration", "state": "implementation_complete_verification_deferred" },
         { "id": "ordinary-attack-effects", "state": "implementation_complete_verification_deferred" },
         { "id": "ordinary-death-corpse-and-revival", "state": "implementation_complete_verification_deferred" },
-        { "id": "data-driven-special-attacks", "state": "planned" }
+        { "id": "special-attack-scheduler-melee-bite-and-leap-actors", "state": "implementation_complete_verification_deferred" },
+        { "id": "gun-spell-polymorph-and-eoc-special-actors", "state": "planned" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],

@@ -26,18 +26,18 @@ use cdda_protocol::{
     CraftActivitySnapshotV1, CraftConsumedItemV1, CraftItemPrototypeV1, CraftProficiencyV1,
     CraftRecipeV1, CraftSkillRequirementV1, CreatureCorpsePrototypeV1, CreatureCorpseSnapshotV1,
     CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
-    DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason,
-    DisassemblyRecipeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
-    FurnitureTileSnapshot, GroundItemSnapshot, HealingItemTypeV1, HeldInputSequence,
-    HeldMovementUpdateSource, HeldMovementUpdateV1, HorizontalDirection,
-    IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1,
-    ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot, LocalTileCoord,
-    MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES,
-    MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS,
-    MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS,
-    MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER,
-    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES,
-    MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
+    CreatureSpecialAttackStateV1, DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1,
+    DisassemblyInterruptionReason, DisassemblyRecipeV1, EventId, FieldSnapshotV1,
+    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot,
+    HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1,
+    HorizontalDirection, IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1,
+    ItemComponentSnapshotV1, ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot,
+    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
+    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
+    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
+    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
+    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
+    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
     MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
     MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
     MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
@@ -2972,6 +2972,7 @@ struct Creature {
     sound_goal: Option<CreatureSoundGoalV1>,
     action_points: i64,
     downed_until_tick: Option<SimTick>,
+    special_attacks: Vec<CreatureSpecialAttackStateV1>,
     blood_field_type_id: String,
     corpse: Option<CreatureCorpsePrototypeV1>,
 }
@@ -3129,6 +3130,7 @@ impl Creature {
             sound_goal: self.sound_goal,
             action_points: self.action_points,
             downed_until_tick: self.downed_until_tick,
+            special_attacks: self.special_attacks.clone(),
             blood_field_type_id: self.blood_field_type_id.clone(),
             corpse: self.corpse.clone(),
         }
@@ -3167,6 +3169,7 @@ impl Creature {
             sound_goal: snapshot.sound_goal,
             action_points: snapshot.action_points,
             downed_until_tick: snapshot.downed_until_tick,
+            special_attacks: snapshot.special_attacks.clone(),
             blood_field_type_id: snapshot.blood_field_type_id.clone(),
             corpse: snapshot.corpse.clone(),
         })
@@ -3198,6 +3201,15 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
         })
         || snapshot.action_points >= i64::from(CREATURE_ACTION_THRESHOLD)
         || snapshot.action_points < cdda_protocol::MIN_ACTION_POINTS
+        || snapshot.special_attacks.len() > 64
+        || !snapshot
+            .special_attacks
+            .windows(2)
+            .all(|pair| pair[0].attack_id < pair[1].attack_id)
+        || snapshot.special_attacks.iter().any(|attack| {
+            validate_item_type_id(&attack.attack_id).is_err()
+                || attack.cooldown_turns > 1_000_000_000
+        })
         || (!snapshot.blood_field_type_id.is_empty()
             && validate_item_type_id(&snapshot.blood_field_type_id).is_err())
         || snapshot.corpse.as_ref().is_some_and(|corpse| {
@@ -5413,6 +5425,7 @@ impl WorldState {
             return Err(SimError::SpawnBlocked);
         }
         let id = self.allocator.allocate_creature()?;
+        let special_attacks = self.initial_creature_special_attacks(&spawn.type_id, id)?;
         self.creatures.insert(
             id,
             Creature {
@@ -5446,6 +5459,7 @@ impl WorldState {
                 sound_goal: None,
                 action_points: 0,
                 downed_until_tick: None,
+                special_attacks,
                 blood_field_type_id: spawn.blood_field_type_id,
                 corpse: spawn.corpse,
             },
@@ -10340,6 +10354,7 @@ impl WorldState {
     }
 
     fn advance_creatures(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+        self.advance_creature_special_cooldowns();
         let creature_ids: Vec<_> = self.creatures.keys().copied().collect();
         for creature_id in creature_ids {
             let Some(creature) = self.creatures.get_mut(&creature_id) else {
@@ -10428,13 +10443,48 @@ impl WorldState {
                 target = Some((key, actor_id, actor_position));
             }
         }
-        let visible_target = target.map(|(_key, actor_id, position)| (actor_id, position));
+        let mut visible_target = target.map(|(_key, actor_id, position)| (actor_id, position));
         if let Some((_target_id, target_position)) = visible_target {
             self.creatures
                 .get_mut(&creature_id)
                 .ok_or(SimError::UnknownCreature)?
                 .goal = Some(target_position);
         }
+        let special_destination = visible_target.map(|(_id, position)| position).or_else(|| {
+            self.creatures.get(&creature_id).and_then(|creature| {
+                creature
+                    .goal
+                    .or_else(|| creature.sound_goal.map(|goal| goal.position))
+            })
+        });
+        let special_cost = if self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .pacifist
+        {
+            0
+        } else {
+            self.try_creature_special_attacks(
+                creature_id,
+                visible_target,
+                special_destination,
+                turn_sequence,
+                events,
+            )?
+        };
+        if visible_target.is_some_and(|(target_id, _position)| {
+            self.actors
+                .get(&target_id)
+                .is_none_or(|actor| actor.hp <= 0)
+        }) {
+            visible_target = None;
+        }
+        let creature_position = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .position;
         if self
             .creatures
             .get(&creature_id)
@@ -10443,8 +10493,7 @@ impl WorldState {
         {
             // Pinned `monster::move` performs planning and special attacks,
             // then `IMMOBILE` clears all remaining moves before ordinary
-            // adjacent attacks, opening, bashing, or movement. Special attacks
-            // are not yet part of this admitted runtime.
+            // adjacent attacks, opening, bashing, or movement.
             return Ok(self
                 .creatures
                 .get(&creature_id)
@@ -10469,7 +10518,9 @@ impl WorldState {
             {
                 (goal.position, true)
             } else {
-                return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+                return i64::from(CREATURE_ACTION_THRESHOLD)
+                    .checked_add(special_cost)
+                    .ok_or(SimError::NumericOverflow);
             };
         if destination == creature_position {
             let creature = self
@@ -10481,7 +10532,9 @@ impl WorldState {
             } else {
                 creature.goal = None;
             }
-            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
+            return i64::from(CREATURE_ACTION_THRESHOLD)
+                .checked_add(special_cost)
+                .ok_or(SimError::NumericOverflow);
         }
         if let Some((target_id, target_position)) = visible_target
             && horizontally_adjacent(creature_position, target_position)
@@ -10500,7 +10553,9 @@ impl WorldState {
             .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
             .ok_or(SimError::NumericOverflow)?;
             self.creature_attack(creature_id, target_id, turn_sequence, events)?;
-            return Ok(attack_cost);
+            return attack_cost
+                .checked_add(special_cost)
+                .ok_or(SimError::NumericOverflow);
         }
         let stumbles = self
             .creatures
@@ -10561,7 +10616,7 @@ impl WorldState {
             match action {
                 CreatureStepAction::OpenTerrain => {
                     self.perform_creature_open_terrain(creature_id, to, events)?;
-                    return Ok(0);
+                    return Ok(special_cost);
                 }
                 CreatureStepAction::Bash => {
                     self.perform_creature_bash(creature_id, to, turn_sequence, events)?;
@@ -10572,6 +10627,7 @@ impl WorldState {
                         .speed;
                     return i64::from(speed)
                         .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+                        .and_then(|cost| cost.checked_add(special_cost))
                         .ok_or(SimError::NumericOverflow);
                 }
                 CreatureStepAction::Move => {}
@@ -10596,9 +10652,13 @@ impl WorldState {
                 from: creature_position,
                 to,
             })?);
-            return Ok(action_cost);
+            return action_cost
+                .checked_add(special_cost)
+                .ok_or(SimError::NumericOverflow);
         }
-        Ok(i64::from(CREATURE_ACTION_THRESHOLD))
+        i64::from(CREATURE_ACTION_THRESHOLD)
+            .checked_add(special_cost)
+            .ok_or(SimError::NumericOverflow)
     }
 
     fn creature_route_step(
@@ -13259,6 +13319,8 @@ impl WorldState {
                 break;
             }
             let creature_id = self.allocator.allocate_creature()?;
+            let revived_special_attacks = self
+                .initial_creature_special_attacks(&corpse.prototype.monster_type_id, creature_id)?;
             match location {
                 CorpseLocation::Ground(_position) => {
                     self.ground_items
@@ -13317,6 +13379,7 @@ impl WorldState {
                             .checked_add(5 * SimTick::HZ)
                             .ok_or(SimError::NumericOverflow)?,
                     )),
+                    special_attacks: revived_special_attacks,
                     blood_field_type_id: corpse.prototype.blood_field_type_id.clone(),
                     corpse: Some(corpse.prototype),
                 },
@@ -14105,6 +14168,10 @@ impl WorldState {
         let mut creatures = BTreeMap::new();
         for creature_snapshot in &snapshot.creatures {
             if creature_snapshot.id.world_namespace() != snapshot.world_namespace
+                || !monsters::special_state_matches_catalog(
+                    snapshot.worldgen.as_ref(),
+                    creature_snapshot,
+                )
                 || (!creature_snapshot.blood_field_type_id.is_empty()
                     && !field_types.contains_key(&creature_snapshot.blood_field_type_id))
                 || (creature_snapshot.hp > 0 && !occupied.insert(creature_snapshot.position))
@@ -14198,7 +14265,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV81");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV82");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

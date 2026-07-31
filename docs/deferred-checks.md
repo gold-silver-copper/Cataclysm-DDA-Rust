@@ -26,6 +26,10 @@ Run only when the user explicitly requests a verification checkpoint.
   medical selection, scaling, wound-treatment, and charge-consumption traces;
   canonical fixture updates; recovery/replay modes; production admission; and
   two-client melee/ranged/monster combat.
+- Monster-special checkpoint: run exact C++ initial/reset cooldown, ordered
+  scheduling, generic melee multiplier/range/effect, bite-wound, leap candidate
+  selection, canonical persistence/replay, production admission, and two-client
+  combat scenarios.
 - Content test-target cleanup: `cargo check -p cdda-content --tests` currently
   fails in untouched `material.rs` because one test-only
   `MaterialThermalDefinition` literal lacks `damage_resistance_milli`; the
