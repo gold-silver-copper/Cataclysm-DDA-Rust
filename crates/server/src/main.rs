@@ -14,9 +14,9 @@ use cdda_content::{
     DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry,
     FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
     ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
-    MonsterDefinition, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
-    ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry,
-    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    MonsterDefinition, MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry,
+    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
+    SkillRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -37,14 +37,14 @@ use cdda_protocol::{
     BashFieldEffectV1, BookStudyV1, ConstructionRecipeV1, ConstructionResultV1, ContentIdentity,
     CraftBookRequirementV1, CraftByproductV1, CraftComponentRequirementV1, CraftItemPrototypeV1,
     CraftProficiencyV1, CraftQualityProviderV1, CraftQualityRequirementV1, CraftRecipeV1,
-    CraftSkillRequirementV1, CraftToolRequirementV1, CreatureCorpsePrototypeV1,
-    CreaturePathSettingsV1, CreatureSizeV1, DisassemblyComponentV1, DisassemblyRecipeV1,
-    ENROLL_ALPN, FieldIntensityLevelV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
-    FurnitureTileSnapshot, GAME_ALPN, IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT,
-    MAX_BOOK_STUDY_MOVES, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES,
-    MAX_CRAFT_SUPPORT_GROUPS, MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION,
-    PoweredToolStateV1, RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1,
-    TerrainTileSnapshot, adjusted_book_study_time_moves,
+    CraftSkillRequirementV1, CraftToolRequirementV1, CreaturePathSettingsV1, CreatureSizeV1,
+    DisassemblyComponentV1, DisassemblyRecipeV1, ENROLL_ALPN, FieldIntensityLevelV1,
+    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GAME_ALPN,
+    IntegralMagazinePocketPrototypeV1, MAX_ACTOR_BASE_STAT, MAX_BOOK_STUDY_MOVES,
+    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
+    MAX_SKILL_LEVEL, MagazineWellPrototypeV1, PROTOCOL_VERSION, PoweredToolStateV1,
+    RangedWeaponSnapshot, SimTick, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
+    adjusted_book_study_time_moves,
 };
 #[cfg(test)]
 use cdda_protocol::{
@@ -62,8 +62,8 @@ use cdda_server::{
     handle_game_connection_with_sessions, load_or_create_secret_key,
 };
 #[cfg(test)]
-use cdda_sim::Chunk;
-use cdda_sim::{CreatureSpawn, ItemSpawn, WorldState, canonical_events_hash};
+use cdda_sim::{Chunk, CreatureSpawn};
+use cdda_sim::{ItemSpawn, WorldState, canonical_events_hash};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -116,6 +116,7 @@ struct RuntimeWorldContent<'a> {
     materials: &'a MaterialRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
+    monster_groups: &'a MonsterGroupRegistry,
     fields: &'a FieldTypeRegistry,
     bash_profiles: &'a BashDamageProfileRegistry,
     terrain: &'a TerrainRegistry,
@@ -280,6 +281,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let monster_groups = MonsterGroupRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     validate_monster_attack_costs(&monsters)?;
     let fields = FieldTypeRegistry::load_selected(
         &content_manifest,
@@ -424,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             materials: &materials,
             item_groups: &item_groups,
             monsters: &monsters,
+            monster_groups: &monster_groups,
             fields: &fields,
             bash_profiles: &bash_profiles,
             terrain: &terrain,
@@ -760,6 +768,7 @@ fn open_world(
     let items = content.items;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
+    let monster_groups = content.monster_groups;
     let fields = content.fields;
     let bash_profiles = content.bash_profiles;
     let terrain = content.terrain;
@@ -864,6 +873,8 @@ fn open_world(
             terrain,
             furniture,
             item_groups: &item_group_catalog,
+            monsters,
+            monster_groups,
         },
     )?;
     initial.register_item_group_catalog(item_group_catalog)?;
@@ -1129,66 +1140,6 @@ fn open_world(
             comestible_type: String::new(),
             ammunition_type: String::from("38"),
             ranged_weapon: None,
-        })?;
-        let zombie = monsters
-            .get("mon_zombie")
-            .ok_or("pinned default content has no classic zombie")?;
-        let blood_field_type_id = monster_blood_field_type(zombie).to_owned();
-        let path_settings = monster_path_settings(zombie)?;
-        let size = monster_size(zombie);
-        world.spawn_creature(CreatureSpawn {
-            type_id: zombie.id.clone(),
-            position: cdda_protocol::WorldPosition { x: 5, y: 5, z: 0 },
-            hp: zombie.hp,
-            speed: u16::try_from(zombie.speed)?,
-            attack_cost_moves: monster_attack_cost(zombie)?,
-            aggression: i16::try_from(zombie.aggression)?,
-            melee_skill: u16::try_from(zombie.melee_skill)?,
-            dodge: u16::try_from(zombie.dodge)?,
-            size,
-            melee_dice: u16::try_from(zombie.melee_dice)?,
-            melee_dice_sides: u16::try_from(zombie.melee_dice_sides)?,
-            can_see: zombie.flags.contains("SEES"),
-            vision_day: u16::try_from(zombie.vision_day)?,
-            vision_night: u16::try_from(zombie.vision_night)?,
-            stumbles: zombie.flags.contains("STUMBLES"),
-            bashes: zombie.flags.contains("BASHES"),
-            group_bash: zombie.flags.contains("GROUP_BASH"),
-            hears: zombie.flags.contains("HEARS"),
-            good_hearing: zombie.flags.contains("GOODHEARING"),
-            clumsy_attacks: zombie.flags.contains("CLUMSY_ATTACKS"),
-            immobile: zombie.flags.contains("IMMOBILE"),
-            pacifist: zombie.flags.contains("PACIFIST"),
-            can_open_doors: zombie.flags.contains("CAN_OPEN_DOORS"),
-            path_settings,
-            blood_field_type_id: blood_field_type_id.clone(),
-            corpse: Some(CreatureCorpsePrototypeV1 {
-                monster_type_id: zombie.id.clone(),
-                max_hp: zombie.hp,
-                speed: u16::try_from(zombie.speed)?,
-                attack_cost_moves: monster_attack_cost(zombie)?,
-                aggression: i16::try_from(zombie.aggression)?,
-                melee_skill: u16::try_from(zombie.melee_skill)?,
-                dodge: u16::try_from(zombie.dodge)?,
-                size,
-                melee_dice: u16::try_from(zombie.melee_dice)?,
-                melee_dice_sides: u16::try_from(zombie.melee_dice_sides)?,
-                can_see: zombie.flags.contains("SEES"),
-                vision_day: u16::try_from(zombie.vision_day)?,
-                vision_night: u16::try_from(zombie.vision_night)?,
-                stumbles: zombie.flags.contains("STUMBLES"),
-                bashes: zombie.flags.contains("BASHES"),
-                group_bash: zombie.flags.contains("GROUP_BASH"),
-                hears: zombie.flags.contains("HEARS"),
-                good_hearing: zombie.flags.contains("GOODHEARING"),
-                clumsy_attacks: zombie.flags.contains("CLUMSY_ATTACKS"),
-                immobile: zombie.flags.contains("IMMOBILE"),
-                pacifist: zombie.flags.contains("PACIFIST"),
-                can_open_doors: zombie.flags.contains("CAN_OPEN_DOORS"),
-                path_settings,
-                blood_field_type_id,
-                revives: zombie.flags.contains("REVIVES"),
-            }),
         })?;
     }
     store.write_snapshot(journal_sequence, &world)?;
@@ -4631,6 +4582,9 @@ mod tests {
                 .expect("description snippets should load");
         let monsters = MonsterRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("monsters should load");
+        let monster_groups =
+            MonsterGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("monster groups should load");
         let item_group_content = RuntimeItemGroupContent {
             items: &items,
             materials: &materials,
@@ -5314,6 +5268,8 @@ mod tests {
                 terrain: &terrain,
                 furniture: &furniture,
                 item_groups: &wall_catalog,
+                monsters: &monsters,
+                monster_groups: &monster_groups,
             },
         )
         .expect("pinned surface mapgen should normalize");
@@ -5344,6 +5300,8 @@ mod tests {
                     terrain: &terrain,
                     furniture: &furniture,
                     item_groups: &wall_catalog,
+                    monsters: &monsters,
+                    monster_groups: &monster_groups,
                 },
             )
             .is_err(),
@@ -6694,6 +6652,7 @@ mod tests {
             super::regional_field_acceptance::assert_production_regional_field_gameplay(
                 &item_groups,
                 item_group_content,
+                &monster_groups,
                 &overmap_terrain,
                 &start_locations,
                 city_settings

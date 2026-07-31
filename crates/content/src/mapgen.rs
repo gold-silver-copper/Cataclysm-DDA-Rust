@@ -45,6 +45,8 @@ const OBJECT_FIELDS: &[&str] = &[
     "fallback_predecessor_mapgen",
     "place_nested",
     "place_items",
+    "place_monsters",
+    "place_monster",
     "flags",
 ];
 const NESTED_OBJECT_FIELDS: &[&str] = &[
@@ -60,6 +62,7 @@ const NESTED_OBJECT_FIELDS: &[&str] = &[
     "place_items",
     "place_vehicles",
     "place_monsters",
+    "place_monster",
     "flags",
 ];
 const PALETTE_FIELDS: &[&str] = &[
@@ -90,6 +93,40 @@ pub struct StrictMapgenItemPlacement {
 pub struct MapgenCoordinateRange {
     pub minimum: i8,
     pub maximum: i8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapgenU16Range {
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenMonsterPlacement {
+    pub monster_group: String,
+    pub chance: MapgenU16Range,
+    /// Pinned spawn-density multiplier in millionths. The upstream default is
+    /// the ordinary world spawn-density option, pinned to 1.0 for a world.
+    pub density_millionths: u32,
+    pub repeat: MapgenU16Range,
+    pub x: MapgenCoordinateRange,
+    pub y: MapgenCoordinateRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StrictMapgenIndividualMonsterTarget {
+    Monster(String),
+    Group(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenIndividualMonsterPlacement {
+    pub target: StrictMapgenIndividualMonsterTarget,
+    pub chance_percent: MapgenU16Range,
+    pub pack_size: MapgenU16Range,
+    pub repeat: MapgenU16Range,
+    pub x: MapgenCoordinateRange,
+    pub y: MapgenCoordinateRange,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,6 +234,8 @@ pub struct StrictMapgenDefinition {
     pub fallback_predecessor_mapgen: Option<String>,
     pub nested: Vec<StrictMapgenNestedPlacement>,
     pub area_items: Vec<StrictMapgenAreaItemPlacement>,
+    pub monster_placements: Vec<StrictMapgenMonsterPlacement>,
+    pub individual_monster_placements: Vec<StrictMapgenIndividualMonsterPlacement>,
     pub erase_all_before_placing_terrain: bool,
     /// Side-effect phases deliberately owned by the later spawning family.
     pub deferred_fields: BTreeSet<String>,
@@ -227,6 +266,8 @@ pub struct StrictNestedMapgenDefinition {
     pub palette_closure: Vec<String>,
     pub nested: Vec<StrictMapgenNestedPlacement>,
     pub area_items: Vec<StrictMapgenAreaItemPlacement>,
+    pub monster_placements: Vec<StrictMapgenMonsterPlacement>,
+    pub individual_monster_placements: Vec<StrictMapgenIndividualMonsterPlacement>,
     pub erase_all_before_placing_terrain: bool,
     pub deferred_fields: BTreeSet<String>,
 }
@@ -794,6 +835,10 @@ where
         "mapgen object",
         item_group_exists,
     )?;
+    let monster_placements =
+        parse_monster_placements(object.get("place_monsters"), "mapgen object")?;
+    let individual_monster_placements =
+        parse_individual_monster_placements(object.get("place_monster"), "mapgen object")?;
     let erase_all_before_placing_terrain = parse_erase_all_flag(object.get("flags"))?;
     if fill_terrain.is_none() {
         if object.get("rows").is_none()
@@ -827,6 +872,8 @@ where
         fallback_predecessor_mapgen,
         nested,
         area_items,
+        monster_placements,
+        individual_monster_placements,
         erase_all_before_placing_terrain,
         deferred_fields: state.deferred_fields,
     })
@@ -901,7 +948,15 @@ where
         &format!("nested mapgen {:?}", raw.nested_id),
         item_group_exists,
     )?;
-    for field in ["place_vehicles", "place_monsters"] {
+    let monster_placements = parse_monster_placements(
+        raw.object.get("place_monsters"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    let individual_monster_placements = parse_individual_monster_placements(
+        raw.object.get("place_monster"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    for field in ["place_vehicles"] {
         if raw
             .object
             .get(field)
@@ -924,6 +979,8 @@ where
         palette_closure: state.palette_closure,
         nested,
         area_items,
+        monster_placements,
+        individual_monster_placements,
         erase_all_before_placing_terrain: parse_erase_all_flag(raw.object.get("flags"))?,
         deferred_fields: state.deferred_fields,
     })
@@ -1054,6 +1111,245 @@ where
             })
         })
         .collect()
+}
+
+fn parse_monster_placements(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenMonsterPlacement>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let placements = value
+        .as_array()
+        .ok_or_else(|| format!("place_monsters in {context} must be an array"))?;
+    if placements.len() > MAX_NESTED_MAPGEN_PLACEMENTS {
+        return Err(format!(
+            "place_monsters in {context} exceeds {MAX_NESTED_MAPGEN_PLACEMENTS} placements"
+        ));
+    }
+    placements
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let placement_context = format!("place_monsters[{index}] in {context}");
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("{placement_context} must be an object"))?;
+            reject_unknown_fields(
+                object,
+                &["monster", "chance", "density", "repeat", "x", "y"],
+                &placement_context,
+            )?;
+            let monster_group = object
+                .get("monster")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 512)
+                .ok_or_else(|| {
+                    format!("monster in {placement_context} must be a bounded group id")
+                })?
+                .to_owned();
+            Ok(StrictMapgenMonsterPlacement {
+                monster_group,
+                chance: parse_u16_range(
+                    object.get("chance"),
+                    1,
+                    1,
+                    u16::MAX,
+                    "chance",
+                    &placement_context,
+                )?,
+                density_millionths: parse_density_millionths(
+                    object.get("density"),
+                    &placement_context,
+                )?,
+                repeat: parse_u16_range(
+                    object.get("repeat"),
+                    1,
+                    1,
+                    MAX_NESTED_MAPGEN_PLACEMENTS as u16,
+                    "repeat",
+                    &placement_context,
+                )?,
+                x: parse_coordinate_range(object.get("x"), "x", &placement_context)?,
+                y: parse_coordinate_range(object.get("y"), "y", &placement_context)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_individual_monster_placements(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenIndividualMonsterPlacement>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let placements = value
+        .as_array()
+        .ok_or_else(|| format!("place_monster in {context} must be an array"))?;
+    if placements.len() > MAX_NESTED_MAPGEN_PLACEMENTS {
+        return Err(format!(
+            "place_monster in {context} exceeds {MAX_NESTED_MAPGEN_PLACEMENTS} placements"
+        ));
+    }
+    placements
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let placement_context = format!("place_monster[{index}] in {context}");
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("{placement_context} must be an object"))?;
+            reject_unknown_fields(
+                object,
+                &[
+                    "monster",
+                    "group",
+                    "chance",
+                    "pack_size",
+                    "repeat",
+                    "x",
+                    "y",
+                    "one_or_none",
+                    "friendly",
+                    "target",
+                    "use_pack_size",
+                    "name",
+                    "random_name",
+                    "spawn_data",
+                ],
+                &placement_context,
+            )?;
+            for field in ["friendly", "target", "use_pack_size"] {
+                if object
+                    .get(field)
+                    .is_some_and(|value| value.as_bool() != Some(false))
+                {
+                    return Err(format!("unsupported {field} semantics in {placement_context}"));
+                }
+            }
+            if object.get("one_or_none").is_some_and(|value| !value.is_boolean()) {
+                return Err(format!("one_or_none in {placement_context} must be boolean"));
+            }
+            if object.contains_key("name")
+                || object
+                    .get("random_name")
+                    .is_some_and(|value| value.as_str().is_none_or(|name| !name.is_empty()))
+                || object.contains_key("spawn_data")
+            {
+                return Err(format!(
+                    "named, mission-targeted, friendly, or spawn-data monster semantics are unsupported in {placement_context}"
+                ));
+            }
+            let target = match (
+                object.get("monster").and_then(Value::as_str),
+                object.get("group").and_then(Value::as_str),
+            ) {
+                (Some(id), None) if !id.is_empty() && id.len() <= 512 => {
+                    StrictMapgenIndividualMonsterTarget::Monster(id.to_owned())
+                }
+                (None, Some(id)) if !id.is_empty() && id.len() <= 512 => {
+                    StrictMapgenIndividualMonsterTarget::Group(id.to_owned())
+                }
+                _ => {
+                    return Err(format!(
+                        "{placement_context} must contain exactly one fixed monster or group id"
+                    ));
+                }
+            };
+            Ok(StrictMapgenIndividualMonsterPlacement {
+                target,
+                chance_percent: parse_u16_range(
+                    object.get("chance"),
+                    100,
+                    1,
+                    100,
+                    "chance",
+                    &placement_context,
+                )?,
+                pack_size: parse_u16_range(
+                    object.get("pack_size"),
+                    1,
+                    1,
+                    1_024,
+                    "pack_size",
+                    &placement_context,
+                )?,
+                repeat: parse_u16_range(
+                    object.get("repeat"),
+                    1,
+                    1,
+                    MAX_NESTED_MAPGEN_PLACEMENTS as u16,
+                    "repeat",
+                    &placement_context,
+                )?,
+                x: parse_coordinate_range(object.get("x"), "x", &placement_context)?,
+                y: parse_coordinate_range(object.get("y"), "y", &placement_context)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_u16_range(
+    value: Option<&Value>,
+    default: u16,
+    allowed_minimum: u16,
+    allowed_maximum: u16,
+    field: &str,
+    context: &str,
+) -> Result<MapgenU16Range, String> {
+    let Some(value) = value else {
+        return Ok(MapgenU16Range {
+            minimum: default,
+            maximum: default,
+        });
+    };
+    let (minimum, maximum) = if let Some(value) = value.as_u64() {
+        (value, value)
+    } else {
+        let values = value
+            .as_array()
+            .filter(|values| values.len() == 2)
+            .ok_or_else(|| format!("{field} in {context} must be an integer or interval"))?;
+        (
+            values[0]
+                .as_u64()
+                .ok_or_else(|| format!("{field} minimum in {context} must be an integer"))?,
+            values[1]
+                .as_u64()
+                .ok_or_else(|| format!("{field} maximum in {context} must be an integer"))?,
+        )
+    };
+    let minimum = u16::try_from(minimum)
+        .ok()
+        .filter(|value| (allowed_minimum..=allowed_maximum).contains(value))
+        .ok_or_else(|| format!("{field} minimum in {context} is outside its runtime bound"))?;
+    let maximum = u16::try_from(maximum)
+        .ok()
+        .filter(|value| *value >= minimum && *value <= allowed_maximum)
+        .ok_or_else(|| format!("{field} maximum in {context} is outside its runtime bound"))?;
+    Ok(MapgenU16Range { minimum, maximum })
+}
+
+fn parse_density_millionths(value: Option<&Value>, context: &str) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(1_000_000);
+    };
+    let density = value
+        .as_f64()
+        .filter(|density| density.is_finite() && (0.0..=81.92).contains(density))
+        .ok_or_else(|| {
+            format!("density in {context} must be a finite number from 0 through 81.92")
+        })?;
+    let scaled = (density * 1_000_000.0).round();
+    if (scaled / 1_000_000.0 - density).abs() > 0.000_000_5 {
+        return Err(format!(
+            "density in {context} has more precision than the canonical millionth scale"
+        ));
+    }
+    u32::try_from(scaled as u64)
+        .map_err(|_| format!("density in {context} exceeds the canonical runtime bound"))
 }
 
 fn parse_nested_placements(

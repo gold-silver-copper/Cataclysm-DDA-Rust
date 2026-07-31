@@ -10,6 +10,7 @@ mod item_group;
 mod mapgen;
 mod material;
 mod monster;
+mod monster_group;
 mod overmap_special;
 mod overmap_terrain;
 mod proficiency;
@@ -58,20 +59,26 @@ pub use mapgen::{
     MAX_MAPGEN_PALETTE_LAYERS, MAX_MAPGEN_REPORT_ASSIGNMENTS, MAX_MAPGEN_ROOTS,
     MAX_MAPGEN_VARIANTS, MAX_MAPGEN_WEIGHT, MAX_NAMED_PALETTES, MAX_NESTED_MAPGEN_DEFINITIONS,
     MAX_NESTED_MAPGEN_DEPTH, MAX_NESTED_MAPGEN_PLACEMENTS, MapgenCoordinateRange, MapgenIdChoice,
-    MapgenRegistry, MapgenRegistryError, MapgenRootReport, StrictMapgenAreaItemPlacement,
-    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenItemPlacement,
-    StrictMapgenNeighborFlags, StrictMapgenNeighborMatch, StrictMapgenNestedConditions,
-    StrictMapgenNestedPlacement, StrictMapgenOmtMatch, StrictNestedMapgenDefinition,
-    WeightedMapgenId,
+    MapgenRegistry, MapgenRegistryError, MapgenRootReport, MapgenU16Range,
+    StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice, StrictMapgenDefinition,
+    StrictMapgenIndividualMonsterPlacement, StrictMapgenIndividualMonsterTarget,
+    StrictMapgenItemPlacement, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
+    StrictMapgenNeighborMatch, StrictMapgenNestedConditions, StrictMapgenNestedPlacement,
+    StrictMapgenOmtMatch, StrictNestedMapgenDefinition, WeightedMapgenId,
 };
 pub use material::{
     ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,
 };
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
+pub use monster_group::{
+    MAX_MONSTER_GROUP_ENTRIES, MAX_MONSTER_GROUP_FREQUENCY, MAX_MONSTER_GROUP_PACK_SIZE,
+    MAX_MONSTER_GROUPS, MonsterGroupDefinition, MonsterGroupEntry, MonsterGroupRegistry,
+    MonsterGroupRegistryError, MonsterGroupTarget,
+};
 pub use overmap_special::{
     MAX_OVERMAP_SPECIALS, OvermapLocationDefinition, OvermapSpecialConnectionDefinition,
-    OvermapSpecialDefinition, OvermapSpecialInterval, OvermapSpecialRegistry,
-    OvermapSpecialRegistryError, OvermapSpecialTerrainDefinition,
+    OvermapSpecialDefinition, OvermapSpecialInterval, OvermapSpecialMonsterSpawnDefinition,
+    OvermapSpecialRegistry, OvermapSpecialRegistryError, OvermapSpecialTerrainDefinition,
 };
 pub use overmap_terrain::{
     MAX_OVERMAP_TERRAIN_ID_BYTES, MAX_OVERMAP_TERRAIN_IDENTITIES,

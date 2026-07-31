@@ -12,8 +12,8 @@ use cdda_conformance::{
 };
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
-    ItemGroupRegistry, MapgenRegistry, OvermapTerrainRegistry, RiverSettingsDefinition,
-    StartLocationRegistry, TerrainRegistry,
+    ItemGroupRegistry, MapgenRegistry, MonsterGroupRegistry, OvermapTerrainRegistry,
+    RiverSettingsDefinition, StartLocationRegistry, TerrainRegistry,
 };
 use cdda_persistence::{ReplayBundleV1, WorldStore};
 use cdda_protocol::{
@@ -731,6 +731,7 @@ fn assert_two_client_field_path(
 pub(super) fn assert_production_regional_field_gameplay(
     item_groups: &ItemGroupRegistry,
     item_group_content: RuntimeItemGroupContent<'_>,
+    monster_groups: &MonsterGroupRegistry,
     overmap_terrain: &OvermapTerrainRegistry,
     start_locations: &StartLocationRegistry,
     city_settings: &CitySettingsDefinition,
@@ -767,6 +768,8 @@ pub(super) fn assert_production_regional_field_gameplay(
             terrain,
             furniture,
             item_groups: &production_field_catalog,
+            monsters: item_group_content.monsters,
+            monster_groups,
         },
     )
     .expect("production regional field should normalize");

@@ -2,26 +2,32 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
-    MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, OvermapSpecialDefinition,
-    OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
-    RiverSettingsDefinition, StartLocationDefinition, StrictMapgenAreaItemPlacement,
-    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenNeighborFlags,
+    MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, MonsterGroupRegistry,
+    MonsterGroupTarget, MonsterRegistry, OvermapSpecialDefinition, OvermapSpecialRegistry,
+    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition,
+    StartLocationDefinition, StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice,
+    StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
+    StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
     TerrainRegistry,
 };
 use cdda_protocol::{
     ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
     WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
-    WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenNeighborConditionV1,
-    WorldgenNestedChoiceV1, WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1,
-    WorldgenNestedPlacementV1, WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1,
-    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
-    WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1,
-    WorldgenRiverNodeV1, WorldgenSpecialPlacementV1, WorldgenSpecialUniquenessV1,
+    WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
+    WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterGroupEntryV1,
+    WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterPlacementV1,
+    WorldgenMonsterPrototypeV1, WorldgenNeighborConditionV1, WorldgenNestedChoiceV1,
+    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
+    WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
+    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
+    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1,
+    WorldgenSpecialPlacementV1, WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
     WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
-    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
+    WorldgenU16RangeV1, WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
+    worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -31,7 +37,10 @@ use cdda_sim::{
     place_overmap_specials,
 };
 
-use super::{furniture_tile, terrain_tile};
+use super::{
+    furniture_tile, monster_attack_cost, monster_blood_field_type, monster_path_settings,
+    monster_size, terrain_tile,
+};
 
 /// Retains the characterized LMOE layout for direct mapgen/start-selection
 /// tests. Production worlds use `bootstrap_regional_field_overmap`.
@@ -332,6 +341,23 @@ fn compile_fixed_special(
         (false, true) => WorldgenSpecialUniquenessV1::Global,
         (true, true) => return Ok(None),
     };
+    let population = definition
+        .monster_spawn
+        .as_ref()
+        .map(|spawn| -> Result<_, Box<dyn std::error::Error>> {
+            Ok(WorldgenSpecialPopulationV1 {
+                group_id: spawn.monster_group.clone(),
+                population: WorldgenU32RangeV1 {
+                    minimum: u32::try_from(spawn.population.minimum)?,
+                    maximum: u32::try_from(spawn.population.maximum)?,
+                },
+                radius: WorldgenU16RangeV1 {
+                    minimum: u16::try_from(spawn.radius.minimum)?,
+                    maximum: u16::try_from(spawn.radius.maximum)?,
+                },
+            })
+        })
+        .transpose()?;
     Ok(Some(OvermapFixedSpecial {
         special_id: definition.id.clone(),
         terrains,
@@ -351,6 +377,7 @@ fn compile_fixed_special(
         priority: definition.priority,
         rotate: definition.rotate,
         uniqueness,
+        population,
     }))
 }
 
@@ -470,6 +497,244 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub terrain: &'a TerrainRegistry,
     pub furniture: &'a FurnitureRegistry,
     pub item_groups: &'a [ItemGroupDefinitionV1],
+    pub monsters: &'a MonsterRegistry,
+    pub monster_groups: &'a MonsterGroupRegistry,
+}
+
+fn runtime_monster_catalog(
+    roots: BTreeSet<String>,
+    mut monster_ids: BTreeSet<String>,
+    groups: &MonsterGroupRegistry,
+    monsters: &MonsterRegistry,
+) -> Result<
+    (
+        Vec<WorldgenMonsterPrototypeV1>,
+        Vec<WorldgenMonsterGroupV1>,
+        BTreeMap<String, u16>,
+        BTreeMap<String, u16>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    fn visit(
+        id: &str,
+        groups: &MonsterGroupRegistry,
+        visiting: &mut BTreeSet<String>,
+        resolved: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        if resolved.contains(id) {
+            return Ok(());
+        }
+        if !visiting.insert(id.to_owned()) {
+            return Err(format!("monster-group dependency cycle reaches {id}"));
+        }
+        let group = groups
+            .get(id)
+            .ok_or_else(|| format!("mapgen references unknown monster group {id}"))?;
+        if !group.is_runtime_static() {
+            return Err(format!(
+                "mapgen monster group {id} requires time, event, condition, replacement, ammo, or unknown semantics"
+            ));
+        }
+        for entry in &group.entries {
+            if let MonsterGroupTarget::Group(child) = &entry.target {
+                visit(child, groups, visiting, resolved)?;
+            }
+        }
+        visiting.remove(id);
+        resolved.insert(id.to_owned());
+        Ok(())
+    }
+
+    let mut group_ids = BTreeSet::new();
+    for root in roots {
+        visit(&root, groups, &mut BTreeSet::new(), &mut group_ids)?;
+    }
+    for group_id in &group_ids {
+        let group = groups
+            .get(group_id)
+            .ok_or("resolved monster group disappeared")?;
+        monster_ids.extend(group.default_monster.iter().cloned());
+        monster_ids.extend(
+            group
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.target {
+                    MonsterGroupTarget::Monster(id) => Some(id.clone()),
+                    MonsterGroupTarget::Group(_) => None,
+                }),
+        );
+    }
+    monster_ids.remove("mon_null");
+    let monster_indices = monster_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+    let monster_prototypes = monster_ids
+        .iter()
+        .map(|id| {
+            let monster = monsters
+                .get(id)
+                .ok_or_else(|| format!("monster group references unknown MONSTER {id}"))?;
+            let base = cdda_protocol::CreatureCorpsePrototypeV1 {
+                monster_type_id: monster.id.clone(),
+                max_hp: monster.hp,
+                speed: u16::try_from(monster.speed)?,
+                attack_cost_moves: monster_attack_cost(monster)?,
+                aggression: i16::try_from(monster.aggression)?,
+                melee_skill: u16::try_from(monster.melee_skill)?,
+                dodge: u16::try_from(monster.dodge)?,
+                size: monster_size(monster),
+                melee_dice: u16::try_from(monster.melee_dice)?,
+                melee_dice_sides: u16::try_from(monster.melee_dice_sides)?,
+                can_see: monster.flags.contains("SEES"),
+                vision_day: u16::try_from(monster.vision_day)?,
+                vision_night: u16::try_from(monster.vision_night)?,
+                stumbles: monster.flags.contains("STUMBLES"),
+                bashes: monster.flags.contains("BASHES"),
+                group_bash: monster.flags.contains("GROUP_BASH"),
+                hears: monster.flags.contains("HEARS"),
+                good_hearing: monster.flags.contains("GOODHEARING"),
+                clumsy_attacks: monster.flags.contains("CLUMSY_ATTACKS"),
+                immobile: monster.flags.contains("IMMOBILE"),
+                pacifist: monster.flags.contains("PACIFIST"),
+                can_open_doors: monster.flags.contains("CAN_OPEN_DOORS"),
+                path_settings: monster_path_settings(monster)?,
+                blood_field_type_id: monster_blood_field_type(monster).to_owned(),
+                revives: monster.flags.contains("REVIVES"),
+            };
+            Ok(WorldgenMonsterPrototypeV1 {
+                base,
+                leaves_corpse: !monster.flags.contains("NO_CORPSE"),
+                deferred_behavior_fields: monster.unsupported_fields.iter().cloned().collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let group_indices = group_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| Ok((id.clone(), u16::try_from(index)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+    let runtime_groups = group_ids
+        .iter()
+        .map(|id| {
+            let group = groups.get(id).ok_or("resolved monster group disappeared")?;
+            Ok(WorldgenMonsterGroupV1 {
+                group_id: id.clone(),
+                default_prototype_index: group
+                    .default_monster
+                    .as_ref()
+                    .filter(|id| id.as_str() != "mon_null")
+                    .map(|id| {
+                        monster_indices
+                            .get(id)
+                            .copied()
+                            .ok_or("monster-group default prototype disappeared")
+                    })
+                    .transpose()?,
+                frequency_total: group.frequency_total,
+                is_animal: group.is_animal,
+                is_safe: group.is_safe,
+                entries: group
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        let target = match &entry.target {
+                            MonsterGroupTarget::Monster(id) => {
+                                WorldgenMonsterGroupTargetV1::Monster {
+                                    prototype_index: *monster_indices
+                                        .get(id)
+                                        .ok_or("monster-group prototype disappeared")?,
+                                }
+                            }
+                            MonsterGroupTarget::Group(id) => WorldgenMonsterGroupTargetV1::Group {
+                                group_index: *group_indices
+                                    .get(id)
+                                    .ok_or("monster subgroup disappeared")?,
+                            },
+                        };
+                        Ok(WorldgenMonsterGroupEntryV1 {
+                            target,
+                            weight: entry.weight,
+                            cost_multiplier: entry.cost_multiplier,
+                            pack_size: WorldgenU16RangeV1 {
+                                minimum: entry.pack_minimum,
+                                maximum: entry.pack_maximum,
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    Ok((
+        monster_prototypes,
+        runtime_groups,
+        group_indices,
+        monster_indices,
+    ))
+}
+
+fn runtime_monster_placement(
+    placement: &StrictMapgenMonsterPlacement,
+    group_indices: &BTreeMap<String, u16>,
+) -> Result<WorldgenMonsterPlacementV1, Box<dyn std::error::Error>> {
+    Ok(WorldgenMonsterPlacementV1 {
+        group_index: *group_indices
+            .get(&placement.monster_group)
+            .ok_or("mapgen monster-group closure disappeared")?,
+        chance: WorldgenU16RangeV1 {
+            minimum: placement.chance.minimum,
+            maximum: placement.chance.maximum,
+        },
+        density_millionths: placement.density_millionths,
+        repeat: WorldgenU16RangeV1 {
+            minimum: placement.repeat.minimum,
+            maximum: placement.repeat.maximum,
+        },
+        x: runtime_coordinate_range(placement.x),
+        y: runtime_coordinate_range(placement.y),
+    })
+}
+
+fn runtime_individual_monster_placement(
+    placement: &StrictMapgenIndividualMonsterPlacement,
+    group_indices: &BTreeMap<String, u16>,
+    monster_indices: &BTreeMap<String, u16>,
+) -> Result<WorldgenIndividualMonsterPlacementV1, Box<dyn std::error::Error>> {
+    let target = match &placement.target {
+        StrictMapgenIndividualMonsterTarget::Monster(id) => {
+            WorldgenIndividualMonsterTargetV1::Monster {
+                prototype_index: *monster_indices
+                    .get(id)
+                    .ok_or("individual mapgen monster prototype disappeared")?,
+            }
+        }
+        StrictMapgenIndividualMonsterTarget::Group(id) => {
+            WorldgenIndividualMonsterTargetV1::Group {
+                group_index: *group_indices
+                    .get(id)
+                    .ok_or("individual mapgen monster group disappeared")?,
+            }
+        }
+    };
+    Ok(WorldgenIndividualMonsterPlacementV1 {
+        target,
+        chance_percent: WorldgenU16RangeV1 {
+            minimum: placement.chance_percent.minimum,
+            maximum: placement.chance_percent.maximum,
+        },
+        pack_size: WorldgenU16RangeV1 {
+            minimum: placement.pack_size.minimum,
+            maximum: placement.pack_size.maximum,
+        },
+        repeat: WorldgenU16RangeV1 {
+            minimum: placement.repeat.minimum,
+            maximum: placement.repeat.maximum,
+        },
+        x: runtime_coordinate_range(placement.x),
+        y: runtime_coordinate_range(placement.y),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -621,6 +886,8 @@ pub(super) fn runtime_mapgen_worldgen(
         terrain,
         furniture,
         item_groups,
+        monsters,
+        monster_groups,
     } = content;
     if !start_location.is_runtime_selectable_with_cities() {
         return Err(format!(
@@ -714,6 +981,68 @@ pub(super) fn runtime_mapgen_worldgen(
             ))
         })
         .collect::<Result<BTreeMap<_, _>, String>>()?;
+
+    let mut monster_group_roots = BTreeSet::new();
+    let mut individual_monster_roots = BTreeSet::new();
+    monster_group_roots.extend(
+        specials
+            .iter()
+            .filter_map(|special| special.population.as_ref())
+            .map(|population| population.group_id.clone()),
+    );
+    for (omt_id, variants) in &definitions {
+        for definition in *variants {
+            monster_group_roots.extend(
+                definition
+                    .monster_placements
+                    .iter()
+                    .map(|placement| placement.monster_group.clone()),
+            );
+            for placement in &definition.individual_monster_placements {
+                match &placement.target {
+                    StrictMapgenIndividualMonsterTarget::Monster(id) => {
+                        individual_monster_roots.insert(id.clone());
+                    }
+                    StrictMapgenIndividualMonsterTarget::Group(id) => {
+                        monster_group_roots.insert(id.clone());
+                    }
+                }
+            }
+        }
+        for nested_id in nested_closures
+            .get(*omt_id)
+            .ok_or("nested mapgen closure disappeared")?
+        {
+            let variants = mapgen
+                .nested(nested_id)
+                .ok_or_else(|| format!("nested mapgen {nested_id} disappeared"))?;
+            for definition in variants {
+                monster_group_roots.extend(
+                    definition
+                        .monster_placements
+                        .iter()
+                        .map(|placement| placement.monster_group.clone()),
+                );
+                for placement in &definition.individual_monster_placements {
+                    match &placement.target {
+                        StrictMapgenIndividualMonsterTarget::Monster(id) => {
+                            individual_monster_roots.insert(id.clone());
+                        }
+                        StrictMapgenIndividualMonsterTarget::Group(id) => {
+                            monster_group_roots.insert(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let (monster_prototypes, runtime_monster_groups, monster_group_indices, monster_indices) =
+        runtime_monster_catalog(
+            monster_group_roots,
+            individual_monster_roots,
+            monster_groups,
+            monsters,
+        )?;
 
     let mut terrain_ids = BTreeSet::new();
     let mut furniture_ids = BTreeSet::new();
@@ -924,6 +1253,8 @@ pub(super) fn runtime_mapgen_worldgen(
                             &furniture_indices,
                             &regional_terrain_indices,
                             &regional_furniture_indices,
+                            &monster_group_indices,
+                            &monster_indices,
                             &overmap,
                             overmap_terrain,
                         )
@@ -948,6 +1279,8 @@ pub(super) fn runtime_mapgen_worldgen(
                                         &furniture_indices,
                                         &regional_terrain_indices,
                                         &regional_furniture_indices,
+                                        &monster_group_indices,
+                                        &monster_indices,
                                         &overmap,
                                         overmap_terrain,
                                     )
@@ -980,6 +1313,8 @@ pub(super) fn runtime_mapgen_worldgen(
         start_location: Some(start_location),
         terrain_prototypes,
         furniture_prototypes,
+        monster_prototypes,
+        monster_groups: runtime_monster_groups,
         regional_terrain,
         regional_furniture,
         omt_generators,
@@ -1077,6 +1412,8 @@ fn runtime_builtin_generator(
             cells,
             nested: Vec::new(),
             area_items: Vec::new(),
+            monster_placements: Vec::new(),
+            individual_monster_placements: Vec::new(),
             erase_all_before_placing_terrain: false,
             deferred_fields,
         }],
@@ -1250,6 +1587,8 @@ fn runtime_mapgen_template(
     furniture: &BTreeMap<String, u16>,
     regional_terrain: &BTreeMap<String, u16>,
     regional_furniture: &BTreeMap<String, u16>,
+    monster_groups: &BTreeMap<String, u16>,
+    monsters: &BTreeMap<String, u16>,
     overmap: &WorldgenOvermapLayoutV1,
     overmap_terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenTemplateV1, Box<dyn std::error::Error>> {
@@ -1280,6 +1619,18 @@ fn runtime_mapgen_template(
             .iter()
             .map(runtime_area_item_placement)
             .collect(),
+        monster_placements: definition
+            .monster_placements
+            .iter()
+            .map(|placement| runtime_monster_placement(placement, monster_groups))
+            .collect::<Result<Vec<_>, _>>()?,
+        individual_monster_placements: definition
+            .individual_monster_placements
+            .iter()
+            .map(|placement| {
+                runtime_individual_monster_placement(placement, monster_groups, monsters)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         erase_all_before_placing_terrain: definition.erase_all_before_placing_terrain,
         deferred_fields: definition.deferred_fields.iter().cloned().collect(),
     })
@@ -1291,6 +1642,8 @@ fn runtime_nested_mapgen_template(
     furniture: &BTreeMap<String, u16>,
     regional_terrain: &BTreeMap<String, u16>,
     regional_furniture: &BTreeMap<String, u16>,
+    monster_groups: &BTreeMap<String, u16>,
+    monsters: &BTreeMap<String, u16>,
     overmap: &WorldgenOvermapLayoutV1,
     overmap_terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenNestedTemplateV1, Box<dyn std::error::Error>> {
@@ -1321,6 +1674,18 @@ fn runtime_nested_mapgen_template(
             .iter()
             .map(runtime_area_item_placement)
             .collect(),
+        monster_placements: definition
+            .monster_placements
+            .iter()
+            .map(|placement| runtime_monster_placement(placement, monster_groups))
+            .collect::<Result<Vec<_>, _>>()?,
+        individual_monster_placements: definition
+            .individual_monster_placements
+            .iter()
+            .map(|placement| {
+                runtime_individual_monster_placement(placement, monster_groups, monsters)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         erase_all_before_placing_terrain: definition.erase_all_before_placing_terrain,
         deferred_fields: definition.deferred_fields.iter().cloned().collect(),
     })
@@ -1630,8 +1995,8 @@ mod tests {
     use cdda_content::{
         CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_RIVER_SETTINGS_ID,
         DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemGroupRegistry,
-        MapgenRegistry, ModCatalog, OvermapTerrainRegistry, RiverSettingsRegistry,
-        StartLocationRegistry, TerrainRegistry,
+        MapgenRegistry, ModCatalog, MonsterGroupRegistry, MonsterRegistry, OvermapTerrainRegistry,
+        RiverSettingsRegistry, StartLocationRegistry, TerrainRegistry,
     };
     use cdda_protocol::{
         ItemGroupDefinitionV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupNodeV1, WorldPosition,
@@ -1655,6 +2020,10 @@ mod tests {
             FurnitureRegistry::load_selected(&manifest, root, &mods, &enabled).expect("furniture");
         let item_groups = ItemGroupRegistry::load_selected(&manifest, root, &mods, &enabled)
             .expect("item groups");
+        let monsters =
+            MonsterRegistry::load_selected(&manifest, root, &mods, &enabled).expect("monsters");
+        let monster_groups = MonsterGroupRegistry::load_selected(&manifest, root, &mods, &enabled)
+            .expect("monster groups");
         let mapgen = MapgenRegistry::load_selected(
             &manifest,
             root,
@@ -1757,6 +2126,8 @@ mod tests {
                 terrain: &terrain,
                 furniture: &furniture,
                 item_groups: &runtime_groups,
+                monsters: &monsters,
+                monster_groups: &monster_groups,
             },
         )
         .expect("production road mapgen should compile");

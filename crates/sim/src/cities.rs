@@ -445,6 +445,8 @@ mod tests {
                 start_location: None,
                 terrain_prototypes: Vec::new(),
                 furniture_prototypes: Vec::new(),
+                monster_prototypes: Vec::new(),
+                monster_groups: Vec::new(),
                 regional_terrain: Vec::new(),
                 regional_furniture: Vec::new(),
                 omt_generators: Vec::new(),

@@ -2,24 +2,26 @@ use cdda_protocol::{
     ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1,
     MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, WorldPosition, WorldgenBuiltinMapgenV1,
     WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
-    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
-    WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
-    worldgen_city_start_distance, worldgen_omt_identity_at, worldgen_omt_matches,
-    worldgen_overmap_contains,
+    WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
+    WorldgenMonsterGroupTargetV1, WorldgenMonsterPlacementV1, WorldgenNestedConditionsV1,
+    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
+    WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_city_start_distance,
+    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
 
 use super::{
-    Chunk, ID_RESERVATION_SIZE, PlannedItemSpawn, SUBMAP_SIZE, SimError, inclusive_rng_u64,
-    plan_item_group_source,
+    Chunk, CreatureSpawn, ID_RESERVATION_SIZE, PlannedItemSpawn, SUBMAP_SIZE, SimError,
+    inclusive_rng_u64, plan_item_group_source,
 };
 
 const OMT_SUBMAP_WIDTH: i32 = 2;
 pub(super) const OMT_TILE_WIDTH: usize = (SUBMAP_SIZE as usize) * (OMT_SUBMAP_WIDTH as usize);
 const OMT_TILE_COUNT: usize = OMT_TILE_WIDTH * OMT_TILE_WIDTH;
+const MAX_PLANNED_CREATURES_PER_OMT: usize = 4_096;
 
 pub(super) fn catalog_fits_one_id_reservation(
     catalog: &WorldgenCatalogV1,
@@ -69,6 +71,7 @@ pub(super) struct PlannedBubble {
     pub chunks: Vec<Chunk>,
     pub items: Vec<(WorldPosition, PlannedItemSpawn)>,
     pub item_object_count: u64,
+    pub creatures: Vec<CreatureSpawn>,
 }
 
 pub(super) fn catalog_initial_bubble_is_admissible(
@@ -135,6 +138,7 @@ pub(super) fn plan_active_bubble(
     catalog: &WorldgenCatalogV1,
     item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
     existing: &std::collections::BTreeMap<ChunkCoord, Chunk>,
+    occupied: &std::collections::BTreeSet<WorldPosition>,
     center: ChunkCoord,
     radius_submaps: i32,
 ) -> Result<Option<PlannedBubble>, SimError> {
@@ -166,7 +170,9 @@ pub(super) fn plan_active_bubble(
         chunks: Vec::new(),
         items: Vec::new(),
         item_object_count: 0,
+        creatures: Vec::new(),
     };
+    let mut planned_occupied = occupied.clone();
     for omt_y in minimum_omt_y..=maximum_omt_y {
         for omt_x in minimum_omt_x..=maximum_omt_x {
             let omt = ChunkCoord {
@@ -184,7 +190,13 @@ pub(super) fn plan_active_bubble(
                 .count();
             match present {
                 0 => {
-                    let cell = plan_omt_cell(world_seed, catalog, item_groups, omt)?;
+                    let cell = plan_omt_cell(
+                        world_seed,
+                        catalog,
+                        item_groups,
+                        omt,
+                        &mut planned_occupied,
+                    )?;
                     planned.item_object_count = planned
                         .item_object_count
                         .checked_add(cell.item_object_count)
@@ -192,6 +204,7 @@ pub(super) fn plan_active_bubble(
                         .ok_or(SimError::InvalidItem)?;
                     planned.chunks.extend(cell.chunks);
                     planned.items.extend(cell.items);
+                    planned.creatures.extend(cell.creatures);
                 }
                 4 => {}
                 _ => return Err(SimError::InvalidTerrain),
@@ -250,6 +263,7 @@ fn plan_omt_cell(
     catalog: &WorldgenCatalogV1,
     item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
     omt: ChunkCoord,
+    occupied: &mut std::collections::BTreeSet<WorldPosition>,
 ) -> Result<PlannedBubble, SimError> {
     let identity = worldgen_omt_identity_at(catalog, omt).ok_or(SimError::InvalidTerrain)?;
     let generator = catalog
@@ -274,6 +288,8 @@ fn plan_omt_cell(
         &mut plan,
         0,
     )?;
+    materialize_monster_placements(catalog, &mut rng, &mut plan)?;
+    materialize_special_populations(world_seed, catalog, omt, &mut plan)?;
 
     let terrain = plan
         .terrain
@@ -306,11 +322,66 @@ fn plan_omt_cell(
             prototype,
         ));
     }
+    let mut creatures = Vec::with_capacity(plan.monsters.len());
+    for (index, prototype_index) in plan.monsters {
+        if terrain[index].move_cost <= 0
+            || furniture[index]
+                .as_ref()
+                .is_some_and(|furniture| furniture.move_cost_mod < 0)
+        {
+            continue;
+        }
+        let position = omt_tile_position(omt, index % OMT_TILE_WIDTH, index / OMT_TILE_WIDTH)?;
+        if !occupied.insert(position) {
+            continue;
+        }
+        let prototype = catalog
+            .monster_prototypes
+            .get(usize::from(prototype_index))
+            .ok_or(SimError::InvalidCreature)?;
+        creatures.push(creature_spawn_from_worldgen(prototype, position));
+    }
     Ok(PlannedBubble {
         chunks: chunks_from_tiles(omt, terrain, furniture)?.into(),
         items,
         item_object_count,
+        creatures,
     })
+}
+
+fn creature_spawn_from_worldgen(
+    prototype: &cdda_protocol::WorldgenMonsterPrototypeV1,
+    position: WorldPosition,
+) -> CreatureSpawn {
+    let base = &prototype.base;
+    CreatureSpawn {
+        type_id: base.monster_type_id.clone(),
+        position,
+        hp: base.max_hp,
+        speed: base.speed,
+        attack_cost_moves: base.attack_cost_moves,
+        aggression: base.aggression,
+        melee_skill: base.melee_skill,
+        dodge: base.dodge,
+        size: base.size,
+        melee_dice: base.melee_dice,
+        melee_dice_sides: base.melee_dice_sides,
+        can_see: base.can_see,
+        vision_day: base.vision_day,
+        vision_night: base.vision_night,
+        stumbles: base.stumbles,
+        bashes: base.bashes,
+        group_bash: base.group_bash,
+        hears: base.hears,
+        good_hearing: base.good_hearing,
+        clumsy_attacks: base.clumsy_attacks,
+        immobile: base.immobile,
+        pacifist: base.pacifist,
+        can_open_doors: base.can_open_doors,
+        path_settings: base.path_settings,
+        blood_field_type_id: base.blood_field_type_id.clone(),
+        corpse: prototype.leaves_corpse.then(|| base.clone()),
+    }
 }
 
 #[derive(Clone)]
@@ -331,6 +402,19 @@ struct OmtMapgenPlan {
     items: Vec<(usize, PlannedItemSpawn)>,
     item_object_count: u64,
     nested_expansions: usize,
+    monster_placements: Vec<PlannedMonsterPlacement>,
+    individual_monster_placements: Vec<PlannedIndividualMonsterPlacement>,
+    monsters: Vec<(usize, u16)>,
+}
+
+struct PlannedMonsterPlacement {
+    placement: WorldgenMonsterPlacementV1,
+    candidates: Vec<usize>,
+}
+
+struct PlannedIndividualMonsterPlacement {
+    placement: WorldgenIndividualMonsterPlacementV1,
+    candidates: Vec<usize>,
 }
 
 impl OmtMapgenPlan {
@@ -341,6 +425,9 @@ impl OmtMapgenPlan {
             items: Vec::new(),
             item_object_count: 0,
             nested_expansions: 0,
+            monster_placements: Vec::new(),
+            individual_monster_placements: Vec::new(),
+            monsters: Vec::new(),
         }
     }
 
@@ -444,6 +531,8 @@ fn apply_root_generator(
         OMT_TILE_WIDTH,
         &template.nested,
         &template.area_items,
+        &template.monster_placements,
+        &template.individual_monster_placements,
         template.erase_all_before_placing_terrain,
         0,
         0,
@@ -464,6 +553,9 @@ fn apply_builtin_mapgen(
     if plan.terrain.iter().any(Option::is_some)
         || plan.furniture.iter().any(Option::is_some)
         || !plan.items.is_empty()
+        || !plan.monster_placements.is_empty()
+        || !plan.individual_monster_placements.is_empty()
+        || !plan.monsters.is_empty()
     {
         return Err(SimError::InvalidTerrain);
     }
@@ -766,6 +858,27 @@ fn rotate_mapgen_plan(plan: &mut OmtMapgenPlan, rotation: u8) -> Result<(), SimE
             rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
         *index = target_y * OMT_TILE_WIDTH + target_x;
     }
+    for request in &mut plan.monster_placements {
+        for index in &mut request.candidates {
+            let (target_x, target_y) =
+                rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
+            *index = target_y * OMT_TILE_WIDTH + target_x;
+        }
+        request.candidates.sort_unstable();
+    }
+    for request in &mut plan.individual_monster_placements {
+        for index in &mut request.candidates {
+            let (target_x, target_y) =
+                rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
+            *index = target_y * OMT_TILE_WIDTH + target_x;
+        }
+        request.candidates.sort_unstable();
+    }
+    for (index, _) in &mut plan.monsters {
+        let (target_x, target_y) =
+            rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
+        *index = target_y * OMT_TILE_WIDTH + target_x;
+    }
     plan.terrain = terrain;
     plan.furniture = furniture;
     Ok(())
@@ -784,6 +897,8 @@ fn apply_template_body(
     height: usize,
     nested: &[WorldgenNestedPlacementV1],
     area_items: &[cdda_protocol::WorldgenAreaItemPlacementV1],
+    monster_placements: &[WorldgenMonsterPlacementV1],
+    individual_monster_placements: &[WorldgenIndividualMonsterPlacementV1],
     erase_all_before_placing_terrain: bool,
     offset_x: i32,
     offset_y: i32,
@@ -869,7 +984,459 @@ fn apply_template_body(
     for placement in area_items {
         plan_area_item_placement(placement, offset_x, offset_y, item_groups, rng, plan)?;
     }
+    for placement in monster_placements {
+        plan_monster_placement_request(placement, offset_x, offset_y, plan)?;
+    }
+    for placement in individual_monster_placements {
+        plan_individual_monster_placement_request(placement, offset_x, offset_y, plan)?;
+    }
     Ok(())
+}
+
+fn plan_monster_placement_request(
+    placement: &WorldgenMonsterPlacementV1,
+    offset_x: i32,
+    offset_y: i32,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let mut candidates = Vec::new();
+    for y in placement.y.minimum..=placement.y.maximum {
+        for x in placement.x.minimum..=placement.x.maximum {
+            let x = offset_x
+                .checked_add(i32::from(x))
+                .ok_or(SimError::NumericOverflow)?;
+            let y = offset_y
+                .checked_add(i32::from(y))
+                .ok_or(SimError::NumericOverflow)?;
+            if let Some(index) = absolute_tile_index(x, y) {
+                candidates.push(index);
+            }
+        }
+    }
+    if !candidates.is_empty() {
+        plan.monster_placements.push(PlannedMonsterPlacement {
+            placement: placement.clone(),
+            candidates,
+        });
+    }
+    Ok(())
+}
+
+fn plan_individual_monster_placement_request(
+    placement: &WorldgenIndividualMonsterPlacementV1,
+    offset_x: i32,
+    offset_y: i32,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let mut candidates = Vec::new();
+    for y in placement.y.minimum..=placement.y.maximum {
+        for x in placement.x.minimum..=placement.x.maximum {
+            let x = offset_x
+                .checked_add(i32::from(x))
+                .ok_or(SimError::NumericOverflow)?;
+            let y = offset_y
+                .checked_add(i32::from(y))
+                .ok_or(SimError::NumericOverflow)?;
+            if let Some(index) = absolute_tile_index(x, y) {
+                candidates.push(index);
+            }
+        }
+    }
+    if !candidates.is_empty() {
+        plan.individual_monster_placements
+            .push(PlannedIndividualMonsterPlacement {
+                placement: placement.clone(),
+                candidates,
+            });
+    }
+    Ok(())
+}
+
+fn materialize_monster_placements(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let requests = std::mem::take(&mut plan.monster_placements);
+    let mut occupied = plan
+        .monsters
+        .iter()
+        .map(|(index, _)| *index)
+        .collect::<std::collections::BTreeSet<_>>();
+    for request in requests {
+        let repeat = choose_worldgen_u16_range(request.placement.repeat, rng)?;
+        for _ in 0..repeat {
+            let chance = choose_worldgen_u16_range(request.placement.chance, rng)?;
+            if !one_in_mapgen(rng, u64::from(chance)) {
+                continue;
+            }
+            let mut quantity = monster_density_count(request.placement.density_millionths, rng)?;
+            materialize_monster_group_quantity(
+                catalog,
+                request.placement.group_index,
+                &mut quantity,
+                &request.candidates,
+                plan,
+                &mut occupied,
+                rng,
+            )?;
+        }
+    }
+    let individual_requests = std::mem::take(&mut plan.individual_monster_placements);
+    for request in individual_requests {
+        let repeat = choose_worldgen_u16_range(request.placement.repeat, rng)?;
+        for _ in 0..repeat {
+            let chance = choose_worldgen_u16_range(request.placement.chance_percent, rng)?;
+            if inclusive_rng_u64(rng, 1, 100) > u64::from(chance) {
+                continue;
+            }
+            let pack_size = choose_worldgen_u16_range(request.placement.pack_size, rng)?;
+            let mut prototypes = Vec::new();
+            match request.placement.target {
+                WorldgenIndividualMonsterTargetV1::Monster { prototype_index } => {
+                    prototypes.push(prototype_index);
+                }
+                WorldgenIndividualMonsterTargetV1::Group { group_index } => {
+                    let mut quantity = 1_i64;
+                    let mut results = Vec::new();
+                    select_monster_group(
+                        catalog,
+                        group_index,
+                        &mut quantity,
+                        false,
+                        rng,
+                        &mut results,
+                        0,
+                    )?;
+                    prototypes.extend(
+                        results
+                            .into_iter()
+                            .map(|(prototype_index, _)| prototype_index),
+                    );
+                }
+            }
+            for prototype_index in prototypes {
+                for _ in 0..pack_size {
+                    let Some(index) = choose_monster_position(
+                        &request.candidates,
+                        &plan.terrain,
+                        &plan.furniture,
+                        &occupied,
+                        rng,
+                    ) else {
+                        continue;
+                    };
+                    if plan.monsters.len() >= MAX_PLANNED_CREATURES_PER_OMT {
+                        return Err(SimError::InvalidCreature);
+                    }
+                    occupied.insert(index);
+                    plan.monsters.push((index, prototype_index));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn materialize_special_populations(
+    world_seed: [u8; 32],
+    catalog: &WorldgenCatalogV1,
+    omt: ChunkCoord,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    if omt.z != 0 {
+        return Ok(());
+    }
+    let candidates = (0..OMT_TILE_COUNT).collect::<Vec<_>>();
+    let mut occupied = plan
+        .monsters
+        .iter()
+        .map(|(index, _)| *index)
+        .collect::<std::collections::BTreeSet<_>>();
+    for special in &catalog.specials {
+        let Some(population) = &special.population else {
+            continue;
+        };
+        let mut parameter_rng = coordinate_rng(
+            world_seed,
+            catalog.generator_version,
+            special.origin,
+            &format!("special-population:{}", special.placement_id.0),
+        );
+        let radius = u16::try_from(inclusive_rng_u64(
+            &mut parameter_rng,
+            u64::from(population.radius.minimum),
+            u64::from(population.radius.maximum),
+        ))
+        .map_err(|_| SimError::NumericOverflow)?;
+        let total_population = inclusive_rng_u64(
+            &mut parameter_rng,
+            u64::from(population.population.minimum),
+            u64::from(population.population.maximum),
+        );
+        let eligible = special_population_omts(catalog, special.origin, radius)?;
+        let Some(index) = eligible.iter().position(|candidate| *candidate == omt) else {
+            continue;
+        };
+        let cell_count = u64::try_from(eligible.len()).map_err(|_| SimError::NumericOverflow)?;
+        let extra_start = usize::try_from(inclusive_rng_u64(
+            &mut parameter_rng,
+            0,
+            cell_count.checked_sub(1).ok_or(SimError::InvalidCreature)?,
+        ))
+        .map_err(|_| SimError::NumericOverflow)?;
+        let base = total_population / cell_count;
+        let remainder = usize::try_from(total_population % cell_count)
+            .map_err(|_| SimError::NumericOverflow)?;
+        let relative = (index + eligible.len() - extra_start) % eligible.len();
+        let mut quantity = i64::try_from(base + u64::from(relative < remainder))
+            .map_err(|_| SimError::NumericOverflow)?;
+        if quantity == 0 {
+            continue;
+        }
+        let group_index = catalog
+            .monster_groups
+            .binary_search_by(|group| group.group_id.as_str().cmp(&population.group_id))
+            .ok()
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or(SimError::InvalidCreature)?;
+        let mut spawn_rng = coordinate_rng(
+            world_seed,
+            catalog.generator_version,
+            omt,
+            &format!("special-population-spawn:{}", special.placement_id.0),
+        );
+        materialize_monster_group_quantity(
+            catalog,
+            group_index,
+            &mut quantity,
+            &candidates,
+            plan,
+            &mut occupied,
+            &mut spawn_rng,
+        )?;
+    }
+    Ok(())
+}
+
+fn special_population_omts(
+    catalog: &WorldgenCatalogV1,
+    origin: ChunkCoord,
+    radius: u16,
+) -> Result<Vec<ChunkCoord>, SimError> {
+    let maximum_x = catalog
+        .overmap
+        .origin_x
+        .checked_add(i32::from(cdda_protocol::WORLDGEN_OVERMAP_WIDTH) - 1)
+        .ok_or(SimError::NumericOverflow)?;
+    let maximum_y = catalog
+        .overmap
+        .origin_y
+        .checked_add(i32::from(cdda_protocol::WORLDGEN_OVERMAP_HEIGHT) - 1)
+        .ok_or(SimError::NumericOverflow)?;
+    let radius = i32::from(radius);
+    let radius_squared = i64::from(radius) * i64::from(radius);
+    let minimum_x = origin
+        .x
+        .saturating_sub(radius)
+        .max(catalog.overmap.origin_x);
+    let maximum_x = origin.x.saturating_add(radius).min(maximum_x);
+    let minimum_y = origin
+        .y
+        .saturating_sub(radius)
+        .max(catalog.overmap.origin_y);
+    let maximum_y = origin.y.saturating_add(radius).min(maximum_y);
+    Ok((minimum_y..=maximum_y)
+        .flat_map(|y| (minimum_x..=maximum_x).map(move |x| ChunkCoord { x, y, z: 0 }))
+        .filter(|candidate| {
+            let dx = i64::from(candidate.x) - i64::from(origin.x);
+            let dy = i64::from(candidate.y) - i64::from(origin.y);
+            dx * dx + dy * dy <= radius_squared
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_monster_group_quantity(
+    catalog: &WorldgenCatalogV1,
+    group_index: u16,
+    quantity: &mut i64,
+    candidates: &[usize],
+    plan: &mut OmtMapgenPlan,
+    occupied: &mut std::collections::BTreeSet<usize>,
+    rng: &mut ChaCha8Rng,
+) -> Result<(), SimError> {
+    let mut iterations = 0_usize;
+    while *quantity > 0 {
+        iterations = iterations
+            .checked_add(1)
+            .filter(|count| *count <= MAX_PLANNED_CREATURES_PER_OMT)
+            .ok_or(SimError::InvalidCreature)?;
+        let first_position =
+            choose_monster_position(candidates, &plan.terrain, &plan.furniture, occupied, rng);
+        let mut results = Vec::new();
+        select_monster_group(catalog, group_index, quantity, false, rng, &mut results, 0)?;
+        for (prototype_index, pack_size) in results {
+            for member in 0..pack_size {
+                let index = if member == 0 {
+                    first_position.filter(|index| !occupied.contains(index))
+                } else {
+                    choose_monster_position(
+                        candidates,
+                        &plan.terrain,
+                        &plan.furniture,
+                        occupied,
+                        rng,
+                    )
+                };
+                let Some(index) = index else {
+                    continue;
+                };
+                if plan.monsters.len() >= MAX_PLANNED_CREATURES_PER_OMT {
+                    return Err(SimError::InvalidCreature);
+                }
+                occupied.insert(index);
+                plan.monsters.push((index, prototype_index));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn choose_worldgen_u16_range(
+    range: cdda_protocol::WorldgenU16RangeV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<u16, SimError> {
+    if range.minimum == 0 || range.minimum > range.maximum {
+        return Err(SimError::InvalidCreature);
+    }
+    u16::try_from(inclusive_rng_u64(
+        rng,
+        u64::from(range.minimum),
+        u64::from(range.maximum),
+    ))
+    .map_err(|_| SimError::NumericOverflow)
+}
+
+fn monster_density_count(density_millionths: u32, rng: &mut ChaCha8Rng) -> Result<i64, SimError> {
+    if density_millionths == 0 {
+        return Ok(0);
+    }
+    let random_millionths = inclusive_rng_u64(rng, 10_000_000, 50_000_000);
+    let scaled = u128::from(density_millionths)
+        .checked_mul(u128::from(random_millionths))
+        .and_then(|value| value.checked_div(1_000_000))
+        .ok_or(SimError::NumericOverflow)?;
+    let whole = scaled / 1_000_000;
+    let remainder = u64::try_from(scaled % 1_000_000).map_err(|_| SimError::NumericOverflow)?;
+    let rounded = whole
+        .checked_add(u128::from(
+            remainder > 0 && inclusive_rng_u64(rng, 1, 1_000_000) <= remainder,
+        ))
+        .ok_or(SimError::NumericOverflow)?;
+    if rounded > MAX_PLANNED_CREATURES_PER_OMT as u128 {
+        return Err(SimError::InvalidCreature);
+    }
+    i64::try_from(rounded).map_err(|_| SimError::NumericOverflow)
+}
+
+fn choose_monster_position(
+    candidates: &[usize],
+    terrain: &[Option<PlannedTerrainTile>],
+    furniture: &[Option<PlannedFurnitureTile>],
+    occupied: &std::collections::BTreeSet<usize>,
+    rng: &mut ChaCha8Rng,
+) -> Option<usize> {
+    for _ in 0..10 {
+        let candidate = candidates.get(
+            usize::try_from(inclusive_rng_u64(
+                rng,
+                0,
+                u64::try_from(candidates.len().checked_sub(1)?).ok()?,
+            ))
+            .ok()?,
+        )?;
+        let passable_terrain = matches!(
+            terrain.get(*candidate),
+            Some(Some(PlannedTerrainTile::Resolved(tile))) if tile.move_cost > 0
+        );
+        let passable_furniture = matches!(
+            furniture.get(*candidate),
+            Some(Some(PlannedFurnitureTile::Resolved(None)))
+                | Some(Some(PlannedFurnitureTile::Resolved(Some(
+                    FurnitureTileSnapshot {
+                        move_cost_mod: 0..,
+                        ..
+                    }
+                ))))
+        );
+        if passable_terrain && passable_furniture && !occupied.contains(candidate) {
+            return Some(*candidate);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_monster_group(
+    catalog: &WorldgenCatalogV1,
+    group_index: u16,
+    quantity: &mut i64,
+    recursive: bool,
+    rng: &mut ChaCha8Rng,
+    output: &mut Vec<(u16, u16)>,
+    depth: usize,
+) -> Result<bool, SimError> {
+    if depth >= cdda_protocol::MAX_WORLDGEN_MONSTER_GROUP_DEPTH {
+        return Err(SimError::InvalidCreature);
+    }
+    let group = catalog
+        .monster_groups
+        .get(usize::from(group_index))
+        .ok_or(SimError::InvalidCreature)?;
+    let mut ticket = inclusive_rng_u64(rng, 1, u64::from(group.frequency_total));
+    let mut found = false;
+    for entry in &group.entries {
+        if u64::from(entry.weight) < ticket {
+            ticket -= u64::from(entry.weight);
+            continue;
+        }
+        let pack_size = choose_worldgen_u16_range(entry.pack_size, rng)?;
+        match entry.target {
+            WorldgenMonsterGroupTargetV1::Monster { prototype_index } => {
+                let cost = i64::from(entry.cost_multiplier)
+                    .saturating_mul(i64::from(pack_size))
+                    .max(1);
+                *quantity = quantity.saturating_sub(cost);
+                output.push((prototype_index, pack_size));
+                found = true;
+            }
+            WorldgenMonsterGroupTargetV1::Group { group_index } => {
+                for _ in 0..pack_size {
+                    found |= select_monster_group(
+                        catalog,
+                        group_index,
+                        quantity,
+                        true,
+                        rng,
+                        output,
+                        depth + 1,
+                    )?;
+                    if output.len() > MAX_PLANNED_CREATURES_PER_OMT {
+                        return Err(SimError::InvalidCreature);
+                    }
+                }
+            }
+        }
+        break;
+    }
+    if !recursive && !found {
+        if let Some(prototype_index) = group.default_prototype_index {
+            output.push((prototype_index, 1));
+        }
+        *quantity = quantity.saturating_sub(1);
+    }
+    Ok(found)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -930,6 +1497,8 @@ fn apply_nested_placement(
         usize::from(template.height),
         &template.nested,
         &template.area_items,
+        &template.monster_placements,
+        &template.individual_monster_placements,
         template.erase_all_before_placing_terrain,
         parent_offset_x
             .checked_add(i32::from(x))
@@ -1731,6 +2300,8 @@ mod tests {
             cells,
             nested: Vec::new(),
             area_items: Vec::new(),
+            monster_placements: Vec::new(),
+            individual_monster_placements: Vec::new(),
             erase_all_before_placing_terrain: false,
             deferred_fields: Vec::new(),
         };
@@ -1770,6 +2341,8 @@ mod tests {
                 test_terrain("t_top_c"),
             ],
             furniture_prototypes: Vec::new(),
+            monster_prototypes: Vec::new(),
+            monster_groups: Vec::new(),
             regional_terrain: vec![cdda_protocol::WorldgenRegionalTerrainTableV1 {
                 regional_id: String::from("region_groundcover"),
                 choices: vec![WorldgenWeightedPrototypeV1 {

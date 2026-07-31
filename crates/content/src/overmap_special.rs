@@ -15,6 +15,8 @@ const MAX_SPECIAL_PARTS: usize = 4_096;
 const MAX_SPECIAL_CONNECTIONS: usize = 256;
 const MAX_SPECIAL_FLAGS: usize = 256;
 const MAX_ID_BYTES: usize = 512;
+const MAX_SPECIAL_SPAWN_POPULATION: i32 = 1_000_000;
+const MAX_SPECIAL_SPAWN_RADIUS: i32 = 180;
 
 const SPECIAL_FIELDS: &[&str] = &[
     "type",
@@ -78,6 +80,13 @@ pub struct OvermapSpecialConnectionDefinition {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OvermapSpecialMonsterSpawnDefinition {
+    pub monster_group: String,
+    pub population: OvermapSpecialInterval,
+    pub radius: OvermapSpecialInterval,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OvermapSpecialDefinition {
     pub id: String,
     pub terrains: Vec<OvermapSpecialTerrainDefinition>,
@@ -89,6 +98,7 @@ pub struct OvermapSpecialDefinition {
     pub priority: i32,
     pub rotate: bool,
     pub flags: BTreeSet<String>,
+    pub monster_spawn: Option<OvermapSpecialMonsterSpawnDefinition>,
     /// Every retained reason blocks runtime admission. Unsupported semantics
     /// are never silently discarded while later families are incomplete.
     pub unsupported_reasons: BTreeSet<String>,
@@ -117,6 +127,7 @@ impl Default for OvermapSpecialDefinition {
             priority: 0,
             rotate: true,
             flags: BTreeSet::new(),
+            monster_spawn: None,
             unsupported_reasons: BTreeSet::new(),
             source: String::new(),
         }
@@ -365,6 +376,9 @@ fn compile_special(
     if let Some(value) = raw.object.get("flags") {
         definition.flags = string_set(value, "flags", &raw.source)?;
     }
+    if let Some(value) = raw.object.get("spawns") {
+        definition.monster_spawn = Some(parse_monster_spawn(value, &raw.source)?);
+    }
     for field in raw.object.keys() {
         if !field.starts_with("//") && !SPECIAL_FIELDS.contains(&field.as_str()) {
             definition
@@ -372,14 +386,7 @@ fn compile_special(
                 .insert(format!("unsupported root field {field}"));
         }
     }
-    for field in [
-        "spawns",
-        "eoc",
-        "extend",
-        "delete",
-        "relative",
-        "proportional",
-    ] {
+    for field in ["eoc", "extend", "delete", "relative", "proportional"] {
         if raw.object.contains_key(field) {
             definition
                 .unsupported_reasons
@@ -426,6 +433,50 @@ fn compile_special(
     }
     definitions.insert(id.to_owned(), definition);
     Ok(true)
+}
+
+fn parse_monster_spawn(
+    value: &Value,
+    source: &str,
+) -> Result<OvermapSpecialMonsterSpawnDefinition, OvermapSpecialRegistryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_field(source, "spawns"))?;
+    if object
+        .keys()
+        .any(|field| !matches!(field.as_str(), "group" | "population" | "radius" | "//"))
+    {
+        return Err(invalid_field(source, "spawns"));
+    }
+    let monster_group = required_id(object, "group", source)?.to_owned();
+    let population = parse_interval(
+        object
+            .get("population")
+            .ok_or_else(|| invalid_field(source, "spawns.population"))?,
+        "spawns.population",
+        false,
+        source,
+    )?;
+    let radius = parse_interval(
+        object
+            .get("radius")
+            .ok_or_else(|| invalid_field(source, "spawns.radius"))?,
+        "spawns.radius",
+        false,
+        source,
+    )?;
+    if population.minimum < 0
+        || population.maximum > MAX_SPECIAL_SPAWN_POPULATION
+        || radius.minimum < 0
+        || radius.maximum > MAX_SPECIAL_SPAWN_RADIUS
+    {
+        return Err(invalid_field(source, "spawns"));
+    }
+    Ok(OvermapSpecialMonsterSpawnDefinition {
+        monster_group,
+        population,
+        radius,
+    })
 }
 
 fn parse_terrains(

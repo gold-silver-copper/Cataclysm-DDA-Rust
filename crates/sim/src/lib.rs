@@ -8957,19 +8957,32 @@ impl WorldState {
         let Some(catalog) = self.worldgen.as_ref() else {
             return Ok(true);
         };
+        let occupied = self
+            .actors
+            .values()
+            .map(|actor| actor.position)
+            .chain(self.creatures.values().map(|creature| creature.position))
+            .collect::<BTreeSet<_>>();
         let Some(planned) = mapgen::plan_active_bubble(
             self.world_seed,
             catalog,
             &self.item_groups,
             &self.chunks,
+            &occupied,
             center,
             ACTIVE_BUBBLE_RADIUS_SUBMAPS,
         )?
         else {
             return Ok(false);
         };
-        let required_item_ids = planned.item_object_count;
-        if self.allocator.remaining() < required_item_ids {
+        let required_ids = planned
+            .item_object_count
+            .checked_add(
+                u64::try_from(planned.creatures.len()).map_err(|_| SimError::NumericOverflow)?,
+            )
+            .filter(|count| *count <= ID_RESERVATION_SIZE)
+            .ok_or(SimError::IdReservationExhausted)?;
+        if self.allocator.remaining() < required_ids {
             return Err(SimError::IdReservationExhausted);
         }
         for chunk in planned.chunks {
@@ -8997,6 +9010,9 @@ impl WorldState {
             {
                 return Err(SimError::InvalidItem);
             }
+        }
+        for creature in planned.creatures {
+            self.spawn_creature(creature)?;
         }
         Ok(true)
     }
@@ -13789,7 +13805,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV75");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV76");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13978,6 +13994,8 @@ mod tests {
             start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),
+            monster_prototypes: Vec::new(),
+            monster_groups: Vec::new(),
             regional_terrain: Vec::new(),
             regional_furniture: Vec::new(),
             omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
@@ -13989,6 +14007,8 @@ mod tests {
                     cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
+                    monster_placements: Vec::new(),
+                    individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,
                     deferred_fields: Vec::new(),
                 }],
@@ -29220,6 +29240,8 @@ mod tests {
                     cells: field_b_cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
+                    monster_placements: Vec::new(),
+                    individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,
                     deferred_fields: Vec::new(),
                 }],

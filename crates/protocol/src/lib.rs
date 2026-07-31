@@ -54,7 +54,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 99;
+pub const PROTOCOL_VERSION: u16 = 100;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -168,6 +168,14 @@ pub const MAX_WORLDGEN_CITY_SIZE: u8 = 55;
 pub const MAX_WORLDGEN_RIVER_NODES: usize = 64;
 pub const MAX_WORLDGEN_SPECIAL_PLACEMENTS: usize = 4_096;
 pub const MAX_WORLDGEN_SPECIAL_OMTS: usize = 65_536;
+pub const MAX_WORLDGEN_MONSTER_PROTOTYPES: usize = 16_384;
+pub const MAX_WORLDGEN_MONSTER_GROUPS: usize = 16_384;
+pub const MAX_WORLDGEN_MONSTER_GROUP_ENTRIES: usize = 65_536;
+pub const MAX_WORLDGEN_MONSTER_GROUP_DEPTH: usize = 32;
+pub const MAX_WORLDGEN_MONSTER_PLACEMENTS: usize = 65_536;
+pub const MAX_WORLDGEN_MONSTER_REPEAT: u16 = 1_024;
+pub const MAX_WORLDGEN_MONSTER_PACK_SIZE: u16 = 1_024;
+pub const MAX_WORLDGEN_MONSTER_DENSITY_MILLIONTHS: u32 = 81_920_000;
 /// Pinned overmaps own 180x180 overmap-terrain coordinates per z-level.
 pub const WORLDGEN_OVERMAP_WIDTH: u16 = 180;
 pub const WORLDGEN_OVERMAP_HEIGHT: u16 = 180;
@@ -2937,6 +2945,8 @@ pub struct WorldgenTemplateV1 {
     pub cells: Vec<WorldgenCellV1>,
     pub nested: Vec<WorldgenNestedPlacementV1>,
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
+    pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
+    pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
     /// Sorted semantic phases owned by later generalized families.
     pub deferred_fields: Vec<String>,
@@ -2951,6 +2961,8 @@ pub struct WorldgenNestedTemplateV1 {
     pub cells: Vec<WorldgenCellV1>,
     pub nested: Vec<WorldgenNestedPlacementV1>,
     pub area_items: Vec<WorldgenAreaItemPlacementV1>,
+    pub monster_placements: Vec<WorldgenMonsterPlacementV1>,
+    pub individual_monster_placements: Vec<WorldgenIndividualMonsterPlacementV1>,
     pub erase_all_before_placing_terrain: bool,
     pub deferred_fields: Vec<String>,
 }
@@ -2959,6 +2971,76 @@ pub struct WorldgenNestedTemplateV1 {
 pub struct WorldgenNestedGeneratorV1 {
     pub nested_id: String,
     pub templates: Vec<WorldgenNestedTemplateV1>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenU16RangeV1 {
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
+/// One immutable monster type admitted into deterministic generation. The
+/// ordinary corpse prototype already contains every modeled base combat and
+/// movement field, so generation reuses it as the live-creature prototype.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterPrototypeV1 {
+    pub base: CreatureCorpsePrototypeV1,
+    pub leaves_corpse: bool,
+    /// Sorted pinned MONSTER fields not yet consumed by the ordinary runtime
+    /// creature model. They remain canonical instead of being silently lost.
+    pub deferred_behavior_fields: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenMonsterGroupTargetV1 {
+    Monster { prototype_index: u16 },
+    Group { group_index: u16 },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterGroupEntryV1 {
+    pub target: WorldgenMonsterGroupTargetV1,
+    pub weight: u32,
+    pub cost_multiplier: i32,
+    pub pack_size: WorldgenU16RangeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterGroupV1 {
+    pub group_id: String,
+    pub default_prototype_index: Option<u16>,
+    pub frequency_total: u32,
+    pub is_animal: bool,
+    pub is_safe: bool,
+    pub entries: Vec<WorldgenMonsterGroupEntryV1>,
+}
+
+/// One mapgen monster-group placement. Chance is an upstream one-in divisor;
+/// density is a pinned multiplier, and repeat is rolled once per application.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterPlacementV1 {
+    pub group_index: u16,
+    pub chance: WorldgenU16RangeV1,
+    pub density_millionths: u32,
+    pub repeat: WorldgenU16RangeV1,
+    pub x: WorldgenCoordinateRangeV1,
+    pub y: WorldgenCoordinateRangeV1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenIndividualMonsterTargetV1 {
+    Monster { prototype_index: u16 },
+    Group { group_index: u16 },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenIndividualMonsterPlacementV1 {
+    pub target: WorldgenIndividualMonsterTargetV1,
+    pub chance_percent: WorldgenU16RangeV1,
+    pub pack_size: WorldgenU16RangeV1,
+    pub repeat: WorldgenU16RangeV1,
+    pub x: WorldgenCoordinateRangeV1,
+    pub y: WorldgenCoordinateRangeV1,
 }
 
 /// One OMT-ID-sorted generator. Template order is source order because it is
@@ -3053,6 +3135,19 @@ pub enum WorldgenSpecialUniquenessV1 {
     Global,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenU32RangeV1 {
+    pub minimum: u32,
+    pub maximum: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenSpecialPopulationV1 {
+    pub group_id: String,
+    pub population: WorldgenU32RangeV1,
+    pub radius: WorldgenU16RangeV1,
+}
+
 /// One atomically placed fixed overmap special. `terrain_omts` contains only
 /// OMTs actually replaced by the special; predicate-only connection anchors
 /// remain represented by the final overmap layout.
@@ -3064,6 +3159,7 @@ pub struct WorldgenSpecialPlacementV1 {
     pub rotation: u8,
     pub uniqueness: WorldgenSpecialUniquenessV1,
     pub terrain_omts: Vec<ChunkCoord>,
+    pub population: Option<WorldgenSpecialPopulationV1>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3167,6 +3263,9 @@ pub struct WorldgenCatalogV1 {
     /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
     pub terrain_prototypes: Vec<TerrainTileSnapshot>,
     pub furniture_prototypes: Vec<FurnitureTileSnapshot>,
+    /// Monster-type-ID and group-ID sorted immutable spawn catalogs.
+    pub monster_prototypes: Vec<WorldgenMonsterPrototypeV1>,
+    pub monster_groups: Vec<WorldgenMonsterGroupV1>,
     /// Regional-table-ID-sorted, unique catalogs referenced by compact indices.
     pub regional_terrain: Vec<WorldgenRegionalTerrainTableV1>,
     pub regional_furniture: Vec<WorldgenRegionalFurnitureTableV1>,
@@ -4509,6 +4608,13 @@ fn valid_worldgen_specials(
             && (layout.origin_y..=maximum_y).contains(&special.origin.y)
             && special.rotation < 4
             && !special.terrain_omts.is_empty()
+            && special.population.as_ref().is_none_or(|population| {
+                valid_worldgen_id(&population.group_id)
+                    && population.population.minimum <= population.population.maximum
+                    && population.population.maximum <= 1_000_000
+                    && population.radius.minimum <= population.radius.maximum
+                    && population.radius.maximum <= u16::from(WORLDGEN_OVERMAP_WIDTH)
+            })
             && total_omts <= MAX_WORLDGEN_SPECIAL_OMTS
             && (special.uniqueness != WorldgenSpecialUniquenessV1::Global
                 || globally_unique.insert(special.special_id.as_str()))
@@ -4861,6 +4967,123 @@ fn valid_worldgen_area_item_placement(placement: &WorldgenAreaItemPlacementV1) -
         && valid_worldgen_coordinate_range(placement.y)
 }
 
+fn valid_worldgen_u16_range(range: WorldgenU16RangeV1, minimum: u16, maximum: u16) -> bool {
+    range.minimum >= minimum && range.minimum <= range.maximum && range.maximum <= maximum
+}
+
+fn valid_worldgen_monster_placement(
+    placement: &WorldgenMonsterPlacementV1,
+    group_count: usize,
+) -> bool {
+    usize::from(placement.group_index) < group_count
+        && valid_worldgen_u16_range(placement.chance, 1, u16::MAX)
+        && placement.density_millionths <= MAX_WORLDGEN_MONSTER_DENSITY_MILLIONTHS
+        && valid_worldgen_u16_range(placement.repeat, 1, MAX_WORLDGEN_MONSTER_REPEAT)
+        && valid_worldgen_coordinate_range(placement.x)
+        && valid_worldgen_coordinate_range(placement.y)
+}
+
+fn valid_worldgen_individual_monster_placement(
+    placement: &WorldgenIndividualMonsterPlacementV1,
+    prototype_count: usize,
+    group_count: usize,
+) -> bool {
+    let target_is_valid = match placement.target {
+        WorldgenIndividualMonsterTargetV1::Monster { prototype_index } => {
+            usize::from(prototype_index) < prototype_count
+        }
+        WorldgenIndividualMonsterTargetV1::Group { group_index } => {
+            usize::from(group_index) < group_count
+        }
+    };
+    target_is_valid
+        && valid_worldgen_u16_range(placement.chance_percent, 1, 100)
+        && valid_worldgen_u16_range(placement.pack_size, 1, MAX_WORLDGEN_MONSTER_PACK_SIZE)
+        && valid_worldgen_u16_range(placement.repeat, 1, MAX_WORLDGEN_MONSTER_REPEAT)
+        && valid_worldgen_coordinate_range(placement.x)
+        && valid_worldgen_coordinate_range(placement.y)
+}
+
+fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
+    if catalog.monster_prototypes.len() > MAX_WORLDGEN_MONSTER_PROTOTYPES
+        || catalog.monster_groups.len() > MAX_WORLDGEN_MONSTER_GROUPS
+        || !catalog.monster_prototypes.iter().all(|prototype| {
+            valid_creature_corpse_prototype(&prototype.base)
+                && valid_worldgen_id(&prototype.base.monster_type_id)
+                && prototype.deferred_behavior_fields.len() <= 64
+                && prototype
+                    .deferred_behavior_fields
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && prototype
+                    .deferred_behavior_fields
+                    .iter()
+                    .all(|field| valid_worldgen_id(field))
+        })
+        || !catalog.monster_prototypes.windows(2).all(|pair| {
+            pair[0].base.monster_type_id.as_str() < pair[1].base.monster_type_id.as_str()
+        })
+        || !catalog
+            .monster_groups
+            .windows(2)
+            .all(|pair| pair[0].group_id < pair[1].group_id)
+    {
+        return false;
+    }
+    if catalog.specials.iter().any(|special| {
+        special.population.as_ref().is_some_and(|population| {
+            catalog
+                .monster_groups
+                .binary_search_by(|group| group.group_id.as_str().cmp(&population.group_id))
+                .is_err()
+        })
+    }) {
+        return false;
+    }
+    let mut entry_count = 0_usize;
+    let mut edges = Vec::with_capacity(catalog.monster_groups.len());
+    for group in &catalog.monster_groups {
+        if !valid_worldgen_id(&group.group_id)
+            || group.frequency_total == 0
+            || group
+                .default_prototype_index
+                .is_some_and(|index| usize::from(index) >= catalog.monster_prototypes.len())
+        {
+            return false;
+        }
+        let Some(total) = entry_count.checked_add(group.entries.len()) else {
+            return false;
+        };
+        entry_count = total;
+        if entry_count > MAX_WORLDGEN_MONSTER_GROUP_ENTRIES {
+            return false;
+        }
+        let mut group_edges = Vec::new();
+        for entry in &group.entries {
+            if entry.weight == 0
+                || !valid_worldgen_u16_range(entry.pack_size, 1, MAX_WORLDGEN_MONSTER_PACK_SIZE)
+            {
+                return false;
+            }
+            match entry.target {
+                WorldgenMonsterGroupTargetV1::Monster { prototype_index } => {
+                    if usize::from(prototype_index) >= catalog.monster_prototypes.len() {
+                        return false;
+                    }
+                }
+                WorldgenMonsterGroupTargetV1::Group { group_index } => {
+                    if usize::from(group_index) >= catalog.monster_groups.len() {
+                        return false;
+                    }
+                    group_edges.push(usize::from(group_index));
+                }
+            }
+        }
+        edges.push(group_edges);
+    }
+    valid_worldgen_bounded_graph(&edges, MAX_WORLDGEN_MONSTER_GROUP_DEPTH)
+}
+
 fn valid_worldgen_neighbor_condition(
     condition: &WorldgenNeighborConditionV1,
     identity_ids: &BTreeSet<&str>,
@@ -5046,6 +5269,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         || catalog.terrain_prototypes.is_empty()
         || catalog.terrain_prototypes.len() > MAX_WORLDGEN_TERRAIN_PROTOTYPES
         || catalog.furniture_prototypes.len() > MAX_WORLDGEN_FURNITURE_PROTOTYPES
+        || !valid_worldgen_monster_catalog(catalog)
         || catalog.regional_terrain.len() > MAX_WORLDGEN_REGIONAL_TABLES
         || catalog.regional_furniture.len() > MAX_WORLDGEN_REGIONAL_TABLES
         || catalog.omt_generators.is_empty()
@@ -5143,6 +5367,8 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         && template.predecessor_id.is_none()
                         && template.nested.is_empty()
                         && template.area_items.is_empty()
+                        && template.monster_placements.is_empty()
+                        && template.individual_monster_placements.is_empty()
                         && !template.erase_all_before_placing_terrain
                         && match builtin {
                             WorldgenBuiltinMapgenV1::ForestWater => {
@@ -5171,6 +5397,19 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                     .area_items
                     .iter()
                     .all(valid_worldgen_area_item_placement)
+                || !template.monster_placements.iter().all(|placement| {
+                    valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
+                })
+                || !template
+                    .individual_monster_placements
+                    .iter()
+                    .all(|placement| {
+                        valid_worldgen_individual_monster_placement(
+                            placement,
+                            catalog.monster_prototypes.len(),
+                            catalog.monster_groups.len(),
+                        )
+                    })
                 || !valid_worldgen_deferred_fields(&template.deferred_fields)
             {
                 return false;
@@ -5178,6 +5417,8 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
             let Some(total) = nested_placement_count
                 .checked_add(template.nested.len())
                 .and_then(|total| total.checked_add(template.area_items.len()))
+                .and_then(|total| total.checked_add(template.monster_placements.len()))
+                .and_then(|total| total.checked_add(template.individual_monster_placements.len()))
             else {
                 return false;
             };
@@ -5245,6 +5486,19 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                         .area_items
                         .iter()
                         .all(valid_worldgen_area_item_placement)
+                    || !template.monster_placements.iter().all(|placement| {
+                        valid_worldgen_monster_placement(placement, catalog.monster_groups.len())
+                    })
+                    || !template
+                        .individual_monster_placements
+                        .iter()
+                        .all(|placement| {
+                            valid_worldgen_individual_monster_placement(
+                                placement,
+                                catalog.monster_prototypes.len(),
+                                catalog.monster_groups.len(),
+                            )
+                        })
                     || !valid_worldgen_deferred_fields(&template.deferred_fields)
                 {
                     return false;
@@ -5252,6 +5506,10 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                 let Some(total) = nested_placement_count
                     .checked_add(template.nested.len())
                     .and_then(|total| total.checked_add(template.area_items.len()))
+                    .and_then(|total| total.checked_add(template.monster_placements.len()))
+                    .and_then(|total| {
+                        total.checked_add(template.individual_monster_placements.len())
+                    })
                 else {
                     return false;
                 };
@@ -7346,6 +7604,8 @@ mod tests {
                 comfort: 1,
                 floor_bedding_warmth: 0,
             }],
+            monster_prototypes: Vec::new(),
+            monster_groups: Vec::new(),
             regional_terrain: vec![WorldgenRegionalTerrainTableV1 {
                 regional_id: String::from("region_groundcover"),
                 choices: vec![
@@ -7381,6 +7641,8 @@ mod tests {
                     cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
+                    monster_placements: Vec::new(),
+                    individual_monster_placements: Vec::new(),
                     erase_all_before_placing_terrain: false,
                     deferred_fields: Vec::new(),
                 }],

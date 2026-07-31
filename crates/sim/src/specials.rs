@@ -4,7 +4,7 @@ use cdda_protocol::{
     ChunkCoord, MAX_WORLDGEN_SPECIAL_PLACEMENTS, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH,
     WorldgenCityV1, WorldgenOmtIdentityV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
     WorldgenOvermapRunV1, WorldgenSpecialId, WorldgenSpecialPlacementV1,
-    WorldgenSpecialUniquenessV1,
+    WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -59,6 +59,7 @@ pub struct OvermapFixedSpecial {
     pub priority: i32,
     pub rotate: bool,
     pub uniqueness: WorldgenSpecialUniquenessV1,
+    pub population: Option<WorldgenSpecialPopulationV1>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,7 +84,7 @@ struct PlacementState {
 
 /// Places the pinned fixed-special family into one coordinate-owned overmap.
 /// All required predicates are tested before any cell is changed. Mutable
-/// specials, EOCs, camps, monster spawns, and non-admitted connection engines
+/// specials, EOCs, camps, and non-admitted connection engines
 /// never reach this boundary.
 pub fn place_overmap_specials(
     world_seed: [u8; 32],
@@ -499,6 +500,7 @@ fn apply_placement(
         rotation,
         uniqueness: definition.uniqueness,
         terrain_omts,
+        population: definition.population.clone(),
     });
     Ok(())
 }
@@ -763,6 +765,11 @@ fn validate_definitions(definitions: &[OvermapFixedSpecial]) -> Result<(), SimEr
             || definition.city_distance.minimum > definition.city_distance.maximum
             || definition.occurrences.minimum > definition.occurrences.maximum
             || definition.occurrences.maximum <= 0
+            || definition.population.as_ref().is_some_and(|population| {
+                population.group_id.is_empty()
+                    || population.population.minimum > population.population.maximum
+                    || population.radius.minimum > population.radius.maximum
+            })
         {
             return Err(SimError::InvalidTerrain);
         }
