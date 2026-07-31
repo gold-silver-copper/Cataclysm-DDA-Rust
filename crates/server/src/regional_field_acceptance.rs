@@ -12,8 +12,8 @@ use cdda_conformance::{
 };
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
-    ItemGroupRegistry, MapgenRegistry, OvermapTerrainRegistry, StartLocationRegistry,
-    TerrainRegistry,
+    ItemGroupRegistry, MapgenRegistry, OvermapTerrainRegistry, RiverSettingsDefinition,
+    StartLocationRegistry, TerrainRegistry,
 };
 use cdda_persistence::{ReplayBundleV1, WorldStore};
 use cdda_protocol::{
@@ -734,13 +734,14 @@ pub(super) fn assert_production_regional_field_gameplay(
     overmap_terrain: &OvermapTerrainRegistry,
     start_locations: &StartLocationRegistry,
     city_settings: &CitySettingsDefinition,
+    river_settings: &RiverSettingsDefinition,
     mapgen: &MapgenRegistry,
     regions: &DefaultRegionTerrainFurnitureRegistry,
     terrain: &TerrainRegistry,
     furniture: &FurnitureRegistry,
 ) {
-    let (production_overmap, cities, road_exits) =
-        bootstrap_regional_road_overmap(overmap_terrain, [31; 32], city_settings)
+    let (production_overmap, cities, rivers, road_exits) =
+        bootstrap_regional_road_overmap(overmap_terrain, [31; 32], city_settings, river_settings)
             .expect("regional road overmap should normalize");
     assert_eq!(road_exits.len(), 3);
     let mapgen_item_group_roots = runtime_mapgen_item_group_roots(&production_overmap, mapgen)
@@ -754,6 +755,7 @@ pub(super) fn assert_production_regional_field_gameplay(
     let production_field_worldgen = runtime_mapgen_worldgen(
         production_overmap,
         cities,
+        rivers,
         start_locations
             .get("sloc_field")
             .expect("field start should exist"),

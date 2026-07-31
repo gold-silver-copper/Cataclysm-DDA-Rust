@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 75;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 97
-/// added production-road mapgen and the item-instance metadata required by its
-/// complete loot closure. Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 75;
+pub const SCHEMA_VERSION: i64 = 76;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 98
+/// retained river curves and bounded built-in mapgen algorithms. Metadata-only
+/// databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 76;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -6792,6 +6792,7 @@ mod tests {
                 center: cdda_protocol::ChunkCoord { x: 0, y: 0, z: 0 },
                 size: 8,
             }],
+            rivers: Vec::new(),
             start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),
@@ -6802,6 +6803,7 @@ mod tests {
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {
                     weight: 1,
                     predecessor_id: None,
+                    builtin: None,
                     cells: vec![cell; cdda_protocol::WORLDGEN_CELLS_PER_OMT],
                     nested: Vec::new(),
                     area_items: Vec::new(),

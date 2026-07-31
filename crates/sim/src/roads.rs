@@ -39,6 +39,9 @@ const MAXIMUM_ROAD_POINTS: usize = 2_048;
 const BORDER_CORNER_MARGIN: i32 = 10;
 const FIELD_STEP_COST: u64 = 6;
 const EXISTING_ROAD_STEP_COST: u64 = 1;
+const WATER_STEP_COST: u64 = 30;
+
+pub const OVERMAP_BRIDGE_IDS: [&str; 2] = ["bridge_north", "bridge_east"];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum OvermapRoadBoundary {
@@ -77,10 +80,33 @@ pub struct OvermapRoadExit {
 pub fn place_overmap_roads(
     world_seed: [u8; 32],
     generator_version: u16,
+    layout: WorldgenOvermapLayoutV1,
+    cities: &[WorldgenCityV1],
+    inherited_exits: &[OvermapRoadExit],
+    road_identities: &[WorldgenOmtIdentityV1],
+) -> Result<(WorldgenOvermapLayoutV1, Vec<OvermapRoadExit>), SimError> {
+    place_overmap_roads_with_bridges(
+        world_seed,
+        generator_version,
+        layout,
+        cities,
+        inherited_exits,
+        road_identities,
+        &[],
+    )
+}
+
+/// Places roads while retaining river cells as straight bridge crossings.
+/// An empty bridge family is valid only when the input layout contains no
+/// river identities, preserving the pre-river API for focused road callers.
+pub fn place_overmap_roads_with_bridges(
+    world_seed: [u8; 32],
+    generator_version: u16,
     mut layout: WorldgenOvermapLayoutV1,
     cities: &[WorldgenCityV1],
     inherited_exits: &[OvermapRoadExit],
     road_identities: &[WorldgenOmtIdentityV1],
+    bridge_identities: &[WorldgenOmtIdentityV1],
 ) -> Result<(WorldgenOvermapLayoutV1, Vec<OvermapRoadExit>), SimError> {
     let identities = road_identity_family(road_identities)?;
     let mut surface = expand_surface(&layout)?;
@@ -94,13 +120,28 @@ pub fn place_overmap_roads(
                 .ok_or(SimError::InvalidTerrain)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let water_cells = surface
+        .iter()
+        .map(|index| {
+            layout
+                .identities
+                .get(usize::from(*index))
+                .map(is_river_identity)
+                .ok_or(SimError::InvalidTerrain)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let bridge_identities = if water_cells.iter().any(|water| *water) {
+        Some(bridge_identity_family(bridge_identities)?)
+    } else {
+        None
+    };
     let mut road_masks = surface
         .iter()
         .map(|index| {
             layout
                 .identities
                 .get(usize::from(*index))
-                .and_then(|identity| road_mask(&identity.full_id))
+                .and_then(existing_road_mask)
                 .unwrap_or(0)
         })
         .collect::<Vec<_>>();
@@ -113,7 +154,7 @@ pub fn place_overmap_roads(
         layout.origin_y,
     );
     let mut exits = validate_inherited_exits(&layout, inherited_exits)?;
-    add_core_exits(&layout, &mut exits, &mut rng)?;
+    add_core_exits(&layout, &mut exits, &water_cells, &mut rng)?;
 
     let mut points = exits
         .iter()
@@ -141,7 +182,13 @@ pub fn place_overmap_roads(
         return Err(SimError::InvalidTerrain);
     }
 
-    connect_closest_points(&points, &mut road_masks, &mut road_cells, &mut rng)?;
+    connect_closest_points(
+        &points,
+        &mut road_masks,
+        &mut road_cells,
+        &water_cells,
+        &mut rng,
+    )?;
     for exit in &exits {
         let index = absolute_to_index(&layout, exit.position)?;
         let mask = road_masks.get_mut(index).ok_or(SimError::InvalidTerrain)?;
@@ -152,9 +199,18 @@ pub fn place_overmap_roads(
         if mask == 0 {
             continue;
         }
-        let identity = identities
-            .get(usize::from(mask))
-            .ok_or(SimError::InvalidTerrain)?;
+        let identity = if water_cells[index] {
+            let bridges = bridge_identities.as_ref().ok_or(SimError::InvalidTerrain)?;
+            match mask {
+                5 => &bridges[0],
+                10 => &bridges[1],
+                _ => return Err(SimError::InvalidTerrain),
+            }
+        } else {
+            identities
+                .get(usize::from(mask))
+                .ok_or(SimError::InvalidTerrain)?
+        };
         install_identity(&mut layout.identities, identity)?;
         surface_ids[index] = identity.full_id.clone();
     }
@@ -187,6 +243,29 @@ pub fn place_overmap_roads(
         return Err(SimError::InvalidTerrain);
     }
     Ok((layout, exits))
+}
+
+fn bridge_identity_family(
+    identities: &[WorldgenOmtIdentityV1],
+) -> Result<[WorldgenOmtIdentityV1; 2], SimError> {
+    if identities.len() != OVERMAP_BRIDGE_IDS.len() {
+        return Err(SimError::InvalidTerrain);
+    }
+    let by_id = identities
+        .iter()
+        .map(|identity| (identity.full_id.as_str(), identity))
+        .collect::<BTreeMap<_, _>>();
+    OVERMAP_BRIDGE_IDS
+        .map(|id| {
+            let identity = by_id.get(id).copied().ok_or(SimError::InvalidTerrain)?;
+            (identity.type_id == "bridge" && identity.generator_id == "bridge")
+                .then(|| identity.clone())
+                .ok_or(SimError::InvalidTerrain)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| SimError::InvalidTerrain)
 }
 
 fn road_identity_family(
@@ -273,6 +352,7 @@ fn validate_exit(layout: &WorldgenOvermapLayoutV1, exit: OvermapRoadExit) -> Res
 fn add_core_exits(
     layout: &WorldgenOvermapLayoutV1,
     exits: &mut Vec<OvermapRoadExit>,
+    water_cells: &[bool],
     rng: &mut ChaCha8Rng,
 ) -> Result<(), SimError> {
     if exits.len() >= MINIMUM_CORE_EXITS {
@@ -290,17 +370,25 @@ fn add_core_exits(
         if exits.len() >= MINIMUM_CORE_EXITS {
             break;
         }
-        let variable = inclusive_i32(
-            rng,
-            BORDER_CORNER_MARGIN,
-            i32::from(WORLDGEN_OVERMAP_WIDTH) - 1 - BORDER_CORNER_MARGIN,
-        )?;
-        let (local_x, local_y) = match boundary {
-            OvermapRoadBoundary::North => (variable, 0),
-            OvermapRoadBoundary::East => (i32::from(WORLDGEN_OVERMAP_WIDTH) - 1, variable),
-            OvermapRoadBoundary::South => (variable, i32::from(WORLDGEN_OVERMAP_HEIGHT) - 1),
-            OvermapRoadBoundary::West => (0, variable),
-        };
+        let mut selected = None;
+        for _ in 0..usize::from(WORLDGEN_OVERMAP_WIDTH) {
+            let variable = inclusive_i32(
+                rng,
+                BORDER_CORNER_MARGIN,
+                i32::from(WORLDGEN_OVERMAP_WIDTH) - 1 - BORDER_CORNER_MARGIN,
+            )?;
+            let position = match boundary {
+                OvermapRoadBoundary::North => (variable, 0),
+                OvermapRoadBoundary::East => (i32::from(WORLDGEN_OVERMAP_WIDTH) - 1, variable),
+                OvermapRoadBoundary::South => (variable, i32::from(WORLDGEN_OVERMAP_HEIGHT) - 1),
+                OvermapRoadBoundary::West => (0, variable),
+            };
+            if !water_cells[surface_index(position.0, position.1)?] {
+                selected = Some(position);
+                break;
+            }
+        }
+        let (local_x, local_y) = selected.ok_or(SimError::InvalidTerrain)?;
         let exit = OvermapRoadExit {
             position: ChunkCoord {
                 x: layout
@@ -328,6 +416,7 @@ fn connect_closest_points(
     points: &[usize],
     road_masks: &mut [u8],
     road_cells: &mut [bool],
+    water_cells: &[bool],
     rng: &mut ChaCha8Rng,
 ) -> Result<(), SimError> {
     if !(2..=MAXIMUM_ROAD_POINTS).contains(&points.len()) {
@@ -339,7 +428,7 @@ fn connect_closest_points(
         let connect =
             join_components(&mut components, left, right) || rng.next_u64().is_multiple_of(10);
         if connect {
-            let path = road_path(points[left], points[right], road_cells)?;
+            let path = road_path(points[left], points[right], road_cells, water_cells)?;
             paint_path(&path, road_masks, road_cells)?;
         }
     }
@@ -414,34 +503,71 @@ fn join_components(components: &mut [usize], left: usize, right: usize) -> bool 
     true
 }
 
-fn road_path(source: usize, destination: usize, roads: &[bool]) -> Result<Vec<usize>, SimError> {
+fn road_path(
+    source: usize,
+    destination: usize,
+    roads: &[bool],
+    water: &[bool],
+) -> Result<Vec<usize>, SimError> {
     let cell_count = usize::from(WORLDGEN_OVERMAP_WIDTH) * usize::from(WORLDGEN_OVERMAP_HEIGHT);
-    if source >= cell_count || destination >= cell_count || roads.len() != cell_count {
+    if source >= cell_count
+        || destination >= cell_count
+        || roads.len() != cell_count
+        || water.len() != cell_count
+        || water[source]
+        || water[destination]
+    {
         return Err(SimError::InvalidTerrain);
     }
     let (destination_x, destination_y) = index_xy(destination)?;
-    let mut costs = vec![u64::MAX; cell_count];
-    let mut previous = vec![None; cell_count];
+    const NO_DIRECTION: usize = 4;
+    const DIRECTION_STATES: usize = 5;
+    let state_count = cell_count
+        .checked_mul(DIRECTION_STATES)
+        .ok_or(SimError::NumericOverflow)?;
+    let source_state = source
+        .checked_mul(DIRECTION_STATES)
+        .and_then(|state| state.checked_add(NO_DIRECTION))
+        .ok_or(SimError::NumericOverflow)?;
+    let mut costs = vec![u64::MAX; state_count];
+    let mut previous = vec![None; state_count];
     let mut queue = BinaryHeap::new();
-    costs[source] = 0;
-    queue.push(Reverse((manhattan(source, destination)?, 0_u64, source)));
-    while let Some(Reverse((_estimate, cost, current))) = queue.pop() {
-        if current == destination {
-            break;
-        }
-        if cost != costs[current] {
+    costs[source_state] = 0;
+    queue.push(Reverse((
+        manhattan(source, destination)?,
+        0_u64,
+        source_state,
+    )));
+    let mut destination_state = None;
+    while let Some(Reverse((_estimate, cost, state))) = queue.pop() {
+        if cost != costs[state] {
             continue;
         }
-        for neighbor in neighbors(current)? {
+        let current = state / DIRECTION_STATES;
+        let incoming = state % DIRECTION_STATES;
+        if current == destination {
+            destination_state = Some(state);
+            break;
+        }
+        for (direction, neighbor) in directed_neighbors(current)? {
+            if water[current] && incoming != direction {
+                continue;
+            }
             let step = if roads[neighbor] {
                 EXISTING_ROAD_STEP_COST
+            } else if water[neighbor] {
+                WATER_STEP_COST
             } else {
                 FIELD_STEP_COST
             };
             let next = cost.checked_add(step).ok_or(SimError::NumericOverflow)?;
-            if next < costs[neighbor] {
-                costs[neighbor] = next;
-                previous[neighbor] = Some(current);
+            let neighbor_state = neighbor
+                .checked_mul(DIRECTION_STATES)
+                .and_then(|state| state.checked_add(direction))
+                .ok_or(SimError::NumericOverflow)?;
+            if next < costs[neighbor_state] {
+                costs[neighbor_state] = next;
+                previous[neighbor_state] = Some(state);
                 let (x, y) = index_xy(neighbor)?;
                 let heuristic =
                     u64::try_from((x - destination_x).abs() + (y - destination_y).abs())
@@ -450,19 +576,16 @@ fn road_path(source: usize, destination: usize, roads: &[bool]) -> Result<Vec<us
                     next.checked_add(heuristic)
                         .ok_or(SimError::NumericOverflow)?,
                     next,
-                    neighbor,
+                    neighbor_state,
                 )));
             }
         }
     }
-    if costs[destination] == u64::MAX {
-        return Err(SimError::InvalidTerrain);
-    }
+    let mut current = destination_state.ok_or(SimError::InvalidTerrain)?;
     let mut path = vec![destination];
-    let mut current = destination;
-    while current != source {
+    while current != source_state {
         current = previous[current].ok_or(SimError::InvalidTerrain)?;
-        path.push(current);
+        path.push(current / DIRECTION_STATES);
     }
     path.reverse();
     Ok(path)
@@ -494,17 +617,18 @@ fn segment_masks(from: usize, to: usize) -> Result<(u8, u8), SimError> {
     }
 }
 
-fn neighbors(index: usize) -> Result<Vec<usize>, SimError> {
+fn directed_neighbors(index: usize) -> Result<Vec<(usize, usize)>, SimError> {
     let (x, y) = index_xy(index)?;
     let width = i32::from(WORLDGEN_OVERMAP_WIDTH);
     let height = i32::from(WORLDGEN_OVERMAP_HEIGHT);
     [(0, -1), (1, 0), (0, 1), (-1, 0)]
         .into_iter()
-        .filter_map(|(dx, dy)| {
+        .enumerate()
+        .filter_map(|(direction, (dx, dy))| {
             let next_x = x + dx;
             let next_y = y + dy;
             (next_x >= 0 && next_x < width && next_y >= 0 && next_y < height)
-                .then(|| surface_index(next_x, next_y))
+                .then(|| surface_index(next_x, next_y).map(|index| (direction, index)))
         })
         .collect()
 }
@@ -594,6 +718,20 @@ fn road_mask(full_id: &str) -> Option<u8> {
         .iter()
         .position(|candidate| *candidate == full_id)
         .and_then(|index| u8::try_from(index).ok())
+}
+
+fn existing_road_mask(identity: &WorldgenOmtIdentityV1) -> Option<u8> {
+    road_mask(&identity.full_id).or_else(|| match identity.full_id.as_str() {
+        "bridge_north" | "bridge_south" => Some(NORTH | SOUTH),
+        "bridge_east" | "bridge_west" => Some(EAST | WEST),
+        _ => None,
+    })
+}
+
+fn is_river_identity(identity: &WorldgenOmtIdentityV1) -> bool {
+    identity.full_id == "forest_water"
+        || identity.full_id == "river_center"
+        || identity.full_id.starts_with("river_")
 }
 
 fn install_identity(
@@ -718,6 +856,7 @@ mod tests {
             generator_version: 2,
             overmap: layout.clone(),
             cities: Vec::new(),
+            rivers: Vec::new(),
             start_location: None,
             terrain_prototypes: Vec::new(),
             furniture_prototypes: Vec::new(),

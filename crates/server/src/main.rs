@@ -11,11 +11,12 @@ use cdda_content::MapgenIdChoice;
 use cdda_content::{
     AmmunitionRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition, CitySettingsRegistry,
     ConstructionRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH,
-    DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, FieldTypeDefinition,
-    FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry,
-    ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
-    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry,
-    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry,
+    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
+    ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
+    MonsterDefinition, MonsterRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
+    RecipeRegistry, RiverSettingsRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
+    TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -124,6 +125,7 @@ struct RuntimeWorldContent<'a> {
     overmap_terrain: &'a OvermapTerrainRegistry,
     start_locations: &'a StartLocationRegistry,
     city_settings: &'a CitySettingsRegistry,
+    river_settings: &'a RiverSettingsRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -337,6 +339,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let river_settings = RiverSettingsRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let skills =
         SkillRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let proficiencies = ProficiencyRegistry::load_selected(
@@ -417,6 +425,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             overmap_terrain: &overmap_terrain,
             start_locations: &start_locations,
             city_settings: &city_settings,
+            river_settings: &river_settings,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -807,12 +816,16 @@ fn open_world(
         item_groups,
         item_group_content,
     )?;
-    let (regional_overmap, cities, _road_exits) = bootstrap_regional_road_overmap(
+    let (regional_overmap, cities, rivers, _road_exits) = bootstrap_regional_road_overmap(
         overmap_terrain,
         metadata.world_seed,
         city_settings
             .get(DEFAULT_CITY_SETTINGS_ID)
             .ok_or("pinned default content is missing default city settings")?,
+        content
+            .river_settings
+            .get(DEFAULT_RIVER_SETTINGS_ID)
+            .ok_or("pinned default content is missing default river settings")?,
     )?;
     let mapgen_item_group_roots = runtime_mapgen_item_group_roots(&regional_overmap, mapgen)?;
     let item_group_catalog = merge_item_group_catalogs([
@@ -826,6 +839,7 @@ fn open_world(
     let worldgen = runtime_mapgen_worldgen(
         regional_overmap,
         cities,
+        rivers,
         start_locations
             .get("sloc_field")
             .ok_or("pinned default content is missing sloc_field")?,
@@ -5268,8 +5282,12 @@ mod tests {
         let city_settings =
             CitySettingsRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("city settings should load");
+        let river_settings =
+            RiverSettingsRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("river settings should load");
         let wilderness = runtime_mapgen_worldgen(
             bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
+            Vec::new(),
             Vec::new(),
             start_locations
                 .get("sloc_lmoe")
@@ -5298,6 +5316,7 @@ mod tests {
         assert!(
             runtime_mapgen_worldgen(
                 bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
+                Vec::new(),
                 Vec::new(),
                 start_locations
                     .get("sloc_shelter_safe")
@@ -6664,6 +6683,9 @@ mod tests {
                 city_settings
                     .get(DEFAULT_CITY_SETTINGS_ID)
                     .expect("default city settings should load"),
+                river_settings
+                    .get(DEFAULT_RIVER_SETTINGS_ID)
+                    .expect("default river settings should load"),
                 &mapgen,
                 &regions,
                 &terrain,

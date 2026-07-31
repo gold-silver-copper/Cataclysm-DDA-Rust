@@ -14,6 +14,7 @@ mod overmap_terrain;
 mod proficiency;
 mod recipe;
 mod region;
+mod river;
 mod skill;
 mod snippet;
 mod start_location;
@@ -86,6 +87,10 @@ pub use region::{
     MAX_REGION_SUBSTITUTION_CHOICES, MAX_REGION_SUBSTITUTION_DEFINITIONS,
     MAX_REGION_SUBSTITUTION_DEPTH, MAX_REGION_SUBSTITUTION_TOTAL_WEIGHT,
     MAX_REGION_SUBSTITUTION_WEIGHT, RegionSubstitutionTable, WeightedRegionSubstitution,
+};
+pub use river::{
+    DEFAULT_RIVER_SETTINGS_ID, MAX_RIVER_SETTINGS, RiverSettingsDefinition, RiverSettingsRegistry,
+    RiverSettingsRegistryError,
 };
 pub use skill::{SkillDefinition, SkillRegistry, SkillRegistryError};
 pub use snippet::{

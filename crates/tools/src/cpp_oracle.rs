@@ -4236,6 +4236,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
             }],
         },
         cities: Vec::new(),
+        rivers: Vec::new(),
         start_location: None,
         terrain_prototypes: vec![terrain],
         furniture_prototypes: Vec::new(),
@@ -4246,6 +4247,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
             templates: vec![WorldgenTemplateV1 {
                 weight: 1,
                 predecessor_id: None,
+                builtin: None,
                 cells,
                 nested: Vec::new(),
                 area_items: Vec::new(),
@@ -4756,6 +4758,7 @@ fn rust_static_template_snapshot(
             }],
         },
         cities: Vec::new(),
+        rivers: Vec::new(),
         start_location: None,
         terrain_prototypes: vec![background, marker],
         furniture_prototypes: vec![FurnitureTileSnapshot {
@@ -4773,6 +4776,7 @@ fn rust_static_template_snapshot(
             templates: vec![WorldgenTemplateV1 {
                 weight: 1,
                 predecessor_id: None,
+                builtin: None,
                 cells,
                 nested: Vec::new(),
                 area_items: Vec::new(),

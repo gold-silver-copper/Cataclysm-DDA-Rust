@@ -1,12 +1,13 @@
 use cdda_protocol::{
     ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1,
-    MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, WorldPosition, WorldgenCatalogV1,
-    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenNestedConditionsV1,
-    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
-    WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_city_start_distance,
-    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
+    MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, WorldPosition, WorldgenBuiltinMapgenV1,
+    WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
+    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
+    WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
+    worldgen_city_start_distance, worldgen_omt_identity_at, worldgen_omt_matches,
+    worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -396,6 +397,14 @@ fn apply_root_generator(
         return Err(SimError::InvalidTerrain);
     }
     let template = choose_template(&generator.templates, rng)?;
+    if let Some(builtin) = template.builtin {
+        if depth != 0 {
+            return Err(SimError::InvalidTerrain);
+        }
+        apply_builtin_mapgen(catalog, builtin, rng, plan)?;
+        resolve_mapgen_plan(catalog, rng, plan)?;
+        return rotate_mapgen_plan(plan, rotation);
+    }
     if let Some(predecessor_id) = &template.predecessor_id {
         let predecessor = catalog
             .omt_generators
@@ -444,6 +453,269 @@ fn apply_root_generator(
     )?;
     resolve_mapgen_plan(catalog, rng, plan)?;
     rotate_mapgen_plan(plan, rotation)
+}
+
+fn apply_builtin_mapgen(
+    catalog: &WorldgenCatalogV1,
+    builtin: WorldgenBuiltinMapgenV1,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    if plan.terrain.iter().any(Option::is_some)
+        || plan.furniture.iter().any(Option::is_some)
+        || !plan.items.is_empty()
+    {
+        return Err(SimError::InvalidTerrain);
+    }
+    if !matches!(builtin, WorldgenBuiltinMapgenV1::ForestWater) {
+        let deep = builtin_terrain(catalog, "t_water_moving_dp")?;
+        for (terrain, furniture) in plan.terrain.iter_mut().zip(&mut plan.furniture) {
+            *terrain = Some(PlannedTerrainTile::Resolved(deep.clone()));
+            *furniture = Some(PlannedFurnitureTile::Resolved(None));
+        }
+    }
+    match builtin {
+        WorldgenBuiltinMapgenV1::RiverStraight => {
+            builtin_river_straight(catalog, rng, plan)?;
+        }
+        WorldgenBuiltinMapgenV1::RiverCurved { rotation } => {
+            builtin_river_curved(catalog, rng, plan)?;
+            rotate_mapgen_plan(plan, rotation)?;
+        }
+        WorldgenBuiltinMapgenV1::RiverCurvedNot { rotation } => {
+            builtin_river_curved_not(catalog, rng, plan)?;
+            rotate_mapgen_plan(plan, rotation)?;
+        }
+        WorldgenBuiltinMapgenV1::ForestWater => builtin_forest_water(catalog, rng, plan)?,
+    }
+    Ok(())
+}
+
+fn builtin_forest_water(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let groundcover = catalog
+        .regional_terrain
+        .binary_search_by(|table| table.regional_id.as_str().cmp("t_region_groundcover_swamp"))
+        .ok()
+        .and_then(|index| u16::try_from(index).ok())
+        .ok_or(SimError::InvalidTerrain)?;
+    let terrain_index = |terrain_id: &str| {
+        catalog
+            .terrain_prototypes
+            .binary_search_by(|terrain| terrain.terrain_id.as_str().cmp(terrain_id))
+            .ok()
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or(SimError::InvalidTerrain)
+    };
+    let shallow = terrain_index("t_water_sh")?;
+    let deep = terrain_index("t_water_dp")?;
+    let murky = terrain_index("t_water_murky")?;
+    for index in 0..OMT_TILE_COUNT {
+        plan.terrain[index] = Some(PlannedTerrainTile::Target(
+            WorldgenTerrainTargetV1::Regional(groundcover),
+        ));
+        plan.furniture[index] = Some(PlannedFurnitureTile::Target(
+            WorldgenFurnitureTargetV1::None,
+        ));
+        if one_in_mapgen(rng, 2) {
+            let ticket = inclusive_rng_u64(rng, 1, 19);
+            let prototype = if ticket <= 6 {
+                shallow
+            } else if ticket == 7 {
+                deep
+            } else {
+                murky
+            };
+            plan.terrain[index] = Some(PlannedTerrainTile::Target(
+                WorldgenTerrainTargetV1::Prototype(prototype),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn builtin_river_straight(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    for x in 0..OMT_TILE_WIDTH {
+        let mut ground_edge =
+            usize::try_from(inclusive_rng_u64(rng, 1, 3)).map_err(|_| SimError::NumericOverflow)?;
+        let shallow_edge =
+            usize::try_from(inclusive_rng_u64(rng, 4, 6)).map_err(|_| SimError::NumericOverflow)?;
+        let ground = grass_or_dirt(catalog, rng)?;
+        builtin_vertical_line(plan, x, 0, ground_edge, &ground)?;
+        if one_in_mapgen(rng, 25) {
+            ground_edge = ground_edge
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+            builtin_set_terrain(plan, x, ground_edge, &clay_or_sand(catalog, rng)?)?;
+        }
+        ground_edge = ground_edge
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        let shallow = builtin_terrain(catalog, "t_water_moving_sh")?;
+        builtin_vertical_line(plan, x, ground_edge, shallow_edge, &shallow)?;
+    }
+    Ok(())
+}
+
+fn builtin_river_curved(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    builtin_river_straight(catalog, rng, plan)?;
+    for y in 0..OMT_TILE_WIDTH {
+        let mut ground_edge = usize::try_from(inclusive_rng_u64(rng, 19, 21))
+            .map_err(|_| SimError::NumericOverflow)?;
+        let shallow_edge = usize::try_from(inclusive_rng_u64(rng, 16, 18))
+            .map_err(|_| SimError::NumericOverflow)?;
+        let ground = grass_or_dirt(catalog, rng)?;
+        builtin_horizontal_line(plan, ground_edge, OMT_TILE_WIDTH - 1, y, &ground)?;
+        if one_in_mapgen(rng, 25) {
+            ground_edge = ground_edge
+                .checked_sub(1)
+                .ok_or(SimError::NumericOverflow)?;
+            builtin_set_terrain(plan, ground_edge, y, &clay_or_sand(catalog, rng)?)?;
+        }
+        ground_edge = ground_edge
+            .checked_sub(1)
+            .ok_or(SimError::NumericOverflow)?;
+        let shallow = builtin_terrain(catalog, "t_water_moving_sh")?;
+        builtin_horizontal_line(plan, shallow_edge, ground_edge, y, &shallow)?;
+    }
+    Ok(())
+}
+
+fn builtin_river_curved_not(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let north_edge =
+        usize::try_from(inclusive_rng_u64(rng, 16, 18)).map_err(|_| SimError::NumericOverflow)?;
+    let east_edge =
+        usize::try_from(inclusive_rng_u64(rng, 4, 8)).map_err(|_| SimError::NumericOverflow)?;
+    let shallow = builtin_terrain(catalog, "t_water_moving_sh")?;
+    for x in north_edge..OMT_TILE_WIDTH {
+        for y in 0..east_edge {
+            let dx = OMT_TILE_WIDTH
+                .checked_sub(x)
+                .ok_or(SimError::NumericOverflow)?;
+            let circle_edge = dx
+                .checked_mul(dx)
+                .and_then(|value| value.checked_add(y.checked_mul(y)?))
+                .ok_or(SimError::NumericOverflow)?;
+            if circle_edge <= 8 {
+                builtin_set_terrain(plan, x, y, &grass_or_dirt(catalog, rng)?)?;
+            }
+            if circle_edge == 9 && one_in_mapgen(rng, 25) {
+                builtin_set_terrain(plan, x, y, &clay_or_sand(catalog, rng)?)?;
+            } else if circle_edge <= 36 {
+                builtin_set_terrain(plan, x, y, &shallow)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn grass_or_dirt(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<cdda_protocol::TerrainTileSnapshot, SimError> {
+    builtin_terrain(
+        catalog,
+        if one_in_mapgen(rng, 4) {
+            "t_grass"
+        } else {
+            "t_dirt"
+        },
+    )
+}
+
+fn clay_or_sand(
+    catalog: &WorldgenCatalogV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<cdda_protocol::TerrainTileSnapshot, SimError> {
+    builtin_terrain(
+        catalog,
+        if one_in_mapgen(rng, 16) {
+            "t_sand"
+        } else {
+            "t_clay"
+        },
+    )
+}
+
+fn one_in_mapgen(rng: &mut ChaCha8Rng, denominator: u64) -> bool {
+    inclusive_rng_u64(rng, 1, denominator) == 1
+}
+
+fn builtin_terrain(
+    catalog: &WorldgenCatalogV1,
+    terrain_id: &str,
+) -> Result<cdda_protocol::TerrainTileSnapshot, SimError> {
+    catalog
+        .terrain_prototypes
+        .binary_search_by(|terrain| terrain.terrain_id.as_str().cmp(terrain_id))
+        .ok()
+        .and_then(|index| catalog.terrain_prototypes.get(index))
+        .cloned()
+        .ok_or(SimError::InvalidTerrain)
+}
+
+fn builtin_set_terrain(
+    plan: &mut OmtMapgenPlan,
+    x: usize,
+    y: usize,
+    terrain: &cdda_protocol::TerrainTileSnapshot,
+) -> Result<(), SimError> {
+    if x >= OMT_TILE_WIDTH || y >= OMT_TILE_WIDTH {
+        return Err(SimError::InvalidTerrain);
+    }
+    let index = y
+        .checked_mul(OMT_TILE_WIDTH)
+        .and_then(|row| row.checked_add(x))
+        .ok_or(SimError::NumericOverflow)?;
+    plan.terrain[index] = Some(PlannedTerrainTile::Resolved(terrain.clone()));
+    Ok(())
+}
+
+fn builtin_vertical_line(
+    plan: &mut OmtMapgenPlan,
+    x: usize,
+    minimum_y: usize,
+    maximum_y: usize,
+    terrain: &cdda_protocol::TerrainTileSnapshot,
+) -> Result<(), SimError> {
+    if minimum_y > maximum_y {
+        return Err(SimError::InvalidTerrain);
+    }
+    for y in minimum_y..=maximum_y {
+        builtin_set_terrain(plan, x, y, terrain)?;
+    }
+    Ok(())
+}
+
+fn builtin_horizontal_line(
+    plan: &mut OmtMapgenPlan,
+    minimum_x: usize,
+    maximum_x: usize,
+    y: usize,
+    terrain: &cdda_protocol::TerrainTileSnapshot,
+) -> Result<(), SimError> {
+    if minimum_x > maximum_x {
+        return Err(SimError::InvalidTerrain);
+    }
+    for x in minimum_x..=maximum_x {
+        builtin_set_terrain(plan, x, y, terrain)?;
+    }
+    Ok(())
 }
 
 fn resolve_mapgen_plan(
@@ -1455,6 +1727,7 @@ mod tests {
         let template = |predecessor_id: Option<&str>, cells| cdda_protocol::WorldgenTemplateV1 {
             weight: 1,
             predecessor_id: predecessor_id.map(str::to_owned),
+            builtin: None,
             cells,
             nested: Vec::new(),
             area_items: Vec::new(),
@@ -1486,6 +1759,7 @@ mod tests {
                 layers: Vec::new(),
             },
             cities: Vec::new(),
+            rivers: Vec::new(),
             start_location: None,
             terrain_prototypes: vec![
                 test_terrain("t_base"),

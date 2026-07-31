@@ -1336,6 +1336,7 @@ mod tests {
                 center: cdda_protocol::ChunkCoord { x: 0, y: 0, z: 0 },
                 size: 8,
             }],
+            rivers: Vec::new(),
             start_location: Some(cdda_protocol::WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_lmoe"),
                 targets: vec![cdda_protocol::WorldgenStartTargetV1 {
@@ -1361,6 +1362,7 @@ mod tests {
                     templates: vec![cdda_protocol::WorldgenTemplateV1 {
                         weight: 1,
                         predecessor_id: None,
+                        builtin: None,
                         cells: vec![cell(0); cdda_protocol::WORLDGEN_CELLS_PER_OMT],
                         nested: Vec::new(),
                         area_items: Vec::new(),
@@ -1374,6 +1376,7 @@ mod tests {
                     templates: vec![cdda_protocol::WorldgenTemplateV1 {
                         weight: 1,
                         predecessor_id: None,
+                        builtin: None,
                         cells: vec![cell(1); cdda_protocol::WORLDGEN_CELLS_PER_OMT],
                         nested: Vec::new(),
                         area_items: Vec::new(),

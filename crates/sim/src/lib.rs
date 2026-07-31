@@ -4,6 +4,7 @@ mod cities;
 mod items;
 mod mapgen;
 mod overmap;
+mod rivers;
 mod roads;
 
 use std::cmp::Reverse;
@@ -74,9 +75,13 @@ use items::{
     item_temperature_timestamps_are_valid, plan_item_group_source,
     process_item_snapshot_temperature,
 };
+pub use rivers::{
+    OVERMAP_RIVER_IDS, OvermapRiverBoundary, OvermapRiverContinuation, OvermapRiverNode,
+    OvermapRiverSettings, place_overmap_rivers,
+};
 pub use roads::{
-    OVERMAP_ROAD_MASK_IDS, OvermapRoadBoundary, OvermapRoadExit, overmap_road_mst_edges,
-    place_overmap_roads,
+    OVERMAP_BRIDGE_IDS, OVERMAP_ROAD_MASK_IDS, OvermapRoadBoundary, OvermapRoadExit,
+    overmap_road_mst_edges, place_overmap_roads, place_overmap_roads_with_bridges,
 };
 
 /// Persistent stores reserve counters in blocks large enough for one admitted
@@ -13777,7 +13782,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV73");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV74");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13961,6 +13966,7 @@ mod tests {
                 }],
             },
             cities: Vec::new(),
+            rivers: Vec::new(),
             start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),
@@ -13971,6 +13977,7 @@ mod tests {
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {
                     weight: 1,
                     predecessor_id: None,
+                    builtin: None,
                     cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
@@ -29201,6 +29208,7 @@ mod tests {
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {
                     weight: 1,
                     predecessor_id: None,
+                    builtin: None,
                     cells: field_b_cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),

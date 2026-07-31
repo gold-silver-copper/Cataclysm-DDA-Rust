@@ -3,27 +3,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
     MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, OvermapTerrainMatchType,
-    OvermapTerrainRegistry, StartLocationDefinition, StrictMapgenAreaItemPlacement,
-    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenNeighborFlags,
-    StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
-    TerrainRegistry,
+    OvermapTerrainRegistry, RiverSettingsDefinition, StartLocationDefinition,
+    StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice, StrictMapgenDefinition,
+    StrictMapgenNeighborFlags, StrictMapgenNeighborMatch, StrictMapgenNestedPlacement,
+    StrictNestedMapgenDefinition, TerrainRegistry,
 };
 use cdda_protocol::{
-    ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenCatalogV1, WorldgenCellV1,
-    WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
+    ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
+    WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
     WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenNeighborConditionV1,
     WorldgenNestedChoiceV1, WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1,
     WorldgenNestedPlacementV1, WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1,
     WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
     WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1,
-    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
-    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
+    WorldgenRiverNodeV1, WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1,
+    WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
+    worldgen_omt_matches,
 };
 use cdda_sim::{
-    OVERMAP_ROAD_MASK_IDS, OvermapCitySettings, OvermapRoadExit, place_overmap_cities,
-    place_overmap_roads,
+    OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
+    OvermapRiverSettings, OvermapRoadExit, place_overmap_cities, place_overmap_rivers,
+    place_overmap_roads_with_bridges,
 };
 
 use super::{furniture_tile, terrain_tile};
@@ -53,8 +55,16 @@ pub(super) fn bootstrap_regional_city_overmap(
     terrain: &OvermapTerrainRegistry,
     world_seed: [u8; 32],
     city_settings: &CitySettingsDefinition,
-) -> Result<(WorldgenOvermapLayoutV1, Vec<WorldgenCityV1>), Box<dyn std::error::Error>> {
-    let field = bootstrap_regional_field_overmap(terrain)?;
+    river_settings: &RiverSettingsDefinition,
+) -> Result<
+    (
+        WorldgenOvermapLayoutV1,
+        Vec<WorldgenCityV1>,
+        Vec<WorldgenRiverNodeV1>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (field, rivers) = bootstrap_regional_river_overmap(terrain, world_seed, river_settings)?;
     let source = terrain
         .get_identity("road_nesw")
         .ok_or("pinned overmap-terrain catalog is missing road_nesw")?;
@@ -65,7 +75,7 @@ pub(super) fn bootstrap_regional_city_overmap(
         generator_id: source.generator_id.clone(),
         rotation: source.rotation,
     };
-    place_overmap_cities(
+    let (layout, cities) = place_overmap_cities(
         world_seed,
         cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
         field,
@@ -76,6 +86,34 @@ pub(super) fn bootstrap_regional_city_overmap(
         ),
         "field",
         center,
+    )?;
+    Ok((layout, cities, rivers))
+}
+
+/// Production regional layout after major-river topology, bounded branches,
+/// and complete shore polishing. The returned nodes are canonical continuity
+/// data rather than transient generation scratch state.
+pub(super) fn bootstrap_regional_river_overmap(
+    terrain: &OvermapTerrainRegistry,
+    world_seed: [u8; 32],
+    settings: &RiverSettingsDefinition,
+) -> Result<(WorldgenOvermapLayoutV1, Vec<WorldgenRiverNodeV1>), Box<dyn std::error::Error>> {
+    let field = bootstrap_regional_field_overmap(terrain)?;
+    let identities = runtime_omt_identities(terrain, &OVERMAP_RIVER_IDS)?;
+    place_overmap_rivers(
+        world_seed,
+        cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        field,
+        OvermapRiverSettings {
+            river_scale: settings.river_scale,
+            river_frequency_millis: settings.river_frequency_millis,
+            branch_chance_millis: settings.branch_chance_millis,
+            branch_remerge_chance_millis: settings.branch_remerge_chance_millis,
+            branch_scale_decrease_millis: settings.branch_scale_decrease_millis,
+        },
+        &[],
+        0,
+        &identities,
     )
     .map_err(Into::into)
 }
@@ -84,6 +122,7 @@ pub(super) fn bootstrap_regional_city_overmap(
 type RegionalRoadOvermap = (
     WorldgenOvermapLayoutV1,
     Vec<WorldgenCityV1>,
+    Vec<WorldgenRiverNodeV1>,
     Vec<OvermapRoadExit>,
 );
 
@@ -91,10 +130,29 @@ pub(super) fn bootstrap_regional_road_overmap(
     terrain: &OvermapTerrainRegistry,
     world_seed: [u8; 32],
     city_settings: &CitySettingsDefinition,
+    river_settings: &RiverSettingsDefinition,
 ) -> Result<RegionalRoadOvermap, Box<dyn std::error::Error>> {
-    let (city_layout, cities) =
-        bootstrap_regional_city_overmap(terrain, world_seed, city_settings)?;
-    let road_identities = OVERMAP_ROAD_MASK_IDS
+    let (city_layout, cities, rivers) =
+        bootstrap_regional_city_overmap(terrain, world_seed, city_settings, river_settings)?;
+    let road_identities = runtime_omt_identities(terrain, &OVERMAP_ROAD_MASK_IDS)?;
+    let bridge_identities = runtime_omt_identities(terrain, &OVERMAP_BRIDGE_IDS)?;
+    let (layout, exits) = place_overmap_roads_with_bridges(
+        world_seed,
+        cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        city_layout,
+        &cities,
+        &[],
+        &road_identities,
+        &bridge_identities,
+    )?;
+    Ok((layout, cities, rivers, exits))
+}
+
+fn runtime_omt_identities(
+    terrain: &OvermapTerrainRegistry,
+    full_ids: &[&str],
+) -> Result<Vec<WorldgenOmtIdentityV1>, Box<dyn std::error::Error>> {
+    full_ids
         .iter()
         .map(|full_id| {
             let source = terrain
@@ -108,16 +166,7 @@ pub(super) fn bootstrap_regional_road_overmap(
                 rotation: source.rotation,
             })
         })
-        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-    let (layout, exits) = place_overmap_roads(
-        world_seed,
-        cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
-        city_layout,
-        &cities,
-        &[],
-        &road_identities,
-    )?;
-    Ok((layout, cities, exits))
+        .collect()
 }
 
 fn bootstrap_uniform_overmap(
@@ -158,6 +207,50 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub item_groups: &'a [ItemGroupDefinitionV1],
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeBuiltinMapgen {
+    Algorithm(WorldgenBuiltinMapgenV1),
+    UniformTerrain(&'static str),
+}
+
+fn runtime_builtin_mapgen(generator_id: &str) -> Option<RuntimeBuiltinMapgen> {
+    let algorithm = match generator_id {
+        "river" => WorldgenBuiltinMapgenV1::RiverStraight,
+        "river_ne" => WorldgenBuiltinMapgenV1::RiverCurved { rotation: 0 },
+        "river_se" => WorldgenBuiltinMapgenV1::RiverCurved { rotation: 1 },
+        "river_sw" => WorldgenBuiltinMapgenV1::RiverCurved { rotation: 2 },
+        "river_nw" => WorldgenBuiltinMapgenV1::RiverCurved { rotation: 3 },
+        "river_c_not_ne" => WorldgenBuiltinMapgenV1::RiverCurvedNot { rotation: 0 },
+        "river_c_not_se" => WorldgenBuiltinMapgenV1::RiverCurvedNot { rotation: 1 },
+        "river_c_not_sw" => WorldgenBuiltinMapgenV1::RiverCurvedNot { rotation: 2 },
+        "river_c_not_nw" => WorldgenBuiltinMapgenV1::RiverCurvedNot { rotation: 3 },
+        "forest_water" => WorldgenBuiltinMapgenV1::ForestWater,
+        "river_center" => return Some(RuntimeBuiltinMapgen::UniformTerrain("t_water_moving_dp")),
+        _ => return None,
+    };
+    Some(RuntimeBuiltinMapgen::Algorithm(algorithm))
+}
+
+fn builtin_terrain_ids(builtin: RuntimeBuiltinMapgen) -> &'static [&'static str] {
+    match builtin {
+        RuntimeBuiltinMapgen::UniformTerrain(id) => match id {
+            "t_water_moving_dp" => &["t_water_moving_dp"],
+            _ => &[],
+        },
+        RuntimeBuiltinMapgen::Algorithm(WorldgenBuiltinMapgenV1::ForestWater) => {
+            &["t_water_dp", "t_water_murky", "t_water_sh"]
+        }
+        RuntimeBuiltinMapgen::Algorithm(_) => &[
+            "t_clay",
+            "t_dirt",
+            "t_grass",
+            "t_sand",
+            "t_water_moving_dp",
+            "t_water_moving_sh",
+        ],
+    }
+}
+
 /// Exact named item-group roots referenced by every mapgen template reachable
 /// from this overmap, including predecessor and nested-mapgen closures. This
 /// keeps production admission driven by the selected world rather than by a
@@ -174,6 +267,9 @@ pub(super) fn runtime_mapgen_item_group_roots(
     loop {
         let mut predecessors = BTreeSet::new();
         for generator_id in &generator_ids {
+            if runtime_builtin_mapgen(generator_id).is_some() {
+                continue;
+            }
             let definitions = mapgen.get(generator_id).ok_or_else(|| {
                 format!("pinned mapgen {generator_id} is unavailable while collecting item groups")
             })?;
@@ -191,6 +287,9 @@ pub(super) fn runtime_mapgen_item_group_roots(
     }
     let mut roots = BTreeSet::new();
     for generator_id in generator_ids {
+        if runtime_builtin_mapgen(&generator_id).is_some() {
+            continue;
+        }
         let definitions = mapgen
             .get(&generator_id)
             .ok_or_else(|| format!("pinned mapgen {generator_id} disappeared"))?;
@@ -237,6 +336,7 @@ pub(super) fn runtime_mapgen_item_group_roots(
 pub(super) fn runtime_mapgen_worldgen(
     overmap: WorldgenOvermapLayoutV1,
     cities: Vec<WorldgenCityV1>,
+    rivers: Vec<WorldgenRiverNodeV1>,
     start_location: &StartLocationDefinition,
     content: RuntimeMapgenContent<'_>,
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
@@ -288,6 +388,9 @@ pub(super) fn runtime_mapgen_worldgen(
     loop {
         let mut predecessors = BTreeSet::new();
         for omt_id in &generator_ids {
+            if runtime_builtin_mapgen(omt_id).is_some() {
+                continue;
+            }
             let variants = mapgen.get(omt_id).ok_or_else(|| {
                 let reason = mapgen
                     .unavailable_reports(omt_id)
@@ -310,6 +413,7 @@ pub(super) fn runtime_mapgen_worldgen(
     }
     let definitions = generator_ids
         .iter()
+        .filter(|omt_id| runtime_builtin_mapgen(omt_id).is_none())
         .map(|omt_id| {
             let definitions = mapgen.get(omt_id).ok_or_else(|| {
                 let reason = mapgen
@@ -341,6 +445,31 @@ pub(super) fn runtime_mapgen_worldgen(
     let mut furniture_ids = BTreeSet::new();
     let mut regional_terrain_ids = BTreeSet::new();
     let mut regional_furniture_ids = BTreeSet::new();
+    for builtin in generator_ids
+        .iter()
+        .filter_map(|generator_id| runtime_builtin_mapgen(generator_id))
+    {
+        if matches!(
+            builtin,
+            RuntimeBuiltinMapgen::Algorithm(WorldgenBuiltinMapgenV1::ForestWater)
+        ) {
+            collect_runtime_terrain_choice(
+                &MapgenIdChoice::Fixed(String::from("t_region_groundcover_swamp")),
+                regions,
+                terrain,
+                &mut terrain_ids,
+                &mut regional_terrain_ids,
+            )?;
+        }
+        for terrain_id in builtin_terrain_ids(builtin) {
+            if terrain.get(terrain_id).is_none() {
+                return Err(
+                    format!("builtin mapgen references missing terrain {terrain_id}").into(),
+                );
+            }
+            terrain_ids.insert((*terrain_id).to_owned());
+        }
+    }
     for (omt_id, variants) in &definitions {
         for definition in *variants {
             if matches!(definition.fill_terrain, Some(MapgenIdChoice::Weighted(_))) {
@@ -507,7 +636,7 @@ pub(super) fn runtime_mapgen_worldgen(
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
 
-    let omt_generators = definitions
+    let mut omt_generators = definitions
         .iter()
         .map(|(omt_id, definitions)| {
             Ok(WorldgenOmtGeneratorV1 {
@@ -556,10 +685,23 @@ pub(super) fn runtime_mapgen_worldgen(
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    omt_generators.extend(
+        generator_ids
+            .iter()
+            .filter_map(|generator_id| {
+                runtime_builtin_mapgen(generator_id).map(|builtin| (generator_id.as_str(), builtin))
+            })
+            .map(|(generator_id, builtin)| {
+                runtime_builtin_generator(generator_id, builtin, &terrain_indices)
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+    );
+    omt_generators.sort_by(|left, right| left.omt_id.cmp(&right.omt_id));
     let catalog = WorldgenCatalogV1 {
         generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
         overmap,
         cities,
+        rivers,
         start_location: Some(start_location),
         terrain_prototypes,
         furniture_prototypes,
@@ -619,6 +761,52 @@ pub(super) fn runtime_mapgen_worldgen(
         .into());
     }
     Ok(catalog)
+}
+
+fn runtime_builtin_generator(
+    generator_id: &str,
+    builtin: RuntimeBuiltinMapgen,
+    terrain_indices: &BTreeMap<String, u16>,
+) -> Result<WorldgenOmtGeneratorV1, Box<dyn std::error::Error>> {
+    let (builtin, cells) = match builtin {
+        RuntimeBuiltinMapgen::Algorithm(builtin) => (Some(builtin), Vec::new()),
+        RuntimeBuiltinMapgen::UniformTerrain(terrain_id) => {
+            let prototype = *terrain_indices
+                .get(terrain_id)
+                .ok_or("builtin terrain disappeared from prototype closure")?;
+            let cell = WorldgenCellV1 {
+                terrain: vec![vec![WorldgenWeightedTerrainTargetV1 {
+                    target: WorldgenTerrainTargetV1::Prototype(prototype),
+                    weight: 1,
+                }]],
+                furniture: vec![vec![WorldgenWeightedFurnitureTargetV1 {
+                    target: WorldgenFurnitureTargetV1::None,
+                    weight: 1,
+                }]],
+                item_group: None,
+            };
+            (None, vec![cell; cdda_protocol::WORLDGEN_CELLS_PER_OMT])
+        }
+    };
+    let deferred_fields = if builtin == Some(WorldgenBuiltinMapgenV1::ForestWater) {
+        vec![String::from("forest_components")]
+    } else {
+        Vec::new()
+    };
+    Ok(WorldgenOmtGeneratorV1 {
+        omt_id: generator_id.to_owned(),
+        templates: vec![WorldgenTemplateV1 {
+            weight: 1_000,
+            predecessor_id: None,
+            builtin,
+            cells,
+            nested: Vec::new(),
+            area_items: Vec::new(),
+            erase_all_before_placing_terrain: false,
+            deferred_fields,
+        }],
+        nested_generators: Vec::new(),
+    })
 }
 
 fn collect_runtime_terrain_choice(
@@ -793,6 +981,7 @@ fn runtime_mapgen_template(
     Ok(WorldgenTemplateV1 {
         weight: definition.weight,
         predecessor_id: definition.fallback_predecessor_mapgen.clone(),
+        builtin: None,
         cells: runtime_mapgen_cells(
             &definition.source,
             &definition.cells,
@@ -1164,9 +1353,10 @@ mod tests {
     use std::path::Path;
 
     use cdda_content::{
-        CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
+        CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_RIVER_SETTINGS_ID,
         DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemGroupRegistry,
-        MapgenRegistry, ModCatalog, OvermapTerrainRegistry, StartLocationRegistry, TerrainRegistry,
+        MapgenRegistry, ModCatalog, OvermapTerrainRegistry, RiverSettingsRegistry,
+        StartLocationRegistry, TerrainRegistry,
     };
     use cdda_protocol::{
         ItemGroupDefinitionV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupNodeV1, WorldPosition,
@@ -1216,12 +1406,17 @@ mod tests {
             .expect("overmap terrain");
         let settings = CitySettingsRegistry::load_selected(&manifest, root, &mods, &enabled)
             .expect("city settings");
-        let (layout, cities, exits) = bootstrap_regional_road_overmap(
+        let river_settings = RiverSettingsRegistry::load_selected(&manifest, root, &mods, &enabled)
+            .expect("river settings");
+        let (layout, cities, rivers, exits) = bootstrap_regional_road_overmap(
             &overmap,
             [37; 32],
             settings
                 .get(DEFAULT_CITY_SETTINGS_ID)
                 .expect("default city settings"),
+            river_settings
+                .get(DEFAULT_RIVER_SETTINGS_ID)
+                .expect("default river settings"),
         )
         .expect("city overmap");
         assert!(!cities.is_empty());
@@ -1277,6 +1472,7 @@ mod tests {
         let catalog = runtime_mapgen_worldgen(
             layout,
             cities,
+            rivers,
             starts.get("sloc_field").expect("field start"),
             RuntimeMapgenContent {
                 mapgen: &mapgen,

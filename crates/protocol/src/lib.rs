@@ -54,7 +54,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 97;
+pub const PROTOCOL_VERSION: u16 = 98;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -165,6 +165,7 @@ pub const MAX_WORLDGEN_ID_BYTES: usize = 512;
 pub const MAX_WORLDGEN_START_TARGETS: usize = 256;
 pub const MAX_WORLDGEN_CITIES: usize = 4_096;
 pub const MAX_WORLDGEN_CITY_SIZE: u8 = 55;
+pub const MAX_WORLDGEN_RIVER_NODES: usize = 64;
 /// Pinned overmaps own 180x180 overmap-terrain coordinates per z-level.
 pub const WORLDGEN_OVERMAP_WIDTH: u16 = 180;
 pub const WORLDGEN_OVERMAP_HEIGHT: u16 = 180;
@@ -2901,11 +2902,34 @@ pub struct WorldgenCellV1 {
     pub item_group: Option<WorldgenItemGroupPlacementV1>,
 }
 
+/// Bounded pinned mapgen algorithms whose random choices cannot be expressed
+/// as independent JSON cell layers. The discriminant is canonical world data;
+/// unsupported upstream built-ins never enter a runtime catalog.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenBuiltinMapgenV1 {
+    RiverStraight,
+    RiverCurved { rotation: u8 },
+    RiverCurvedNot { rotation: u8 },
+    ForestWater,
+}
+
+impl WorldgenBuiltinMapgenV1 {
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        match self {
+            Self::RiverStraight | Self::ForestWater => true,
+            Self::RiverCurved { rotation } | Self::RiverCurvedNot { rotation } => rotation < 4,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenTemplateV1 {
     pub weight: u32,
     /// Optional ordinary mapgen run before this overlay.
     pub predecessor_id: Option<String>,
+    /// Exact bounded algorithm used instead of independent cell layers.
+    pub builtin: Option<WorldgenBuiltinMapgenV1>,
     /// Exactly 576 row-major cells: one 24x24 OMT or four 12x12 submaps.
     /// Empty target vectors are explicit overlay no-ops.
     pub cells: Vec<WorldgenCellV1>,
@@ -3001,6 +3025,19 @@ pub struct WorldgenCityV1 {
     pub size: u8,
 }
 
+/// One retained river curve. Major nodes carry cross-overmap endpoint and
+/// tangent continuity; bounded branch nodes make the generated topology fully
+/// reproducible without consulting mutable neighboring worlds.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenRiverNodeV1 {
+    pub start: ChunkCoord,
+    pub end: ChunkCoord,
+    pub control_start: ChunkCoord,
+    pub control_end: ChunkCoord,
+    pub size: u32,
+    pub major: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenI32IntervalV1 {
     pub minimum: i32,
@@ -3091,6 +3128,9 @@ pub struct WorldgenCatalogV1 {
     /// Stable placement-order city seeds retained with their authoritative
     /// center and radius. Strictly sorted by `city_id`.
     pub cities: Vec<WorldgenCityV1>,
+    /// Deterministic placement-order river curves retained for adjacent-map
+    /// continuity and recovery.
+    pub rivers: Vec<WorldgenRiverNodeV1>,
     /// Server-authoritative spawn selector for new characters.
     pub start_location: Option<WorldgenStartLocationV1>,
     /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
@@ -4359,6 +4399,46 @@ fn valid_worldgen_cities(layout: &WorldgenOvermapLayoutV1, cities: &[WorldgenCit
     })
 }
 
+fn valid_worldgen_rivers(layout: &WorldgenOvermapLayoutV1, rivers: &[WorldgenRiverNodeV1]) -> bool {
+    if rivers.len() > MAX_WORLDGEN_RIVER_NODES {
+        return false;
+    }
+    let Some(maximum_x) = layout
+        .origin_x
+        .checked_add(i32::from(WORLDGEN_OVERMAP_WIDTH) - 1)
+    else {
+        return false;
+    };
+    let Some(maximum_y) = layout
+        .origin_y
+        .checked_add(i32::from(WORLDGEN_OVERMAP_HEIGHT) - 1)
+    else {
+        return false;
+    };
+    let inside = |point: ChunkCoord| {
+        point.z == 0
+            && (layout.origin_x..=maximum_x).contains(&point.x)
+            && (layout.origin_y..=maximum_y).contains(&point.y)
+    };
+    let boundary = |point: ChunkCoord| {
+        point.x == layout.origin_x
+            || point.x == maximum_x
+            || point.y == layout.origin_y
+            || point.y == maximum_y
+    };
+    rivers.iter().all(|river| {
+        river.size > 0
+            && usize::try_from(river.size).is_ok_and(|size| {
+                size <= usize::from(WORLDGEN_OVERMAP_WIDTH) * usize::from(WORLDGEN_OVERMAP_HEIGHT)
+            })
+            && inside(river.start)
+            && inside(river.end)
+            && inside(river.control_start)
+            && inside(river.control_end)
+            && (!river.major || boundary(river.start) && boundary(river.end))
+    })
+}
+
 fn valid_worldgen_overmap_layout(layout: &WorldgenOvermapLayoutV1) -> Option<BTreeSet<u16>> {
     if layout.identities.is_empty()
         || layout.identities.len() > MAX_WORLDGEN_OMT_IDENTITIES
@@ -4616,7 +4696,7 @@ fn valid_worldgen_deferred_fields(fields: &[String]) -> bool {
         && fields.iter().all(|field| {
             matches!(
                 field.as_str(),
-                "place_monsters" | "place_vehicles" | "signage_text"
+                "forest_components" | "place_monsters" | "place_vehicles" | "signage_text"
             )
         })
 }
@@ -4655,6 +4735,42 @@ fn valid_worldgen_cell_shape(cell: &WorldgenCellV1, catalog: &WorldgenCatalogV1)
             .item_group
             .as_ref()
             .is_none_or(valid_worldgen_item_placement)
+}
+
+fn valid_worldgen_builtin_mapgen(
+    builtin: WorldgenBuiltinMapgenV1,
+    catalog: &WorldgenCatalogV1,
+) -> bool {
+    let (terrain_ids, regional_id): (&[&str], Option<&str>) = match builtin {
+        WorldgenBuiltinMapgenV1::ForestWater => (
+            &["t_water_dp", "t_water_murky", "t_water_sh"],
+            Some("t_region_groundcover_swamp"),
+        ),
+        _ => (
+            &[
+                "t_clay",
+                "t_dirt",
+                "t_grass",
+                "t_sand",
+                "t_water_moving_dp",
+                "t_water_moving_sh",
+            ],
+            None,
+        ),
+    };
+    builtin.is_valid()
+        && terrain_ids.into_iter().all(|terrain_id| {
+            catalog
+                .terrain_prototypes
+                .binary_search_by(|terrain| terrain.terrain_id.as_str().cmp(terrain_id))
+                .is_ok()
+        })
+        && regional_id.is_none_or(|regional_id| {
+            catalog
+                .regional_terrain
+                .binary_search_by(|table| table.regional_id.as_str().cmp(regional_id))
+                .is_ok()
+        })
 }
 
 fn valid_worldgen_area_item_placement(placement: &WorldgenAreaItemPlacementV1) -> bool {
@@ -4835,6 +4951,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
     };
     if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V2
         || !valid_worldgen_cities(&catalog.overmap, &catalog.cities)
+        || !valid_worldgen_rivers(&catalog.overmap, &catalog.rivers)
         || catalog.start_location.as_ref().is_some_and(|start| {
             !valid_worldgen_start_location(
                 start,
@@ -4936,13 +5053,32 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
             return false;
         }
         for template in &generator.templates {
-            if template.cells.len() != WORLDGEN_CELLS_PER_OMT
+            let valid_body = match template.builtin {
+                Some(builtin) => {
+                    valid_worldgen_builtin_mapgen(builtin, catalog)
+                        && template.cells.is_empty()
+                        && template.predecessor_id.is_none()
+                        && template.nested.is_empty()
+                        && template.area_items.is_empty()
+                        && !template.erase_all_before_placing_terrain
+                        && match builtin {
+                            WorldgenBuiltinMapgenV1::ForestWater => {
+                                template.deferred_fields == ["forest_components"]
+                            }
+                            _ => template.deferred_fields.is_empty(),
+                        }
+                }
+                None => {
+                    template.cells.len() == WORLDGEN_CELLS_PER_OMT
+                        && (template.predecessor_id.is_some()
+                            || template.cells.iter().all(|cell| !cell.terrain.is_empty()))
+                }
+            };
+            if !valid_body
                 || template
                     .predecessor_id
                     .as_ref()
                     .is_some_and(|id| !valid_worldgen_id(id))
-                || (template.predecessor_id.is_none()
-                    && template.cells.iter().any(|cell| cell.terrain.is_empty()))
                 || template.nested.len() > MAX_WORLDGEN_NESTED_PLACEMENTS_PER_TEMPLATE
                 || !template
                     .nested
@@ -7098,6 +7234,7 @@ mod tests {
                 }],
             },
             cities: Vec::new(),
+            rivers: Vec::new(),
             start_location: Some(WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_field"),
                 targets: vec![WorldgenStartTargetV1 {
@@ -7156,6 +7293,7 @@ mod tests {
                 templates: vec![WorldgenTemplateV1 {
                     weight: 1_000,
                     predecessor_id: None,
+                    builtin: None,
                     cells,
                     nested: Vec::new(),
                     area_items: Vec::new(),
