@@ -898,6 +898,23 @@ at `costume_accessories`, where `leg_sheath6` requires generalized multi-pocket
 wrapper insertion. No runtime denominator credit is claimed before the field is
 generated, explored, looted, persisted, and client-accessible.
 
+Protocol 96/schema 74/CanonicalStateV72 complete deterministic production city
+placement while retaining replay format 3 and CanonicalEventsV18. The selected
+`region_settings_city` registry admits the pinned `default` and `no_cities`
+settings with strict overlay inheritance and fail-closed unknown semantics. A
+focused simulation engine derives the pinned 9/10 default center count, bounded
+sizes, spacing, megacity/no-city branches, dense stable IDs, and immutable
+center metadata from the persistent world seed. Exact upstream default settings,
+count/size bounds, and representative city-distance traces are compared directly
+with the C++ oracle. City-aware starts use retained size and edge-distance
+intervals under server authority. Production worlds paint stable `road_nesw`
+center identities but deliberately generate their documented `field` predecessor
+until the generalized road family owns connected road mapgen. The production
+scenario preserves the heterogeneous city-backed field through direct,
+snapshot, SQLite, portable replay, and real-Iroh two-client exploration and
+restart. Roads are the next dependency boundary; rivers, specials, and spawning
+remain closed.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results
@@ -1211,7 +1228,8 @@ that are generated, authoritatively interacted with, persisted,
 client-accessible, and four-mode verified earn the corresponding points; loaded
 JSON alone earns none. The denominator is independently derived from the pinned
 manifest and split between core-DDA ordinary gameplay (13,865 definitions,
-263,435 possible weighted points; currently 44, or 0.0167%) and selectable
+263,435 possible weighted points; currently 50 generated definitions and 305
+weighted points, or 0.1158%) and selectable
 bundled mods (5,967 definitions, 113,373 possible points; currently zero).
 The mod target is the union of nonobsolete pinned mods that can participate in
 at least one valid new-world selection; mutually exclusive configurations still

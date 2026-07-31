@@ -1,6 +1,7 @@
 //! Pinned upstream content identity and provenance primitives.
 
 mod bash;
+mod city;
 mod construction;
 mod field;
 mod furniture;
@@ -21,6 +22,10 @@ mod terrain;
 pub use bash::{
     BASH_MULTIPLIER_SCALE, BashDamageProfileDefinition, BashDamageProfileRegistry,
     BashDamageProfileRegistryError, BashDefinition, BashFieldEffectDefinition, BashItemGroupSource,
+};
+pub use city::{
+    CitySettingsDefinition, CitySettingsRegistry, CitySettingsRegistryError,
+    DEFAULT_CITY_SETTINGS_ID, MAX_CITY_SETTINGS, MAX_UPSTREAM_CITY_SIZE, MAX_UPSTREAM_CITY_SPACING,
 };
 pub use construction::{
     ConstructionDefinition, ConstructionGroupDefinition, ConstructionRegistry,

@@ -1,10 +1,10 @@
 {
   "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "green_parent_commit": "40037fbb1db9eaac8d4889b811d29f8c00380e6b",
-  "verified_commit": "38ff729d97e073473bb26b4a9b8b28ac573ed29a",
-  "protocol_version": 95,
-  "persistence_schema_version": 73,
+  "green_parent_commit": "38ff729d97e073473bb26b4a9b8b28ac573ed29a",
+  "verified_commit": null,
+  "protocol_version": 96,
+  "persistence_schema_version": 74,
   "replay_format_version": 3,
   "evidence_weights": {
     "generated": 1,
@@ -59,7 +59,7 @@
       ],
       "target_definitions": 13865,
       "maximum_weighted_points": 263435,
-      "earned_weighted_points": 286,
+      "earned_weighted_points": 305,
       "evidence_paths": ["docs/content-schema-inventory.json", "vendor/cdda-content-manifest.json"]
     }
   ],
@@ -99,6 +99,18 @@
       "weighted_points": 19,
       "ordinary_gameplay_loops": ["create two persistent characters at the production field start and retain both across disconnect, recovery, and replay"],
       "evidence_paths": ["crates/content/src/start_location.rs", "crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"]
+    },
+    {
+      "id": "overmap-city-placement",
+      "target_scope": "core-dda-ordinary-gameplay",
+      "generated_definitions": 1,
+      "authoritatively_interacted_definitions": 1,
+      "persisted_definitions": 1,
+      "client_accessible_definitions": 1,
+      "four_mode_definitions": 1,
+      "weighted_points": 19,
+      "ordinary_gameplay_loops": ["create the production world from pinned default city settings, retain deterministic city centers and stable IDs, explore the resulting heterogeneous field with two Iroh-authenticated clients, disconnect, recover from SQLite, and replay portably"],
+      "evidence_paths": ["crates/content/src/city.rs", "crates/sim/src/cities.rs", "crates/server/src/worldgen.rs", "crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"]
     },
     {
       "id": "regional-field-loot",

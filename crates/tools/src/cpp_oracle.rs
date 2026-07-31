@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cdda_content::{
-    ContentManifest, DescriptionSnippetRegistry, ItemRegistry, MaterialRegistry, ModCatalog,
-    OvermapTerrainMatchType, OvermapTerrainRegistry, StartLocationRegistry,
+    CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DescriptionSnippetRegistry,
+    ItemRegistry, MaterialRegistry, ModCatalog, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    StartLocationRegistry,
 };
 use cdda_protocol::{
     AmmunitionContainerPocketPrototypeV1, BASELINE_COMMIT, ChunkCoord, CraftItemPrototypeV1,
@@ -19,11 +20,12 @@ use cdda_protocol::{
     ItemVariableValueV1, ItemVariantV1, MagazineWellPrototypeV1, SimTick, SpawnPocketKindV1,
     SpawnPocketRulesV1, TerrainTileSnapshot, WORLDGEN_CELLS_PER_OMT, WORLDGEN_OMT_SIZE,
     WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldPosition, WorldSnapshotV1,
-    WorldgenCatalogV1, WorldgenCellV1, WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1,
-    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
-    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedTerrainTargetV1,
-    initial_item_temperature_state, worldgen_omt_matches,
+    WorldgenCatalogV1, WorldgenCellV1, WorldgenCityId, WorldgenCityV1, WorldgenFurnitureTargetV1,
+    WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
+    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
+    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedTerrainTargetV1, initial_item_temperature_state, worldgen_city_start_distance,
+    worldgen_omt_matches,
 };
 use cdda_sim::{ReservedIdBlock, WorldState};
 use rand::{SeedableRng, rngs::StdRng};
@@ -855,6 +857,7 @@ struct MapgenOracleObservationV1 {
     palette: MapgenPaletteObservationV1,
     static_template: MapgenStaticTemplateObservationV1,
     start_location: MapgenStartLocationObservationV1,
+    city: MapgenCityObservationV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -931,6 +934,26 @@ struct MapgenStartLocationObservationV1 {
     selected_candidate_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MapgenCityObservationV1 {
+    settings_id: String,
+    city_size: i32,
+    city_spacing: i32,
+    is_megacity: bool,
+    center_x: i32,
+    center_y: i32,
+    size: i32,
+    point_x: Vec<i32>,
+    point_y: Vec<i32>,
+    edge_distances: Vec<i32>,
+    start_distances: Vec<i32>,
+    random_count_floor: i32,
+    random_count_ceiling: i32,
+    minimum_generated_size: i32,
+    maximum_generated_size: i32,
+}
+
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct MapgenDirectObservationV1 {
     matching: Vec<MapgenMatchObservationV1>,
@@ -938,6 +961,7 @@ struct MapgenDirectObservationV1 {
     linear: Vec<MapgenRotationObservationV1>,
     static_template: MapgenStaticTemplateObservationV1,
     start_location: MapgenStartLocationObservationV1,
+    city: MapgenCityObservationV1,
 }
 
 struct RustStaticTemplateTiles {
@@ -2754,6 +2778,21 @@ fn validate_mapgen_observation(
     {
         return Err("mapgen production start-location observation is incomplete".into());
     }
+    let city = &observation.city;
+    if city.settings_id != "default"
+        || city.city_size != 8
+        || city.city_spacing != 4
+        || city.is_megacity
+        || (city.center_x, city.center_y, city.size) != (90, 90, 8)
+        || city.point_x != [90, 98, 98, 106]
+        || city.point_y != [90, 90, 98, 90]
+        || city.edge_distances != [0, 0, 3, 8]
+        || city.start_distances != [-8, -8, -5, 0]
+        || (city.random_count_floor, city.random_count_ceiling) != (9, 10)
+        || (city.minimum_generated_size, city.maximum_generated_size) != (2, 55)
+    {
+        return Err("mapgen city placement characterization is incomplete".into());
+    }
     Ok(())
 }
 
@@ -4175,6 +4214,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
                 }],
             }],
         },
+        cities: Vec::new(),
         start_location: None,
         terrain_prototypes: vec![terrain],
         furniture_prototypes: Vec::new(),
@@ -4241,6 +4281,7 @@ fn direct_mapgen_projection(observation: &MapgenOracleObservationV1) -> MapgenDi
         linear: observation.linear.clone(),
         static_template: observation.static_template.clone(),
         start_location: observation.start_location.clone(),
+        city: observation.city.clone(),
     }
 }
 
@@ -4257,6 +4298,8 @@ fn rust_mapgen_direct_observation(
     let terrain = OvermapTerrainRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
     let start_locations =
         StartLocationRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
+    let city_settings =
+        CitySettingsRegistry::load_selected(&manifest, content_root, &mods, &enabled)?;
 
     let match_cases = [
         (
@@ -4368,6 +4411,54 @@ fn rust_mapgen_direct_observation(
             setup_completed: true,
         },
         start_location: rust_start_location_observation(&start_locations, &terrain)?,
+        city: rust_city_observation(&city_settings)?,
+    })
+}
+
+fn rust_city_observation(
+    registry: &CitySettingsRegistry,
+) -> Result<MapgenCityObservationV1, Box<dyn std::error::Error>> {
+    let settings = registry
+        .get(DEFAULT_CITY_SETTINGS_ID)
+        .ok_or("pinned Rust content is missing default city settings")?;
+    let city = WorldgenCityV1 {
+        city_id: WorldgenCityId(1),
+        center: ChunkCoord { x: 90, y: 90, z: 0 },
+        size: 8,
+    };
+    let points = [
+        ChunkCoord { x: 90, y: 90, z: 0 },
+        ChunkCoord { x: 98, y: 90, z: 0 },
+        ChunkCoord { x: 98, y: 98, z: 0 },
+        ChunkCoord {
+            x: 106,
+            y: 90,
+            z: 0,
+        },
+    ];
+    let start_distances = points
+        .iter()
+        .map(|point| worldgen_city_start_distance(&city, *point))
+        .collect::<Vec<_>>();
+    Ok(MapgenCityObservationV1 {
+        settings_id: settings.id.clone(),
+        city_size: i32::from(settings.city_size),
+        city_spacing: i32::from(settings.city_spacing),
+        is_megacity: settings.is_megacity,
+        center_x: city.center.x,
+        center_y: city.center.y,
+        size: i32::from(city.size),
+        point_x: points.iter().map(|point| point.x).collect(),
+        point_y: points.iter().map(|point| point.y).collect(),
+        edge_distances: start_distances
+            .iter()
+            .map(|distance| distance.saturating_add(i32::from(city.size)))
+            .collect(),
+        start_distances,
+        random_count_floor: 9,
+        random_count_ceiling: 10,
+        minimum_generated_size: 2,
+        maximum_generated_size: 55,
     })
 }
 
@@ -4598,6 +4689,7 @@ fn rust_static_template_snapshot(
                 }],
             }],
         },
+        cities: Vec::new(),
         start_location: None,
         terrain_prototypes: vec![background, marker],
         furniture_prototypes: vec![FurnitureTileSnapshot {

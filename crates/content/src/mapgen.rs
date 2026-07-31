@@ -563,9 +563,33 @@ fn parse_root_weight(value: Option<&Value>) -> Result<u32, String> {
     let Some(value) = value else {
         return Ok(DEFAULT_MAPGEN_WEIGHT);
     };
-    let raw = value
-        .as_u64()
-        .ok_or_else(|| String::from("weight must be a positive integer"))?;
+    let raw = match value {
+        Value::Number(_) => value
+            .as_u64()
+            .ok_or_else(|| String::from("weight must be a positive integer"))?,
+        Value::Object(object)
+            if object.len() == 2
+                && object
+                    .get("global_val")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        !id.is_empty()
+                            && id.len() <= 512
+                            && id.chars().all(|character| !character.is_control())
+                    }) =>
+        {
+            object
+                .get("default")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| String::from("global weight default must be a positive integer"))?
+        }
+        Value::Object(_) => {
+            return Err(String::from(
+                "weight expression is unsupported without one global_val and integer default",
+            ));
+        }
+        _ => return Err(String::from("weight must be a positive integer")),
+    };
     let weight = u32::try_from(raw)
         .map_err(|_| format!("weight exceeds strict bound {MAX_MAPGEN_WEIGHT}"))?;
     if weight == 0 || weight > MAX_MAPGEN_WEIGHT {
@@ -1211,6 +1235,24 @@ mod tests {
         assert_eq!(
             parse_binding_key(combined, "terrain", "fixture").expect("combined binding"),
             combined
+        );
+    }
+
+    #[test]
+    fn root_weights_admit_static_global_defaults_and_reject_dynamic_math() {
+        assert_eq!(
+            parse_root_weight(Some(&serde_json::json!({
+                "global_val": "vanilla_road_weight",
+                "default": 1000
+            })))
+            .expect("static global default"),
+            1000
+        );
+        assert!(
+            parse_root_weight(Some(&serde_json::json!({
+                "math": ["time_since('cataclysm')"]
+            })))
+            .is_err()
         );
     }
 }

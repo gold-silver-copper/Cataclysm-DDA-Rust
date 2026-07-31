@@ -114,8 +114,15 @@ impl StartLocationDefinition {
     /// the canonical first-available selector already accepts outdoor tiles.
     #[must_use]
     pub fn is_runtime_selectable_without_cities(&self) -> bool {
-        !self.requires_city()
-            && self.allowed_z_levels.contains(0)
+        !self.requires_city() && self.is_runtime_selectable_with_cities()
+    }
+
+    /// All currently represented start-location semantics once authoritative
+    /// city center/size records are available. Map preparation parameters and
+    /// nonzero-only z ranges remain explicit blockers.
+    #[must_use]
+    pub fn is_runtime_selectable_with_cities(&self) -> bool {
+        self.allowed_z_levels.contains(0)
             && self.flags.iter().all(|flag| flag == "ALLOW_OUTSIDE")
             && self
                 .targets

@@ -1,19 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, MapgenIdChoice, MapgenRegistry,
-    OvermapTerrainMatchType, OvermapTerrainRegistry, StartLocationDefinition,
-    StrictMapgenDefinition, TerrainRegistry,
+    CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
+    MapgenIdChoice, MapgenRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    StartLocationDefinition, StrictMapgenDefinition, TerrainRegistry,
 };
 use cdda_protocol::{
-    ItemGroupDefinitionV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenFurniturePrototypeTargetV1,
-    WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenOmtGeneratorV1,
-    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
-    WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1,
-    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    ItemGroupDefinitionV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenCityV1,
+    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1,
+    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
+    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
+    WorldgenRegionalTerrainTableV1, WorldgenStartLocationV1, WorldgenStartTargetV1,
+    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
 };
+use cdda_sim::{OvermapCitySettings, place_overmap_cities};
 
 use super::{furniture_tile, terrain_tile};
 
@@ -33,6 +35,44 @@ pub(super) fn bootstrap_regional_field_overmap(
     terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenOvermapLayoutV1, Box<dyn std::error::Error>> {
     bootstrap_uniform_overmap(terrain, "field")
+}
+
+/// Production regional layout after the city-placement family. City seeds are
+/// deterministic world data; later roads/buildings expand from them without
+/// rerolling ownership or size.
+pub(super) fn bootstrap_regional_city_overmap(
+    terrain: &OvermapTerrainRegistry,
+    world_seed: [u8; 32],
+    city_settings: &CitySettingsDefinition,
+) -> Result<(WorldgenOvermapLayoutV1, Vec<WorldgenCityV1>), Box<dyn std::error::Error>> {
+    let field = bootstrap_regional_field_overmap(terrain)?;
+    let source = terrain
+        .get_identity("road_nesw")
+        .ok_or("pinned overmap-terrain catalog is missing road_nesw")?;
+    let center = WorldgenOmtIdentityV1 {
+        full_id: source.full_id.clone(),
+        type_id: source.type_id.clone(),
+        subtype_id: source.subtype_id.clone(),
+        // `place_cities` owns the road OMT identity, but its nested local-map
+        // construction belongs to the following roads family. Use the exact
+        // pinned `fallback_predecessor_mapgen` (`field`) until that family is
+        // admitted; no unsupported road collision or loot is fabricated.
+        generator_id: String::from("field"),
+        rotation: source.rotation,
+    };
+    place_overmap_cities(
+        world_seed,
+        cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        field,
+        OvermapCitySettings::core_default(
+            city_settings.city_size,
+            city_settings.city_spacing,
+            city_settings.is_megacity,
+        ),
+        "field",
+        center,
+    )
+    .map_err(Into::into)
 }
 
 fn bootstrap_uniform_overmap(
@@ -74,6 +114,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
 
 pub(super) fn runtime_mapgen_worldgen(
     overmap: WorldgenOvermapLayoutV1,
+    cities: Vec<WorldgenCityV1>,
     start_location: &StartLocationDefinition,
     content: RuntimeMapgenContent<'_>,
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
@@ -84,7 +125,7 @@ pub(super) fn runtime_mapgen_worldgen(
         furniture,
         item_groups,
     } = content;
-    if !start_location.is_runtime_selectable_without_cities() {
+    if !start_location.is_runtime_selectable_with_cities() {
         return Err(format!(
             "start location {} requires unsupported city, parameter, flag, or z-level semantics",
             start_location.id
@@ -107,6 +148,14 @@ pub(super) fn runtime_mapgen_worldgen(
                 },
             })
             .collect(),
+        city_sizes: cdda_protocol::WorldgenI32IntervalV1 {
+            minimum: start_location.city_sizes.minimum,
+            maximum: start_location.city_sizes.maximum,
+        },
+        city_distance: cdda_protocol::WorldgenI32IntervalV1 {
+            minimum: start_location.city_distance.minimum,
+            maximum: start_location.city_distance.maximum,
+        },
     };
     let generator_ids = overmap
         .identities
@@ -286,6 +335,7 @@ pub(super) fn runtime_mapgen_worldgen(
     let catalog = WorldgenCatalogV1 {
         generator_version: cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
         overmap,
+        cities,
         start_location: Some(start_location),
         terrain_prototypes,
         furniture_prototypes,
@@ -611,5 +661,69 @@ pub(super) fn runtime_mapgen_furniture_choice(
                 .collect::<Result<_, String>>()
                 .map_err(Into::into)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use cdda_content::{
+        CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, FurnitureRegistry,
+        ItemGroupRegistry, MapgenRegistry, ModCatalog, OvermapTerrainRegistry, TerrainRegistry,
+    };
+
+    use super::bootstrap_regional_city_overmap;
+
+    #[test]
+    fn pinned_city_center_family_reaches_production_content() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest_path = repository.join(cdda_content::DEFAULT_MANIFEST_PATH);
+        let manifest = ContentManifest::load(&manifest_path).expect("manifest");
+        let root = manifest_path.parent().expect("manifest parent");
+        let mods = ModCatalog::load(&manifest, root).expect("mods");
+        let enabled = mods.recommended_new_world().expect("recommended mods");
+        let terrain =
+            TerrainRegistry::load_selected(&manifest, root, &mods, &enabled).expect("terrain");
+        let furniture =
+            FurnitureRegistry::load_selected(&manifest, root, &mods, &enabled).expect("furniture");
+        let item_groups = ItemGroupRegistry::load_selected(&manifest, root, &mods, &enabled)
+            .expect("item groups");
+        let mapgen = MapgenRegistry::load_selected(
+            &manifest,
+            root,
+            &mods,
+            &enabled,
+            &terrain,
+            &furniture,
+            &item_groups,
+        )
+        .expect("mapgen");
+        let overmap = OvermapTerrainRegistry::load_selected(&manifest, root, &mods, &enabled)
+            .expect("overmap terrain");
+        let settings = CitySettingsRegistry::load_selected(&manifest, root, &mods, &enabled)
+            .expect("city settings");
+        let (layout, cities) = bootstrap_regional_city_overmap(
+            &overmap,
+            [37; 32],
+            settings
+                .get(DEFAULT_CITY_SETTINGS_ID)
+                .expect("default city settings"),
+        )
+        .expect("city overmap");
+        assert!(!cities.is_empty());
+        let center = layout
+            .identities
+            .iter()
+            .find(|identity| identity.full_id == "road_nesw")
+            .expect("city center identity");
+        assert_eq!(center.type_id, "road");
+        assert_eq!(center.subtype_id, "road_four_way");
+        assert!(
+            mapgen.get(&center.generator_id).is_some(),
+            "production city-center predecessor {:?} is blocked: {:?}",
+            center.generator_id,
+            mapgen.unavailable_reports(&center.generator_id)
+        );
     }
 }

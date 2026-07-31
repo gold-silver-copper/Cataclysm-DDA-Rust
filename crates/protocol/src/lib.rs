@@ -41,7 +41,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 95;
+pub const PROTOCOL_VERSION: u16 = 96;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -141,6 +141,8 @@ pub const MAX_WORLDGEN_CELL_CHOICES: usize = 32;
 pub const MAX_WORLDGEN_WEIGHTED_CELL_TARGETS: usize = 1_048_576;
 pub const MAX_WORLDGEN_ID_BYTES: usize = 512;
 pub const MAX_WORLDGEN_START_TARGETS: usize = 256;
+pub const MAX_WORLDGEN_CITIES: usize = 4_096;
+pub const MAX_WORLDGEN_CITY_SIZE: u8 = 55;
 /// Pinned overmaps own 180x180 overmap-terrain coordinates per z-level.
 pub const WORLDGEN_OVERMAP_WIDTH: u16 = 180;
 pub const WORLDGEN_OVERMAP_HEIGHT: u16 = 180;
@@ -2877,6 +2879,36 @@ pub struct WorldgenOvermapLayoutV1 {
     pub layers: Vec<WorldgenOvermapLayerV1>,
 }
 
+/// Stable immutable identity for a city seed inside one worldgen catalog.
+/// IDs are dense placement-order values beginning at one, independent of the
+/// runtime object allocator and therefore reproducible from the world seed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct WorldgenCityId(pub u32);
+
+/// One authoritative city seed placed by the pinned overmap family. The road
+/// family later expands from this center; city ownership and starts use the
+/// retained center and size without rediscovering them from terrain.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenCityV1 {
+    pub city_id: WorldgenCityId,
+    /// Absolute OMT coordinate in the catalog's coordinate-owned overmap.
+    pub center: ChunkCoord,
+    pub size: u8,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenI32IntervalV1 {
+    pub minimum: i32,
+    pub maximum: i32,
+}
+
+impl WorldgenI32IntervalV1 {
+    #[must_use]
+    pub const fn contains(self, value: i32) -> bool {
+        value >= self.minimum && value <= self.maximum
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum WorldgenOmtMatchTypeV1 {
     Exact,
@@ -2892,15 +2924,57 @@ pub struct WorldgenStartTargetV1 {
     pub match_type: WorldgenOmtMatchTypeV1,
 }
 
-/// One city-independent, parameter-free, map-preparation-free starting
-/// location admitted by the current runtime. Target order remains source order
-/// because upstream chooses one target uniformly before searching terrain.
-/// Runtime admission requires every retained target to match a coordinate in
-/// the durable initial bubble so character creation never generates terrain.
+/// One parameter-free, map-preparation-free starting location admitted by the
+/// current runtime. Target order remains source order for point-origin starts;
+/// city-origin starts retain upstream's city size and edge-distance filters.
+/// Runtime admission requires a matching coordinate in the durable initial
+/// bubble so character creation never generates terrain.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenStartLocationV1 {
     pub start_location_id: String,
     pub targets: Vec<WorldgenStartTargetV1>,
+    pub city_sizes: WorldgenI32IntervalV1,
+    pub city_distance: WorldgenI32IntervalV1,
+}
+
+impl WorldgenStartLocationV1 {
+    #[must_use]
+    pub const fn requires_city(&self) -> bool {
+        self.city_sizes.minimum > 0 || self.city_distance.maximum < WORLDGEN_OVERMAP_WIDTH as i32
+    }
+}
+
+/// Pinned `start_location::can_belong_to_city` distance projection. Upstream
+/// first clamps radial distance to the city edge, then subtracts city size a
+/// second time; negative inner-city values are therefore observable.
+#[must_use]
+pub fn worldgen_city_start_distance(city: &WorldgenCityV1, omt: ChunkCoord) -> i32 {
+    let dx = i64::from(omt.x) - i64::from(city.center.x);
+    let dy = i64::from(omt.y) - i64::from(city.center.y);
+    let squared = u64::try_from(dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)))
+        .unwrap_or(u64::MAX);
+    i32::try_from(integer_sqrt_u64(squared))
+        .unwrap_or(i32::MAX)
+        .saturating_sub(i32::from(city.size))
+        .max(0)
+        .saturating_sub(i32::from(city.size))
+}
+
+fn integer_sqrt_u64(value: u64) -> u64 {
+    if value < 2 {
+        return value;
+    }
+    let mut lower = 1_u64;
+    let mut upper = value.min(u64::from(u32::MAX)).saturating_add(1);
+    while lower + 1 < upper {
+        let middle = lower + (upper - lower) / 2;
+        if middle <= value / middle {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    lower
 }
 
 /// Immutable deterministic generation definitions retained by one world.
@@ -2909,6 +2983,9 @@ pub struct WorldgenCatalogV1 {
     pub generator_version: u16,
     /// Immutable coordinate-owned terrain selection retained with the world.
     pub overmap: WorldgenOvermapLayoutV1,
+    /// Stable placement-order city seeds retained with their authoritative
+    /// center and radius. Strictly sorted by `city_id`.
+    pub cities: Vec<WorldgenCityV1>,
     /// Server-authoritative spawn selector for new characters.
     pub start_location: Option<WorldgenStartLocationV1>,
     /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
@@ -4126,10 +4203,17 @@ fn valid_worldgen_start_location(
     start: &WorldgenStartLocationV1,
     used_surface_identities: &BTreeSet<u16>,
     identities: &[WorldgenOmtIdentityV1],
+    cities: &[WorldgenCityV1],
 ) -> bool {
     valid_worldgen_id(&start.start_location_id)
         && !start.targets.is_empty()
         && start.targets.len() <= MAX_WORLDGEN_START_TARGETS
+        && start.city_sizes.minimum <= start.city_sizes.maximum
+        && start.city_distance.minimum <= start.city_distance.maximum
+        && (!start.requires_city()
+            || cities
+                .iter()
+                .any(|city| start.city_sizes.contains(i32::from(city.size))))
         && start
             .targets
             .iter()
@@ -4141,6 +4225,33 @@ fn valid_worldgen_start_location(
                 })
             })
         })
+}
+
+fn valid_worldgen_cities(layout: &WorldgenOvermapLayoutV1, cities: &[WorldgenCityV1]) -> bool {
+    if cities.len() > MAX_WORLDGEN_CITIES {
+        return false;
+    }
+    let Some(maximum_x) = layout
+        .origin_x
+        .checked_add(i32::from(WORLDGEN_OVERMAP_WIDTH) - 1)
+    else {
+        return false;
+    };
+    let Some(maximum_y) = layout
+        .origin_y
+        .checked_add(i32::from(WORLDGEN_OVERMAP_HEIGHT) - 1)
+    else {
+        return false;
+    };
+    let mut centers = BTreeSet::new();
+    cities.iter().enumerate().all(|(index, city)| {
+        city.city_id.0 == u32::try_from(index + 1).unwrap_or(u32::MAX)
+            && (2..=MAX_WORLDGEN_CITY_SIZE).contains(&city.size)
+            && city.center.z == 0
+            && (layout.origin_x..=maximum_x).contains(&city.center.x)
+            && (layout.origin_y..=maximum_y).contains(&city.center.y)
+            && centers.insert(city.center)
+    })
 }
 
 fn valid_worldgen_overmap_layout(layout: &WorldgenOvermapLayoutV1) -> Option<BTreeSet<u16>> {
@@ -4417,11 +4528,13 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         return false;
     };
     if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V2
+        || !valid_worldgen_cities(&catalog.overmap, &catalog.cities)
         || catalog.start_location.as_ref().is_some_and(|start| {
             !valid_worldgen_start_location(
                 start,
                 &used_surface_identities,
                 &catalog.overmap.identities,
+                &catalog.cities,
             )
         })
         || catalog.terrain_prototypes.is_empty()
@@ -6505,12 +6618,21 @@ mod tests {
                     }],
                 }],
             },
+            cities: Vec::new(),
             start_location: Some(WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_field"),
                 targets: vec![WorldgenStartTargetV1 {
                     omt: String::from("field"),
                     match_type: WorldgenOmtMatchTypeV1::Type,
                 }],
+                city_sizes: WorldgenI32IntervalV1 {
+                    minimum: 0,
+                    maximum: i32::MAX,
+                },
+                city_distance: WorldgenI32IntervalV1 {
+                    minimum: 0,
+                    maximum: i32::MAX,
+                },
             }),
             terrain_prototypes: vec![
                 worldgen_test_terrain("t_floor"),
@@ -6558,6 +6680,44 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn city_identity_constraints_and_exact_start_distances_are_canonical() {
+        let city = WorldgenCityV1 {
+            city_id: WorldgenCityId(1),
+            center: ChunkCoord { x: 0, y: 0, z: 0 },
+            size: 8,
+        };
+        assert_eq!(worldgen_city_start_distance(&city, city.center), -8);
+        assert_eq!(
+            worldgen_city_start_distance(&city, ChunkCoord { x: 8, y: 0, z: 0 }),
+            -8
+        );
+        assert_eq!(
+            worldgen_city_start_distance(&city, ChunkCoord { x: 8, y: 8, z: 0 }),
+            -5
+        );
+        assert_eq!(
+            worldgen_city_start_distance(&city, ChunkCoord { x: 16, y: 0, z: 0 }),
+            0
+        );
+
+        let mut catalog = worldgen_test_catalog();
+        catalog.cities.push(city);
+        let start = catalog.start_location.as_mut().expect("start");
+        start.city_sizes = WorldgenI32IntervalV1 {
+            minimum: 8,
+            maximum: 8,
+        };
+        start.city_distance = WorldgenI32IntervalV1 {
+            minimum: -8,
+            maximum: -5,
+        };
+        assert!(worldgen_catalog_shape_is_valid(&catalog));
+
+        catalog.cities[0].city_id = WorldgenCityId(2);
+        assert!(!worldgen_catalog_shape_is_valid(&catalog));
     }
 
     #[test]

@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 95,
-  "persistence_schema_version": 73,
+  "protocol_version": 96,
+  "persistence_schema_version": 74,
   "replay_format_version": 3,
-  "active_milestone": "overmap-cities",
+  "active_milestone": "overmap-roads",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -93,6 +93,15 @@
       "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
       "four_mode_conformance": ["crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"],
       "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/regional_field_acceptance.rs"],
+      "authoritative_client_path": ["crates/server/src/regional_field_acceptance.rs", "crates/client/src/main.rs"]
+    },
+    {
+      "milestone_id": "overmap-cities",
+      "pinned_characterization": ["tools/cpp-oracle/mapgen_oracle_test.cpp", "docs/oracles/mapgen-static-semantics-v1.json"],
+      "generalized_rust_engine": ["crates/content/src/city.rs", "crates/sim/src/cities.rs", "crates/sim/src/overmap.rs"],
+      "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
+      "four_mode_conformance": ["crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"],
+      "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/main.rs"],
       "authoritative_client_path": ["crates/server/src/regional_field_acceptance.rs", "crates/client/src/main.rs"]
     }
   ],
@@ -204,20 +213,20 @@
     {
       "id": "overmap-cities",
       "title": "City placement and ownership",
-      "state": "in_progress",
+      "state": "complete",
       "priority": 8,
       "depends_on": ["regional-terrain-base"],
-      "upstream_sources": ["../Cataclysm-DDA/src/overmap.cpp"],
-      "rust_paths": ["crates/sim/src/overmap.rs", "crates/server/src/worldgen.rs"],
-      "scenario_families": ["seeded-city-centers", "city-size-and-spacing", "city-constrained-starts"],
-      "differential_oracle": "planned",
-      "multiplayer_adaptation": "Cities are generated once under world ownership and become immutable inputs to starts, roads, specials, and persistent map discovery.",
-      "unlocks": ["urban mapgen routing", "city-constrained starts", "NPC population anchors"]
+      "upstream_sources": ["../Cataclysm-DDA/src/city.cpp", "../Cataclysm-DDA/src/city.h", "../Cataclysm-DDA/src/regional_settings.cpp", "../Cataclysm-DDA/src/start_location.cpp", "../Cataclysm-DDA/src/overmap.cpp", "../Cataclysm-DDA/src/overmap_city.cpp"],
+      "rust_paths": ["crates/content/src/city.rs", "crates/content/src/start_location.rs", "crates/protocol/src/lib.rs", "crates/sim/src/cities.rs", "crates/sim/src/overmap.rs", "crates/sim/src/mapgen.rs", "crates/server/src/worldgen.rs", "crates/server/src/main.rs", "crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs", "crates/persistence/src/lib.rs", "crates/tools/src/cpp_oracle.rs"],
+      "scenario_families": ["pinned-default-density-and-size-bounds", "seeded-stable-city-centers", "city-spacing-and-center-road-identities", "no-cities-and-megacity-settings", "city-constrained-authoritative-starts", "direct-snapshot-sqlite-replay-city-catalog", "two-client-city-backed-field-recovery"],
+      "differential_oracle": "verified",
+      "multiplayer_adaptation": "The server generates city centers once from the persistent world seed, assigns dense stable city IDs, retains immutable center and size metadata, and uses it for authoritative starts and future road ownership; clients cannot reroll or submit city state.",
+      "unlocks": ["persistent city anchors", "city-constrained starts", "road-network generation substrate"]
     },
     {
       "id": "overmap-roads",
       "title": "Road network generation",
-      "state": "planned",
+      "state": "in_progress",
       "priority": 9,
       "depends_on": ["regional-terrain-base", "overmap-cities"],
       "upstream_sources": ["../Cataclysm-DDA/src/overmap.cpp"],

@@ -1,5 +1,6 @@
 //! Renderer-independent canonical simulation state.
 
+mod cities;
 mod items;
 mod mapgen;
 mod overmap;
@@ -54,6 +55,7 @@ use cdda_protocol::{
     ItemGroupTargetV1,
 };
 
+pub use cities::{OvermapCitySettings, place_overmap_cities};
 pub use items::{
     ItemGroupDefaultContainerMode, ItemGroupDefaultContainerProjection,
     ItemGroupDressingProjection, ItemGroupFlexibleWrapperProjection,
@@ -13766,7 +13768,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV71");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV72");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13895,6 +13897,13 @@ mod tests {
         }
     }
 
+    fn unbounded_worldgen_interval() -> cdda_protocol::WorldgenI32IntervalV1 {
+        cdda_protocol::WorldgenI32IntervalV1 {
+            minimum: 0,
+            maximum: i32::MAX,
+        }
+    }
+
     fn test_worldgen_catalog(
         terrain: TerrainTileSnapshot,
         item_group: Option<&str>,
@@ -13940,6 +13949,7 @@ mod tests {
                     }],
                 }],
             },
+            cities: Vec::new(),
             start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),
@@ -29177,6 +29187,8 @@ mod tests {
                 omt: String::from("field_b"),
                 match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Exact,
             }],
+            city_sizes: unbounded_worldgen_interval(),
+            city_distance: unbounded_worldgen_interval(),
         });
 
         let mut world = WorldState::new(71, [31; 32]);
@@ -29288,6 +29300,8 @@ mod tests {
                 omt: String::from("field_test"),
                 match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
             }],
+            city_sizes: unbounded_worldgen_interval(),
+            city_distance: unbounded_worldgen_interval(),
         });
         let mut world = WorldState::new(67, [29; 32]);
         world
@@ -29349,6 +29363,65 @@ mod tests {
             restored
                 .canonical_hash()
                 .expect("restored world should hash")
+        );
+    }
+
+    #[test]
+    fn city_constrained_start_uses_authoritative_size_and_distance() {
+        let mut catalog = test_worldgen_catalog(test_terrain("t_city_start"), None);
+        let city = cdda_protocol::WorldgenCityV1 {
+            city_id: cdda_protocol::WorldgenCityId(1),
+            center: ChunkCoord { x: 0, y: 0, z: 0 },
+            size: 8,
+        };
+        catalog.cities.push(city.clone());
+        catalog.start_location = Some(cdda_protocol::WorldgenStartLocationV1 {
+            start_location_id: String::from("sloc_city_field"),
+            targets: vec![cdda_protocol::WorldgenStartTargetV1 {
+                omt: String::from("field_test"),
+                match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
+            }],
+            city_sizes: cdda_protocol::WorldgenI32IntervalV1 {
+                minimum: 8,
+                maximum: 8,
+            },
+            city_distance: cdda_protocol::WorldgenI32IntervalV1 {
+                minimum: -8,
+                maximum: -5,
+            },
+        });
+        let mut world = WorldState::new(68, [30; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+            .expect("block should install");
+        world
+            .configure_worldgen(catalog)
+            .expect("city start worldgen should configure");
+        world
+            .generate_initial_bubble(WorldPosition { x: 0, y: 0, z: 0 })
+            .expect("city start bubble should generate");
+        let actor = world
+            .spawn_actor_first_available(true)
+            .expect("city-constrained survivor should spawn");
+        let position = world
+            .actor_snapshot(actor)
+            .expect("city survivor should exist")
+            .position;
+        let omt = ChunkCoord {
+            x: position.x.div_euclid(mapgen::OMT_TILE_WIDTH as i32),
+            y: position.y.div_euclid(mapgen::OMT_TILE_WIDTH as i32),
+            z: position.z,
+        };
+        assert!(
+            world
+                .worldgen
+                .as_ref()
+                .expect("catalog")
+                .start_location
+                .as_ref()
+                .expect("start")
+                .city_distance
+                .contains(cdda_protocol::worldgen_city_start_distance(&city, omt))
         );
     }
 
@@ -29448,6 +29521,8 @@ mod tests {
                 omt: String::from("field_remote"),
                 match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Exact,
             }],
+            city_sizes: unbounded_worldgen_interval(),
+            city_distance: unbounded_worldgen_interval(),
         });
 
         let mut type_catalog = catalog.clone();
@@ -29457,6 +29532,8 @@ mod tests {
                 omt: String::from("field"),
                 match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
             }],
+            city_sizes: unbounded_worldgen_interval(),
+            city_distance: unbounded_worldgen_interval(),
         });
         let mut remote_only = WorldState::new(83, [43; 32]);
         assert!(matches!(

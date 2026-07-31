@@ -11,8 +11,9 @@ use cdda_conformance::{
     ScenarioV1, run_scenario,
 };
 use cdda_content::{
-    DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, MapgenRegistry,
-    OvermapTerrainRegistry, StartLocationRegistry, StrictItemGroupGraph, TerrainRegistry,
+    CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
+    MapgenRegistry, OvermapTerrainRegistry, StartLocationRegistry, StrictItemGroupGraph,
+    TerrainRegistry,
 };
 use cdda_persistence::{ReplayBundleV1, WorldStore};
 use cdda_protocol::{
@@ -31,7 +32,7 @@ use iroh::{Endpoint, EndpointAddr, SecretKey, endpoint::presets};
 
 use super::item_groups::{RuntimeItemGroupContent, runtime_named_item_group_catalog};
 use super::worldgen::{
-    RuntimeMapgenContent, bootstrap_regional_field_overmap, runtime_mapgen_worldgen,
+    RuntimeMapgenContent, bootstrap_regional_city_overmap, runtime_mapgen_worldgen,
 };
 use super::{PendingJournal, flush_journal, record_simulation_output, utc_now_seconds};
 
@@ -645,6 +646,7 @@ pub(super) fn assert_production_regional_field_gameplay(
     item_group_content: RuntimeItemGroupContent<'_>,
     overmap_terrain: &OvermapTerrainRegistry,
     start_locations: &StartLocationRegistry,
+    city_settings: &CitySettingsDefinition,
     mapgen: &MapgenRegistry,
     regions: &DefaultRegionTerrainFurnitureRegistry,
     terrain: &TerrainRegistry,
@@ -653,9 +655,12 @@ pub(super) fn assert_production_regional_field_gameplay(
     let production_field_catalog =
         runtime_named_item_group_catalog(field_graph, item_group_content)
             .expect("production field catalog should normalize");
+    let (production_overmap, cities) =
+        bootstrap_regional_city_overmap(overmap_terrain, [31; 32], city_settings)
+            .expect("regional city overmap should normalize");
     let production_field_worldgen = runtime_mapgen_worldgen(
-        bootstrap_regional_field_overmap(overmap_terrain)
-            .expect("regional field overmap should normalize"),
+        production_overmap,
+        cities,
         start_locations
             .get("sloc_field")
             .expect("field start should exist"),
@@ -668,10 +673,21 @@ pub(super) fn assert_production_regional_field_gameplay(
         },
     )
     .expect("production regional field should normalize");
-    assert_eq!(
-        production_field_worldgen.overmap.identities[0].full_id,
-        "field"
+    assert!(
+        production_field_worldgen
+            .overmap
+            .identities
+            .iter()
+            .any(|identity| identity.full_id == "field")
     );
+    assert!(
+        production_field_worldgen
+            .overmap
+            .identities
+            .iter()
+            .any(|identity| identity.full_id == "road_nesw")
+    );
+    assert!(!production_field_worldgen.cities.is_empty());
     assert_eq!(
         production_field_worldgen
             .start_location
@@ -860,18 +876,18 @@ pub(super) fn assert_production_regional_field_gameplay(
         (direct_field.final_state_hash, direct_field.event_trace_hash),
         (
             [
-                0x1a, 0xc8, 0x03, 0xcf, 0x46, 0x56, 0x90, 0x81, 0x81, 0x76, 0x39, 0xf9, 0x39, 0xac,
-                0xaa, 0x18, 0x0e, 0x66, 0x28, 0x48, 0x7f, 0x00, 0xe8, 0x92, 0xa2, 0x18, 0x34, 0x39,
-                0xab, 0xa2, 0x1e, 0x97,
+                0x7b, 0xa9, 0x46, 0x89, 0x89, 0xab, 0x15, 0x9d, 0x59, 0xf2, 0x0f, 0x06, 0x51, 0x33,
+                0xc0, 0x8a, 0xa7, 0x96, 0xce, 0x3c, 0x55, 0xa4, 0x0d, 0x61, 0x1a, 0xee, 0x28, 0xad,
+                0x01, 0x79, 0x77, 0x78,
             ],
             [
-                0x40, 0xb0, 0x5c, 0x27, 0x8a, 0x6a, 0x6a, 0xf9, 0x05, 0x5e, 0x6d, 0xd9, 0xa3, 0xbc,
-                0x0a, 0xcf, 0x4e, 0x92, 0x0c, 0x9f, 0x69, 0x0f, 0x7e, 0x0b, 0x1e, 0xea, 0x9a, 0x67,
-                0x87, 0x26, 0xed, 0xa7,
+                0xf3, 0x0e, 0x04, 0x53, 0x11, 0xd9, 0x76, 0xb1, 0x28, 0xbb, 0x69, 0x6d, 0xd9, 0x71,
+                0x51, 0xed, 0xe4, 0xc8, 0xcc, 0x75, 0xf3, 0x56, 0x5d, 0xa9, 0x50, 0x3c, 0x3e, 0x0d,
+                0xbf, 0x5f, 0xf7, 0x0c,
             ],
         )
     );
-    assert_eq!(direct_field.final_snapshot.chunks.len(), 144);
+    assert_eq!(direct_field.final_snapshot.chunks.len(), 208);
     assert_eq!(direct_field.final_snapshot.actors.len(), 2);
     assert!(
         direct_field

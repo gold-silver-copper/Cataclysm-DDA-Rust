@@ -4,7 +4,8 @@ use cdda_protocol::{
     WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenTerrainTargetV1,
     WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
     WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
-    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
+    worldgen_city_start_distance, worldgen_omt_identity_at, worldgen_omt_matches,
+    worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -75,17 +76,35 @@ pub(super) fn catalog_initial_bubble_is_admissible(
             else {
                 return false;
             };
-            candidates.push(identity);
+            candidates.push((ChunkCoord { x, y, z: 0 }, identity));
         }
     }
     let Some(start) = catalog.start_location.as_ref() else {
         return true;
     };
-    start.targets.iter().all(|target| {
-        candidates
-            .iter()
-            .any(|identity| worldgen_omt_matches(&target.omt, target.match_type, identity))
-    })
+    if start.requires_city() {
+        catalog.cities.iter().any(|city| {
+            start.city_sizes.contains(i32::from(city.size))
+                && candidates.iter().any(|(omt, identity)| {
+                    let dx = i64::from(omt.x) - i64::from(city.center.x);
+                    let dy = i64::from(omt.y) - i64::from(city.center.y);
+                    if dx.abs() > i64::from(city.size) || dy.abs() > i64::from(city.size) {
+                        return false;
+                    }
+                    let edge_distance = worldgen_city_start_distance(city, *omt);
+                    start.city_distance.contains(edge_distance)
+                        && start.targets.iter().any(|target| {
+                            worldgen_omt_matches(&target.omt, target.match_type, identity)
+                        })
+                })
+        })
+    } else {
+        start.targets.iter().all(|target| {
+            candidates.iter().any(|(_omt, identity)| {
+                worldgen_omt_matches(&target.omt, target.match_type, identity)
+            })
+        })
+    }
 }
 
 pub(super) fn plan_active_bubble(

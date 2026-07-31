@@ -98,6 +98,23 @@
       "candidate_identity_ids": ["shelter_north", "lmoe_north", "road_ew", "forest_thick"],
       "matching_candidate_ids": ["lmoe_north"],
       "selected_candidate_id": "lmoe_north"
+    },
+    "city": {
+      "settings_id": "default",
+      "city_size": 8,
+      "city_spacing": 4,
+      "is_megacity": false,
+      "center_x": 90,
+      "center_y": 90,
+      "size": 8,
+      "point_x": [90, 98, 98, 106],
+      "point_y": [90, 90, 98, 90],
+      "edge_distances": [0, 0, 3, 8],
+      "start_distances": [-8, -8, -5, 0],
+      "random_count_floor": 9,
+      "random_count_ceiling": 10,
+      "minimum_generated_size": 2,
+      "maximum_generated_size": 55
     }
   }
 }

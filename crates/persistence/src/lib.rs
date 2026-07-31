@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 73;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 95
-/// added raw charge sentinels and explicit capacity ownership to item groups.
-/// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 73;
+pub const SCHEMA_VERSION: i64 = 74;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 96
+/// added city/start worldgen fields on top of Protocol 95 item-group capacity
+/// ownership. Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 74;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -6787,6 +6787,11 @@ mod tests {
                     }],
                 }],
             },
+            cities: vec![cdda_protocol::WorldgenCityV1 {
+                city_id: cdda_protocol::WorldgenCityId(1),
+                center: cdda_protocol::ChunkCoord { x: 0, y: 0, z: 0 },
+                size: 8,
+            }],
             start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),
@@ -6801,6 +6806,7 @@ mod tests {
             }],
         };
         let expected_overmap = catalog.overmap.clone();
+        let expected_cities = catalog.cities.clone();
         let mut world = WorldState::new(63, [19; 32]);
         world
             .install_reserved_block(block)
@@ -6833,6 +6839,14 @@ mod tests {
             expected_overmap
         );
         assert_eq!(
+            recovered_snapshot
+                .worldgen
+                .as_ref()
+                .expect("catalog should recover")
+                .cities,
+            expected_cities
+        );
+        assert_eq!(
             recovered.canonical_hash().expect("recovered hash"),
             expected_hash
         );
@@ -6847,6 +6861,15 @@ mod tests {
             .verify(&content)
             .expect("mapgen replay should verify");
         assert_eq!(replayed.snapshot().chunks.len(), 144);
+        assert_eq!(
+            replayed
+                .snapshot()
+                .worldgen
+                .as_ref()
+                .expect("catalog should replay")
+                .cities,
+            expected_cities
+        );
         assert_eq!(
             replayed.canonical_hash().expect("replayed hash"),
             expected_hash

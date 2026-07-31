@@ -1204,9 +1204,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x27, 0x39, 0xa4, 0x53, 0xfb, 0x70, 0x0b, 0x8f, 0x31, 0x18, 0xf6, 0x96, 0x31,
-                    0x92, 0x6f, 0x5e, 0xf0, 0xba, 0xad, 0x7a, 0xb5, 0xeb, 0x7c, 0x04, 0x34, 0xa8,
-                    0x2b, 0x37, 0x2e, 0x8a, 0xf5, 0xab,
+                    0x30, 0x90, 0x1c, 0x70, 0x61, 0x2b, 0x20, 0x59, 0xed, 0xa9, 0xe6, 0x8a, 0xe5,
+                    0xae, 0xe7, 0xfc, 0x38, 0x12, 0x58, 0xef, 0x6e, 0xba, 0xb4, 0x94, 0xad, 0x25,
+                    0xc6, 0xff, 0xd3, 0x27, 0x5e, 0xa9,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1331,12 +1331,25 @@ mod tests {
                     ],
                 }],
             },
+            cities: vec![cdda_protocol::WorldgenCityV1 {
+                city_id: cdda_protocol::WorldgenCityId(1),
+                center: cdda_protocol::ChunkCoord { x: 0, y: 0, z: 0 },
+                size: 8,
+            }],
             start_location: Some(cdda_protocol::WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_lmoe"),
                 targets: vec![cdda_protocol::WorldgenStartTargetV1 {
                     omt: String::from("lmoe"),
                     match_type: cdda_protocol::WorldgenOmtMatchTypeV1::Type,
                 }],
+                city_sizes: cdda_protocol::WorldgenI32IntervalV1 {
+                    minimum: 0,
+                    maximum: i32::MAX,
+                },
+                city_distance: cdda_protocol::WorldgenI32IntervalV1 {
+                    minimum: 0,
+                    maximum: i32::MAX,
+                },
             }),
             terrain_prototypes: vec![terrain("t_field"), terrain("t_lmoe_floor")],
             furniture_prototypes: Vec::new(),

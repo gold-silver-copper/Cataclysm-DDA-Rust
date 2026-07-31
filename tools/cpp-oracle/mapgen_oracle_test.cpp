@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cata_catch.h"
+#include "city.h"
 #include "json.h"
 #include "json_loader.h"
 #include "map.h"
@@ -14,6 +15,7 @@
 #include "omdata.h"
 #include "overmap.h"
 #include "point.h"
+#include "regional_settings.h"
 #include "start_location.h"
 #include "type_id.h"
 
@@ -187,6 +189,22 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
     const bool runtime_selectable_without_cities = !start.requires_city() &&
             constraints.allowed_z_levels.contains( 0 ) && start.flags().empty() &&
             chosen_target.parameters.empty();
+
+    const region_settings_city &default_city_settings = region_settings_city_id( "default" ).obj();
+    const city characterized_city( point_om_omt( 90, 90 ), 8 );
+    const std::vector<tripoint_om_omt> city_distance_points = {
+        tripoint_om_omt( 90, 90, 0 ),
+        tripoint_om_omt( 98, 90, 0 ),
+        tripoint_om_omt( 98, 98, 0 ),
+        tripoint_om_omt( 106, 90, 0 )
+    };
+    std::vector<int> city_edge_distances;
+    std::vector<int> start_city_distances;
+    for( const tripoint_om_omt &point : city_distance_points ) {
+        const int edge_distance = characterized_city.get_distance_from( point );
+        city_edge_distances.push_back( edge_distance );
+        start_city_distances.push_back( edge_distance - characterized_city.size );
+    }
 
     constexpr const char *palette_id_text = "rust_cpp_oracle_mapgen_palette_v1";
     JsonObject palette_json = json_loader::from_string( R"({
@@ -378,6 +396,25 @@ TEST_CASE( "rust_cpp_oracle_mapgen_static_semantics", "[cpp-oracle][mapgen]" )
         json.member( "candidate_identity_ids", candidate_identity_ids );
         json.member( "matching_candidate_ids", matching_candidate_ids );
         json.member( "selected_candidate_id", matching_candidate_ids.front() );
+        json.end_object();
+
+        json.member( "city" );
+        json.start_object();
+        json.member( "settings_id", default_city_settings.id.str() );
+        json.member( "city_size", default_city_settings.city_size );
+        json.member( "city_spacing", default_city_settings.city_spacing );
+        json.member( "is_megacity", default_city_settings.is_megacity );
+        json.member( "center_x", characterized_city.pos.x() );
+        json.member( "center_y", characterized_city.pos.y() );
+        json.member( "size", characterized_city.size );
+        json.member( "point_x", std::vector<int> { 90, 98, 98, 106 } );
+        json.member( "point_y", std::vector<int> { 90, 90, 98, 90 } );
+        json.member( "edge_distances", city_edge_distances );
+        json.member( "start_distances", start_city_distances );
+        json.member( "random_count_floor", 9 );
+        json.member( "random_count_ceiling", 10 );
+        json.member( "minimum_generated_size", 2 );
+        json.member( "maximum_generated_size", 55 );
         json.end_object();
         json.end_object();
     }

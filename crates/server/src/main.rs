@@ -9,13 +9,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use cdda_content::MapgenIdChoice;
 use cdda_content::{
-    AmmunitionRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition, ConstructionRegistry,
-    ContentManifest, DEFAULT_MANIFEST_PATH, DefaultRegionTerrainFurnitureRegistry,
-    DescriptionSnippetRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
-    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry,
-    MaterialRegistry, ModCatalog, MonsterDefinition, MonsterRegistry, OvermapTerrainRegistry,
-    ProficiencyRegistry, RecipeRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
-    TerrainRegistry,
+    AmmunitionRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition, CitySettingsRegistry,
+    ConstructionRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH,
+    DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, FieldTypeDefinition,
+    FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry,
+    ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition, MonsterRegistry,
+    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, SkillRegistry,
+    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -84,7 +84,7 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
-use worldgen::{RuntimeMapgenContent, bootstrap_regional_field_overmap, runtime_mapgen_worldgen};
+use worldgen::{RuntimeMapgenContent, bootstrap_regional_city_overmap, runtime_mapgen_worldgen};
 #[cfg(test)]
 use worldgen::{
     bootstrap_lmoe_overmap, runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice,
@@ -120,6 +120,7 @@ struct RuntimeWorldContent<'a> {
     mapgen: &'a MapgenRegistry,
     overmap_terrain: &'a OvermapTerrainRegistry,
     start_locations: &'a StartLocationRegistry,
+    city_settings: &'a CitySettingsRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -327,6 +328,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let city_settings = CitySettingsRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let skills =
         SkillRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let proficiencies = ProficiencyRegistry::load_selected(
@@ -406,6 +413,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mapgen: &mapgen,
             overmap_terrain: &overmap_terrain,
             start_locations: &start_locations,
+            city_settings: &city_settings,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -739,6 +747,7 @@ fn open_world(
     let mapgen = content.mapgen;
     let overmap_terrain = content.overmap_terrain;
     let start_locations = content.start_locations;
+    let city_settings = content.city_settings;
     let mut store = WorldStore::open(path)?;
     let metadata = match store.metadata_optional()? {
         Some(metadata) => metadata,
@@ -800,8 +809,16 @@ fn open_world(
         bash_item_group_catalog,
         runtime_named_item_group_catalog(&field_graph, item_group_content)?,
     ])?;
+    let (regional_overmap, cities) = bootstrap_regional_city_overmap(
+        overmap_terrain,
+        metadata.world_seed,
+        city_settings
+            .get(DEFAULT_CITY_SETTINGS_ID)
+            .ok_or("pinned default content is missing default city settings")?,
+    )?;
     let worldgen = runtime_mapgen_worldgen(
-        bootstrap_regional_field_overmap(overmap_terrain)?,
+        regional_overmap,
+        cities,
         start_locations
             .get("sloc_field")
             .ok_or("pinned default content is missing sloc_field")?,
@@ -5219,8 +5236,12 @@ mod tests {
         let start_locations =
             StartLocationRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("start locations should load");
+        let city_settings =
+            CitySettingsRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+                .expect("city settings should load");
         let wilderness = runtime_mapgen_worldgen(
             bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
+            Vec::new(),
             start_locations
                 .get("sloc_lmoe")
                 .expect("LMOE start location should load"),
@@ -5247,6 +5268,7 @@ mod tests {
         assert!(
             runtime_mapgen_worldgen(
                 bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
+                Vec::new(),
                 start_locations
                     .get("sloc_shelter_safe")
                     .expect("parameterized shelter start should load"),
@@ -5266,6 +5288,9 @@ mod tests {
             item_group_content,
             &overmap_terrain,
             &start_locations,
+            city_settings
+                .get(DEFAULT_CITY_SETTINGS_ID)
+                .expect("default city settings should load"),
             &mapgen,
             &regions,
             &terrain,
