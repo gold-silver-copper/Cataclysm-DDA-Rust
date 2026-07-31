@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod anatomy;
 mod astronomy_table;
+mod eocs;
+mod interactions;
 mod item_groups;
+mod use_actions;
 
 pub use anatomy::{
     ANATOMY_SCALE, ActorBodyPartSnapshotV1, ActorEffectSnapshotV1, AnatomyDefinitionV1,
@@ -18,6 +21,17 @@ pub use anatomy::{
     actor_body_part_summary_hp, actor_body_parts_are_valid, actor_effects_are_valid,
     anatomy_definition_is_valid, body_part_prototype_is_valid, wearable_armor_catalog_is_valid,
     wearable_armor_type_is_valid,
+};
+pub use eocs::{
+    EocConditionV1, EocDefinitionV1, EocEffectV1, EocItemUseTypeV1, MAX_EOC_DEFINITIONS,
+    MAX_EOC_EFFECTS, MAX_EOC_ITEM_USE_TYPES, MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES,
+    MAX_EOC_TREE_DEPTH, MAX_EOC_TREE_NODES, eoc_catalog_is_valid,
+};
+pub use interactions::{
+    InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
+    MAX_INTERACTION_CHOICE_ID_BYTES, MAX_INTERACTION_CHOICE_LABEL_BYTES, MAX_INTERACTION_CHOICES,
+    MAX_INTERACTION_LIFETIME_TICKS, MAX_INTERACTION_PROMPT_BYTES, PendingInteractionV1,
+    pending_interaction_is_valid,
 };
 
 pub use item_groups::{
@@ -64,8 +78,12 @@ use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
     valid_item_temperature_state,
 };
+pub use use_actions::{
+    ItemTransformTypeV1, MAX_ITEM_TRANSFORM_MOVES, MAX_ITEM_TRANSFORM_TYPES,
+    item_transform_catalog_is_valid,
+};
 
-pub const PROTOCOL_VERSION: u16 = 106;
+pub const PROTOCOL_VERSION: u16 = 107;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -263,6 +281,7 @@ stable_id!(AccountId);
 stable_id!(ActorId);
 stable_id!(CreatureId);
 stable_id!(ItemId);
+stable_id!(InteractionId);
 stable_id!(VehicleId);
 stable_id!(MissionId);
 stable_id!(EventId);
@@ -1712,6 +1731,13 @@ pub enum CommandKind {
     Activate {
         item_id: ItemId,
     },
+    RespondInteraction {
+        interaction_id: InteractionId,
+        choice_id: String,
+    },
+    CancelInteraction {
+        interaction_id: InteractionId,
+    },
     Craft {
         recipe_id: String,
         /// `None` is the untrusted client request shape. The authoritative
@@ -1790,6 +1816,9 @@ pub enum CommandRejection {
     InventoryFull,
     ItemNotConsumable,
     ItemNotActivatable,
+    NoInteractionPending,
+    StaleInteraction,
+    InvalidInteractionChoice,
     ItemHasNoPower,
     PoweredToolActive,
     InvalidTerrainInteraction,
@@ -2050,6 +2079,31 @@ pub enum WorldEventKind {
         body_part_id: String,
         healed_hp: i32,
         remaining_charges: i32,
+    },
+    EocMessage {
+        actor_id: ActorId,
+        text: String,
+    },
+    EocItemActivated {
+        actor_id: ActorId,
+        item_id: ItemId,
+        remaining_charges: i32,
+    },
+    ItemTransformed {
+        actor_id: ActorId,
+        item_id: ItemId,
+        from_type_id: String,
+        to_type_id: String,
+        remaining_charges: i32,
+    },
+    InteractionRequested {
+        actor_id: ActorId,
+        interaction: PendingInteractionV1,
+    },
+    InteractionCanceled {
+        actor_id: ActorId,
+        interaction_id: InteractionId,
+        reason: InteractionCancellationReasonV1,
     },
     ActorNeedsUpdated {
         actor_id: ActorId,
@@ -2652,6 +2706,8 @@ pub struct ActorSnapshot {
     pub disassembly_activity: Option<DisassemblyActivitySnapshotV1>,
     #[serde(default)]
     pub construction_activity: Option<ConstructionActivitySnapshotV1>,
+    /// Server-owned prompt retained across snapshots, reconnects, and recovery.
+    pub pending_interaction: Option<PendingInteractionV1>,
     /// Stable recipe-ID-sorted permanent knowledge. Autolearn and carried-book
     /// availability remain derived rather than duplicated here.
     pub learned_recipes: Vec<String>,
@@ -3615,6 +3671,13 @@ pub struct WorldSnapshotV1 {
     pub smash_item_types: Vec<SmashItemTypeV1>,
     /// Item-type-ID-sorted strict authoritative medical-use profiles.
     pub healing_item_types: Vec<HealingItemTypeV1>,
+    /// Immutable EOC interpreter programs and item activation profiles. Both
+    /// catalogs are ID-sorted and retain only closed, supported semantics.
+    pub eoc_definitions: Vec<EocDefinitionV1>,
+    pub eoc_item_use_types: Vec<EocItemUseTypeV1>,
+    /// Strict conversions with compatible storage/temperature layouts and a
+    /// complete validated target static prototype.
+    pub item_transform_types: Vec<ItemTransformTypeV1>,
     /// Immutable coordinate-owned layout and normalized mapgen definitions,
     /// plus the server-authoritative start selector.
     /// Generated four-submap cells live in `chunks`; the catalog is retained
@@ -4137,6 +4200,20 @@ fn valid_client_command(command: &ClientCommand) -> bool {
         }
         CommandKind::Activate { item_id } => {
             item_id.counter() > 0 && item_id.world_namespace() == command.actor_id.world_namespace()
+        }
+        CommandKind::RespondInteraction {
+            interaction_id,
+            choice_id,
+        } => {
+            interaction_id.counter() > 0
+                && interaction_id.world_namespace() == command.actor_id.world_namespace()
+                && !choice_id.is_empty()
+                && choice_id.len() <= MAX_INTERACTION_CHOICE_ID_BYTES
+                && !choice_id.chars().any(char::is_control)
+        }
+        CommandKind::CancelInteraction { interaction_id } => {
+            interaction_id.counter() > 0
+                && interaction_id.world_namespace() == command.actor_id.world_namespace()
         }
         CommandKind::RemovePocketItem {
             owner_item,

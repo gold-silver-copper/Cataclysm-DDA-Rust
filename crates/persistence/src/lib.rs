@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 84;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 106
-/// retained monster special-attack profiles and per-creature cooldowns.
+pub const SCHEMA_VERSION: i64 = 85;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 107
+/// retained canonical EOC programs and item activation profiles.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 84;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 85;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -12040,6 +12040,7 @@ mod tests {
             read_activity: None,
             disassembly_activity: None,
             construction_activity: None,
+            pending_interaction: None,
             learned_recipes: Vec::new(),
             skills: Vec::new(),
             proficiencies: Vec::new(),
@@ -12538,6 +12539,7 @@ mod tests {
             read_activity: None,
             disassembly_activity: None,
             construction_activity: None,
+            pending_interaction: None,
             learned_recipes: Vec::new(),
             skills: Vec::new(),
             proficiencies: Vec::new(),

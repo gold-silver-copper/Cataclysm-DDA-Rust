@@ -250,12 +250,36 @@ fn roll_scaled_value(
 }
 
 impl WorldState {
+    pub(super) fn healing_item_body_part_choices(
+        &self,
+        actor_id: ActorId,
+        item_id: ItemId,
+        healing: &HealingItemTypeV1,
+    ) -> Result<Vec<String>, SimError> {
+        let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let required_charges = i32::from(healing.charges_per_use.max(1));
+        if actor.worn.contains(&item_id)
+            || actor.inventory.get(&item_id).is_none_or(|item| {
+                item.type_id != healing.item_type_id || item.charges < required_charges
+            })
+        {
+            return Ok(Vec::new());
+        }
+        Ok(actor
+            .body_parts
+            .iter()
+            .filter(|part| healing_part_score(actor, part, healing).is_some())
+            .map(|part| part.body_part_id.clone())
+            .collect())
+    }
+
     pub(super) fn apply_healing_item(
         &mut self,
         actor_id: ActorId,
         item_id: ItemId,
         healing: &HealingItemTypeV1,
         sequence: u64,
+        selected_body_part: Option<&str>,
     ) -> Result<Option<HealingItemOutcome>, SimError> {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
         let required_charges = i32::from(healing.charges_per_use.max(1));
@@ -267,34 +291,29 @@ impl WorldState {
             return Ok(None);
         }
         let first_aid = actor_skill_level(actor, "firstaid", false);
-        let mut selected = None;
-        let mut selected_score = 0_u64;
-        for (index, part) in actor.body_parts.iter().enumerate() {
-            if part.current_hp <= 0 {
-                continue;
-            }
-            let missing = part.maximum_hp.saturating_sub(part.current_hp) as u64;
-            let effect_score = actor
-                .effects
+        let selected = if let Some(selected_body_part) = selected_body_part {
+            actor.body_parts.iter().position(|part| {
+                part.body_part_id == selected_body_part
+                    && healing_part_score(actor, part, healing).is_some()
+            })
+        } else {
+            actor
+                .body_parts
                 .iter()
-                .filter(|effect| effect.body_part_id.as_deref() == Some(&part.body_part_id))
-                .fold(0_u64, |score, effect| {
-                    score
-                        + match effect.effect_id.as_str() {
-                            "bleed" if healing.bleed > 0 => u64::from(effect.intensity) * 100,
-                            "bite" if healing.bite_chance_millionths > 0 => 1_000,
-                            "infected" if healing.infect_chance_millionths > 0 => 2_000,
-                            _ => 0,
+                .enumerate()
+                .fold(None, |selected: Option<(usize, u64)>, (index, part)| {
+                    let Some(score) = healing_part_score(actor, part, healing) else {
+                        return selected;
+                    };
+                    match selected {
+                        Some((_selected_index, selected_score)) if selected_score >= score => {
+                            selected
                         }
-                });
-            let dressing = missing > 0
-                && (healing.bandages_power_milli > 0 || healing.disinfectant_power_milli > 0);
-            let score = missing.saturating_add(effect_score);
-            if (score > 0 || dressing) && selected.is_none_or(|_| score > selected_score) {
-                selected = Some(index);
-                selected_score = score;
-            }
-        }
+                        _ => Some((index, score)),
+                    }
+                })
+                .map(|(index, _score)| index)
+        };
         let Some(selected) = selected else {
             return Ok(None);
         };
@@ -499,4 +518,32 @@ impl WorldState {
         }
         Ok(())
     }
+}
+
+fn healing_part_score(
+    actor: &super::Actor,
+    part: &ActorBodyPartSnapshotV1,
+    healing: &HealingItemTypeV1,
+) -> Option<u64> {
+    if part.current_hp <= 0 {
+        return None;
+    }
+    let missing = part.maximum_hp.saturating_sub(part.current_hp) as u64;
+    let effect_score = actor
+        .effects
+        .iter()
+        .filter(|effect| effect.body_part_id.as_deref() == Some(&part.body_part_id))
+        .fold(0_u64, |score, effect| {
+            score
+                + match effect.effect_id.as_str() {
+                    "bleed" if healing.bleed > 0 => u64::from(effect.intensity) * 100,
+                    "bite" if healing.bite_chance_millionths > 0 => 1_000,
+                    "infected" if healing.infect_chance_millionths > 0 => 2_000,
+                    _ => 0,
+                }
+        });
+    let dressing =
+        missing > 0 && (healing.bandages_power_milli > 0 || healing.disinfectant_power_milli > 0);
+    let score = missing.saturating_add(effect_score);
+    (score > 0 || dressing).then_some(score)
 }

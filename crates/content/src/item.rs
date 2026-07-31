@@ -5,7 +5,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::{ContentManifest, ModCatalog, ModCatalogError, SelectedContentFile};
+use crate::{
+    ContentManifest, EffectOnConditionDefinition, ModCatalog, ModCatalogError, SelectedContentFile,
+    eoc::parse_inline_eoc,
+};
 
 const IMPLEMENTED_FIELDS: &[&str] = &[
     "type",
@@ -117,6 +120,9 @@ pub struct ItemDefinition {
     pub transform_actions: Vec<ItemTransformActionDefinition>,
     /// Strict inline `heal` actions retained for authoritative medical use.
     pub healing_actions: Vec<ItemHealingActionDefinition>,
+    /// Strict `effect_on_conditions` actors retained with stable top-level
+    /// references and typed inline activation EOCs.
+    pub eoc_actions: Vec<ItemEocActionDefinition>,
     /// Whether the finalized `use_action` value also contains any action that
     /// is not an inline transform. Strict runtime projections use this to
     /// avoid silently discarding link-up, firestarter, or actor behavior.
@@ -722,6 +728,16 @@ pub struct ItemHealingActionDefinition {
     pub bleed: u16,
     pub bite_chance_millionths: u32,
     pub infect_chance_millionths: u32,
+    pub deferred_fields: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ItemEocActionDefinition {
+    pub eoc_ids: Vec<String>,
+    pub inline_eocs: Vec<EffectOnConditionDefinition>,
+    pub consume: bool,
+    pub need_worn: bool,
+    pub need_wielding: bool,
     pub deferred_fields: BTreeSet<String>,
 }
 
@@ -1997,6 +2013,7 @@ fn apply_transform_action_projection(
     });
     item.has_unsupported_use_actions = false;
     item.healing_actions.clear();
+    item.eoc_actions.clear();
     const PROJECTED_OR_COSMETIC_TRANSFORM_FIELDS: &[&str] = &[
         "type",
         "target",
@@ -2019,6 +2036,10 @@ fn apply_transform_action_projection(
         if action_type == Some("heal") {
             item.healing_actions
                 .push(parse_healing_action(action, source)?);
+            continue;
+        }
+        if action_type == Some("effect_on_conditions") {
+            item.eoc_actions.push(parse_eoc_action(action, source)?);
             continue;
         }
         if action_type != Some("transform") {
@@ -2073,6 +2094,72 @@ fn apply_transform_action_projection(
     }
     item.transform_actions = actions;
     Ok(())
+}
+
+fn parse_eoc_action(
+    action: &Map<String, Value>,
+    source: &str,
+) -> Result<ItemEocActionDefinition, ItemRegistryError> {
+    const SUPPORTED_OR_COSMETIC: &[&str] = &[
+        "type",
+        "effect_on_conditions",
+        "consume",
+        "need_worn",
+        "need_wielding",
+        "description",
+        "menu_text",
+    ];
+    let values = action
+        .get("effect_on_conditions")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| invalid_field(source, "use_action.effect_on_conditions"))?;
+    let mut eoc_ids = Vec::new();
+    let mut inline_eocs = Vec::new();
+    let mut deferred_fields = action
+        .keys()
+        .filter(|field| {
+            !field.starts_with("//") && !SUPPORTED_OR_COSMETIC.contains(&field.as_str())
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for (index, value) in values.iter().enumerate() {
+        if let Some(id) = value
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        {
+            eoc_ids.push(id.to_owned());
+            continue;
+        }
+        let Some(object) = value.as_object() else {
+            deferred_fields.insert(format!("effect_on_conditions[{index}]"));
+            continue;
+        };
+        match parse_inline_eoc(object, &format!("{source}#inline_eoc[{index}]")) {
+            Ok(definition) => {
+                eoc_ids.push(definition.id.clone());
+                inline_eocs.push(definition);
+            }
+            Err(_) => {
+                deferred_fields.insert(format!("effect_on_conditions[{index}]"));
+            }
+        }
+    }
+    let boolean = |field: &str| -> Result<bool, ItemRegistryError> {
+        action.get(field).map_or(Ok(false), |value| {
+            value
+                .as_bool()
+                .ok_or_else(|| invalid_field(source, &format!("use_action.{field}")))
+        })
+    };
+    Ok(ItemEocActionDefinition {
+        eoc_ids,
+        inline_eocs,
+        consume: boolean("consume")?,
+        need_worn: boolean("need_worn")?,
+        need_wielding: boolean("need_wielding")?,
+        deferred_fields,
+    })
 }
 
 fn parse_healing_action(

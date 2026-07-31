@@ -4869,6 +4869,26 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             actor_id: event_actor,
             ..
         }
+        | WorldEventKind::EocMessage {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::EocItemActivated {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::ItemTransformed {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::InteractionRequested {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::InteractionCanceled {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::ActorNeedsUpdated {
             actor_id: event_actor,
             ..

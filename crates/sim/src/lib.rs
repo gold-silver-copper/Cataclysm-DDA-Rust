@@ -3,6 +3,8 @@
 mod anatomy;
 mod cities;
 mod combat;
+mod eocs;
+mod interactions;
 mod items;
 mod mapgen;
 mod monsters;
@@ -10,6 +12,7 @@ mod overmap;
 mod rivers;
 mod roads;
 mod specials;
+mod use_actions;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -27,17 +30,18 @@ use cdda_protocol::{
     CraftRecipeV1, CraftSkillRequirementV1, CreatureCorpsePrototypeV1, CreatureCorpseSnapshotV1,
     CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
     CreatureSpecialAttackStateV1, DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1,
-    DisassemblyInterruptionReason, DisassemblyRecipeV1, EventId, FieldSnapshotV1,
-    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot,
-    HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1,
-    HorizontalDirection, IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1,
-    ItemComponentSnapshotV1, ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot,
-    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
-    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
-    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
-    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
-    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
-    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
+    DisassemblyInterruptionReason, DisassemblyRecipeV1, EocDefinitionV1, EocItemUseTypeV1, EventId,
+    FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot,
+    GroundItemSnapshot, HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource,
+    HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
+    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
+    ItemGroupSourceV1, ItemId, ItemSnapshot, ItemTransformTypeV1, LocalTileCoord,
+    MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES,
+    MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS,
+    MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS,
+    MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER,
+    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES,
+    MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
     MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
     MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
     MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
@@ -49,9 +53,10 @@ use cdda_protocol::{
     SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
     TerrainTileSnapshot, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind,
     WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves,
-    healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
-    item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
-    item_snapshots_can_combine_for_containment, worldgen_catalog_is_valid,
+    eoc_catalog_is_valid, healing_item_catalog_is_valid, item_group_catalog_is_valid,
+    item_group_source_max_outputs, item_group_sources_are_valid,
+    item_snapshot_is_compatible_with_spawn_rules, item_snapshots_can_combine_for_containment,
+    item_transform_catalog_is_valid, worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -2631,6 +2636,7 @@ struct Actor {
     read_activity: Option<BookStudyActivitySnapshotV1>,
     disassembly_activity: Option<DisassemblyActivitySnapshotV1>,
     construction_activity: Option<ConstructionActivitySnapshotV1>,
+    pending_interaction: Option<cdda_protocol::PendingInteractionV1>,
     learned_recipes: BTreeSet<String>,
     skills: BTreeMap<String, SkillLevelSnapshot>,
     proficiencies: BTreeMap<String, ProficiencyLevelSnapshot>,
@@ -2675,6 +2681,7 @@ impl Actor {
             read_activity: self.read_activity.clone(),
             disassembly_activity: self.disassembly_activity.clone(),
             construction_activity: self.construction_activity.clone(),
+            pending_interaction: self.pending_interaction.clone(),
             learned_recipes: self.learned_recipes.iter().cloned().collect(),
             skills: self.skills.values().cloned().collect(),
             proficiencies: self.proficiencies.values().cloned().collect(),
@@ -2823,6 +2830,14 @@ fn valid_actor_schedule(
                 validate_construction_activity(activity, snapshot.id).is_err()
                     || (snapshot.sleeping && !activity.interrupted)
                     || (!snapshot.queued_actions.is_empty() && !activity.interrupted)
+            })
+        || snapshot
+            .pending_interaction
+            .as_ref()
+            .is_some_and(|interaction| {
+                !cdda_protocol::pending_interaction_is_valid(interaction, snapshot.id)
+                    || interaction.created_at_tick > current_tick
+                    || interaction.expires_at_tick <= current_tick
             })
         || usize::from(snapshot.craft_activity.is_some())
             + usize::from(snapshot.read_activity.is_some())
@@ -4613,7 +4628,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV18");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV19");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4635,6 +4650,9 @@ pub struct WorldState {
     furniture_bash_types: BTreeMap<String, FurnitureBashTypeV1>,
     smash_item_types: BTreeMap<String, SmashItemTypeV1>,
     healing_item_types: BTreeMap<String, HealingItemTypeV1>,
+    eoc_definitions: BTreeMap<String, EocDefinitionV1>,
+    eoc_item_use_types: BTreeMap<String, EocItemUseTypeV1>,
+    item_transform_types: BTreeMap<String, ItemTransformTypeV1>,
     worldgen: Option<WorldgenCatalogV1>,
     actors: BTreeMap<ActorId, Actor>,
     creatures: BTreeMap<CreatureId, Creature>,
@@ -4665,6 +4683,9 @@ impl WorldState {
             furniture_bash_types: BTreeMap::new(),
             smash_item_types: BTreeMap::new(),
             healing_item_types: BTreeMap::new(),
+            eoc_definitions: BTreeMap::new(),
+            eoc_item_use_types: BTreeMap::new(),
+            item_transform_types: BTreeMap::new(),
             worldgen: None,
             actors: BTreeMap::new(),
             creatures: BTreeMap::new(),
@@ -5533,6 +5554,7 @@ impl WorldState {
                 read_activity: None,
                 disassembly_activity: None,
                 construction_activity: None,
+                pending_interaction: None,
                 learned_recipes: BTreeSet::new(),
                 skills: BTreeMap::new(),
                 proficiencies: BTreeMap::new(),
@@ -5741,6 +5763,7 @@ impl WorldState {
                 read_activity: actor.read_activity,
                 disassembly_activity: actor.disassembly_activity,
                 construction_activity: actor.construction_activity,
+                pending_interaction: actor.pending_interaction,
                 learned_recipes: actor.learned_recipes.into_iter().collect(),
                 skills: restored_skills,
                 proficiencies: restored_proficiencies,
@@ -5805,6 +5828,7 @@ impl WorldState {
         }
         self.tick = self.tick.next();
         let mut events = Vec::with_capacity(commands.len());
+        self.expire_interactions(&mut events)?;
         self.advance_actor_combat_resources();
         for input in held_movement {
             self.apply_held_movement_update(input)?;
@@ -7247,14 +7271,29 @@ impl WorldState {
                 let Some(item) = actor.inventory.get(item_id) else {
                     return Ok(0);
                 };
+                if let Some(cost) = self.item_transform_action_cost(actor_id, *item_id)? {
+                    return Ok(cost);
+                }
                 self.healing_item_types
                     .get(&item.type_id)
                     .map_or(Ok(0), |healing| {
+                        if self
+                            .healing_item_body_part_choices(actor_id, *item_id, healing)?
+                            .len()
+                            > 1
+                        {
+                            return Ok(0);
+                        }
                         i64::from(healing.move_cost_moves)
                             .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
                             .ok_or(SimError::NumericOverflow)
                     })
             }
+            CommandKind::RespondInteraction {
+                interaction_id,
+                choice_id,
+            } => self.interaction_action_cost(actor_id, *interaction_id, choice_id),
+            CommandKind::CancelInteraction { .. } => Ok(0),
             CommandKind::Wake
             | CommandKind::Craft { .. }
             | CommandKind::ResumeCraft
@@ -7516,6 +7555,19 @@ impl WorldState {
             }
             CommandKind::Activate { item_id } => {
                 self.apply_activate(actor_id, sequence, item_id, events)
+            }
+            CommandKind::RespondInteraction {
+                interaction_id,
+                choice_id,
+            } => self.apply_interaction_response(
+                actor_id,
+                sequence,
+                interaction_id,
+                choice_id,
+                events,
+            ),
+            CommandKind::CancelInteraction { interaction_id } => {
+                self.apply_interaction_cancel(actor_id, sequence, interaction_id, events)
             }
             CommandKind::Craft { recipe_id, recipe } => {
                 self.start_craft(actor_id, sequence, recipe_id, recipe, events)
@@ -11216,14 +11268,40 @@ impl WorldState {
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
-        let Some(item) = actor.inventory.get(&item_id) else {
+        let Some(item_type_id) = actor
+            .inventory
+            .get(&item_id)
+            .map(|item| item.type_id.clone())
+        else {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
             return Ok(());
         };
-        if let Some(healing) = self.healing_item_types.get(&item.type_id).cloned() {
-            if let Some(outcome) =
-                self.apply_healing_item(actor_id, item_id, &healing, sequence.0)?
-            {
+        if self.apply_eoc_item_use(actor_id, sequence, item_id, events)? {
+            return Ok(());
+        }
+        if self.apply_item_transform(actor_id, sequence, item_id, events)? {
+            return Ok(());
+        }
+        if let Some(healing) = self.healing_item_types.get(&item_type_id).cloned() {
+            let choices = self.healing_item_body_part_choices(actor_id, item_id, &healing)?;
+            if choices.len() > 1 {
+                self.request_medical_body_part(
+                    actor_id,
+                    sequence,
+                    item_id,
+                    item_type_id,
+                    choices,
+                    events,
+                )?;
+                return Ok(());
+            }
+            if let Some(outcome) = self.apply_healing_item(
+                actor_id,
+                item_id,
+                &healing,
+                sequence.0,
+                choices.first().map(String::as_str),
+            )? {
                 events.push(self.make_event(WorldEventKind::MedicalItemApplied {
                     actor_id,
                     item_id,
@@ -11240,7 +11318,12 @@ impl WorldState {
             )?);
             return Ok(());
         }
-        let Some(powered) = item.powered_tool.clone() else {
+        let Some(powered) = self
+            .actors
+            .get(&actor_id)
+            .and_then(|actor| actor.inventory.get(&item_id))
+            .and_then(|item| item.powered_tool.clone())
+        else {
             events.push(self.rejection(
                 actor_id,
                 sequence,
@@ -13763,6 +13846,9 @@ impl WorldState {
             furniture_bash_types: self.furniture_bash_types.values().cloned().collect(),
             smash_item_types: self.smash_item_types.values().cloned().collect(),
             healing_item_types: self.healing_item_types.values().cloned().collect(),
+            eoc_definitions: self.eoc_definitions.values().cloned().collect(),
+            eoc_item_use_types: self.eoc_item_use_types.values().cloned().collect(),
+            item_transform_types: self.item_transform_types.values().cloned().collect(),
             worldgen: self.worldgen.clone(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
             creatures: self.creatures.values().map(Creature::snapshot).collect(),
@@ -13910,6 +13996,34 @@ impl WorldState {
             .iter()
             .cloned()
             .map(|healing| (healing.item_type_id.clone(), healing))
+            .collect();
+        if !eoc_catalog_is_valid(&snapshot.eoc_definitions, &snapshot.eoc_item_use_types)
+            || snapshot.eoc_definitions.iter().any(|definition| {
+                !eocs::eoc_body_parts_are_valid(definition, &snapshot.actor_anatomy)
+            })
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let eoc_definitions = snapshot
+            .eoc_definitions
+            .iter()
+            .cloned()
+            .map(|definition| (definition.eoc_id.clone(), definition))
+            .collect();
+        let eoc_item_use_types = snapshot
+            .eoc_item_use_types
+            .iter()
+            .cloned()
+            .map(|profile| (profile.item_type_id.clone(), profile))
+            .collect();
+        if !item_transform_catalog_is_valid(&snapshot.item_transform_types) {
+            return Err(SimError::InvalidSnapshot);
+        }
+        let item_transform_types = snapshot
+            .item_transform_types
+            .iter()
+            .cloned()
+            .map(|profile| (profile.source_type_id.clone(), profile))
             .collect();
         let mut actors = BTreeMap::new();
         let mut occupied = BTreeSet::new();
@@ -14079,6 +14193,7 @@ impl WorldState {
                     read_activity: actor.read_activity.clone(),
                     disassembly_activity: actor.disassembly_activity.clone(),
                     construction_activity: actor.construction_activity.clone(),
+                    pending_interaction: actor.pending_interaction.clone(),
                     learned_recipes: actor.learned_recipes.iter().cloned().collect(),
                     skills,
                     proficiencies,
@@ -14249,6 +14364,9 @@ impl WorldState {
             furniture_bash_types,
             smash_item_types,
             healing_item_types,
+            eoc_definitions,
+            eoc_item_use_types,
+            item_transform_types,
             worldgen: snapshot.worldgen.clone(),
             actors,
             creatures,
@@ -14265,7 +14383,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV82");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV83");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -21260,6 +21378,7 @@ mod tests {
             read_activity: None,
             disassembly_activity: None,
             construction_activity: None,
+            pending_interaction: None,
             learned_recipes: Vec::new(),
             skills: Vec::new(),
             proficiencies: Vec::new(),
@@ -21306,6 +21425,7 @@ mod tests {
                 read_activity: None,
                 disassembly_activity: None,
                 construction_activity: None,
+                pending_interaction: None,
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),

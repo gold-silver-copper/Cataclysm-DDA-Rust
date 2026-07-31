@@ -30,6 +30,11 @@ Run only when the user explicitly requests a verification checkpoint.
   scheduling, generic melee multiplier/range/effect, bite-wound, leap candidate
   selection, canonical persistence/replay, production admission, and two-client
   combat scenarios.
+- EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
+  differentials, strict transform/use-action traces, production catalog
+  admission, canonical persistence/replay, hostile recursive-program cases,
+  two-client item activation, and generic medical-choice request, reconnect,
+  expiry, stale-response, canonical-event-V19, and recovery coverage.
 - Content test-target cleanup: `cargo check -p cdda-content --tests` currently
   fails in untouched `material.rs` because one test-only
   `MaterialThermalDefinition` literal lacks `damage_resistance_milli`; the

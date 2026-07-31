@@ -12,11 +12,11 @@ use cdda_content::{
     AmmunitionRegistry, AnatomyRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition,
     CitySettingsRegistry, ConstructionRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
     DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry,
-    DescriptionSnippetRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
-    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry,
-    MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry, MonsterRegistry,
-    OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry,
-    RiverSettingsRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
+    DescriptionSnippetRegistry, EffectOnConditionRegistry, FieldTypeDefinition, FieldTypeRegistry,
+    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry,
+    MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry,
+    MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
+    RecipeRegistry, RiverSettingsRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
     TerrainRegistry,
 };
 #[cfg(test)]
@@ -70,12 +70,15 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod anatomy;
+mod eocs;
 mod item_groups;
 #[cfg(test)]
 mod regional_field_acceptance;
+mod use_actions;
 mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
+use eocs::runtime_eoc_catalog;
 use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
     runtime_bash_item_group_catalog, runtime_bash_item_group_source,
@@ -88,6 +91,7 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
+use use_actions::runtime_item_transform_types;
 use worldgen::{
     RuntimeMapgenContent, bootstrap_regional_special_overmap, runtime_mapgen_item_group_roots,
     runtime_mapgen_worldgen,
@@ -117,6 +121,7 @@ struct RuntimeWorldContent<'a> {
     ammunition: &'a AmmunitionRegistry,
     snippets: &'a DescriptionSnippetRegistry,
     items: &'a ItemRegistry,
+    eocs: &'a EffectOnConditionRegistry,
     materials: &'a MaterialRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
@@ -267,6 +272,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let items =
         ItemRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
+    let eocs = EffectOnConditionRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let materials = MaterialRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -439,6 +450,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ammunition: &ammunition,
             snippets: &snippets,
             items: &items,
+            eocs: &eocs,
             materials: &materials,
             item_groups: &item_groups,
             monsters: &monsters,
@@ -779,6 +791,8 @@ fn open_world(
     let actor_anatomy = runtime_actor_anatomy(content.anatomy)?;
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
+    let eocs = content.eocs;
+    let eoc_catalog = runtime_eoc_catalog(eocs, items, &actor_anatomy)?;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
     let monster_groups = content.monster_groups;
@@ -910,6 +924,10 @@ fn open_world(
         initial.register_smash_item_type(profile)?;
     }
     initial.register_healing_item_types(runtime_healing_item_types(items))?;
+    let (eoc_definitions, eoc_item_use_types) = eoc_catalog;
+    initial.register_eoc_catalog(eoc_definitions, eoc_item_use_types)?;
+    initial
+        .register_item_transform_types(runtime_item_transform_types(items, item_group_content))?;
     for definition in furniture
         .iter()
         .filter(|definition| definition.bash.is_some())
@@ -2812,6 +2830,7 @@ fn runtime_healing_item_types(items: &ItemRegistry) -> Vec<HealingItemTypeV1> {
             };
             if definition.has_unsupported_use_actions
                 || !definition.transform_actions.is_empty()
+                || !definition.eoc_actions.is_empty()
                 || !healing.deferred_fields.is_empty()
             {
                 return None;

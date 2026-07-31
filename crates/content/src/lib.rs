@@ -4,6 +4,7 @@ mod anatomy;
 mod bash;
 mod city;
 mod construction;
+mod eoc;
 mod field;
 mod furniture;
 mod item;
@@ -39,16 +40,20 @@ pub use construction::{
     ConstructionDefinition, ConstructionGroupDefinition, ConstructionRegistry,
     ConstructionRegistryError,
 };
+pub use eoc::{
+    EffectOnConditionDefinition, EffectOnConditionRegistry, EffectOnConditionRegistryError,
+    EocConditionDefinition, EocEffectDefinition, MAX_EOC_TREE_DEPTH,
+};
 pub use field::{
     FieldIntensityDefinition, FieldTypeDefinition, FieldTypeRegistry, FieldTypeRegistryError,
 };
 pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryError};
 pub use item::{
-    ArmorMaterialLayerDefinition, ArmorPortionDefinition, ItemDefinition, ItemQualityDefinition,
-    ItemRegistry, ItemRegistryError, ItemSnippetDefinition, ItemTemperatureRuntimeClass,
-    ItemVariableValueDefinition, ItemVariantDefinition, MagazineWellDefinition, PocketDefinition,
-    PocketTypeDefinition, SpawnPocketKindDefinition, StrictMagazineDefinition,
-    StrictSpawnPocketDefinition,
+    ArmorMaterialLayerDefinition, ArmorPortionDefinition, ItemDefinition, ItemEocActionDefinition,
+    ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemSnippetDefinition,
+    ItemTemperatureRuntimeClass, ItemVariableValueDefinition, ItemVariantDefinition,
+    MagazineWellDefinition, PocketDefinition, PocketTypeDefinition, SpawnPocketKindDefinition,
+    StrictMagazineDefinition, StrictSpawnPocketDefinition,
 };
 pub use item_group::{
     ItemGroupChargesRange, ItemGroupContentsSource, ItemGroupDefinition, ItemGroupEntryWrapper,

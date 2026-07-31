@@ -23,11 +23,12 @@ use cdda_protocol::{
     CharacterRequest, CharacterSummary, ChatMessage, ChatRejection, ClientCommand,
     ClientDatagramV1, ClientHello, CommandKind, CommandRejection, ContentIdentity, ControlMessage,
     CreatureId, ENROLL_ALPN, EnrollmentRejection, GAME_ALPN, GameplayRejection,
-    HeldMovementInputV1, HorizontalDirection, IntegralMagazinePocketSnapshotV1, ItemId,
-    ItemSnapshot, MAX_CHARACTER_CREATION_STAT, MAX_CHARACTERS_PER_ACCOUNT, MAX_CHAT_BYTES,
-    MAX_DATAGRAM_SIZE, MAX_REPORT_BYTES, MAX_REPORT_CHARACTERS, MIN_CHARACTER_CREATION_STAT,
-    PROTOCOL_VERSION, PlayerReport, REQUIRED_DATAGRAM_SIZE, ReplicationSnapshotV1, ReportReason,
-    ReportRejection, ReportResponse, SkyPhase, WorldEvent, WorldEventKind, encode_client_datagram,
+    HeldMovementInputV1, HorizontalDirection, IntegralMagazinePocketSnapshotV1,
+    InteractionCancellationReasonV1, ItemId, ItemSnapshot, MAX_CHARACTER_CREATION_STAT,
+    MAX_CHARACTERS_PER_ACCOUNT, MAX_CHAT_BYTES, MAX_DATAGRAM_SIZE, MAX_REPORT_BYTES,
+    MAX_REPORT_CHARACTERS, MIN_CHARACTER_CREATION_STAT, PROTOCOL_VERSION, PlayerReport,
+    REQUIRED_DATAGRAM_SIZE, ReplicationSnapshotV1, ReportReason, ReportRejection, ReportResponse,
+    SkyPhase, WorldEvent, WorldEventKind, encode_client_datagram,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, endpoint::presets};
 
@@ -79,6 +80,13 @@ enum ClientAction {
     },
     Activate {
         item_id: ItemId,
+    },
+    RespondInteraction {
+        interaction_id: cdda_protocol::InteractionId,
+        choice_id: String,
+    },
+    CancelInteraction {
+        interaction_id: cdda_protocol::InteractionId,
     },
     Craft {
         recipe_id: String,
@@ -223,6 +231,19 @@ struct ItemMenu {
     action: Option<ItemMenuAction>,
     entries: Vec<ItemMenuEntry>,
     selected: usize,
+}
+
+#[derive(Default, Resource)]
+struct InteractionMenu {
+    interaction_id: Option<cdda_protocol::InteractionId>,
+    selected: usize,
+    waiting: bool,
+}
+
+impl InteractionMenu {
+    const fn is_active(&self) -> bool {
+        self.interaction_id.is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -500,6 +521,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(ChatComposer::default())
         .insert_resource(CharacterMenu::default())
         .insert_resource(ItemMenu::default())
+        .insert_resource(InteractionMenu::default())
         .insert_resource(CraftMenu::default())
         .insert_resource(TargetMenu::default())
         .insert_resource(TerrainMenu::default())
@@ -544,6 +566,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Update,
         (
             handle_character_menu,
+            handle_interaction_menu,
             handle_chat_input,
             handle_item_menu,
             handle_craft_menu,
@@ -996,6 +1019,16 @@ async fn run_game_session(
                     }
                     Some(ClientAction::Activate { item_id }) => {
                         Some(CommandKind::Activate { item_id })
+                    }
+                    Some(ClientAction::RespondInteraction {
+                        interaction_id,
+                        choice_id,
+                    }) => Some(CommandKind::RespondInteraction {
+                        interaction_id,
+                        choice_id,
+                    }),
+                    Some(ClientAction::CancelInteraction { interaction_id }) => {
+                        Some(CommandKind::CancelInteraction { interaction_id })
                     }
                     Some(ClientAction::Craft { recipe_id }) => Some(CommandKind::Craft {
                         recipe_id,
@@ -1638,6 +1671,66 @@ fn valid_character_name_input(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 
+fn handle_interaction_menu(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut menu: ResMut<InteractionMenu>,
+    game: Option<ResMut<GameClient>>,
+) {
+    let Some(mut game) = game else {
+        return;
+    };
+    let pending = game
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.controlled_actor.pending_interaction.as_ref())
+        .cloned();
+    let Some(pending) = pending else {
+        menu.interaction_id = None;
+        menu.selected = 0;
+        menu.waiting = false;
+        return;
+    };
+    if menu.interaction_id != Some(pending.interaction_id) {
+        menu.interaction_id = Some(pending.interaction_id);
+        menu.selected = 0;
+        menu.waiting = false;
+    }
+    if menu.waiting || pending.choices.is_empty() {
+        return;
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyK) {
+        menu.selected = menu
+            .selected
+            .checked_sub(1)
+            .unwrap_or(pending.choices.len() - 1);
+    } else if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyJ) {
+        menu.selected = (menu.selected + 1) % pending.choices.len();
+    } else if keys.just_pressed(KeyCode::Escape) {
+        if game
+            .actions
+            .try_send(ClientAction::CancelInteraction {
+                interaction_id: pending.interaction_id,
+            })
+            .is_ok()
+        {
+            menu.waiting = true;
+            game.notice = String::from("Canceling interaction…");
+        }
+    } else if keys.just_pressed(KeyCode::Enter)
+        && let Some(choice) = pending.choices.get(menu.selected)
+        && game
+            .actions
+            .try_send(ClientAction::RespondInteraction {
+                interaction_id: pending.interaction_id,
+                choice_id: choice.choice_id.clone(),
+            })
+            .is_ok()
+    {
+        menu.waiting = true;
+        game.notice = format!("Selected {}…", choice.label);
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // Bevy systems declare disjoint resource access as parameters.
 fn handle_chat_input(
     mut keyboard_inputs: MessageReader<KeyboardInput>,
@@ -1647,6 +1740,7 @@ fn handle_chat_input(
     craft_menu: Res<CraftMenu>,
     target_menu: Res<TargetMenu>,
     terrain_menu: Res<TerrainMenu>,
+    interaction_menu: Res<InteractionMenu>,
     game: Option<Res<GameClient>>,
 ) {
     let Some(game) = game else {
@@ -1662,6 +1756,7 @@ fn handle_chat_input(
                 || craft_menu.open
                 || target_menu.action.is_some()
                 || terrain_menu.action.is_some()
+                || interaction_menu.is_active()
             {
                 continue;
             }
@@ -1701,6 +1796,7 @@ fn handle_chat_input(
 fn handle_item_menu(
     keys: Res<ButtonInput<KeyCode>>,
     composer: Res<ChatComposer>,
+    interaction_menu: Res<InteractionMenu>,
     target_menu: Res<TargetMenu>,
     terrain_menu: Res<TerrainMenu>,
     craft_menu: Res<CraftMenu>,
@@ -1711,6 +1807,7 @@ fn handle_item_menu(
     content_recipes: Option<Res<ContentRecipes>>,
 ) {
     if composer.active
+        || interaction_menu.is_active()
         || target_menu.action.is_some()
         || terrain_menu.action.is_some()
         || craft_menu.open
@@ -2035,6 +2132,7 @@ impl CraftMenu {
 fn handle_craft_menu(
     keys: Res<ButtonInput<KeyCode>>,
     composer: Res<ChatComposer>,
+    interaction_menu: Res<InteractionMenu>,
     item_menu: Res<ItemMenu>,
     target_menu: Res<TargetMenu>,
     terrain_menu: Res<TerrainMenu>,
@@ -2047,6 +2145,7 @@ fn handle_craft_menu(
     furniture: Option<Res<ContentFurniture>>,
 ) {
     if composer.active
+        || interaction_menu.is_active()
         || item_menu.action.is_some()
         || target_menu.action.is_some()
         || terrain_menu.action.is_some()
@@ -2930,18 +3029,55 @@ fn item_menu_entries(
                 .inventory
                 .iter()
                 .filter(|item| {
-                    let healing = content
-                        .and_then(|content| content.0.get(&item.type_id))
-                        .filter(|definition| {
-                            definition.healing_actions.len() == 1
-                                && !definition.has_unsupported_use_actions
-                                && definition.transform_actions.is_empty()
-                                && definition.healing_actions[0].deferred_fields.is_empty()
-                                && u16::try_from(definition.charges_per_use).is_ok()
-                        });
+                    let definition = content.and_then(|content| content.0.get(&item.type_id));
+                    let healing = definition.filter(|definition| {
+                        definition.healing_actions.len() == 1
+                            && !definition.has_unsupported_use_actions
+                            && definition.transform_actions.is_empty()
+                            && definition.eoc_actions.is_empty()
+                            && definition.healing_actions[0].deferred_fields.is_empty()
+                            && u16::try_from(definition.charges_per_use).is_ok()
+                    });
                     if let Some(definition) = healing {
                         !actor.worn.contains(&item.id)
                             && item.charges >= definition.charges_per_use.max(1)
+                    } else if let Some(action) = definition.and_then(|definition| {
+                        let [action] = definition.eoc_actions.as_slice() else {
+                            return None;
+                        };
+                        (!definition.has_unsupported_use_actions
+                            && definition.transform_actions.is_empty()
+                            && definition.healing_actions.is_empty()
+                            && definition.comestible_type.is_empty()
+                            && action.deferred_fields.is_empty()
+                            && !action.eoc_ids.is_empty())
+                        .then_some(action)
+                    }) {
+                        (!action.need_worn || actor.worn.contains(&item.id))
+                            && (!action.need_wielding || actor.wielded == Some(item.id))
+                            && (!action.consume || item.charges > 0)
+                    } else if let Some(required_charges) = definition.and_then(|definition| {
+                        let [action] = definition.transform_actions.as_slice() else {
+                            return None;
+                        };
+                        if definition.has_non_transform_use_actions
+                            || definition.has_unsupported_use_actions
+                            || definition.has_unsupported_transform_action_fields
+                            || !definition.healing_actions.is_empty()
+                            || !definition.eoc_actions.is_empty()
+                            || definition.subtypes.contains("ARMOR")
+                            || action.target == definition.id
+                        {
+                            return None;
+                        }
+                        let consumed = if definition.subtypes.contains("TOOL") {
+                            definition.charges_per_use.checked_mul(action.ammo_scale)?
+                        } else {
+                            0
+                        };
+                        Some(action.need_charges.max(consumed))
+                    }) {
+                        item_tool_charges(item) >= required_charges
                     } else {
                         item.powered_tool.as_ref().is_some_and(|powered| {
                             powered.active
@@ -3454,6 +3590,7 @@ fn client_action_for_item_menu(
 fn handle_target_menu(
     keys: Res<ButtonInput<KeyCode>>,
     composer: Res<ChatComposer>,
+    interaction_menu: Res<InteractionMenu>,
     item_menu: Res<ItemMenu>,
     terrain_menu: Res<TerrainMenu>,
     craft_menu: Res<CraftMenu>,
@@ -3462,6 +3599,7 @@ fn handle_target_menu(
     content_monsters: Option<Res<ContentMonsters>>,
 ) {
     if composer.active
+        || interaction_menu.is_active()
         || item_menu.action.is_some()
         || terrain_menu.action.is_some()
         || craft_menu.open
@@ -3700,6 +3838,7 @@ const fn client_action_for_target_menu(
 fn handle_terrain_menu(
     keys: Res<ButtonInput<KeyCode>>,
     composer: Res<ChatComposer>,
+    interaction_menu: Res<InteractionMenu>,
     item_menu: Res<ItemMenu>,
     target_menu: Res<TargetMenu>,
     craft_menu: Res<CraftMenu>,
@@ -3709,6 +3848,7 @@ fn handle_terrain_menu(
     content_furniture: Option<Res<ContentFurniture>>,
 ) {
     if composer.active
+        || interaction_menu.is_active()
         || item_menu.action.is_some()
         || target_menu.action.is_some()
         || craft_menu.open
@@ -3949,6 +4089,7 @@ fn handle_movement_input(
     time: Res<Time>,
     composer: Res<ChatComposer>,
     character_menu: Res<CharacterMenu>,
+    interaction_menu: Res<InteractionMenu>,
     menu: Res<ItemMenu>,
     craft_menu: Res<CraftMenu>,
     target_menu: Res<TargetMenu>,
@@ -3961,6 +4102,7 @@ fn handle_movement_input(
         .as_ref()
         .is_none_or(|game| game.controlled_actor.is_none())
         || character_menu.is_active()
+        || interaction_menu.is_active()
         || composer.active
         || menu.action.is_some()
         || craft_menu.open
@@ -3992,6 +4134,7 @@ fn handle_movement_input(
         held_sender.since_send = Duration::ZERO;
     }
     if character_menu.is_active()
+        || interaction_menu.is_active()
         || composer.active
         || menu.action.is_some()
         || craft_menu.open
@@ -4199,6 +4342,7 @@ fn render_status_text(
     craft_menu: Res<CraftMenu>,
     target_menu: Res<TargetMenu>,
     terrain_menu: Res<TerrainMenu>,
+    interaction_menu: Res<InteractionMenu>,
 ) {
     let Some(game) = game else {
         return;
@@ -4217,6 +4361,7 @@ fn render_status_text(
         || craft_menu.open
         || target_menu.action.is_some()
         || terrain_menu.action.is_some()
+        || interaction_menu.is_active()
     {
         String::new()
     } else if composer.active {
@@ -4230,8 +4375,34 @@ fn render_status_text(
             "\n\nChat:\n{chat_log}\nPress Enter to chat; /report-last <details> reports the latest other speaker."
         )
     };
+    let interaction = game
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.controlled_actor.pending_interaction.as_ref())
+        .map_or_else(String::new, |pending| {
+            let choices = pending
+                .choices
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| {
+                    let marker = if index == interaction_menu.selected {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    format!("{marker} {}", choice.label)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let instructions = if interaction_menu.waiting {
+                "Waiting for the server…"
+            } else {
+                "Arrows or J/K select, Enter confirms, Escape cancels"
+            };
+            format!("\n\n{}\n{choices}\n{instructions}", pending.prompt)
+        });
     text.0 = format!(
-        "Cataclysm: Dark Days Ahead — Rust Multiplayer\n\nClient endpoint\n{}\n\n{}{}{}{}{}{}{}",
+        "Cataclysm: Dark Days Ahead — Rust Multiplayer\n\nClient endpoint\n{}\n\n{}{}{}{}{}{}{}{}",
         bootstrap.identity,
         game.status,
         character_menu.display(),
@@ -4239,6 +4410,7 @@ fn render_status_text(
         craft_menu.display(),
         target_menu.display(),
         terrain_menu.display(),
+        interaction,
         chat
     );
 }
@@ -4345,6 +4517,33 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!(
             "Treated {body_part_id}; restored {healed_hp} HP and left {remaining_charges} charge(s)."
         ),
+        WorldEventKind::EocMessage { text, .. } => text.clone(),
+        WorldEventKind::EocItemActivated {
+            remaining_charges, ..
+        } => format!("Activated item; {remaining_charges} charge(s) remain."),
+        WorldEventKind::ItemTransformed {
+            from_type_id,
+            to_type_id,
+            remaining_charges,
+            ..
+        } => format!(
+            "Transformed {from_type_id} into {to_type_id}; {remaining_charges} charge(s) remain."
+        ),
+        WorldEventKind::InteractionRequested { interaction, .. } => {
+            format!("Interaction requested: {}", interaction.prompt)
+        }
+        WorldEventKind::InteractionCanceled { reason, .. } => match reason {
+            InteractionCancellationReasonV1::Replaced => {
+                String::from("The previous interaction was replaced.")
+            }
+            InteractionCancellationReasonV1::Expired => String::from("The interaction expired."),
+            InteractionCancellationReasonV1::ClientCanceled => {
+                String::from("Canceled the interaction.")
+            }
+            InteractionCancellationReasonV1::Invalidated => {
+                String::from("The interaction is no longer valid.")
+            }
+        },
         WorldEventKind::ActorNeedsUpdated { .. } => String::from("Needs advanced."),
         WorldEventKind::ActorDiedFromNeeds { .. } => {
             String::from("Your character died from unmet needs.")
@@ -4544,6 +4743,9 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::InventoryFull => "inventory is full",
         CommandRejection::ItemNotConsumable => "item cannot be consumed",
         CommandRejection::ItemNotActivatable => "item cannot be activated",
+        CommandRejection::NoInteractionPending => "there is no interaction to answer",
+        CommandRejection::StaleInteraction => "that interaction is no longer current",
+        CommandRejection::InvalidInteractionChoice => "that choice is not available",
         CommandRejection::ItemHasNoPower => "item has no usable battery charge",
         CommandRejection::PoweredToolActive => "turn the powered tool off first",
         CommandRejection::InvalidTerrainInteraction => "terrain cannot be changed",
@@ -5555,6 +5757,7 @@ mod tests {
                 read_activity: None,
                 disassembly_activity: None,
                 construction_activity: None,
+                pending_interaction: None,
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -6057,6 +6260,7 @@ mod tests {
                 read_activity: None,
                 disassembly_activity: None,
                 construction_activity: None,
+                pending_interaction: None,
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -6758,6 +6962,7 @@ mod tests {
                 read_activity: None,
                 disassembly_activity: None,
                 construction_activity: None,
+                pending_interaction: None,
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
@@ -6890,6 +7095,7 @@ mod tests {
                 read_activity: None,
                 disassembly_activity: None,
                 construction_activity: None,
+                pending_interaction: None,
                 learned_recipes: Vec::new(),
                 skills: Vec::new(),
                 proficiencies: Vec::new(),
