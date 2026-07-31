@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::{SimError, WorldState};
 
 const DIALOGUE_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
+pub(super) const DIALOGUE_FALLBACK_CHOICE_ID: &str = "__fallback_done";
+pub(super) const DIALOGUE_FALLBACK_CHOICE_LABEL: &str = "Bye.";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct Npc {
@@ -171,6 +173,18 @@ impl WorldState {
         if !adjacent(actor_position, npc.position) {
             return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
         }
+        if choice_id == DIALOGUE_FALLBACK_CHOICE_ID {
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .pending_interaction = None;
+            events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                actor_id,
+                interaction_id,
+                reason: InteractionCancellationReasonV1::Completed,
+            })?);
+            return Ok(());
+        }
         let Some(response) = self
             .dialogue_topics
             .get(topic_id)
@@ -253,7 +267,7 @@ impl WorldState {
                 reason: InteractionCancellationReasonV1::Replaced,
             })?);
         }
-        let choices = topic
+        let mut choices = topic
             .responses
             .iter()
             .map(|response| {
@@ -268,7 +282,13 @@ impl WorldState {
             .collect::<Result<Vec<Option<_>>, SimError>>()?
             .into_iter()
             .flatten()
-            .collect();
+            .collect::<Vec<_>>();
+        if choices.is_empty() {
+            choices.push(InteractionChoiceV1 {
+                choice_id: String::from(DIALOGUE_FALLBACK_CHOICE_ID),
+                label: String::from(DIALOGUE_FALLBACK_CHOICE_LABEL),
+            });
+        }
         let interaction = PendingInteractionV1 {
             interaction_id: InteractionId::new(self.world_namespace, self.next_event_counter),
             prompt: format!("{npc_name}: {}", topic.dynamic_line),

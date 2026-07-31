@@ -1764,10 +1764,6 @@ fn runtime_npc_dialogue(
                 && !topic.dynamic_line.is_empty()
                 && !contains_unresolved_dialogue_tag(&topic.dynamic_line)
                 && (1..=cdda_protocol::MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())
-                && topic
-                    .responses
-                    .iter()
-                    .any(|response| response.condition.is_none())
                 && topic.responses.iter().all(|response| {
                     !contains_unresolved_dialogue_tag(&response.text)
                         && cdda_protocol::opinion_is_valid(&cdda_protocol::NpcOpinionV1 {

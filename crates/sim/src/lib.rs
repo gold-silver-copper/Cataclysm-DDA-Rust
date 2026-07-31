@@ -14780,10 +14780,16 @@ impl WorldState {
                         let Some(topic) = dialogue_topics.get(topic_id) else {
                             return true;
                         };
-                        if interaction.prompt != format!("{}: {}", npc.name, topic.dynamic_line)
-                            || interaction.choices.is_empty()
-                        {
+                        if interaction.prompt != format!("{}: {}", npc.name, topic.dynamic_line) {
                             return true;
+                        }
+                        if interaction.choices.as_slice()
+                            == [cdda_protocol::InteractionChoiceV1 {
+                                choice_id: String::from(npc_dialogue::DIALOGUE_FALLBACK_CHOICE_ID),
+                                label: String::from(npc_dialogue::DIALOGUE_FALLBACK_CHOICE_LABEL),
+                            }]
+                        {
+                            return false;
                         }
                         let mut responses = topic.responses.iter();
                         interaction.choices.iter().any(|choice| {
