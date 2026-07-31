@@ -65,7 +65,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 101;
+pub const PROTOCOL_VERSION: u16 = 102;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1796,6 +1796,7 @@ pub enum CommandRejection {
     InvalidBashInteraction,
     InvalidBashTool,
     ActionQueueFull,
+    WeaponNotMelee,
     WeaponNotRanged,
     WeaponEmpty,
     NoClearShot,
@@ -1911,6 +1912,11 @@ pub enum WorldEventKind {
         remaining_part_hp: i32,
         remaining_hp: i32,
     },
+    /// A fully resolved authoritative survivor-on-survivor melee miss.
+    ActorMissedActor {
+        source: ActorId,
+        target: ActorId,
+    },
     ActorDied {
         actor_id: ActorId,
         killer: ActorId,
@@ -1992,6 +1998,9 @@ pub enum WorldEventKind {
         source: CreatureId,
         target: ActorId,
         stumbled: bool,
+        /// Sleeping-target misses are canonical for replay but intentionally
+        /// remain private, matching the pinned upstream message boundary.
+        target_was_sleeping: bool,
     },
     ActorKilledByCreature {
         actor_id: ActorId,
@@ -2621,6 +2630,13 @@ pub struct ActorSnapshot {
     pub sleepiness: i32,
     pub sleeping: bool,
     pub sleep_intervals: u16,
+    /// Current whole-point stamina. Combat resource changes are authoritative
+    /// and persist across disconnect, recovery, and replay.
+    pub stamina: u32,
+    pub maximum_stamina: u32,
+    /// Ordinary defensive reactions remaining before the next one-second
+    /// actor turn refresh.
+    pub dodge_attempts_remaining: u8,
     pub speed: u16,
     pub action_points: i64,
     pub queued_actions: Vec<QueuedActionSnapshot>,

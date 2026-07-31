@@ -2,6 +2,7 @@
 
 mod anatomy;
 mod cities;
+mod combat;
 mod items;
 mod mapgen;
 mod overmap;
@@ -109,6 +110,7 @@ pub const ACTOR_ACTION_THRESHOLD: u32 = cdda_protocol::ACTION_POINT_THRESHOLD;
 const DISCONNECTED_AUTOPILOT_THREAT_RADIUS: u64 = 8;
 const CORPSE_REVIVAL_HOUR_TICKS: u64 = SimTick::HZ * 60 * 60;
 pub const DEFAULT_ACTOR_SPEED: u16 = 100;
+pub const DEFAULT_ACTOR_MAXIMUM_STAMINA: u32 = combat::DEFAULT_MAXIMUM_STAMINA;
 /// Pinned samples of CDDA's
 /// `1 - (0.5 - 0.5 * cos(pi * practice))^2` remaining time-malus curve.
 /// Runtime interpolation is integer-only and portable across platforms.
@@ -2617,6 +2619,9 @@ struct Actor {
     sleepiness: i32,
     sleeping: bool,
     sleep_intervals: u16,
+    stamina: u32,
+    maximum_stamina: u32,
+    dodge_attempts_remaining: u8,
     speed: u16,
     action_points: i64,
     queued_actions: VecDeque<QueuedActionSnapshot>,
@@ -2658,6 +2663,9 @@ impl Actor {
             sleepiness: self.sleepiness,
             sleeping: self.sleeping,
             sleep_intervals: self.sleep_intervals,
+            stamina: self.stamina,
+            maximum_stamina: self.maximum_stamina,
+            dodge_attempts_remaining: self.dodge_attempts_remaining,
             speed: self.speed,
             action_points: self.action_points,
             queued_actions: self.queued_actions.iter().cloned().collect(),
@@ -2764,6 +2772,11 @@ fn valid_actor_schedule(
         || snapshot.sleepiness > SLEEPINESS_MAX
         || (!snapshot.sleeping && snapshot.sleep_intervals != 0)
         || snapshot.sleep_intervals > MAX_SLEEP_INTENSITY
+        || snapshot.maximum_stamina == 0
+        || snapshot.maximum_stamina > combat::MAXIMUM_STAMINA_LIMIT
+        || snapshot.stamina > snapshot.maximum_stamina
+        || snapshot.dodge_attempts_remaining > combat::ORDINARY_DODGE_ATTEMPTS
+        || ((snapshot.sleeping || snapshot.hp <= 0) && snapshot.dodge_attempts_remaining != 0)
         || snapshot.worn.len() > MAX_ACTOR_INVENTORY_ITEMS
         || snapshot.worn.iter().copied().collect::<BTreeSet<_>>().len() != snapshot.worn.len()
         || snapshot
@@ -5475,6 +5488,9 @@ impl WorldState {
                 sleepiness: 0,
                 sleeping: false,
                 sleep_intervals: 0,
+                stamina: DEFAULT_ACTOR_MAXIMUM_STAMINA,
+                maximum_stamina: DEFAULT_ACTOR_MAXIMUM_STAMINA,
+                dodge_attempts_remaining: combat::ORDINARY_DODGE_ATTEMPTS,
                 speed: DEFAULT_ACTOR_SPEED,
                 action_points: i64::from(ACTOR_ACTION_THRESHOLD),
                 queued_actions: VecDeque::new(),
@@ -5680,6 +5696,9 @@ impl WorldState {
                 sleepiness: actor.sleepiness,
                 sleeping: actor.sleeping,
                 sleep_intervals: actor.sleep_intervals,
+                stamina: actor.stamina,
+                maximum_stamina: actor.maximum_stamina,
+                dodge_attempts_remaining: actor.dodge_attempts_remaining,
                 speed: actor.speed,
                 action_points: actor.action_points,
                 queued_actions: actor.queued_actions.into(),
@@ -5751,6 +5770,7 @@ impl WorldState {
         }
         self.tick = self.tick.next();
         let mut events = Vec::with_capacity(commands.len());
+        self.advance_actor_combat_resources();
         for input in held_movement {
             self.apply_held_movement_update(input)?;
         }
@@ -5777,6 +5797,32 @@ impl WorldState {
             events,
             canonical_hash,
         })
+    }
+
+    fn advance_actor_combat_resources(&mut self) {
+        if !self.tick.0.is_multiple_of(SimTick::HZ) {
+            return;
+        }
+        for actor in self.actors.values_mut() {
+            let winded = actor
+                .effects
+                .iter()
+                .any(|effect| effect.effect_id == "winded" && effect.expires_at_tick > self.tick);
+            let regen = if winded {
+                combat::WINDED_STAMINA_REGEN_PER_SECOND
+            } else {
+                combat::BASE_STAMINA_REGEN_PER_SECOND
+            };
+            actor.stamina = actor
+                .stamina
+                .saturating_add(regen)
+                .min(actor.maximum_stamina);
+            actor.dodge_attempts_remaining = if actor.hp > 0 && !actor.sleeping {
+                combat::ORDINARY_DODGE_ATTEMPTS
+            } else {
+                0
+            };
+        }
     }
 
     /// Item-owned traversal coordinator. Temperature arithmetic and recursive
@@ -5870,6 +5916,7 @@ impl WorldState {
                     if actor.hp <= 0 {
                         actor.sleeping = false;
                         actor.sleep_intervals = 0;
+                        actor.dodge_attempts_remaining = 0;
                         actor.held_movement = None;
                         actor.queued_actions.clear();
                     }
@@ -7500,6 +7547,7 @@ impl WorldState {
             .ok_or(SimError::UnknownActor)?;
         actor.sleeping = true;
         actor.sleep_intervals = 0;
+        actor.dodge_attempts_remaining = 0;
         actor.action_points = 0;
         let canceled = actor
             .queued_actions
@@ -7601,6 +7649,20 @@ impl WorldState {
         let target_position = target_actor.position;
         if !horizontally_adjacent(source_position, target_position) {
             events.push(self.rejection(source, sequence, CommandRejection::TargetOutOfRange)?);
+            return Ok(());
+        }
+        let Some((spread, dodge_attempted)) =
+            self.actor_actor_hit_spread(source, target, sequence.0)?
+        else {
+            events.push(self.rejection(source, sequence, CommandRejection::WeaponNotMelee)?);
+            return Ok(());
+        };
+        self.charge_actor_melee_stamina(source)?;
+        if dodge_attempted {
+            self.consume_actor_dodge_attempt(target)?;
+        }
+        if spread < 0 {
+            events.push(self.make_event(WorldEventKind::ActorMissedActor { source, target })?);
             return Ok(());
         }
         let damage = self.melee_damage(source)?;
@@ -9273,10 +9335,12 @@ impl WorldState {
             events.push(self.rejection(source, sequence, CommandRejection::TargetOutOfRange)?);
             return Ok(());
         }
-        if self
-            .actor_creature_hit_spread(source, target, sequence.0)?
-            .is_some_and(|spread| spread < 0)
-        {
+        let Some(spread) = self.actor_creature_hit_spread(source, target, sequence.0)? else {
+            events.push(self.rejection(source, sequence, CommandRejection::WeaponNotMelee)?);
+            return Ok(());
+        };
+        self.charge_actor_melee_stamina(source)?;
+        if spread < 0 {
             events.push(self.make_event(WorldEventKind::ActorMissedCreature { source, target })?);
             return Ok(());
         }
@@ -9290,70 +9354,6 @@ impl WorldState {
             return Ok(());
         }
         self.apply_melee_damage_to_creature(source, target, damage, events)
-    }
-
-    /// Exact currently admitted player-hit subset. `None` preserves the
-    /// documented temporary guaranteed-hit boundary for weapons outside the
-    /// strict ordinary bash catalog.
-    fn actor_creature_hit_spread(
-        &self,
-        source: ActorId,
-        target: CreatureId,
-        rng_sequence: u64,
-    ) -> Result<Option<i64>, SimError> {
-        let actor = self.actors.get(&source).ok_or(SimError::UnknownActor)?;
-        let creature = self
-            .creatures
-            .get(&target)
-            .ok_or(SimError::UnknownCreature)?;
-        let melee_skill = actor_skill_level(actor, "melee", false);
-        let (accuracy_numerator, accuracy_denominator) = match actor.wielded {
-            None => (
-                pinned_unarmed_melee_accuracy_quarters(actor.base_dexterity, melee_skill),
-                4,
-            ),
-            Some(item_id) => {
-                if self.actor_bash_strength(source)?.is_none() {
-                    return Ok(None);
-                }
-                let weapon = actor.inventory.get(&item_id).ok_or(SimError::UnknownItem)?;
-                let profile = self
-                    .smash_item_types
-                    .get(&weapon.type_id)
-                    .ok_or(SimError::InvalidItem)?;
-                (
-                    pinned_bash_weapon_melee_accuracy_twelfths(
-                        actor.base_dexterity,
-                        actor_skill_level(actor, "bashing", false),
-                        melee_skill,
-                        profile.melee_to_hit,
-                        profile.bash_damage,
-                    ),
-                    12,
-                )
-            }
-        };
-        let mut rng = self.named_session_rng(
-            b"actor-melee-hit",
-            &[source.as_u128(), target.as_u128()],
-            rng_sequence,
-        );
-        let hit_roll = pinned_melee_hit_roll(accuracy_numerator, accuracy_denominator, &mut rng)?;
-        let dodge_roll = i64::from(creature.dodge)
-            .checked_mul(5)
-            .ok_or(SimError::NumericOverflow)?;
-        let spread = hit_roll
-            .checked_sub(dodge_roll)
-            .and_then(|spread| spread.checked_sub(creature_size_melee_penalty(creature.size)))
-            .ok_or(SimError::NumericOverflow)?;
-        spread
-            .checked_add(if creature.immobile {
-                IMMOBILE_MELEE_HIT_BONUS
-            } else {
-                0
-            })
-            .map(Some)
-            .ok_or(SimError::NumericOverflow)
     }
 
     fn apply_melee_damage_to_creature(
@@ -10781,10 +10781,20 @@ impl WorldState {
         turn_sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        if let Some((spread, stumbled)) =
-            self.sleeping_target_creature_attack_roll(source, target, turn_sequence)?
-            && spread < 0
-        {
+        let Some((spread, stumbled, dodge_attempted)) =
+            self.creature_actor_attack_roll(source, target, turn_sequence)?
+        else {
+            return Ok(());
+        };
+        if dodge_attempted {
+            self.consume_actor_dodge_attempt(target)?;
+        }
+        if spread < 0 {
+            let target_was_sleeping = self
+                .actors
+                .get(&target)
+                .ok_or(SimError::UnknownActor)?
+                .sleeping;
             if stumbled {
                 let until = self
                     .tick
@@ -10801,6 +10811,7 @@ impl WorldState {
                 source,
                 target,
                 stumbled,
+                target_was_sleeping,
             })?);
             return Ok(());
         }
@@ -10926,38 +10937,10 @@ impl WorldState {
         if actor.hp <= 0 {
             actor.sleeping = false;
             actor.sleep_intervals = 0;
+            actor.dodge_attempts_remaining = 0;
             actor.queued_actions.clear();
         }
         Ok((outcome, was_sleeping))
-    }
-
-    /// Exact currently admitted monster-hit subset. Sleeping actors cannot
-    /// attempt to dodge in pinned CDDA, so their dodge roll is exactly zero.
-    /// Awake targets retain the documented temporary guaranteed-hit boundary
-    /// until canonical dodge attempts, stamina, encumbrance, and limb state
-    /// exist.
-    fn sleeping_target_creature_attack_roll(
-        &self,
-        source: CreatureId,
-        target: ActorId,
-        turn_sequence: u64,
-    ) -> Result<Option<(i64, bool)>, SimError> {
-        let creature = self
-            .creatures
-            .get(&source)
-            .ok_or(SimError::UnknownCreature)?;
-        let actor = self.actors.get(&target).ok_or(SimError::UnknownActor)?;
-        if creature.melee_dice == 0 || !actor.sleeping {
-            return Ok(None);
-        }
-        let mut rng = self.named_rng(
-            b"creature-melee-hit",
-            &[source.as_u128(), target.as_u128()],
-            turn_sequence,
-        );
-        let spread = pinned_melee_hit_roll(i64::from(creature.melee_skill), 1, &mut rng)?;
-        let stumbled = spread < 0 && creature.clumsy_attacks && rng.next_u32().is_multiple_of(4);
-        Ok(Some((spread, stumbled)))
     }
 
     fn apply_wield(
@@ -13513,6 +13496,7 @@ impl WorldState {
                 if died {
                     actor.sleeping = false;
                     actor.sleep_intervals = 0;
+                    actor.dodge_attempts_remaining = 0;
                     actor.queued_actions.clear();
                 } else if actor.sleeping && needs_damage {
                     actor.sleeping = false;
@@ -13530,6 +13514,7 @@ impl WorldState {
                     actor.sleepiness = actor.sleepiness.saturating_sub(10);
                     actor.sleeping = true;
                     actor.sleep_intervals = 0;
+                    actor.dodge_attempts_remaining = 0;
                     actor.action_points = 0;
                     canceled.extend(actor.queued_actions.drain(..).map(|action| action.sequence));
                     sleep_reason = Some(SleepReason::Exhaustion);
@@ -14021,6 +14006,9 @@ impl WorldState {
                     sleepiness: actor.sleepiness,
                     sleeping: actor.sleeping,
                     sleep_intervals: actor.sleep_intervals,
+                    stamina: actor.stamina,
+                    maximum_stamina: actor.maximum_stamina,
+                    dodge_attempts_remaining: actor.dodge_attempts_remaining,
                     speed: actor.speed,
                     action_points: actor.action_points,
                     queued_actions: actor.queued_actions.clone().into(),
@@ -14209,7 +14197,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV77");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV78");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -17393,6 +17381,7 @@ mod tests {
                     source,
                     target,
                     stumbled: false,
+                    ..
                 },
                 ..
             }] if *source == creature && *target == actor
@@ -17531,6 +17520,7 @@ mod tests {
                     source,
                     target,
                     stumbled: false,
+                    ..
                 },
                 ..
             }] if *source == creature && *target == actor
@@ -17617,6 +17607,7 @@ mod tests {
                     source,
                     target,
                     stumbled: true,
+                    ..
                 },
                 ..
             }] if *source == creature && *target == actor
@@ -21191,6 +21182,9 @@ mod tests {
             sleepiness: 0,
             sleeping: false,
             sleep_intervals: 0,
+            stamina: DEFAULT_ACTOR_MAXIMUM_STAMINA,
+            maximum_stamina: DEFAULT_ACTOR_MAXIMUM_STAMINA,
+            dodge_attempts_remaining: combat::ORDINARY_DODGE_ATTEMPTS,
             speed: DEFAULT_ACTOR_SPEED,
             action_points: i64::from(ACTOR_ACTION_THRESHOLD),
             queued_actions: Vec::new(),
@@ -21234,6 +21228,9 @@ mod tests {
                 sleepiness: 0,
                 sleeping: false,
                 sleep_intervals: 0,
+                stamina: DEFAULT_ACTOR_MAXIMUM_STAMINA,
+                maximum_stamina: DEFAULT_ACTOR_MAXIMUM_STAMINA,
+                dodge_attempts_remaining: combat::ORDINARY_DODGE_ATTEMPTS,
                 speed: DEFAULT_ACTOR_SPEED,
                 action_points: i64::from(ACTOR_ACTION_THRESHOLD),
                 queued_actions: Vec::new(),

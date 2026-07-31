@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 101,
-  "persistence_schema_version": 79,
+  "protocol_version": 102,
+  "persistence_schema_version": 80,
   "replay_format_version": 3,
   "active_milestone": "anatomy-combat",
   "completion_gate": [
@@ -409,7 +409,8 @@
         { "id": "bodypart-hp-and-targeting", "state": "implementation_complete" },
         { "id": "wearable-armor-and-damage-absorption", "state": "implementation_complete" },
         { "id": "on-hit-effects", "state": "in_progress" },
-        { "id": "dodge-stamina-healing", "state": "planned" }
+        { "id": "dodge-and-stamina", "state": "implementation_complete" },
+        { "id": "healing", "state": "planned" }
       ],
       "priority": 22,
       "depends_on": ["cpp-differential-oracle", "simulation-actors-module", "simulation-combat-module", "simulation-canonical-state-module", "protocol-domain-modules", "persistence-domain-modules"],

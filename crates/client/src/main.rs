@@ -4241,6 +4241,7 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!(
             "Hit a survivor's {body_part_id} for {amount}; {remaining_part_hp} part HP and {remaining_hp} vital HP remain."
         ),
+        WorldEventKind::ActorMissedActor { .. } => String::from("Missed the survivor."),
         WorldEventKind::ActorDied { .. } => String::from("A survivor died."),
         WorldEventKind::CreatureMoved { .. } => String::from("A creature moved."),
         WorldEventKind::CreatureDamaged {
@@ -4527,6 +4528,7 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::InvalidBashInteraction => "that tile cannot be smashed",
         CommandRejection::InvalidBashTool => "wield a supported bash-only tool first",
         CommandRejection::ActionQueueFull => "action queue is full",
+        CommandRejection::WeaponNotMelee => "wielded item has no admitted melee profile",
         CommandRejection::WeaponNotRanged => "wielded item is not a ranged weapon",
         CommandRejection::WeaponEmpty => "weapon is empty",
         CommandRejection::NoClearShot => "no clear shot",
@@ -5150,7 +5152,7 @@ fn gameplay_status(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5164,6 +5166,9 @@ fn gameplay_status(
         actor.hp,
         body_parts,
         effects,
+        actor.stamina,
+        actor.maximum_stamina,
+        actor.dodge_attempts_remaining,
         actor.base_strength,
         actor.base_dexterity,
         actor.base_intelligence,
@@ -5205,6 +5210,7 @@ mod tests {
                 source: CreatureId::new(1, 2),
                 target: ActorId::new(1, 3),
                 stumbled,
+                target_was_sleeping: false,
             },
         };
         assert_eq!(event_message(&event(false)), "A creature missed you.");
@@ -5517,6 +5523,9 @@ mod tests {
                 sleepiness: 0,
                 sleeping: false,
                 sleep_intervals: 0,
+                stamina: 8_500,
+                maximum_stamina: 8_500,
+                dodge_attempts_remaining: 1,
                 speed: 100,
                 action_points: 0,
                 queued_actions: Vec::new(),
@@ -6016,6 +6025,9 @@ mod tests {
                 sleepiness: 0,
                 sleeping: false,
                 sleep_intervals: 0,
+                stamina: 8_500,
+                maximum_stamina: 8_500,
+                dodge_attempts_remaining: 1,
                 speed: 100,
                 action_points: 0,
                 queued_actions: Vec::new(),
@@ -6714,6 +6726,9 @@ mod tests {
                 sleepiness: 0,
                 sleeping: false,
                 sleep_intervals: 0,
+                stamina: 8_500,
+                maximum_stamina: 8_500,
+                dodge_attempts_remaining: 1,
                 speed: 100,
                 action_points: 0,
                 queued_actions: Vec::new(),
@@ -6843,6 +6858,9 @@ mod tests {
                 sleepiness: 0,
                 sleeping: false,
                 sleep_intervals: 0,
+                stamina: 8_500,
+                maximum_stamina: 8_500,
+                dodge_attempts_remaining: 1,
                 speed: 100,
                 action_points: 0,
                 queued_actions: Vec::new(),

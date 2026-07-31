@@ -17,5 +17,6 @@ Run only when the user explicitly requests a verification checkpoint.
   `cdda-server --all-targets` check hit the mandatory 60-second timeout; bounded
   library, binary, and test-target checks are used during implementation.
 - Anatomy/combat checkpoint: run exact C++ body-part HP, hit-selection, armor
-  layer, and on-hit-effect traces; canonical fixture updates; recovery/replay
-  modes; production admission; and two-client melee/ranged/monster combat.
+  layer, on-hit-effect, stamina regeneration/burn, dodge threshold/attempt, and
+  actor/monster hit traces; canonical fixture updates; recovery/replay modes;
+  production admission; and two-client melee/ranged/monster combat.

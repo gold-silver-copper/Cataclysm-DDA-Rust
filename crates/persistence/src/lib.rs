@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 79;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 99
-/// retained river curves and bounded built-in mapgen algorithms. Metadata-only
+pub const SCHEMA_VERSION: i64 = 80;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 102
+/// retained authoritative actor stamina and dodge attempts. Metadata-only
 /// databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 79;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 80;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -8061,6 +8061,7 @@ mod tests {
                             source,
                             target,
                             stumbled: true,
+                            ..
                         } if source == creature_id && target == actor_id
                     )
                 })
@@ -12029,6 +12030,9 @@ mod tests {
             sleepiness: 0,
             sleeping: false,
             sleep_intervals: 0,
+            stamina: cdda_sim::DEFAULT_ACTOR_MAXIMUM_STAMINA,
+            maximum_stamina: cdda_sim::DEFAULT_ACTOR_MAXIMUM_STAMINA,
+            dodge_attempts_remaining: 1,
             speed: cdda_sim::DEFAULT_ACTOR_SPEED,
             action_points: i64::from(cdda_sim::ACTOR_ACTION_THRESHOLD),
             queued_actions: Vec::new(),
@@ -12524,6 +12528,9 @@ mod tests {
             sleepiness: 0,
             sleeping: false,
             sleep_intervals: 0,
+            stamina: cdda_sim::DEFAULT_ACTOR_MAXIMUM_STAMINA,
+            maximum_stamina: cdda_sim::DEFAULT_ACTOR_MAXIMUM_STAMINA,
+            dodge_attempts_remaining: 1,
             speed: cdda_sim::DEFAULT_ACTOR_SPEED,
             action_points: i64::from(cdda_sim::ACTOR_ACTION_THRESHOLD),
             queued_actions: Vec::new(),

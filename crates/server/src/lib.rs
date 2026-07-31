@@ -5017,6 +5017,7 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             ..
         } => event_actor == Some(actor_id),
         WorldEventKind::DamageApplied { source, target, .. }
+        | WorldEventKind::ActorMissedActor { source, target }
         | WorldEventKind::ActorDied {
             actor_id: target,
             killer: source,
@@ -5028,12 +5029,16 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::ActorKilledByCreature {
             actor_id: target, ..
         } => target == actor_id,
+        WorldEventKind::CreatureMissedActor {
+            target,
+            target_was_sleeping,
+            ..
+        } => target == actor_id && !target_was_sleeping,
         WorldEventKind::RangedAttackResolved { source, target, .. } => {
             source == actor_id
                 || matches!(target, cdda_protocol::RangedTarget::Actor(target) if target == actor_id)
         }
         WorldEventKind::CreatureMoved { .. }
-        | WorldEventKind::CreatureMissedActor { .. }
         | WorldEventKind::CreatureCorpseCreated { .. }
         | WorldEventKind::CreatureRevived { .. }
         | WorldEventKind::CreatureBashed { .. }
@@ -5180,7 +5185,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sleeping_target_creature_miss_event_is_not_disclosed() {
+    fn creature_miss_event_respects_sleeping_message_boundary() {
         let target = ActorId::new(1, 1);
         let other = ActorId::new(1, 2);
         let event = WorldEvent {
@@ -5190,10 +5195,21 @@ mod tests {
                 source: cdda_protocol::CreatureId::new(1, 5),
                 target,
                 stumbled: true,
+                target_was_sleeping: true,
             },
         };
         assert!(!event_involves_actor(&event, target));
         assert!(!event_involves_actor(&event, other));
+        let mut awake_event = event;
+        if let WorldEventKind::CreatureMissedActor {
+            target_was_sleeping,
+            ..
+        } = &mut awake_event.kind
+        {
+            *target_was_sleeping = false;
+        }
+        assert!(event_involves_actor(&awake_event, target));
+        assert!(!event_involves_actor(&awake_event, other));
     }
 
     fn server_test_recipe(recipe_id: &str, output: &str) -> CraftRecipeV1 {
