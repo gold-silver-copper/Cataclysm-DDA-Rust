@@ -756,6 +756,7 @@ pub(super) fn assert_production_regional_field_gameplay(
         production_overmap,
         cities,
         rivers,
+        Vec::new(),
         start_locations
             .get("sloc_field")
             .expect("field start should exist"),

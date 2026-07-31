@@ -1760,6 +1760,7 @@ mod tests {
             },
             cities: Vec::new(),
             rivers: Vec::new(),
+            specials: Vec::new(),
             start_location: None,
             terrain_prototypes: vec![
                 test_terrain("t_base"),

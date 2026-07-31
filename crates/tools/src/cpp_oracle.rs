@@ -4237,6 +4237,7 @@ fn rust_item_group_tool_charge_case_with_replacement(
         },
         cities: Vec::new(),
         rivers: Vec::new(),
+        specials: Vec::new(),
         start_location: None,
         terrain_prototypes: vec![terrain],
         furniture_prototypes: Vec::new(),
@@ -4759,6 +4760,7 @@ fn rust_static_template_snapshot(
         },
         cities: Vec::new(),
         rivers: Vec::new(),
+        specials: Vec::new(),
         start_location: None,
         terrain_prototypes: vec![background, marker],
         furniture_prototypes: vec![FurnitureTileSnapshot {

@@ -136,6 +136,45 @@ impl OvermapTerrainRegistry {
             .iter()
             .map(|(id, identity)| (id.as_str(), identity))
     }
+
+    /// Returns the concrete identity selected by each clockwise quarter-turn
+    /// of an overmap special. Nonrotating terrain has one peer; rotatable and
+    /// linear terrain have four entries beginning at the supplied identity.
+    #[must_use]
+    pub fn rotated_peers(&self, full_id: &str) -> Option<Vec<&OvermapTerrainIdentity>> {
+        let source = self.identities.get(full_id)?;
+        let definition = self.types.get(&source.type_id)?;
+        match definition.shape() {
+            OvermapTerrainShape::NonRotating => Some(vec![source]),
+            OvermapTerrainShape::Rotatable => (0..4)
+                .map(|turn| {
+                    let rotation = (usize::from(source.rotation) + turn) % 4;
+                    self.identities.values().find(|identity| {
+                        identity.type_id == source.type_id
+                            && usize::from(identity.rotation) == rotation
+                    })
+                })
+                .collect(),
+            OvermapTerrainShape::Linear => {
+                let source_mask = LINEAR_PEERS
+                    .iter()
+                    .position(|(suffix, _, _)| full_id == format!("{}{suffix}", source.type_id))?;
+                (0..4)
+                    .map(|turns| {
+                        let mut mask = u8::try_from(source_mask).ok()?;
+                        for _ in 0..turns {
+                            mask = (mask & 4) << 1
+                                | (mask & 8) >> 3
+                                | (mask & 1) << 1
+                                | (mask & 2) << 1;
+                        }
+                        let suffix = LINEAR_PEERS.get(usize::from(mask))?.0;
+                        self.identities.get(&format!("{}{suffix}", source.type_id))
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

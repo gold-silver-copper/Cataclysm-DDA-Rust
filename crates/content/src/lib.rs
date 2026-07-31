@@ -10,6 +10,7 @@ mod item_group;
 mod mapgen;
 mod material;
 mod monster;
+mod overmap_special;
 mod overmap_terrain;
 mod proficiency;
 mod recipe;
@@ -67,6 +68,11 @@ pub use material::{
     ComestibleThermalProperties, MaterialRegistry, MaterialRegistryError, MaterialThermalDefinition,
 };
 pub use monster::{MonsterDefinition, MonsterRegistry, MonsterRegistryError};
+pub use overmap_special::{
+    MAX_OVERMAP_SPECIALS, OvermapLocationDefinition, OvermapSpecialConnectionDefinition,
+    OvermapSpecialDefinition, OvermapSpecialInterval, OvermapSpecialRegistry,
+    OvermapSpecialRegistryError, OvermapSpecialTerrainDefinition,
+};
 pub use overmap_terrain::{
     MAX_OVERMAP_TERRAIN_ID_BYTES, MAX_OVERMAP_TERRAIN_IDENTITIES,
     MAX_OVERMAP_TERRAIN_IDS_PER_DEFINITION, MAX_OVERMAP_TERRAIN_TYPES, OvermapTerrainIdentity,

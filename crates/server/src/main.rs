@@ -14,9 +14,9 @@ use cdda_content::{
     DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry,
     FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
     ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
-    MonsterDefinition, MonsterRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
-    RecipeRegistry, RiverSettingsRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
-    TerrainRegistry,
+    MonsterDefinition, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
+    ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry,
+    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -86,7 +86,7 @@ use item_groups::{
     runtime_item_group_item,
 };
 use worldgen::{
-    RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_item_group_roots,
+    RuntimeMapgenContent, bootstrap_regional_special_overmap, runtime_mapgen_item_group_roots,
     runtime_mapgen_worldgen,
 };
 #[cfg(test)]
@@ -123,6 +123,7 @@ struct RuntimeWorldContent<'a> {
     regions: &'a DefaultRegionTerrainFurnitureRegistry,
     mapgen: &'a MapgenRegistry,
     overmap_terrain: &'a OvermapTerrainRegistry,
+    overmap_specials: &'a OvermapSpecialRegistry,
     start_locations: &'a StartLocationRegistry,
     city_settings: &'a CitySettingsRegistry,
     river_settings: &'a RiverSettingsRegistry,
@@ -327,6 +328,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let overmap_specials = OvermapSpecialRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+        &overmap_terrain,
+    )?;
     let start_locations = StartLocationRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -423,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             regions: &regions,
             mapgen: &mapgen,
             overmap_terrain: &overmap_terrain,
+            overmap_specials: &overmap_specials,
             start_locations: &start_locations,
             city_settings: &city_settings,
             river_settings: &river_settings,
@@ -758,6 +767,7 @@ fn open_world(
     let regions = content.regions;
     let mapgen = content.mapgen;
     let overmap_terrain = content.overmap_terrain;
+    let overmap_specials = content.overmap_specials;
     let start_locations = content.start_locations;
     let city_settings = content.city_settings;
     let mut store = WorldStore::open(path)?;
@@ -816,17 +826,20 @@ fn open_world(
         item_groups,
         item_group_content,
     )?;
-    let (regional_overmap, cities, rivers, _road_exits) = bootstrap_regional_road_overmap(
-        overmap_terrain,
-        metadata.world_seed,
-        city_settings
-            .get(DEFAULT_CITY_SETTINGS_ID)
-            .ok_or("pinned default content is missing default city settings")?,
-        content
-            .river_settings
-            .get(DEFAULT_RIVER_SETTINGS_ID)
-            .ok_or("pinned default content is missing default river settings")?,
-    )?;
+    let (regional_overmap, cities, rivers, _road_exits, specials) =
+        bootstrap_regional_special_overmap(
+            overmap_terrain,
+            overmap_specials,
+            mapgen,
+            metadata.world_seed,
+            city_settings
+                .get(DEFAULT_CITY_SETTINGS_ID)
+                .ok_or("pinned default content is missing default city settings")?,
+            content
+                .river_settings
+                .get(DEFAULT_RIVER_SETTINGS_ID)
+                .ok_or("pinned default content is missing default river settings")?,
+        )?;
     let mapgen_item_group_roots = runtime_mapgen_item_group_roots(&regional_overmap, mapgen)?;
     let item_group_catalog = merge_item_group_catalogs([
         bash_item_group_catalog,
@@ -840,6 +853,7 @@ fn open_world(
         regional_overmap,
         cities,
         rivers,
+        specials,
         start_locations
             .get("sloc_field")
             .ok_or("pinned default content is missing sloc_field")?,
@@ -5289,6 +5303,7 @@ mod tests {
             bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             start_locations
                 .get("sloc_lmoe")
                 .expect("LMOE start location should load"),
@@ -5316,6 +5331,7 @@ mod tests {
         assert!(
             runtime_mapgen_worldgen(
                 bootstrap_lmoe_overmap(&overmap_terrain).expect("LMOE layer should normalize"),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 start_locations

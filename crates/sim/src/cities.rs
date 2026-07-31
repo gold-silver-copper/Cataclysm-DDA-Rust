@@ -441,6 +441,7 @@ mod tests {
                 overmap: layout.clone(),
                 cities: cities.clone(),
                 rivers: Vec::new(),
+                specials: Vec::new(),
                 start_location: None,
                 terrain_prototypes: Vec::new(),
                 furniture_prototypes: Vec::new(),

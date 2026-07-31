@@ -8,3 +8,6 @@ Run only when the user explicitly requests a verification checkpoint.
 - River/bridge checkpoint: run pinned topology and built-in mapgen C++
   differential traces, production-content admission, recovery/replay modes,
   and the real-Iroh two-client exploration path.
+- Overmap-special checkpoint: run fixed-special loader/admission coverage,
+  exact C++ sector/rotation/city/uniqueness traces, multi-z atomic placement,
+  recovery/replay modes, and real-Iroh two-client landmark exploration.

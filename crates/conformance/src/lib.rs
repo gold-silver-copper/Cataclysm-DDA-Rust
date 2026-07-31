@@ -1337,6 +1337,7 @@ mod tests {
                 size: 8,
             }],
             rivers: Vec::new(),
+            specials: Vec::new(),
             start_location: Some(cdda_protocol::WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_lmoe"),
                 targets: vec![cdda_protocol::WorldgenStartTargetV1 {

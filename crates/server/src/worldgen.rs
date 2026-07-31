@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
-    MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, OvermapTerrainMatchType,
-    OvermapTerrainRegistry, RiverSettingsDefinition, StartLocationDefinition,
-    StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice, StrictMapgenDefinition,
-    StrictMapgenNeighborFlags, StrictMapgenNeighborMatch, StrictMapgenNestedPlacement,
-    StrictNestedMapgenDefinition, TerrainRegistry,
+    MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, OvermapSpecialDefinition,
+    OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
+    RiverSettingsDefinition, StartLocationDefinition, StrictMapgenAreaItemPlacement,
+    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenNeighborFlags,
+    StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
+    TerrainRegistry,
 };
 use cdda_protocol::{
     ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
@@ -16,16 +17,18 @@ use cdda_protocol::{
     WorldgenNestedPlacementV1, WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1,
     WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
     WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1,
-    WorldgenRiverNodeV1, WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1,
-    WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
-    worldgen_omt_matches,
+    WorldgenRiverNodeV1, WorldgenSpecialPlacementV1, WorldgenSpecialUniquenessV1,
+    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
-    OvermapRiverSettings, OvermapRoadExit, place_overmap_cities, place_overmap_rivers,
-    place_overmap_roads_with_bridges,
+    OvermapFixedSpecial, OvermapFixedSpecialConnection, OvermapFixedSpecialTerrain,
+    OvermapRiverSettings, OvermapRoadExit, OvermapSpecialInterval, connect_overmap_special_roads,
+    place_overmap_cities, place_overmap_rivers, place_overmap_roads_with_bridges,
+    place_overmap_specials,
 };
 
 use super::{furniture_tile, terrain_tile};
@@ -148,6 +151,274 @@ pub(super) fn bootstrap_regional_road_overmap(
     Ok((layout, cities, rivers, exits))
 }
 
+/// Production regional layout after deterministic fixed-special placement and
+/// generalized local-road connection routing.
+type RegionalSpecialOvermap = (
+    WorldgenOvermapLayoutV1,
+    Vec<WorldgenCityV1>,
+    Vec<WorldgenRiverNodeV1>,
+    Vec<OvermapRoadExit>,
+    Vec<WorldgenSpecialPlacementV1>,
+);
+
+pub(super) fn bootstrap_regional_special_overmap(
+    terrain: &OvermapTerrainRegistry,
+    specials: &OvermapSpecialRegistry,
+    mapgen: &MapgenRegistry,
+    world_seed: [u8; 32],
+    city_settings: &CitySettingsDefinition,
+    river_settings: &RiverSettingsDefinition,
+) -> Result<RegionalSpecialOvermap, Box<dyn std::error::Error>> {
+    let (layout, cities, rivers, exits) =
+        bootstrap_regional_road_overmap(terrain, world_seed, city_settings, river_settings)?;
+    let definitions = runtime_fixed_specials(specials, terrain, mapgen, &layout)?;
+    let default_below = runtime_omt_identity(terrain, "solid_earth")?;
+    let default_above = runtime_omt_identity(terrain, "open_air")?;
+    let placed = place_overmap_specials(
+        world_seed,
+        cdda_protocol::WORLDGEN_GENERATOR_VERSION_V2,
+        layout,
+        &cities,
+        &definitions,
+        default_below,
+        default_above,
+        &BTreeSet::new(),
+    )?;
+    let road_identities = runtime_omt_identities(terrain, &OVERMAP_ROAD_MASK_IDS)?;
+    let bridge_identities = runtime_omt_identities(terrain, &OVERMAP_BRIDGE_IDS)?;
+    let layout = connect_overmap_special_roads(
+        placed.layout,
+        &placed.road_anchors,
+        &road_identities,
+        &bridge_identities,
+    )?;
+    Ok((layout, cities, rivers, exits, placed.placements))
+}
+
+fn runtime_fixed_specials(
+    specials: &OvermapSpecialRegistry,
+    terrain: &OvermapTerrainRegistry,
+    mapgen: &MapgenRegistry,
+    layout: &WorldgenOvermapLayoutV1,
+) -> Result<Vec<OvermapFixedSpecial>, Box<dyn std::error::Error>> {
+    let present_types = layout
+        .identities
+        .iter()
+        .map(|identity| identity.type_id.as_str())
+        .collect::<BTreeSet<_>>();
+    specials
+        .iter()
+        .filter_map(|(_, definition)| {
+            if !definition.placement_semantics_are_supported()
+                || definition.flags.contains("EXTRADIMENSIONAL")
+                || definition.flags.contains("LAKE") && !present_types.contains("lake_surface")
+                || definition.flags.contains("OCEAN") && !present_types.contains("ocean_surface")
+            {
+                None
+            } else {
+                Some(compile_fixed_special(definition, specials, terrain, mapgen))
+            }
+        })
+        .filter_map(|result| match result {
+            Ok(Some(definition)) => Some(Ok(definition)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn compile_fixed_special(
+    definition: &OvermapSpecialDefinition,
+    specials: &OvermapSpecialRegistry,
+    terrain: &OvermapTerrainRegistry,
+    mapgen: &MapgenRegistry,
+) -> Result<Option<OvermapFixedSpecial>, Box<dyn std::error::Error>> {
+    let mut terrains = Vec::with_capacity(definition.terrains.len());
+    for part in &definition.terrains {
+        let mut allowed_location_types = BTreeSet::new();
+        for location in &part.locations {
+            let Some(location) = specials.location(location) else {
+                return Ok(None);
+            };
+            allowed_location_types.extend(location.terrain_types.iter().cloned());
+        }
+        let rotated_identities = if let Some(overmap) = &part.overmap {
+            let Some(peers) = terrain.rotated_peers(overmap) else {
+                return Ok(None);
+            };
+            if peers
+                .iter()
+                .any(|identity| !runtime_generator_is_available(&identity.generator_id, mapgen))
+            {
+                return Ok(None);
+            }
+            peers.into_iter().map(runtime_protocol_identity).collect()
+        } else {
+            Vec::new()
+        };
+        terrains.push(OvermapFixedSpecialTerrain {
+            offset: cdda_protocol::ChunkCoord {
+                x: part.point[0],
+                y: part.point[1],
+                z: part.point[2],
+            },
+            rotated_identities,
+            allowed_location_types,
+        });
+    }
+    if terrains
+        .iter()
+        .all(|terrain| terrain.rotated_identities.is_empty())
+    {
+        return Ok(None);
+    }
+    let connection_location_ids = [
+        "road", "stream", "field", "forest", "swamp", "highway", "water",
+    ];
+    let mut road_location_types = BTreeSet::new();
+    for location in connection_location_ids {
+        if let Some(location) = specials.location(location) {
+            road_location_types.extend(location.terrain_types.iter().cloned());
+        }
+    }
+    let mut connections = Vec::with_capacity(definition.connections.len());
+    for connection in &definition.connections {
+        let terrain_type = connection
+            .terrain
+            .as_deref()
+            .or_else(|| {
+                definition
+                    .terrains
+                    .iter()
+                    .find(|part| part.point == connection.point)
+                    .and_then(|part| part.overmap.as_deref())
+                    .and_then(|id| terrain.get_identity(id))
+                    .map(|identity| identity.type_id.as_str())
+            })
+            .unwrap_or("");
+        let connection_id = connection.connection.as_deref().unwrap_or_else(|| {
+            if terrain_type == "road" {
+                "local_road"
+            } else {
+                ""
+            }
+        });
+        if terrain_type != "road" || connection_id != "local_road" {
+            return Ok(None);
+        }
+        connections.push(OvermapFixedSpecialConnection {
+            offset: cdda_protocol::ChunkCoord {
+                x: connection.point[0],
+                y: connection.point[1],
+                z: connection.point[2],
+            },
+            from: connection.from.map(|point| cdda_protocol::ChunkCoord {
+                x: point[0],
+                y: point[1],
+                z: point[2],
+            }),
+            terrain_type: terrain_type.to_owned(),
+            connection_id: connection_id.to_owned(),
+            existing: connection.existing,
+            allowed_location_types: road_location_types.clone(),
+        });
+    }
+    let uniqueness = match (
+        definition.flags.contains("OVERMAP_UNIQUE"),
+        definition.flags.contains("GLOBALLY_UNIQUE"),
+    ) {
+        (false, false) => WorldgenSpecialUniquenessV1::None,
+        (true, false) => WorldgenSpecialUniquenessV1::Overmap,
+        (false, true) => WorldgenSpecialUniquenessV1::Global,
+        (true, true) => return Ok(None),
+    };
+    Ok(Some(OvermapFixedSpecial {
+        special_id: definition.id.clone(),
+        terrains,
+        connections,
+        city_sizes: OvermapSpecialInterval {
+            minimum: definition.city_sizes.minimum,
+            maximum: definition.city_sizes.maximum,
+        },
+        city_distance: OvermapSpecialInterval {
+            minimum: definition.city_distance.minimum,
+            maximum: definition.city_distance.maximum,
+        },
+        occurrences: OvermapSpecialInterval {
+            minimum: definition.occurrences.minimum,
+            maximum: definition.occurrences.maximum,
+        },
+        priority: definition.priority,
+        rotate: definition.rotate,
+        uniqueness,
+    }))
+}
+
+fn runtime_generator_is_available(generator_id: &str, mapgen: &MapgenRegistry) -> bool {
+    runtime_generator_is_available_inner(generator_id, mapgen, &mut BTreeSet::new())
+}
+
+fn runtime_generator_is_available_inner(
+    generator_id: &str,
+    mapgen: &MapgenRegistry,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    if runtime_builtin_mapgen(generator_id).is_some() {
+        return true;
+    }
+    if !visiting.insert(generator_id.to_owned()) {
+        return false;
+    }
+    let available = mapgen.get(generator_id).is_some_and(|definitions| {
+        !definitions.is_empty()
+            && definitions.iter().all(|definition| {
+                definition.deferred_fields.is_empty()
+                    && definition
+                        .fallback_predecessor_mapgen
+                        .as_deref()
+                        .is_none_or(|predecessor| {
+                            runtime_generator_is_available_inner(predecessor, mapgen, visiting)
+                        })
+            })
+            && mapgen
+                .strict_nested_closure(generator_id)
+                .is_ok_and(|closure| {
+                    closure.iter().all(|nested_id| {
+                        mapgen.nested(nested_id).is_some_and(|nested| {
+                            !nested.is_empty()
+                                && nested
+                                    .iter()
+                                    .all(|definition| definition.deferred_fields.is_empty())
+                        })
+                    })
+                })
+    });
+    visiting.remove(generator_id);
+    available
+}
+
+fn runtime_protocol_identity(
+    source: &cdda_content::OvermapTerrainIdentity,
+) -> WorldgenOmtIdentityV1 {
+    WorldgenOmtIdentityV1 {
+        full_id: source.full_id.clone(),
+        type_id: source.type_id.clone(),
+        subtype_id: source.subtype_id.clone(),
+        generator_id: source.generator_id.clone(),
+        rotation: source.rotation,
+    }
+}
+
+fn runtime_omt_identity(
+    terrain: &OvermapTerrainRegistry,
+    full_id: &str,
+) -> Result<WorldgenOmtIdentityV1, Box<dyn std::error::Error>> {
+    terrain
+        .get_identity(full_id)
+        .map(runtime_protocol_identity)
+        .ok_or_else(|| format!("pinned overmap-terrain catalog is missing {full_id}").into())
+}
+
 fn runtime_omt_identities(
     terrain: &OvermapTerrainRegistry,
     full_ids: &[&str],
@@ -158,13 +429,7 @@ fn runtime_omt_identities(
             let source = terrain
                 .get_identity(full_id)
                 .ok_or_else(|| format!("pinned overmap-terrain catalog is missing {full_id}"))?;
-            Ok(WorldgenOmtIdentityV1 {
-                full_id: source.full_id.clone(),
-                type_id: source.type_id.clone(),
-                subtype_id: source.subtype_id.clone(),
-                generator_id: source.generator_id.clone(),
-                rotation: source.rotation,
-            })
+            Ok(runtime_protocol_identity(source))
         })
         .collect()
 }
@@ -226,6 +491,11 @@ fn runtime_builtin_mapgen(generator_id: &str) -> Option<RuntimeBuiltinMapgen> {
         "river_c_not_nw" => WorldgenBuiltinMapgenV1::RiverCurvedNot { rotation: 3 },
         "forest_water" => WorldgenBuiltinMapgenV1::ForestWater,
         "river_center" => return Some(RuntimeBuiltinMapgen::UniformTerrain("t_water_moving_dp")),
+        "solid_earth" => return Some(RuntimeBuiltinMapgen::UniformTerrain("t_soil")),
+        "open_air" => return Some(RuntimeBuiltinMapgen::UniformTerrain("t_open_air")),
+        "empty_rock" | "deep_rock" => {
+            return Some(RuntimeBuiltinMapgen::UniformTerrain("t_rock"));
+        }
         _ => return None,
     };
     Some(RuntimeBuiltinMapgen::Algorithm(algorithm))
@@ -235,6 +505,9 @@ fn builtin_terrain_ids(builtin: RuntimeBuiltinMapgen) -> &'static [&'static str]
     match builtin {
         RuntimeBuiltinMapgen::UniformTerrain(id) => match id {
             "t_water_moving_dp" => &["t_water_moving_dp"],
+            "t_soil" => &["t_soil"],
+            "t_open_air" => &["t_open_air"],
+            "t_rock" => &["t_rock"],
             _ => &[],
         },
         RuntimeBuiltinMapgen::Algorithm(WorldgenBuiltinMapgenV1::ForestWater) => {
@@ -337,6 +610,7 @@ pub(super) fn runtime_mapgen_worldgen(
     overmap: WorldgenOvermapLayoutV1,
     cities: Vec<WorldgenCityV1>,
     rivers: Vec<WorldgenRiverNodeV1>,
+    specials: Vec<WorldgenSpecialPlacementV1>,
     start_location: &StartLocationDefinition,
     content: RuntimeMapgenContent<'_>,
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
@@ -702,6 +976,7 @@ pub(super) fn runtime_mapgen_worldgen(
         overmap,
         cities,
         rivers,
+        specials,
         start_location: Some(start_location),
         terrain_prototypes,
         furniture_prototypes,
@@ -1473,6 +1748,7 @@ mod tests {
             layout,
             cities,
             rivers,
+            Vec::new(),
             starts.get("sloc_field").expect("field start"),
             RuntimeMapgenContent {
                 mapgen: &mapgen,

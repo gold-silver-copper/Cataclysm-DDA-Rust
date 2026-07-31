@@ -6,6 +6,7 @@ mod mapgen;
 mod overmap;
 mod rivers;
 mod roads;
+mod specials;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -81,7 +82,13 @@ pub use rivers::{
 };
 pub use roads::{
     OVERMAP_BRIDGE_IDS, OVERMAP_ROAD_MASK_IDS, OvermapRoadBoundary, OvermapRoadExit,
-    overmap_road_mst_edges, place_overmap_roads, place_overmap_roads_with_bridges,
+    connect_overmap_special_roads, overmap_road_mst_edges, place_overmap_roads,
+    place_overmap_roads_with_bridges,
+};
+pub use specials::{
+    OvermapFixedSpecial, OvermapFixedSpecialConnection, OvermapFixedSpecialTerrain,
+    OvermapSpecialInterval, OvermapSpecialPlacementResult, OvermapSpecialRoadAnchor,
+    place_overmap_specials,
 };
 
 /// Persistent stores reserve counters in blocks large enough for one admitted
@@ -13782,7 +13789,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV74");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV75");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13967,6 +13974,7 @@ mod tests {
             },
             cities: Vec::new(),
             rivers: Vec::new(),
+            specials: Vec::new(),
             start_location: None,
             terrain_prototypes: vec![terrain],
             furniture_prototypes: Vec::new(),

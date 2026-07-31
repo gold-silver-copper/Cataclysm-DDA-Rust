@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use cdda_protocol::{
     ChunkCoord, WORLDGEN_OVERMAP_HEIGHT, WORLDGEN_OVERMAP_WIDTH, WorldgenCityV1,
-    WorldgenOmtIdentityV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
+    WorldgenOmtIdentityV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
 
 use crate::SimError;
+use crate::specials::OvermapSpecialRoadAnchor;
 
 pub const OVERMAP_ROAD_MASK_IDS: [&str; 16] = [
     "road_isolated",
@@ -245,6 +246,124 @@ pub fn place_overmap_roads_with_bridges(
     Ok((layout, exits))
 }
 
+/// Connects fixed-special road anchors to their selected city or fallback
+/// road without routing through already placed landmark OMTs. Rivers remain
+/// straight bridge crossings and a `from` hint constrains the first segment.
+pub fn connect_overmap_special_roads(
+    mut layout: WorldgenOvermapLayoutV1,
+    anchors: &[OvermapSpecialRoadAnchor],
+    road_identities: &[WorldgenOmtIdentityV1],
+    bridge_identities: &[WorldgenOmtIdentityV1],
+) -> Result<WorldgenOvermapLayoutV1, SimError> {
+    if anchors.is_empty() {
+        return Ok(layout);
+    }
+    let identities = road_identity_family(road_identities)?;
+    let surface = expand_surface(&layout)?;
+    let mut surface_ids = surface
+        .iter()
+        .map(|index| {
+            layout
+                .identities
+                .get(usize::from(*index))
+                .map(|identity| identity.full_id.clone())
+                .ok_or(SimError::InvalidTerrain)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let water_cells = surface
+        .iter()
+        .map(|index| {
+            layout
+                .identities
+                .get(usize::from(*index))
+                .map(is_river_identity)
+                .ok_or(SimError::InvalidTerrain)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let bridges = if water_cells.iter().any(|water| *water) {
+        Some(bridge_identity_family(bridge_identities)?)
+    } else {
+        None
+    };
+    let mut road_masks = surface
+        .iter()
+        .map(|index| {
+            layout
+                .identities
+                .get(usize::from(*index))
+                .and_then(existing_road_mask)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let mut road_cells = road_masks.iter().map(|mask| *mask != 0).collect::<Vec<_>>();
+    let blocked = surface
+        .iter()
+        .map(|index| {
+            layout
+                .identities
+                .get(usize::from(*index))
+                .map(|identity| !road_connection_substrate(identity))
+                .ok_or(SimError::InvalidTerrain)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for anchor in anchors {
+        let source = absolute_to_index(&layout, anchor.endpoint)?;
+        let destination = absolute_to_index(&layout, anchor.target)?;
+        if blocked.get(source).copied().unwrap_or(true)
+            || blocked.get(destination).copied().unwrap_or(true)
+        {
+            return Err(SimError::InvalidTerrain);
+        }
+        if source == destination {
+            continue;
+        }
+        let path = road_path(
+            source,
+            destination,
+            &road_cells,
+            &water_cells,
+            Some(&blocked),
+            anchor.initial_direction.map(direction_index),
+        )?;
+        paint_path(&path, &mut road_masks, &mut road_cells)?;
+    }
+    let mut known = layout
+        .identities
+        .iter()
+        .cloned()
+        .map(|identity| (identity.full_id.clone(), identity))
+        .collect::<BTreeMap<_, _>>();
+    for identity in identities.iter().chain(bridges.iter().flatten()) {
+        if known
+            .get(&identity.full_id)
+            .is_some_and(|existing| existing != identity)
+        {
+            return Err(SimError::InvalidTerrain);
+        }
+        known.insert(identity.full_id.clone(), identity.clone());
+    }
+    for (index, mask) in road_masks.iter().copied().enumerate() {
+        if mask == 0 {
+            continue;
+        }
+        let identity = if water_cells[index] {
+            let bridges = bridges.as_ref().ok_or(SimError::InvalidTerrain)?;
+            match mask {
+                5 => &bridges[0],
+                10 => &bridges[1],
+                _ => return Err(SimError::InvalidTerrain),
+            }
+        } else {
+            identities
+                .get(usize::from(mask))
+                .ok_or(SimError::InvalidTerrain)?
+        };
+        surface_ids[index] = identity.full_id.clone();
+    }
+    rebuild_layout_with_surface_ids(&mut layout, surface_ids, &known)?;
+    Ok(layout)
+}
+
 fn bridge_identity_family(
     identities: &[WorldgenOmtIdentityV1],
 ) -> Result<[WorldgenOmtIdentityV1; 2], SimError> {
@@ -428,7 +547,14 @@ fn connect_closest_points(
         let connect =
             join_components(&mut components, left, right) || rng.next_u64().is_multiple_of(10);
         if connect {
-            let path = road_path(points[left], points[right], road_cells, water_cells)?;
+            let path = road_path(
+                points[left],
+                points[right],
+                road_cells,
+                water_cells,
+                None,
+                None,
+            )?;
             paint_path(&path, road_masks, road_cells)?;
         }
     }
@@ -508,12 +634,15 @@ fn road_path(
     destination: usize,
     roads: &[bool],
     water: &[bool],
+    blocked: Option<&[bool]>,
+    initial_direction: Option<usize>,
 ) -> Result<Vec<usize>, SimError> {
     let cell_count = usize::from(WORLDGEN_OVERMAP_WIDTH) * usize::from(WORLDGEN_OVERMAP_HEIGHT);
     if source >= cell_count
         || destination >= cell_count
         || roads.len() != cell_count
         || water.len() != cell_count
+        || blocked.is_some_and(|blocked| blocked.len() != cell_count)
         || water[source]
         || water[destination]
     {
@@ -550,6 +679,12 @@ fn road_path(
             break;
         }
         for (direction, neighbor) in directed_neighbors(current)? {
+            if current == source && initial_direction.is_some_and(|initial| initial != direction) {
+                continue;
+            }
+            if blocked.is_some_and(|blocked| blocked[neighbor]) && neighbor != destination {
+                continue;
+            }
             if water[current] && incoming != direction {
                 continue;
             }
@@ -685,12 +820,14 @@ fn surface_index(x: i32, y: i32) -> Result<usize, SimError> {
 }
 
 fn expand_surface(layout: &WorldgenOvermapLayoutV1) -> Result<Vec<u16>, SimError> {
-    if layout.layers.len() != 1 || layout.layers[0].z != 0 {
-        return Err(SimError::InvalidTerrain);
-    }
+    let layer = layout
+        .layers
+        .iter()
+        .find(|layer| layer.z == 0)
+        .ok_or(SimError::InvalidTerrain)?;
     let expected = usize::from(WORLDGEN_OVERMAP_WIDTH) * usize::from(WORLDGEN_OVERMAP_HEIGHT);
     let mut cells = Vec::with_capacity(expected);
-    for run in &layout.layers[0].runs {
+    for run in &layer.runs {
         if layout
             .identities
             .get(usize::from(run.identity_index))
@@ -713,6 +850,79 @@ fn expand_surface(layout: &WorldgenOvermapLayoutV1) -> Result<Vec<u16>, SimError
         .ok_or(SimError::InvalidTerrain)
 }
 
+fn rebuild_layout_with_surface_ids(
+    layout: &mut WorldgenOvermapLayoutV1,
+    surface_ids: Vec<String>,
+    known: &BTreeMap<String, WorldgenOmtIdentityV1>,
+) -> Result<(), SimError> {
+    let expected = usize::from(WORLDGEN_OVERMAP_WIDTH) * usize::from(WORLDGEN_OVERMAP_HEIGHT);
+    if surface_ids.len() != expected {
+        return Err(SimError::InvalidTerrain);
+    }
+    let mut layer_ids = BTreeMap::new();
+    for layer in &layout.layers {
+        let mut cells = Vec::with_capacity(expected);
+        for run in &layer.runs {
+            let identity = layout
+                .identities
+                .get(usize::from(run.identity_index))
+                .ok_or(SimError::InvalidTerrain)?;
+            let length = usize::try_from(run.length).map_err(|_| SimError::NumericOverflow)?;
+            if cells
+                .len()
+                .checked_add(length)
+                .is_none_or(|sum| sum > expected)
+            {
+                return Err(SimError::InvalidTerrain);
+            }
+            cells.extend(std::iter::repeat_n(identity.full_id.clone(), length));
+        }
+        if cells.len() != expected || layer_ids.insert(layer.z, cells).is_some() {
+            return Err(SimError::InvalidTerrain);
+        }
+    }
+    layer_ids.insert(0, surface_ids);
+    let used = layer_ids
+        .values()
+        .flatten()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    layout.identities = used
+        .iter()
+        .map(|id| known.get(*id).cloned().ok_or(SimError::InvalidTerrain))
+        .collect::<Result<Vec<_>, _>>()?;
+    let indices = layout
+        .identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            Ok((
+                identity.full_id.as_str(),
+                u16::try_from(index).map_err(|_| SimError::NumericOverflow)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, SimError>>()?;
+    layout.layers = layer_ids
+        .into_iter()
+        .map(|(z, cells)| {
+            let cells = cells
+                .iter()
+                .map(|id| {
+                    indices
+                        .get(id.as_str())
+                        .copied()
+                        .ok_or(SimError::InvalidTerrain)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(WorldgenOvermapLayerV1 {
+                z,
+                runs: encode_runs(&cells)?,
+            })
+        })
+        .collect::<Result<Vec<_>, SimError>>()?;
+    Ok(())
+}
+
 fn road_mask(full_id: &str) -> Option<u8> {
     OVERMAP_ROAD_MASK_IDS
         .iter()
@@ -726,6 +936,31 @@ fn existing_road_mask(identity: &WorldgenOmtIdentityV1) -> Option<u8> {
         "bridge_east" | "bridge_west" => Some(EAST | WEST),
         _ => None,
     })
+}
+
+fn road_connection_substrate(identity: &WorldgenOmtIdentityV1) -> bool {
+    existing_road_mask(identity).is_some()
+        || is_river_identity(identity)
+        || matches!(
+            identity.type_id.as_str(),
+            "field"
+                | "meadow_core"
+                | "meadow_end"
+                | "highlands"
+                | "forest"
+                | "forest_thick"
+                | "forest_water"
+                | "forest_trail"
+        )
+}
+
+fn direction_index(direction: OvermapRoadBoundary) -> usize {
+    match direction {
+        OvermapRoadBoundary::North => 0,
+        OvermapRoadBoundary::East => 1,
+        OvermapRoadBoundary::South => 2,
+        OvermapRoadBoundary::West => 3,
+    }
 }
 
 fn is_river_identity(identity: &WorldgenOmtIdentityV1) -> bool {
@@ -857,6 +1092,7 @@ mod tests {
             overmap: layout.clone(),
             cities: Vec::new(),
             rivers: Vec::new(),
+            specials: Vec::new(),
             start_location: None,
             terrain_prototypes: Vec::new(),
             furniture_prototypes: Vec::new(),

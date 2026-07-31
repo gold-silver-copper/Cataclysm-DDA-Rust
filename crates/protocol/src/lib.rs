@@ -54,7 +54,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 98;
+pub const PROTOCOL_VERSION: u16 = 99;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -166,6 +166,8 @@ pub const MAX_WORLDGEN_START_TARGETS: usize = 256;
 pub const MAX_WORLDGEN_CITIES: usize = 4_096;
 pub const MAX_WORLDGEN_CITY_SIZE: u8 = 55;
 pub const MAX_WORLDGEN_RIVER_NODES: usize = 64;
+pub const MAX_WORLDGEN_SPECIAL_PLACEMENTS: usize = 4_096;
+pub const MAX_WORLDGEN_SPECIAL_OMTS: usize = 65_536;
 /// Pinned overmaps own 180x180 overmap-terrain coordinates per z-level.
 pub const WORLDGEN_OVERMAP_WIDTH: u16 = 180;
 pub const WORLDGEN_OVERMAP_HEIGHT: u16 = 180;
@@ -3038,6 +3040,32 @@ pub struct WorldgenRiverNodeV1 {
     pub major: bool,
 }
 
+/// Stable immutable identity for an overmap-special placement. IDs are dense
+/// placement-order values so persistence and replay never infer ownership from
+/// mutable terrain names.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct WorldgenSpecialId(pub u32);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WorldgenSpecialUniquenessV1 {
+    None,
+    Overmap,
+    Global,
+}
+
+/// One atomically placed fixed overmap special. `terrain_omts` contains only
+/// OMTs actually replaced by the special; predicate-only connection anchors
+/// remain represented by the final overmap layout.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenSpecialPlacementV1 {
+    pub placement_id: WorldgenSpecialId,
+    pub special_id: String,
+    pub origin: ChunkCoord,
+    pub rotation: u8,
+    pub uniqueness: WorldgenSpecialUniquenessV1,
+    pub terrain_omts: Vec<ChunkCoord>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenI32IntervalV1 {
     pub minimum: i32,
@@ -3131,6 +3159,9 @@ pub struct WorldgenCatalogV1 {
     /// Deterministic placement-order river curves retained for adjacent-map
     /// continuity and recovery.
     pub rivers: Vec<WorldgenRiverNodeV1>,
+    /// Deterministic placement-order fixed specials and their stable OMT
+    /// ownership. Strictly sorted by `placement_id`.
+    pub specials: Vec<WorldgenSpecialPlacementV1>,
     /// Server-authoritative spawn selector for new characters.
     pub start_location: Option<WorldgenStartLocationV1>,
     /// Prototype-ID-sorted, unique catalogs referenced by compact indices.
@@ -4439,6 +4470,57 @@ fn valid_worldgen_rivers(layout: &WorldgenOvermapLayoutV1, rivers: &[WorldgenRiv
     })
 }
 
+fn valid_worldgen_specials(
+    layout: &WorldgenOvermapLayoutV1,
+    specials: &[WorldgenSpecialPlacementV1],
+) -> bool {
+    if specials.len() > MAX_WORLDGEN_SPECIAL_PLACEMENTS {
+        return false;
+    }
+    let Some(maximum_x) = layout
+        .origin_x
+        .checked_add(i32::from(WORLDGEN_OVERMAP_WIDTH) - 1)
+    else {
+        return false;
+    };
+    let Some(maximum_y) = layout
+        .origin_y
+        .checked_add(i32::from(WORLDGEN_OVERMAP_HEIGHT) - 1)
+    else {
+        return false;
+    };
+    let z_levels = layout
+        .layers
+        .iter()
+        .map(|layer| layer.z)
+        .collect::<BTreeSet<_>>();
+    let mut owned = BTreeSet::new();
+    let mut globally_unique = BTreeSet::new();
+    let mut total_omts = 0_usize;
+    specials.iter().enumerate().all(|(index, special)| {
+        let Some(next_total) = total_omts.checked_add(special.terrain_omts.len()) else {
+            return false;
+        };
+        total_omts = next_total;
+        special.placement_id.0 == u32::try_from(index + 1).unwrap_or(u32::MAX)
+            && valid_worldgen_id(&special.special_id)
+            && special.origin.z == 0
+            && (layout.origin_x..=maximum_x).contains(&special.origin.x)
+            && (layout.origin_y..=maximum_y).contains(&special.origin.y)
+            && special.rotation < 4
+            && !special.terrain_omts.is_empty()
+            && total_omts <= MAX_WORLDGEN_SPECIAL_OMTS
+            && (special.uniqueness != WorldgenSpecialUniquenessV1::Global
+                || globally_unique.insert(special.special_id.as_str()))
+            && special.terrain_omts.iter().all(|omt| {
+                (layout.origin_x..=maximum_x).contains(&omt.x)
+                    && (layout.origin_y..=maximum_y).contains(&omt.y)
+                    && z_levels.contains(&omt.z)
+                    && owned.insert(*omt)
+            })
+    })
+}
+
 fn valid_worldgen_overmap_layout(layout: &WorldgenOvermapLayoutV1) -> Option<BTreeSet<u16>> {
     if layout.identities.is_empty()
         || layout.identities.len() > MAX_WORLDGEN_OMT_IDENTITIES
@@ -4952,6 +5034,7 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
     if catalog.generator_version != WORLDGEN_GENERATOR_VERSION_V2
         || !valid_worldgen_cities(&catalog.overmap, &catalog.cities)
         || !valid_worldgen_rivers(&catalog.overmap, &catalog.rivers)
+        || !valid_worldgen_specials(&catalog.overmap, &catalog.specials)
         || catalog.start_location.as_ref().is_some_and(|start| {
             !valid_worldgen_start_location(
                 start,
@@ -7235,6 +7318,7 @@ mod tests {
             },
             cities: Vec::new(),
             rivers: Vec::new(),
+            specials: Vec::new(),
             start_location: Some(WorldgenStartLocationV1 {
                 start_location_id: String::from("sloc_field"),
                 targets: vec![WorldgenStartTargetV1 {
