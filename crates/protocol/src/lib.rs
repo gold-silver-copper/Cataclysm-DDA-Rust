@@ -89,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 122;
+pub const PROTOCOL_VERSION: u16 = 123;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1986,6 +1986,12 @@ pub enum WorldEventKind {
         corpse_item_id: ItemId,
         position: WorldPosition,
     },
+    CreaturePolymorphed {
+        creature_id: CreatureId,
+        from_type_id: String,
+        to_type_id: String,
+        position: WorldPosition,
+    },
     CreatureBashed {
         creature_id: CreatureId,
         target: WorldPosition,
@@ -3218,6 +3224,7 @@ pub enum WorldgenMonsterSpecialAttackKindV1 {
     Leap,
     Eoc,
     Gun,
+    Polymorph,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3285,6 +3292,12 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub condition: Option<EocConditionV1>,
     /// Source-ordered immediate monster-alpha EOC activations.
     pub eoc_ids: Vec<String>,
+    /// Concrete target prototype for a polymorph actor; empty for every other
+    /// special kind.
+    pub polymorph_monster_type_id: String,
+    pub polymorph_keep_speed: bool,
+    pub polymorph_keep_hp: bool,
+    pub polymorph_keep_aggression: bool,
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
     /// Empty for ammo-free pseudo guns; otherwise the concrete item ID whose
@@ -5473,7 +5486,9 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                         && attack
                             .accuracy
                             .is_none_or(|accuracy| (0..=1_000_000).contains(&accuracy))
-                        && (1..=1_000_000).contains(&attack.range)
+                        && ((matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Polymorph)
+                            && attack.range == 0)
+                            || (1..=1_000_000).contains(&attack.range))
                         && (0..=1_000_000_000)
                             .contains(&attack.minimum_damage_multiplier_millionths)
                         && attack.minimum_damage_multiplier_millionths
@@ -5487,6 +5502,15 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                             .eoc_ids
                             .iter()
                             .all(|eoc_id| valid_worldgen_id(eoc_id))
+                        && (if matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Polymorph)
+                        {
+                            valid_worldgen_id(&attack.polymorph_monster_type_id)
+                        } else {
+                            attack.polymorph_monster_type_id.is_empty()
+                                && !attack.polymorph_keep_speed
+                                && !attack.polymorph_keep_hp
+                                && !attack.polymorph_keep_aggression
+                        })
                         && attack.gun_ranges.len() <= 64
                         && attack.infection_chance_millionths <= 1_000_000
                         && (matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Bite)
@@ -5651,6 +5675,44 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                             .max()
                                             .unwrap_or(0)
                             }
+                            WorldgenMonsterSpecialAttackKindV1::Polymorph => {
+                                attack.move_cost_moves == 0
+                                    && attack.accuracy.is_none()
+                                    && !attack.no_adjacent
+                                    && !attack.dodgeable
+                                    && attack.minimum_damage_multiplier_millionths == 0
+                                    && attack.maximum_damage_multiplier_millionths == 0
+                                    && attack.damage.is_empty()
+                                    && attack.effects.is_empty()
+                                    && !attack.effects_require_damage
+                                    && attack.infection_chance_millionths == 0
+                                    && attack.leap_minimum_range_milli == 0
+                                    && attack.leap_maximum_range_milli == 0
+                                    && attack.leap_minimum_consider_range_milli == 0
+                                    && attack.leap_maximum_consider_range_milli == 0
+                                    && !attack.leap_allow_no_target
+                                    && !attack.leap_prefer
+                                    && !attack.leap_random
+                                    && !attack.leap_ignore_destination_danger
+                                    && attack.eoc_ids.is_empty()
+                                    && attack.gun_type_id.is_empty()
+                                    && attack.gun_ammunition_type_id.is_empty()
+                                    && attack.gun_ranges.is_empty()
+                                    && attack.gun_item_range == 0
+                                    && attack.gun_dispersion == 0
+                                    && attack.gun_sound_volume == 0
+                                    && attack.gun_targeting_cost_moves == 0
+                                    && !attack.gun_require_targeting_player
+                                    && attack.gun_targeting_timeout_turns == 0
+                                    && attack.gun_targeting_timeout_extend_turns == 0
+                                    && attack.gun_targeting_sound.is_empty()
+                                    && attack.gun_targeting_volume == 0
+                                    && !attack.gun_laser_lock
+                                    && attack.gun_projectile_effects.is_empty()
+                                    && !attack.gun_no_damage_scaling
+                                    && !attack.gun_blinds_eyes
+                                    && !attack.gun_target_moving_vehicles
+                            }
                         }
                 })
                 && prototype.deferred_behavior_fields.len() <= 1_024
@@ -5679,6 +5741,23 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                 .monster_groups
                 .binary_search_by(|group| group.group_id.as_str().cmp(&population.group_id))
                 .is_err()
+        })
+    }) {
+        return false;
+    }
+    if catalog.monster_prototypes.iter().any(|prototype| {
+        prototype.special_attacks.iter().any(|attack| {
+            matches!(attack.kind, WorldgenMonsterSpecialAttackKindV1::Polymorph)
+                && catalog
+                    .monster_prototypes
+                    .binary_search_by(|candidate| {
+                        candidate
+                            .base
+                            .monster_type_id
+                            .as_str()
+                            .cmp(&attack.polymorph_monster_type_id)
+                    })
+                    .is_err()
         })
     }) {
         return false;

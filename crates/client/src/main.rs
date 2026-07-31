@@ -4439,6 +4439,11 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::CreatureDied { .. } => String::from("The creature died."),
         WorldEventKind::CreatureCorpseCreated { .. } => String::from("The creature left a corpse."),
         WorldEventKind::CreatureRevived { .. } => String::from("A corpse rose again."),
+        WorldEventKind::CreaturePolymorphed {
+            from_type_id,
+            to_type_id,
+            ..
+        } => format!("A creature changed from {from_type_id} into {to_type_id}."),
         WorldEventKind::CreatureBashed {
             target_type_id,
             success,

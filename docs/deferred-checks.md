@@ -39,8 +39,10 @@ Run only when the user explicitly requests a verification checkpoint.
   body-part on-hit duration/intensity traces; inherited firing-mode selection,
   overlapping range precedence, bounded burst ammunition consumption,
   per-projectile fields/damage/sound, stun blocking, intra-burst recoil and
-  cycling boundaries; combat scenarios at protocol 122/schema 100,
-  CanonicalStateV98, canonical-event-V23.
+  cycling boundaries; polymorph prototype dependency closure, proportional HP,
+  exact keep-speed/HP/aggression overrides, stable creature identity, target
+  special-cooldown reset, and authoritative transform events; combat scenarios
+  at protocol 123/schema 101, CanonicalStateV99, canonical-event-V24.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
   possible-value selection traces, strict

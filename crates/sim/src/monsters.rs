@@ -578,6 +578,12 @@ impl WorldState {
                         true
                     }
                 }
+                WorldgenMonsterSpecialAttackKindV1::Polymorph => {
+                    self.execute_creature_polymorph(source, profile, events)?;
+                    // The replacement owns a different attack catalog and
+                    // polymorph clears the current turn's moves.
+                    return Ok(0);
+                }
             };
             if !used {
                 continue;
@@ -603,6 +609,115 @@ impl WorldState {
                 .ok_or(SimError::NumericOverflow)?;
         }
         Ok(total_cost)
+    }
+
+    fn execute_creature_polymorph(
+        &mut self,
+        source: CreatureId,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let target = self
+            .worldgen
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .monster_prototypes
+                    .binary_search_by(|prototype| {
+                        prototype
+                            .base
+                            .monster_type_id
+                            .as_str()
+                            .cmp(&profile.polymorph_monster_type_id)
+                    })
+                    .ok()
+                    .and_then(|index| catalog.monster_prototypes.get(index))
+            })
+            .cloned()
+            .ok_or(SimError::InvalidCreature)?;
+        let (from_type_id, old_hp, old_max_hp, old_speed, old_aggression, position) = {
+            let creature = self
+                .creatures
+                .get(&source)
+                .ok_or(SimError::UnknownCreature)?;
+            (
+                creature.type_id.clone(),
+                creature.hp,
+                creature.max_hp,
+                creature.speed,
+                creature.aggression,
+                creature.position,
+            )
+        };
+        if old_hp <= 0 || old_max_hp <= 0 {
+            return Err(SimError::InvalidCreature);
+        }
+        let proportional_hp = i64::from(old_hp)
+            .checked_mul(i64::from(target.base.max_hp))
+            .ok_or(SimError::NumericOverflow)?
+            / i64::from(old_max_hp);
+        let proportional_hp =
+            i32::try_from(proportional_hp.max(1)).map_err(|_| SimError::NumericOverflow)?;
+        let creature = self
+            .creatures
+            .get_mut(&source)
+            .ok_or(SimError::UnknownCreature)?;
+        creature.type_id = target.base.monster_type_id.clone();
+        creature.hp = if profile.polymorph_keep_hp {
+            old_hp
+        } else {
+            proportional_hp
+        };
+        creature.max_hp = target.base.max_hp;
+        creature.speed = if profile.polymorph_keep_speed {
+            old_speed
+        } else {
+            target.base.speed
+        };
+        creature.attack_cost_moves = target.base.attack_cost_moves;
+        creature.aggression = if profile.polymorph_keep_aggression {
+            old_aggression
+        } else {
+            target.base.aggression
+        };
+        creature.melee_skill = target.base.melee_skill;
+        creature.dodge = target.base.dodge;
+        creature.size = target.base.size;
+        creature.melee_dice = target.base.melee_dice;
+        creature.melee_dice_sides = target.base.melee_dice_sides;
+        creature.can_see = target.base.can_see;
+        creature.vision_day = target.base.vision_day;
+        creature.vision_night = target.base.vision_night;
+        creature.stumbles = target.base.stumbles;
+        creature.bashes = target.base.bashes;
+        creature.group_bash = target.base.group_bash;
+        creature.hears = target.base.hears;
+        creature.good_hearing = target.base.good_hearing;
+        creature.clumsy_attacks = target.base.clumsy_attacks;
+        creature.immobile = target.base.immobile;
+        creature.pacifist = target.base.pacifist;
+        creature.can_open_doors = target.base.can_open_doors;
+        creature.path_settings = target.base.path_settings;
+        creature.action_points = 0;
+        creature.special_attacks = target
+            .special_attacks
+            .iter()
+            .map(|attack| CreatureSpecialAttackStateV1 {
+                attack_id: attack.attack_id.clone(),
+                cooldown_turns: attack.cooldown_turns,
+                enabled: true,
+            })
+            .collect();
+        creature.ammunition = target.starting_ammunition;
+        creature.blood_field_type_id = target.base.blood_field_type_id.clone();
+        creature.corpse = target.leaves_corpse.then(|| target.base.clone());
+        events.push(self.make_event(WorldEventKind::CreaturePolymorphed {
+            creature_id: source,
+            from_type_id,
+            to_type_id: target.base.monster_type_id,
+            position,
+        })?);
+        Ok(())
     }
 
     fn prepare_creature_gun_targeting(

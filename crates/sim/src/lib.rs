@@ -3256,7 +3256,6 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
     if snapshot.id.counter() == 0
         || snapshot.max_hp <= 0
         || snapshot.hp <= 0
-        || snapshot.hp > snapshot.max_hp
         || snapshot.speed == 0
         || snapshot.attack_cost_moves == 0
         || snapshot.melee_dice_sides == 0
@@ -3309,7 +3308,6 @@ fn validate_creature_snapshot(snapshot: &CreatureSnapshot) -> Result<(), SimErro
                 || corpse.monster_type_id != snapshot.type_id
                 || corpse.max_hp != snapshot.max_hp
                 || corpse.attack_cost_moves != snapshot.attack_cost_moves
-                || corpse.aggression != snapshot.aggression
                 || corpse.melee_skill != snapshot.melee_skill
                 || corpse.dodge != snapshot.dodge
                 || corpse.size != snapshot.size
@@ -4705,7 +4703,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV23");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV24");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -10712,6 +10710,15 @@ impl WorldState {
                 events,
             )?
         };
+        if self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .action_points
+            < i64::from(CREATURE_ACTION_THRESHOLD)
+        {
+            return Ok(0);
+        }
         if visible_target.is_some_and(|(target_id, _position)| {
             self.actors
                 .get(&target_id)
@@ -14526,7 +14533,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV98");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV99");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

@@ -92,6 +92,7 @@ pub enum MonsterSpecialAttackKind {
     Leap,
     Eoc,
     Gun,
+    Polymorph,
     Unsupported,
 }
 
@@ -132,6 +133,10 @@ pub struct MonsterSpecialAttackDefinition {
     pub leap_ignore_destination_danger: bool,
     pub condition: Option<EocConditionDefinition>,
     pub eoc_ids: Vec<String>,
+    pub polymorph_monster_type_id: String,
+    pub polymorph_keep_speed: bool,
+    pub polymorph_keep_hp: bool,
+    pub polymorph_keep_aggression: bool,
     pub gun_type_id: String,
     pub gun_ammunition_type_id: String,
     pub gun_fake_skills: BTreeMap<String, u16>,
@@ -188,6 +193,8 @@ impl MonsterSpecialAttackDefinition {
                             .map(|range| range.maximum)
                             .max()
                             .unwrap_or(0)))
+            && (self.kind != MonsterSpecialAttackKind::Polymorph
+                || !self.polymorph_monster_type_id.is_empty())
     }
 }
 
@@ -762,6 +769,10 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         leap_ignore_destination_danger: false,
         condition: None,
         eoc_ids: Vec::new(),
+        polymorph_monster_type_id: String::new(),
+        polymorph_keep_speed: false,
+        polymorph_keep_hp: false,
+        polymorph_keep_aggression: false,
         gun_type_id: String::new(),
         gun_ammunition_type_id: String::new(),
         gun_fake_skills: BTreeMap::new(),
@@ -808,6 +819,7 @@ fn parse_special_attack(
         "leap" => MonsterSpecialAttackKind::Leap,
         "eoc" => MonsterSpecialAttackKind::Eoc,
         "gun" => MonsterSpecialAttackKind::Gun,
+        "polymorph_special" => MonsterSpecialAttackKind::Polymorph,
         "monster_attack" => base
             .map(|base| base.kind)
             .unwrap_or(MonsterSpecialAttackKind::Unsupported),
@@ -822,7 +834,10 @@ fn parse_special_attack(
         attack.unsupported_fields.remove("missing_actor_type");
     }
     if declared_type != "monster_attack"
-        && !matches!(declared_type, "melee" | "bite" | "leap" | "eoc" | "gun")
+        && !matches!(
+            declared_type,
+            "melee" | "bite" | "leap" | "eoc" | "gun" | "polymorph_special"
+        )
     {
         attack
             .unsupported_fields
@@ -895,6 +910,26 @@ fn parse_special_attack(
         attack.gun_laser_lock = false;
         attack.gun_target_moving_vehicles = false;
         attack.gun_require_sunlight = false;
+    }
+    if kind == MonsterSpecialAttackKind::Polymorph
+        && base.is_none_or(|base| base.kind != MonsterSpecialAttackKind::Polymorph)
+    {
+        attack.move_cost_moves = 0;
+        attack.accuracy = None;
+        attack.range = 0;
+        attack.no_adjacent = false;
+        attack.dodgeable = false;
+        attack.minimum_damage_multiplier_millionths = 0;
+        attack.maximum_damage_multiplier_millionths = 0;
+        attack.damage.clear();
+        attack.effects.clear();
+        attack.effects_require_damage = false;
+        attack.infection_chance_millionths = 0;
+        attack.eoc_ids.clear();
+        attack.polymorph_monster_type_id.clear();
+        attack.polymorph_keep_speed = true;
+        attack.polymorph_keep_hp = true;
+        attack.polymorph_keep_aggression = true;
     }
     if let Some(value) = fields.get("move_cost") {
         attack.move_cost_moves = parse_u32(value, source, "special_attacks.move_cost")?;
@@ -1117,6 +1152,28 @@ fn parse_special_attack(
             }
         }
     }
+    if kind == MonsterSpecialAttackKind::Polymorph {
+        if let Some(value) = fields.get("mon_id") {
+            attack.polymorph_monster_type_id = value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .ok_or_else(|| invalid(source, "special_attacks.mon_id"))?
+                .to_owned();
+        } else if base.is_none() || attack.polymorph_monster_type_id.is_empty() {
+            return Err(invalid(source, "special_attacks.mon_id"));
+        }
+        for (field, target) in [
+            ("poly_keep_speed", &mut attack.polymorph_keep_speed),
+            ("poly_keep_hp", &mut attack.polymorph_keep_hp),
+            ("poly_keep_anger", &mut attack.polymorph_keep_aggression),
+        ] {
+            if let Some(value) = fields.get(field) {
+                *target = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, &format!("special_attacks.{field}")))?;
+            }
+        }
+    }
     if kind == MonsterSpecialAttackKind::Bite {
         if let Some(value) = fields.get("infection_chance") {
             let percent = parse_u32(value, source, "special_attacks.infection_chance")?;
@@ -1245,6 +1302,10 @@ fn parse_special_attack(
         "laser_lock",
         "target_moving_vehicles",
         "require_sunlight",
+        "mon_id",
+        "poly_keep_speed",
+        "poly_keep_hp",
+        "poly_keep_anger",
     ];
     for field in fields.keys().filter(|field| !field.starts_with("//")) {
         if COSMETIC_FIELDS.contains(&field.as_str()) {
@@ -1313,10 +1374,17 @@ fn parse_special_attack(
         "target_moving_vehicles",
         "require_sunlight",
     ];
+    const POLYMORPH_ONLY_FIELDS: &[&str] = &[
+        "mon_id",
+        "poly_keep_speed",
+        "poly_keep_hp",
+        "poly_keep_anger",
+    ];
     let inapplicable = match kind {
         MonsterSpecialAttackKind::Leap => MELEE_ONLY_FIELDS,
         MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite => LEAP_ONLY_FIELDS,
         MonsterSpecialAttackKind::Eoc | MonsterSpecialAttackKind::Gun => &[],
+        MonsterSpecialAttackKind::Polymorph => &[],
         MonsterSpecialAttackKind::Unsupported => &[],
     };
     attack.unsupported_fields.extend(
@@ -1325,6 +1393,25 @@ fn parse_special_attack(
             .filter(|field| fields.contains_key(**field))
             .map(|field| (*field).to_owned()),
     );
+    if kind != MonsterSpecialAttackKind::Polymorph {
+        attack.unsupported_fields.extend(
+            POLYMORPH_ONLY_FIELDS
+                .iter()
+                .filter(|field| fields.contains_key(**field))
+                .map(|field| (*field).to_owned()),
+        );
+    } else {
+        attack.unsupported_fields.extend(
+            MELEE_ONLY_FIELDS
+                .iter()
+                .chain(LEAP_ONLY_FIELDS)
+                .chain(GUN_ONLY_FIELDS)
+                .copied()
+                .chain(["move_cost", "range", "eoc"])
+                .filter(|field| fields.contains_key(*field))
+                .map(str::to_owned),
+        );
+    }
     if kind == MonsterSpecialAttackKind::Leap && fields.contains_key("range") {
         attack.unsupported_fields.insert(String::from("range"));
     }

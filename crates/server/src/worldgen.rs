@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cdda_content::{
     AmmunitionEffectRegistry, CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry,
@@ -980,6 +980,31 @@ fn runtime_monster_catalog(
         );
     }
     monster_ids.remove("mon_null");
+    let mut polymorph_dependencies = monster_ids.iter().cloned().collect::<VecDeque<_>>();
+    while let Some(monster_id) = polymorph_dependencies.pop_front() {
+        let monster = monsters
+            .get(&monster_id)
+            .ok_or_else(|| format!("monster group references unknown MONSTER {monster_id}"))?;
+        for target_id in monster
+            .special_attacks
+            .values()
+            .filter(|attack| {
+                attack.is_fully_supported() && attack.kind == MonsterSpecialAttackKind::Polymorph
+            })
+            .map(|attack| &attack.polymorph_monster_type_id)
+        {
+            if monsters.get(target_id).is_none() {
+                return Err(format!(
+                    "monster {} polymorph actor references unknown MONSTER {target_id}",
+                    monster.id
+                )
+                .into());
+            }
+            if monster_ids.insert(target_id.clone()) {
+                polymorph_dependencies.push_back(target_id.clone());
+            }
+        }
+    }
     let monster_indices = monster_ids
         .iter()
         .enumerate()
@@ -1141,6 +1166,9 @@ fn runtime_monster_catalog(
                         MonsterSpecialAttackKind::Leap => WorldgenMonsterSpecialAttackKindV1::Leap,
                         MonsterSpecialAttackKind::Eoc => WorldgenMonsterSpecialAttackKindV1::Eoc,
                         MonsterSpecialAttackKind::Gun => WorldgenMonsterSpecialAttackKindV1::Gun,
+                        MonsterSpecialAttackKind::Polymorph => {
+                            WorldgenMonsterSpecialAttackKindV1::Polymorph
+                        }
                         MonsterSpecialAttackKind::Unsupported => {
                             return Err(
                                 "unsupported special attack reached runtime admission".into()
@@ -1214,6 +1242,20 @@ fn runtime_monster_catalog(
                             .as_ref()
                             .map(crate::eocs::runtime_condition),
                         eoc_ids: attack.eoc_ids.clone(),
+                        polymorph_monster_type_id: if attack.kind
+                            == MonsterSpecialAttackKind::Polymorph
+                        {
+                            attack.polymorph_monster_type_id.clone()
+                        } else {
+                            String::new()
+                        },
+                        polymorph_keep_speed: attack.kind == MonsterSpecialAttackKind::Polymorph
+                            && attack.polymorph_keep_speed,
+                        polymorph_keep_hp: attack.kind == MonsterSpecialAttackKind::Polymorph
+                            && attack.polymorph_keep_hp,
+                        polymorph_keep_aggression: attack.kind
+                            == MonsterSpecialAttackKind::Polymorph
+                            && attack.polymorph_keep_aggression,
                         gun_type_id: gun_profile
                             .map(|_| attack.gun_type_id.clone())
                             .unwrap_or_default(),
