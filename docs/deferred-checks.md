@@ -19,7 +19,10 @@ Run only when the user explicitly requests a verification checkpoint.
   library, binary, and test-target checks are used during implementation.
 - Anatomy/combat checkpoint: run exact C++ body-part HP, hit-selection, armor
   layer, on-hit-effect, stamina regeneration/burn, dodge threshold/attempt, and
-  actor/monster hit traces plus sleeping natural-healing remainder rolls and
+  actor/monster hit traces, including ordered multi-type monster damage,
+  same-type dice merging, penetration, armor/damage multipliers and inheritance
+  modifiers, plus attack-effect chance/range/body-part/permanence and repeated
+  application traces, sleeping natural-healing remainder rolls and
   medical selection, scaling, wound-treatment, and charge-consumption traces;
   canonical fixture updates; recovery/replay modes; production admission; and
   two-client melee/ranged/monster combat.

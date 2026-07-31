@@ -4,9 +4,9 @@ use cdda_protocol::{ActorId, CreatureId};
 use rand_core::Rng;
 
 use super::{
-    SimError, WorldState, actor_skill_level, effective_base_stat,
-    pinned_bash_weapon_melee_accuracy_twelfths, pinned_melee_hit_roll,
-    pinned_unarmed_melee_accuracy_quarters,
+    SimError, WorldState, actor_skill_level, anatomy, apply_actor_effect_applications,
+    effective_base_stat, pinned_bash_weapon_melee_accuracy_twelfths, pinned_melee_hit_roll,
+    pinned_unarmed_melee_accuracy_quarters, runtime_armor_is_supported,
 };
 
 pub(super) const DEFAULT_MAXIMUM_STAMINA: u32 = 8_500;
@@ -14,6 +14,40 @@ pub(super) const BASE_STAMINA_REGEN_PER_SECOND: u32 = 20;
 pub(super) const WINDED_STAMINA_REGEN_PER_SECOND: u32 = 2;
 pub(super) const ORDINARY_DODGE_ATTEMPTS: u8 = 1;
 pub(super) const MAXIMUM_STAMINA_LIMIT: u32 = 1_000_000;
+
+const DAMAGE_MULTIPLIER_SCALE: i128 = 1_000_000;
+
+#[derive(Clone, Debug)]
+pub(super) struct ActorDamageUnit {
+    pub damage_type_id: String,
+    pub amount_milli: i32,
+    pub armor_penetration_milli: i32,
+    pub armor_multiplier_millionths: i32,
+    pub damage_multiplier_millionths: i32,
+    pub constant_armor_multiplier_millionths: i32,
+    pub constant_damage_multiplier_millionths: i32,
+}
+
+impl ActorDamageUnit {
+    pub(super) fn ordinary(damage_type_id: &str, amount: u16) -> Self {
+        Self {
+            damage_type_id: damage_type_id.to_owned(),
+            amount_milli: i32::from(amount) * 1_000,
+            armor_penetration_milli: 0,
+            armor_multiplier_millionths: 1_000_000,
+            damage_multiplier_millionths: 1_000_000,
+            constant_armor_multiplier_millionths: 1_000_000,
+            constant_damage_multiplier_millionths: 1_000_000,
+        }
+    }
+}
+
+fn multiply_damage_multiplier(value: i128, factor: i32) -> Result<i128, SimError> {
+    value
+        .checked_mul(i128::from(factor))
+        .and_then(|value| value.checked_div(DAMAGE_MULTIPLIER_SCALE))
+        .ok_or(SimError::NumericOverflow)
+}
 
 // Pinned samples of CDDA's `1 - logarithmic_range(10%, 90%, stamina)`.
 // Runtime interpolation is integer-only so authoritative rolls and replay do
@@ -81,6 +115,139 @@ pub(super) fn melee_stamina_cost(weight_milligrams: u64, melee_skill: u8) -> u32
 }
 
 impl WorldState {
+    pub(super) fn damage_actor(
+        &mut self,
+        target: ActorId,
+        damage_type: &str,
+        damage: u16,
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool), SimError> {
+        self.damage_actor_components(
+            target,
+            &[ActorDamageUnit::ordinary(damage_type, damage)],
+            rng,
+        )
+        .map(|(outcome, was_sleeping, _)| (outcome, was_sleeping))
+    }
+
+    pub(super) fn damage_actor_components(
+        &mut self,
+        target: ActorId,
+        units: &[ActorDamageUnit],
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool, u16), SimError> {
+        let selected = anatomy::select_body_part_index(&self.actor_anatomy, rng)?;
+        let body_part_id = self
+            .actor_anatomy
+            .parts
+            .get(selected)
+            .ok_or(SimError::InvalidActorAnatomy)?
+            .body_part_id
+            .as_str();
+        let actor = self.actors.get(&target).ok_or(SimError::UnknownActor)?;
+        let mut dealt_components = Vec::with_capacity(units.len());
+        let mut total_damage = 0_u32;
+        let mut cut_or_stab_damage = 0_u32;
+        for unit in units {
+            if unit.amount_milli < 0 {
+                // Pinned character absorption clamps negative components and
+                // skips armor processing for them entirely.
+                dealt_components.push((unit.damage_type_id.as_str(), 0));
+                continue;
+            }
+            let mut remaining_milli = i128::from(unit.amount_milli).max(0);
+            let mut penetration_milli = i128::from(unit.armor_penetration_milli);
+            for item_id in actor.worn.iter().rev() {
+                let item = actor.inventory.get(item_id).ok_or(SimError::InvalidArmor)?;
+                let armor = self
+                    .wearable_armor_types
+                    .get(&item.type_id)
+                    .filter(|armor| runtime_armor_is_supported(armor))
+                    .ok_or(SimError::InvalidArmor)?;
+                for portion in armor.portions.iter().filter(|portion| {
+                    portion
+                        .covers
+                        .binary_search_by(|covered| covered.as_str().cmp(body_part_id))
+                        .is_ok()
+                }) {
+                    if rng.next_u32() % 100 >= u32::from(portion.coverage_percent) {
+                        continue;
+                    }
+                    for material in &portion.materials {
+                        if rng.next_u32() % 100 >= u32::from(material.covered_by_material_percent) {
+                            continue;
+                        }
+                        let protection_milli = i128::from(
+                            material
+                                .protection_milli
+                                .get(&unit.damage_type_id)
+                                .copied()
+                                .unwrap_or_default(),
+                        );
+                        let effective = multiply_damage_multiplier(
+                            multiply_damage_multiplier(
+                                (protection_milli - penetration_milli).max(0),
+                                unit.armor_multiplier_millionths,
+                            )?,
+                            unit.constant_armor_multiplier_millionths,
+                        )?;
+                        remaining_milli = (remaining_milli - effective).max(0);
+                        penetration_milli = (penetration_milli - protection_milli).max(0);
+                    }
+                }
+            }
+            let adjusted_milli = multiply_damage_multiplier(
+                multiply_damage_multiplier(remaining_milli, unit.damage_multiplier_millionths)?,
+                unit.constant_damage_multiplier_millionths,
+            )?;
+            // Pinned deal_damage_handle_type truncates each adjusted component
+            // to an integer before summing the atomic hit.
+            let dealt = u16::try_from((adjusted_milli / 1_000).max(0))
+                .map_err(|_| SimError::NumericOverflow)?;
+            total_damage = total_damage
+                .checked_add(u32::from(dealt))
+                .ok_or(SimError::NumericOverflow)?;
+            if matches!(unit.damage_type_id.as_str(), "cut" | "stab") {
+                cut_or_stab_damage = cut_or_stab_damage
+                    .checked_add(u32::from(dealt))
+                    .ok_or(SimError::NumericOverflow)?;
+            }
+            dealt_components.push((unit.damage_type_id.as_str(), dealt));
+        }
+        let total_damage = u16::try_from(total_damage).map_err(|_| SimError::NumericOverflow)?;
+        let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+        let outcome = anatomy::apply_damage_to_part(
+            &self.actor_anatomy,
+            &mut actor.body_parts,
+            selected,
+            total_damage,
+        )?;
+        for (damage_type, dealt) in dealt_components {
+            let applications = anatomy::on_hit_effects(
+                &self.actor_anatomy,
+                &actor.body_parts,
+                selected,
+                damage_type,
+                dealt,
+                rng,
+            )?;
+            apply_actor_effect_applications(actor, applications, self.tick)?;
+        }
+        actor.hp = outcome.remaining_hp;
+        let was_sleeping = actor.sleeping;
+        if actor.hp <= 0 {
+            actor.sleeping = false;
+            actor.sleep_intervals = 0;
+            actor.dodge_attempts_remaining = 0;
+            actor.queued_actions.clear();
+        }
+        Ok((
+            outcome,
+            was_sleeping,
+            u16::try_from(cut_or_stab_damage).map_err(|_| SimError::NumericOverflow)?,
+        ))
+    }
+
     pub(super) fn actor_melee_accuracy(
         &self,
         source: ActorId,

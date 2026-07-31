@@ -15,19 +15,19 @@ use cdda_protocol::{
     ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
     WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
     WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
-    WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterGroupEntryV1,
-    WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterPlacementV1,
-    WorldgenMonsterPrototypeV1, WorldgenNeighborConditionV1, WorldgenNestedChoiceV1,
-    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
-    WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1,
-    WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1, WorldgenOvermapRunV1,
-    WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1,
-    WorldgenSpecialPlacementV1, WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1,
-    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
-    WorldgenU16RangeV1, WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
-    worldgen_omt_matches,
+    WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
+    WorldgenMonsterGroupEntryV1, WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1,
+    WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1,
+    WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
+    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
+    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
+    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
+    WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1, WorldgenSpecialPlacementV1,
+    WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1, WorldgenStartLocationV1,
+    WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenU16RangeV1,
+    WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -603,11 +603,89 @@ fn runtime_monster_catalog(
                 blood_field_type_id: monster_blood_field_type(monster).to_owned(),
                 revives: monster.flags.contains("REVIVES"),
             };
+            let melee_damage_supported = monster.melee_damage_is_fully_supported()
+                && monster
+                    .melee_damage
+                    .iter()
+                    .all(|unit| unit.damage_multiplier_millionths > 0);
+            let mut deferred_behavior_fields = monster
+                .unsupported_fields
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !melee_damage_supported {
+                deferred_behavior_fields.insert(String::from("melee_damage"));
+            }
+            let attack_effects_supported = monster.attack_effects_are_fully_supported();
+            if !attack_effects_supported {
+                deferred_behavior_fields.insert(String::from("attack_effs"));
+            }
+            let mut attack_effects = attack_effects_supported
+                .then(|| {
+                    monster
+                        .attack_effects
+                        .iter()
+                        .map(|effect| WorldgenMonsterAttackEffectV1 {
+                            effect_id: effect.effect_id.clone(),
+                            chance_millionths: effect.chance_millionths,
+                            permanent: effect.permanent,
+                            affect_hit_body_part: effect.affect_hit_body_part,
+                            requires_cut_or_stab_damage: false,
+                            body_part_id: effect.body_part_id.clone(),
+                            duration_minimum_turns: effect.duration_turns.0,
+                            duration_maximum_turns: effect.duration_turns.1,
+                            intensity_minimum: effect.intensity.0,
+                            intensity_maximum: effect.intensity.1,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for (flag, effect_id, duration_turns) in [
+                ("VENOM", "poison", 180),
+                ("BADVENOM", "badpoison", 240),
+                ("PARALYZEVENOM", "paralyzepoison", 600),
+            ] {
+                if monster.flags.contains(flag) {
+                    attack_effects.push(WorldgenMonsterAttackEffectV1 {
+                        effect_id: effect_id.to_owned(),
+                        chance_millionths: 1_000_000,
+                        permanent: false,
+                        affect_hit_body_part: false,
+                        requires_cut_or_stab_damage: true,
+                        body_part_id: None,
+                        duration_minimum_turns: duration_turns,
+                        duration_maximum_turns: duration_turns,
+                        intensity_minimum: 1,
+                        intensity_maximum: 1,
+                    });
+                }
+            }
             Ok(WorldgenMonsterPrototypeV1 {
                 base,
                 armor_milli: monster.finalized_armor_milli(),
+                melee_dice_armor_penetration_milli: monster.melee_dice_armor_penetration_milli,
+                melee_damage: melee_damage_supported
+                    .then(|| {
+                        monster
+                            .melee_damage
+                            .iter()
+                            .map(|unit| WorldgenMonsterMeleeDamageUnitV1 {
+                                damage_type_id: unit.damage_type_id.clone(),
+                                amount_milli: unit.amount_milli,
+                                armor_penetration_milli: unit.armor_penetration_milli,
+                                armor_multiplier_millionths: unit.armor_multiplier_millionths,
+                                damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                                constant_armor_multiplier_millionths: unit
+                                    .constant_armor_multiplier_millionths,
+                                constant_damage_multiplier_millionths: unit
+                                    .constant_damage_multiplier_millionths,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                attack_effects,
                 leaves_corpse: !monster.flags.contains("NO_CORPSE"),
-                deferred_behavior_fields: monster.unsupported_fields.iter().cloned().collect(),
+                deferred_behavior_fields: deferred_behavior_fields.into_iter().collect(),
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;

@@ -10875,7 +10875,18 @@ impl WorldState {
         if damage == 0 {
             return Ok(());
         }
-        let (outcome, was_sleeping) = self.damage_actor(target, "bash", damage, &mut rng)?;
+        let damage_units = self.creature_melee_damage_units(source, damage)?;
+        let (outcome, was_sleeping, cut_or_stab_damage) =
+            self.damage_actor_components(target, &damage_units, &mut rng)?;
+        if outcome.amount > 0 {
+            self.apply_creature_attack_effects(
+                source,
+                target,
+                &outcome.body_part_id,
+                cut_or_stab_damage > 0,
+                &mut rng,
+            )?;
+        }
         events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
             source,
             target,
@@ -10900,88 +10911,6 @@ impl WorldState {
             }
         }
         Ok(())
-    }
-
-    fn damage_actor(
-        &mut self,
-        target: ActorId,
-        damage_type: &str,
-        damage: u16,
-        rng: &mut impl Rng,
-    ) -> Result<(anatomy::ActorDamageOutcome, bool), SimError> {
-        let selected = anatomy::select_body_part_index(&self.actor_anatomy, rng)?;
-        let body_part_id = self
-            .actor_anatomy
-            .parts
-            .get(selected)
-            .ok_or(SimError::InvalidActorAnatomy)?
-            .body_part_id
-            .as_str();
-        let actor = self.actors.get(&target).ok_or(SimError::UnknownActor)?;
-        let mut remaining_milli = u32::from(damage)
-            .checked_mul(1_000)
-            .ok_or(SimError::NumericOverflow)?;
-        for item_id in actor.worn.iter().rev() {
-            let item = actor.inventory.get(item_id).ok_or(SimError::InvalidArmor)?;
-            let armor = self
-                .wearable_armor_types
-                .get(&item.type_id)
-                .filter(|armor| runtime_armor_is_supported(armor))
-                .ok_or(SimError::InvalidArmor)?;
-            for portion in armor.portions.iter().filter(|portion| {
-                portion
-                    .covers
-                    .binary_search_by(|covered| covered.as_str().cmp(body_part_id))
-                    .is_ok()
-            }) {
-                if rng.next_u32() % 100 >= u32::from(portion.coverage_percent) {
-                    continue;
-                }
-                for material in &portion.materials {
-                    if rng.next_u32() % 100 < u32::from(material.covered_by_material_percent) {
-                        remaining_milli = remaining_milli.saturating_sub(
-                            material
-                                .protection_milli
-                                .get(damage_type)
-                                .copied()
-                                .unwrap_or(0),
-                        );
-                    }
-                }
-            }
-        }
-        let damage = u16::try_from(
-            remaining_milli
-                .checked_add(500)
-                .ok_or(SimError::NumericOverflow)?
-                / 1_000,
-        )
-        .map_err(|_| SimError::NumericOverflow)?;
-        let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
-        let outcome = anatomy::apply_damage_to_part(
-            &self.actor_anatomy,
-            &mut actor.body_parts,
-            selected,
-            damage,
-        )?;
-        let applications = anatomy::on_hit_effects(
-            &self.actor_anatomy,
-            &actor.body_parts,
-            selected,
-            damage_type,
-            outcome.amount,
-            rng,
-        )?;
-        apply_actor_effect_applications(actor, applications, self.tick)?;
-        actor.hp = outcome.remaining_hp;
-        let was_sleeping = actor.sleeping;
-        if actor.hp <= 0 {
-            actor.sleeping = false;
-            actor.sleep_intervals = 0;
-            actor.dodge_attempts_remaining = 0;
-            actor.queued_actions.clear();
-        }
-        Ok((outcome, was_sleeping))
     }
 
     fn apply_wield(
@@ -14269,7 +14198,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV80");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV81");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

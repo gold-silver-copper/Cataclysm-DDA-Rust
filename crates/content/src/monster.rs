@@ -27,6 +27,9 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "melee_skill",
     "melee_dice",
     "melee_dice_sides",
+    "melee_dice_ap",
+    "melee_damage",
+    "attack_effs",
     "dodge",
     "vision_day",
     "vision_night",
@@ -49,6 +52,32 @@ pub struct MonsterPathSettings {
     pub avoid_sharp: bool,
     pub avoid_dangerous_fields: bool,
     pub allow_climb_stairs: bool,
+}
+
+/// One finalized component of a monster's ordinary melee damage instance.
+/// Amount and penetration use thousandths of one damage point; multipliers use
+/// millionths so admitted authoritative combat never depends on host floats.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonsterMeleeDamageUnitDefinition {
+    pub damage_type_id: String,
+    pub amount_milli: i32,
+    pub armor_penetration_milli: i32,
+    pub armor_multiplier_millionths: i32,
+    pub damage_multiplier_millionths: i32,
+    pub constant_armor_multiplier_millionths: i32,
+    pub constant_damage_multiplier_millionths: i32,
+}
+
+/// One effect applied after an ordinary monster melee hit deals damage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonsterAttackEffectDefinition {
+    pub effect_id: String,
+    pub chance_millionths: u32,
+    pub permanent: bool,
+    pub affect_hit_body_part: bool,
+    pub body_part_id: Option<String>,
+    pub duration_turns: (u32, u32),
+    pub intensity: (u32, u32),
 }
 
 impl Default for MonsterPathSettings {
@@ -86,6 +115,11 @@ pub struct MonsterDefinition {
     pub melee_skill: i32,
     pub melee_dice: i32,
     pub melee_dice_sides: i32,
+    pub melee_dice_armor_penetration_milli: i32,
+    /// Final inherited ordinary melee damage in pinned damage-instance order.
+    pub melee_damage: Vec<MonsterMeleeDamageUnitDefinition>,
+    /// Final inherited post-damage ordinary melee effects in source order.
+    pub attack_effects: Vec<MonsterAttackEffectDefinition>,
     pub dodge: i32,
     pub vision_day: i32,
     pub vision_night: i32,
@@ -120,6 +154,9 @@ impl Default for MonsterDefinition {
             melee_skill: 0,
             melee_dice: 0,
             melee_dice_sides: 0,
+            melee_dice_armor_penetration_milli: 0,
+            melee_damage: Vec::new(),
+            attack_effects: Vec::new(),
             dodge: 0,
             vision_day: 40,
             vision_night: 1,
@@ -138,6 +175,22 @@ impl MonsterDefinition {
     #[must_use]
     pub fn finalized_armor_milli(&self) -> BTreeMap<String, i32> {
         finalized_armor(&self.armor_milli)
+    }
+
+    #[must_use]
+    pub fn melee_damage_is_fully_supported(&self) -> bool {
+        !self
+            .unsupported_fields
+            .iter()
+            .any(|field| field == "melee_damage" || field.starts_with("melee_damage."))
+    }
+
+    #[must_use]
+    pub fn attack_effects_are_fully_supported(&self) -> bool {
+        !self
+            .unsupported_fields
+            .iter()
+            .any(|field| field == "attack_effs" || field.starts_with("attack_effs."))
     }
 }
 
@@ -362,6 +415,15 @@ fn apply_fields(
     ] {
         apply_integer(object, field, target, 0, i32::MAX, source)?;
     }
+    apply_scaled_number(
+        object,
+        "melee_dice_ap",
+        &mut monster.melee_dice_armor_penetration_milli,
+        1_000,
+        source,
+    )?;
+    apply_melee_damage(monster, object, source)?;
+    apply_attack_effects(monster, object, source)?;
     apply_string_set(object, "material", &mut monster.materials, source)?;
     apply_string_set(object, "flags", &mut monster.flags, source)?;
     apply_string_set(object, "species", &mut monster.species, source)?;
@@ -393,6 +455,526 @@ fn apply_fields(
         }
     }
     Ok(())
+}
+
+fn apply_attack_effects(
+    monster: &mut MonsterDefinition,
+    object: &Map<String, Value>,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    if let Some(value) = object.get("attack_effs") {
+        monster
+            .unsupported_fields
+            .retain(|field| field != "attack_effs" && !field.starts_with("attack_effs."));
+        let values = value
+            .as_array()
+            .ok_or_else(|| invalid(source, "attack_effs"))?;
+        let mut effects = Vec::with_capacity(values.len());
+        for value in values {
+            let fields = value
+                .as_object()
+                .ok_or_else(|| invalid(source, "attack_effs"))?;
+            const IMPLEMENTED_EFFECT_FIELDS: &[&str] = &[
+                "id",
+                "chance",
+                "permanent",
+                "affect_hit_bp",
+                "bp",
+                "duration",
+                "intensity",
+            ];
+            for field in fields.keys().filter(|field| !field.starts_with("//")) {
+                if !IMPLEMENTED_EFFECT_FIELDS.contains(&field.as_str()) {
+                    monster
+                        .unsupported_fields
+                        .insert(format!("attack_effs.{field}"));
+                }
+            }
+            let effect_id = fields
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .ok_or_else(|| invalid(source, "attack_effs.id"))?
+                .to_owned();
+            let chance = fields.get("chance").map_or(Ok(100.0), |value| {
+                value
+                    .as_f64()
+                    .filter(|chance| chance.is_finite() && (0.0..=100.0).contains(chance))
+                    .ok_or_else(|| invalid(source, "attack_effs.chance"))
+            })?;
+            let chance_millionths = (chance * 10_000.0).round() as u32;
+            let permanent = fields.get("permanent").map_or(Ok(false), |value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, "attack_effs.permanent"))
+            })?;
+            let affect_hit_body_part = fields.get("affect_hit_bp").map_or(Ok(false), |value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, "attack_effs.affect_hit_bp"))
+            })?;
+            let body_part_id = fields
+                .get("bp")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|id| {
+                            !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid(source, "attack_effs.bp"))
+                })
+                .transpose()?;
+            effects.push(MonsterAttackEffectDefinition {
+                effect_id,
+                chance_millionths,
+                permanent,
+                affect_hit_body_part,
+                body_part_id,
+                duration_turns: parse_attack_effect_range(
+                    fields.get("duration"),
+                    1,
+                    source,
+                    "attack_effs.duration",
+                )?,
+                intensity: parse_attack_effect_range(
+                    fields.get("intensity"),
+                    1,
+                    source,
+                    "attack_effs.intensity",
+                )?,
+            });
+        }
+        monster.attack_effects = effects;
+    }
+    for modifier_name in ["extend", "delete", "relative", "proportional"] {
+        if modifier(object, modifier_name, "attack_effs", source)?.is_some() {
+            monster
+                .unsupported_fields
+                .insert(format!("attack_effs.{modifier_name}"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_attack_effect_range(
+    value: Option<&Value>,
+    default: u32,
+    source: &str,
+    field: &str,
+) -> Result<(u32, u32), MonsterRegistryError> {
+    let parse = |value: &Value| {
+        u32::try_from(value.as_i64().ok_or_else(|| invalid(source, field))?)
+            .map_err(|_| invalid(source, field))
+    };
+    let range = match value {
+        None => (default, default),
+        Some(Value::Array(values)) if values.len() == 2 => (parse(&values[0])?, parse(&values[1])?),
+        Some(value) => {
+            let value = parse(value)?;
+            (value, value)
+        }
+    };
+    let maximum = if field.ends_with("intensity") {
+        1_000_000
+    } else {
+        1_000_000_000
+    };
+    if range.0 > range.1 || range.1 > maximum || (field.ends_with("intensity") && range.0 == 0) {
+        return Err(invalid(source, field));
+    }
+    Ok(range)
+}
+
+fn apply_scaled_number(
+    object: &Map<String, Value>,
+    field: &str,
+    target: &mut i32,
+    scale: i32,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    if let Some(value) = object.get(field) {
+        *target = parse_scaled_number(value, scale, source, field)?;
+    } else if let Some(value) = modifier(object, "proportional", field, source)? {
+        let factor = parse_proportional_factor(Some(value), source, field)?;
+        if factor == 0 {
+            return Err(invalid(source, field));
+        }
+        *target = multiply_scaled(*target, factor, source, field)?;
+    } else if let Some(value) = modifier(object, "relative", field, source)? {
+        *target = target
+            .checked_add(parse_scaled_number(value, scale, source, field)?)
+            .ok_or_else(|| invalid(source, field))?;
+    }
+    for modifier_name in ["extend", "delete"] {
+        if modifier(object, modifier_name, field, source)?.is_some() {
+            return Err(invalid(source, &format!("{modifier_name}.{field}")));
+        }
+    }
+    Ok(())
+}
+
+fn apply_melee_damage(
+    monster: &mut MonsterDefinition,
+    object: &Map<String, Value>,
+    source: &str,
+) -> Result<(), MonsterRegistryError> {
+    if let Some(value) = object.get("melee_damage") {
+        monster
+            .unsupported_fields
+            .retain(|field| field != "melee_damage" && !field.starts_with("melee_damage."));
+        let (damage, deferred) = parse_melee_damage(value, source, "melee_damage")?;
+        monster.melee_damage = damage;
+        monster.unsupported_fields.extend(deferred);
+    } else if let Some(value) = modifier(object, "proportional", "melee_damage", source)? {
+        let (damage_type, factors, deferred) = parse_proportional_melee_damage(value, source)?;
+        let unit = monster
+            .melee_damage
+            .iter_mut()
+            .find(|unit| unit.damage_type_id == damage_type)
+            .ok_or_else(|| invalid(source, "proportional.melee_damage.damage_type"))?;
+        unit.amount_milli = multiply_scaled(
+            unit.amount_milli,
+            factors.amount_millionths,
+            source,
+            "proportional.melee_damage.amount",
+        )?;
+        unit.armor_penetration_milli = multiply_scaled(
+            unit.armor_penetration_milli,
+            factors.armor_penetration_millionths,
+            source,
+            "proportional.melee_damage.armor_penetration",
+        )?;
+        unit.armor_multiplier_millionths = multiply_scaled(
+            unit.armor_multiplier_millionths,
+            factors.armor_multiplier_millionths,
+            source,
+            "proportional.melee_damage.armor_multiplier",
+        )?;
+        unit.damage_multiplier_millionths = multiply_scaled(
+            unit.damage_multiplier_millionths,
+            factors.damage_multiplier_millionths,
+            source,
+            "proportional.melee_damage.damage_multiplier",
+        )?;
+        unit.constant_armor_multiplier_millionths = multiply_scaled(
+            unit.constant_armor_multiplier_millionths,
+            factors.constant_armor_multiplier_millionths,
+            source,
+            "proportional.melee_damage.constant_armor_multiplier",
+        )?;
+        unit.constant_damage_multiplier_millionths = multiply_scaled(
+            unit.constant_damage_multiplier_millionths,
+            factors.constant_damage_multiplier_millionths,
+            source,
+            "proportional.melee_damage.constant_damage_multiplier",
+        )?;
+        monster.unsupported_fields.extend(deferred);
+    } else if let Some(value) = modifier(object, "relative", "melee_damage", source)? {
+        let (relative, deferred) = parse_melee_damage(value, source, "relative.melee_damage")?;
+        for addition in relative {
+            let Some(unit) = monster
+                .melee_damage
+                .iter_mut()
+                .find(|unit| unit.damage_type_id == addition.damage_type_id)
+            else {
+                continue;
+            };
+            unit.amount_milli = unit
+                .amount_milli
+                .checked_add(addition.amount_milli)
+                .ok_or_else(|| invalid(source, "relative.melee_damage.amount"))?;
+            unit.armor_penetration_milli = unit
+                .armor_penetration_milli
+                .checked_add(addition.armor_penetration_milli)
+                .ok_or_else(|| invalid(source, "relative.melee_damage.armor_penetration"))?;
+            add_relative_multiplier(
+                &mut unit.armor_multiplier_millionths,
+                addition.armor_multiplier_millionths,
+                source,
+                "relative.melee_damage.armor_multiplier",
+            )?;
+            add_relative_multiplier(
+                &mut unit.damage_multiplier_millionths,
+                addition.damage_multiplier_millionths,
+                source,
+                "relative.melee_damage.damage_multiplier",
+            )?;
+            // Pinned damage_unit::operator+= intentionally does not add the
+            // relative unconditional armor multiplier.
+            add_relative_multiplier(
+                &mut unit.constant_damage_multiplier_millionths,
+                addition.constant_damage_multiplier_millionths,
+                source,
+                "relative.melee_damage.constant_damage_multiplier",
+            )?;
+        }
+        monster.unsupported_fields.extend(deferred);
+    }
+    for modifier_name in ["extend", "delete"] {
+        if modifier(object, modifier_name, "melee_damage", source)?.is_some() {
+            monster
+                .unsupported_fields
+                .insert(format!("melee_damage.{modifier_name}"));
+        }
+    }
+    Ok(())
+}
+
+fn add_relative_multiplier(
+    target: &mut i32,
+    addition: i32,
+    source: &str,
+    field: &str,
+) -> Result<(), MonsterRegistryError> {
+    // The pinned relative reader maps its default 1.0 multiplier back to zero
+    // before addition; an explicitly supplied 1.0 has the same behavior.
+    if addition != 1_000_000 {
+        *target = target
+            .checked_add(addition)
+            .ok_or_else(|| invalid(source, field))?;
+    }
+    Ok(())
+}
+
+fn parse_melee_damage(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<(Vec<MonsterMeleeDamageUnitDefinition>, BTreeSet<String>), MonsterRegistryError> {
+    let values = match value {
+        Value::Object(_) => vec![value],
+        Value::Array(values) => values.iter().collect(),
+        _ => return Err(invalid(source, field)),
+    };
+    let mut units = Vec::with_capacity(values.len());
+    let mut deferred = BTreeSet::new();
+    for value in values {
+        let (unit, unit_deferred) = parse_melee_damage_unit(value, source, field)?;
+        if units
+            .iter()
+            .any(|existing: &MonsterMeleeDamageUnitDefinition| {
+                existing.damage_type_id == unit.damage_type_id
+            })
+        {
+            deferred.insert(String::from("melee_damage.duplicate_damage_type"));
+        }
+        units.push(unit);
+        deferred.extend(unit_deferred);
+    }
+    Ok((units, deferred))
+}
+
+fn parse_melee_damage_unit(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<(MonsterMeleeDamageUnitDefinition, BTreeSet<String>), MonsterRegistryError> {
+    const FIELDS: &[&str] = &[
+        "damage_type",
+        "amount",
+        "armor_penetration",
+        "armor_multiplier",
+        "damage_multiplier",
+        "constant_armor_multiplier",
+        "constant_damage_multiplier",
+        "barrels",
+    ];
+    let object = value.as_object().ok_or_else(|| invalid(source, field))?;
+    let damage_type_id = object
+        .get("damage_type")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or_else(|| invalid(source, &format!("{field}.damage_type")))?
+        .to_owned();
+    let mut deferred = BTreeSet::new();
+    for key in object.keys().filter(|key| !key.starts_with("//")) {
+        if !FIELDS.contains(&key.as_str()) || key == "barrels" {
+            deferred.insert(format!("melee_damage.{key}"));
+        }
+    }
+    Ok((
+        MonsterMeleeDamageUnitDefinition {
+            damage_type_id,
+            amount_milli: parse_optional_scaled_number(
+                object.get("amount"),
+                0,
+                1_000,
+                source,
+                &format!("{field}.amount"),
+            )?,
+            armor_penetration_milli: parse_optional_scaled_number(
+                object.get("armor_penetration"),
+                0,
+                1_000,
+                source,
+                &format!("{field}.armor_penetration"),
+            )?,
+            armor_multiplier_millionths: parse_optional_scaled_number(
+                object.get("armor_multiplier"),
+                1_000_000,
+                1_000_000,
+                source,
+                &format!("{field}.armor_multiplier"),
+            )?,
+            damage_multiplier_millionths: parse_optional_scaled_number(
+                object.get("damage_multiplier"),
+                1_000_000,
+                1_000_000,
+                source,
+                &format!("{field}.damage_multiplier"),
+            )?,
+            constant_armor_multiplier_millionths: parse_optional_scaled_number(
+                object.get("constant_armor_multiplier"),
+                1_000_000,
+                1_000_000,
+                source,
+                &format!("{field}.constant_armor_multiplier"),
+            )?,
+            constant_damage_multiplier_millionths: parse_optional_scaled_number(
+                object.get("constant_damage_multiplier"),
+                1_000_000,
+                1_000_000,
+                source,
+                &format!("{field}.constant_damage_multiplier"),
+            )?,
+        },
+        deferred,
+    ))
+}
+
+struct ProportionalMeleeDamage {
+    amount_millionths: i32,
+    armor_penetration_millionths: i32,
+    armor_multiplier_millionths: i32,
+    damage_multiplier_millionths: i32,
+    constant_armor_multiplier_millionths: i32,
+    constant_damage_multiplier_millionths: i32,
+}
+
+fn parse_proportional_melee_damage(
+    value: &Value,
+    source: &str,
+) -> Result<(String, ProportionalMeleeDamage, BTreeSet<String>), MonsterRegistryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid(source, "proportional.melee_damage"))?;
+    let damage_type = object
+        .get("damage_type")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+        .ok_or_else(|| invalid(source, "proportional.melee_damage.damage_type"))?
+        .to_owned();
+    let known = [
+        "damage_type",
+        "amount",
+        "armor_penetration",
+        "armor_multiplier",
+        "damage_multiplier",
+        "constant_armor_multiplier",
+        "constant_damage_multiplier",
+        "barrels",
+    ];
+    let deferred = object
+        .keys()
+        .filter(|key| {
+            !key.starts_with("//") && (!known.contains(&key.as_str()) || key.as_str() == "barrels")
+        })
+        .map(|key| format!("melee_damage.{key}"))
+        .collect();
+    Ok((
+        damage_type,
+        ProportionalMeleeDamage {
+            amount_millionths: parse_proportional_factor(
+                object.get("amount"),
+                source,
+                "proportional.melee_damage.amount",
+            )?,
+            armor_penetration_millionths: parse_proportional_factor(
+                object.get("armor_penetration"),
+                source,
+                "proportional.melee_damage.armor_penetration",
+            )?,
+            armor_multiplier_millionths: parse_proportional_factor(
+                object.get("armor_multiplier"),
+                source,
+                "proportional.melee_damage.armor_multiplier",
+            )?,
+            damage_multiplier_millionths: parse_proportional_factor(
+                object.get("damage_multiplier"),
+                source,
+                "proportional.melee_damage.damage_multiplier",
+            )?,
+            constant_armor_multiplier_millionths: parse_proportional_factor(
+                object.get("constant_armor_multiplier"),
+                source,
+                "proportional.melee_damage.constant_armor_multiplier",
+            )?,
+            constant_damage_multiplier_millionths: parse_proportional_factor(
+                object.get("constant_damage_multiplier"),
+                source,
+                "proportional.melee_damage.constant_damage_multiplier",
+            )?,
+        },
+        deferred,
+    ))
+}
+
+fn parse_proportional_factor(
+    value: Option<&Value>,
+    source: &str,
+    field: &str,
+) -> Result<i32, MonsterRegistryError> {
+    let Some(value) = value else {
+        return Ok(1_000_000);
+    };
+    let factor = parse_scaled_number(value, 1_000_000, source, field)?;
+    if factor < 0 || factor == 1_000_000 {
+        return Err(invalid(source, field));
+    }
+    Ok(factor)
+}
+
+fn parse_optional_scaled_number(
+    value: Option<&Value>,
+    default: i32,
+    scale: i32,
+    source: &str,
+    field: &str,
+) -> Result<i32, MonsterRegistryError> {
+    value
+        .map(|value| parse_scaled_number(value, scale, source, field))
+        .unwrap_or(Ok(default))
+}
+
+fn parse_scaled_number(
+    value: &Value,
+    scale: i32,
+    source: &str,
+    field: &str,
+) -> Result<i32, MonsterRegistryError> {
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid(source, field))?;
+    let scaled = value * f64::from(scale);
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(invalid(source, field));
+    }
+    Ok(scaled.round() as i32)
+}
+
+fn multiply_scaled(
+    value: i32,
+    factor_millionths: i32,
+    source: &str,
+    field: &str,
+) -> Result<i32, MonsterRegistryError> {
+    i64::from(value)
+        .checked_mul(i64::from(factor_millionths))
+        .and_then(|value| value.checked_div(1_000_000))
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| invalid(source, field))
 }
 
 fn apply_armor(

@@ -65,7 +65,7 @@ use item_groups::{
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 104;
+pub const PROTOCOL_VERSION: u16 = 105;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3064,9 +3064,44 @@ pub struct WorldgenMonsterPrototypeV1 {
     pub leaves_corpse: bool,
     /// Final inherited flat resistances in thousandths of one damage point.
     pub armor_milli: BTreeMap<String, i32>,
+    /// Armor penetration applied to the ordinary rolled bash dice, in
+    /// thousandths of one damage point.
+    pub melee_dice_armor_penetration_milli: i32,
+    /// Unique typed components added to the rolled ordinary melee hit, in the
+    /// pinned damage-instance order that controls armor and effect RNG draws.
+    pub melee_damage: Vec<WorldgenMonsterMeleeDamageUnitV1>,
+    /// Source-ordered effects applied only after an ordinary melee hit deals
+    /// positive damage.
+    pub attack_effects: Vec<WorldgenMonsterAttackEffectV1>,
     /// Sorted pinned MONSTER fields not yet consumed by the ordinary runtime
     /// creature model. They remain canonical instead of being silently lost.
     pub deferred_behavior_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterMeleeDamageUnitV1 {
+    pub damage_type_id: String,
+    pub amount_milli: i32,
+    pub armor_penetration_milli: i32,
+    pub armor_multiplier_millionths: i32,
+    pub damage_multiplier_millionths: i32,
+    pub constant_armor_multiplier_millionths: i32,
+    pub constant_damage_multiplier_millionths: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterAttackEffectV1 {
+    pub effect_id: String,
+    pub chance_millionths: u32,
+    pub permanent: bool,
+    pub affect_hit_body_part: bool,
+    /// Used by intrinsic venom effects, which require dealt cut or stab damage.
+    pub requires_cut_or_stab_damage: bool,
+    pub body_part_id: Option<String>,
+    pub duration_minimum_turns: u32,
+    pub duration_maximum_turns: u32,
+    pub intensity_minimum: u32,
+    pub intensity_maximum: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -5161,6 +5196,40 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                     .all(|(damage_type, resistance)| {
                         valid_worldgen_id(damage_type) && resistance.unsigned_abs() <= 1_000_000_000
                     })
+                && prototype.melee_dice_armor_penetration_milli.unsigned_abs() <= 1_000_000_000
+                && prototype.melee_damage.len() <= 64
+                && prototype
+                    .melee_damage
+                    .iter()
+                    .map(|unit| unit.damage_type_id.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == prototype.melee_damage.len()
+                && prototype.melee_damage.iter().all(|unit| {
+                    valid_worldgen_id(&unit.damage_type_id)
+                        && unit.amount_milli.unsigned_abs() <= 1_000_000_000
+                        && unit.armor_penetration_milli.unsigned_abs() <= 1_000_000_000
+                        && unit.armor_multiplier_millionths.unsigned_abs() <= 1_000_000_000
+                        && unit.damage_multiplier_millionths > 0
+                        && unit.damage_multiplier_millionths <= 1_000_000_000
+                        && unit.constant_armor_multiplier_millionths.unsigned_abs() <= 1_000_000_000
+                        && unit.constant_damage_multiplier_millionths.unsigned_abs()
+                            <= 1_000_000_000
+                })
+                && prototype.attack_effects.len() <= 64
+                && prototype.attack_effects.iter().all(|effect| {
+                    valid_worldgen_id(&effect.effect_id)
+                        && effect.chance_millionths <= 1_000_000
+                        && effect
+                            .body_part_id
+                            .as_ref()
+                            .is_none_or(|body_part_id| valid_worldgen_id(body_part_id))
+                        && effect.duration_minimum_turns <= effect.duration_maximum_turns
+                        && effect.duration_maximum_turns <= 1_000_000_000
+                        && effect.intensity_minimum > 0
+                        && effect.intensity_minimum <= effect.intensity_maximum
+                        && effect.intensity_maximum <= 1_000_000
+                })
                 && prototype.deferred_behavior_fields.len() <= 64
                 && prototype
                     .deferred_behavior_fields

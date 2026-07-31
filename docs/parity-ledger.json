@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 104,
-  "persistence_schema_version": 82,
+  "protocol_version": 105,
+  "persistence_schema_version": 83,
   "replay_format_version": 3,
   "active_milestone": "anatomy-combat",
   "completion_gate": [
@@ -455,13 +455,15 @@
       "submilestones": [
         { "id": "ordinary-perception-movement-and-melee", "state": "implementation_complete_verification_deferred" },
         { "id": "natural-armor-resistance", "state": "implementation_complete_verification_deferred" },
+        { "id": "typed-melee-damage-and-penetration", "state": "implementation_complete_verification_deferred" },
+        { "id": "ordinary-attack-effects", "state": "implementation_complete_verification_deferred" },
         { "id": "ordinary-death-corpse-and-revival", "state": "implementation_complete_verification_deferred" },
         { "id": "data-driven-special-attacks", "state": "planned" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],
       "upstream_sources": ["../Cataclysm-DDA/src/monster.cpp", "../Cataclysm-DDA/src/mattack_actors.cpp"],
-      "rust_paths": ["crates/content/src/monster.rs", "crates/sim/src/lib.rs"],
+      "rust_paths": ["crates/content/src/monster.rs", "crates/protocol/src/lib.rs", "crates/server/src/worldgen.rs", "crates/sim/src/combat.rs", "crates/sim/src/monsters.rs", "crates/sim/src/lib.rs"],
       "scenario_families": ["ordinary-monster-turn", "special-attack-interpreter", "death-and-drops"],
       "differential_oracle": "planned",
       "multiplayer_adaptation": "The server schedules creatures continuously, including zero-player time, and withholds private perception and path intent.",
