@@ -14,12 +14,18 @@ use super::{
 /// frozen wire shape. Content normalization rejects a real restriction with
 /// this identity.
 pub const SPAWN_POCKET_SINGLE_ITEM_MARKER: &str = "__CDDA_SINGLE_ITEM_POCKET__";
+pub const SPAWN_POCKET_OPEN_CONTAINER_MARKER: &str = "__CDDA_OPEN_CONTAINER_POCKET__";
 
 /// Reserved constructor metadata used to retain the pinned monster identity
 /// of a static corpse item inside Protocol 95's existing typed variable map.
 /// Maximum damage prevents revival but does not prevent decay, so production
 /// admission must additionally retain the corpse's rot state.
 pub const ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE: &str = "__CDDA_CORPSE_SOURCE_MONSTER_V1__";
+pub const ITEM_GROUP_GUN_FOULING_VARIABLE: &str = "__CDDA_ITEM_GROUP_GUN_FOULING_V1__";
+pub const ITEM_GUN_DIRT_FAULT_VARIABLE: &str = "__CDDA_GUN_DIRT_FAULT_V1__";
+pub const ITEM_GUN_UNLUBRICATED_FAULT_VARIABLE: &str = "__CDDA_GUN_UNLUBRICATED_FAULT_V1__";
+pub const ITEM_DEGRADATION_INCREMENTS_VARIABLE: &str = "__CDDA_DEGRADATION_INCREMENTS_V1__";
+pub const ITEM_DEGRADATION_VARIABLE: &str = "__CDDA_DEGRADATION_V1__";
 
 /// Reserved canonical variables that retain rot within Protocol 95's existing
 /// typed item-variable map. Values use upstream one-second turns.
@@ -27,6 +33,10 @@ pub const ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE: &str = "__CDDA_ROT_SHELF_LIFE_TURN
 pub const ITEM_ROT_TURNS_VARIABLE: &str = "__CDDA_ROT_TURNS_V1__";
 pub const ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS: u64 = 24 * 60 * 60;
 pub const ITEM_POCKET_INSULATION_VARIABLE_PREFIX: &str = "__CDDA_POCKET_INSULATION_F32_BITS_V1_";
+pub const ITEM_POCKET_VOLUME_MULTIPLIER_VARIABLE_PREFIX: &str =
+    "__CDDA_POCKET_VOLUME_MULTIPLIER_F32_BITS_V1_";
+pub const ITEM_POCKET_WEIGHT_MULTIPLIER_VARIABLE_PREFIX: &str =
+    "__CDDA_POCKET_WEIGHT_MULTIPLIER_F32_BITS_V1_";
 
 #[must_use]
 pub fn spawn_pocket_is_single_item(rules: &SpawnPocketRulesV1) -> bool {
@@ -37,11 +47,29 @@ pub fn spawn_pocket_is_single_item(rules: &SpawnPocketRulesV1) -> bool {
 }
 
 #[must_use]
+pub fn spawn_pocket_is_open_container(rules: &SpawnPocketRulesV1) -> bool {
+    rules
+        .item_restrictions
+        .binary_search_by(|restriction| {
+            restriction.as_str().cmp(SPAWN_POCKET_OPEN_CONTAINER_MARKER)
+        })
+        .is_ok()
+}
+
+#[must_use]
+pub fn is_reserved_spawn_pocket_marker(restriction: &str) -> bool {
+    matches!(
+        restriction,
+        SPAWN_POCKET_SINGLE_ITEM_MARKER | SPAWN_POCKET_OPEN_CONTAINER_MARKER
+    )
+}
+
+#[must_use]
 pub fn spawn_pocket_has_item_restrictions(rules: &SpawnPocketRulesV1) -> bool {
     rules
         .item_restrictions
         .iter()
-        .any(|restriction| restriction != SPAWN_POCKET_SINGLE_ITEM_MARKER)
+        .any(|restriction| !is_reserved_spawn_pocket_marker(restriction))
 }
 
 /// Additional external volume contributed by one physical spawn pocket.
@@ -57,6 +85,36 @@ pub fn spawn_pocket_external_volume_milliliters(
     } else {
         contents_volume_milliliters.saturating_sub(rules.magazine_well_volume_milliliters)
     }
+}
+
+#[must_use]
+pub fn spawn_pocket_external_volume_with_multiplier_milliliters(
+    rules: &SpawnPocketRulesV1,
+    contents_volume_milliliters: u64,
+    multiplier: f32,
+) -> Option<u64> {
+    if !multiplier.is_finite() || multiplier < 0.0 {
+        return None;
+    }
+    if rules.rigid {
+        return Some(0);
+    }
+    let unscaled =
+        contents_volume_milliliters.saturating_sub(rules.magazine_well_volume_milliliters);
+    let scaled = unscaled as f32 * multiplier;
+    scaled.is_finite().then_some(scaled as u64)
+}
+
+#[must_use]
+pub fn spawn_pocket_content_weight_with_multiplier_milligrams(
+    content_weight_milligrams: u64,
+    multiplier: f32,
+) -> Option<u64> {
+    if !multiplier.is_finite() || multiplier < 0.0 {
+        return None;
+    }
+    let scaled = content_weight_milligrams as f32 * multiplier;
+    scaled.is_finite().then_some(scaled as u64)
 }
 
 /// Fixed-point material thermodynamics finalized from an item's complete
@@ -196,7 +254,9 @@ fn item_profile_has_flag(containment: &ItemContainmentProfileV1, expected: &str)
 }
 
 pub const MAX_ITEM_VARIANTS: usize = 256;
-pub const MAX_ITEM_SNIPPETS: usize = 256;
+/// Includes all 390 identified choices in the pinned production `note`
+/// category while keeping per-item constructor metadata explicitly bounded.
+pub const MAX_ITEM_SNIPPETS: usize = 512;
 pub const MAX_ITEM_VARIABLES: usize = 64;
 pub const MAX_DESCRIPTION_SNIPPET_CATEGORIES: usize = 256;
 /// Includes the pinned 20,900-choice English `<world_name>` category while
@@ -277,13 +337,21 @@ pub const MAX_ITEM_GROUP_ENTRIES: usize = 8_192;
 /// Maximum number of local-node and named-group edges on a generated path.
 pub const MAX_ITEM_GROUP_DEPTH: usize = 32;
 /// One item-group invocation cannot require more than one reserved ID block.
-pub const MAX_ITEM_GROUP_OUTPUTS: u64 = 4_096;
+/// The bound admits the pinned production road closure (27,428 conservative
+/// outputs) while retaining a finite hostile-input and allocation ceiling.
+pub const MAX_ITEM_GROUP_OUTPUTS: u64 = 32_768;
 
 /// Reserved value carried by `ItemGroupContentsSourceV1::Group` so inherited
 /// group-level ammunition and magazine dressing can use the frozen Protocol
 /// 95 representation. Simulation consumes the marker before ordinary contents
 /// insertion; a real content group in this namespace is always rejected.
 pub const ITEM_GROUP_DRESSING_MARKER_PREFIX: &str = "__CDDA_ITEM_GROUP_DRESSING_V1:";
+/// Reserved modifier metadata carrying one canonical item-instance flag. The
+/// simulator consumes these markers after contents insertion and never treats
+/// them as named item-group references.
+pub const ITEM_GROUP_CUSTOM_FLAG_MARKER_PREFIX: &str = "__CDDA_ITEM_GROUP_CUSTOM_FLAG_V1:";
+pub const MAX_ITEM_GROUP_CUSTOM_FLAGS: usize = 256;
+pub const MAX_ITEM_GROUP_CUSTOM_FLAG_BYTES: usize = 128;
 
 #[must_use]
 pub fn encode_item_group_dressing_marker(
@@ -317,6 +385,32 @@ pub fn decode_item_group_dressing_marker(value: &str) -> Option<(u8, u8)> {
 #[must_use]
 pub fn is_reserved_item_group_dressing_marker(value: &str) -> bool {
     value.starts_with(ITEM_GROUP_DRESSING_MARKER_PREFIX)
+}
+
+#[must_use]
+pub fn encode_item_group_custom_flag_marker(flag: &str) -> Option<String> {
+    (!flag.is_empty()
+        && flag.len() <= MAX_ITEM_GROUP_CUSTOM_FLAG_BYTES
+        && !flag.chars().any(char::is_control))
+    .then(|| format!("{ITEM_GROUP_CUSTOM_FLAG_MARKER_PREFIX}{flag}"))
+}
+
+#[must_use]
+pub fn decode_item_group_custom_flag_marker(value: &str) -> Option<&str> {
+    let flag = value.strip_prefix(ITEM_GROUP_CUSTOM_FLAG_MARKER_PREFIX)?;
+    let canonical = encode_item_group_custom_flag_marker(flag)?;
+    (canonical == value).then_some(flag)
+}
+
+#[must_use]
+pub fn is_reserved_item_group_custom_flag_marker(value: &str) -> bool {
+    value.starts_with(ITEM_GROUP_CUSTOM_FLAG_MARKER_PREFIX)
+}
+
+#[must_use]
+pub fn is_reserved_item_group_internal_marker(value: &str) -> bool {
+    is_reserved_item_group_dressing_marker(value)
+        || is_reserved_item_group_custom_flag_marker(value)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -366,6 +460,21 @@ pub enum ItemGroupToolChargeStorageV1 {
         magazine: CraftItemPrototypeV1,
         ammunition: Box<CraftItemPrototypeV1>,
     },
+    /// Ordered defaults for an owner with multiple detachable wells. Pinned
+    /// `Item_modifier` uses one ammunition roll and one magazine roll, then
+    /// applies those decisions independently to every well. Explicit
+    /// `charges` remain unsupported because upstream treats them as
+    /// ambiguous on multi-well owners.
+    MultiDetachable {
+        wells: Vec<ItemGroupDetachableStorageV1>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ItemGroupDetachableStorageV1 {
+    pub well_pocket_index: u16,
+    pub magazine: CraftItemPrototypeV1,
+    pub ammunition: Box<CraftItemPrototypeV1>,
 }
 
 /// Raw endpoints from pinned `Item_modifier::charges`. Each endpoint may use
@@ -579,6 +688,23 @@ fn item_group_dressing_policy(
     Some(policy.unwrap_or_default())
 }
 
+fn item_group_custom_flags(contents: &[ItemGroupContentsSourceV1]) -> Option<BTreeSet<&str>> {
+    let mut flags = BTreeSet::new();
+    for source in contents {
+        let ItemGroupContentsSourceV1::Group(group_id) = source else {
+            continue;
+        };
+        if !is_reserved_item_group_custom_flag_marker(group_id) {
+            continue;
+        }
+        let flag = decode_item_group_custom_flag_marker(group_id)?;
+        if flags.len() >= MAX_ITEM_GROUP_CUSTOM_FLAGS || !flags.insert(flag) {
+            return None;
+        }
+    }
+    Some(flags)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ItemGroupEvaluationState {
     Visiting,
@@ -781,11 +907,12 @@ impl<'a> ItemGroupEvaluator<'a> {
         for entry in entries {
             let mut target = target_metrics(self, &entry.target)?;
             let dressing = item_group_dressing_policy(&entry.contents)?;
+            let _custom_flags = item_group_custom_flags(&entry.contents)?;
             let has_actual_contents = entry.contents.iter().any(|contents| {
                 !matches!(
                     contents,
                     ItemGroupContentsSourceV1::Group(group_id)
-                        if is_reserved_item_group_dressing_marker(group_id)
+                        if is_reserved_item_group_internal_marker(group_id)
                 )
             });
             let modifier_present = entry.raw_damage.is_some()
@@ -806,16 +933,10 @@ impl<'a> ItemGroupEvaluator<'a> {
                 // contained result.
                 target = raw_item_group_item_metrics(item);
             }
-            if entry.modifier_default_container_sealed.is_some()
-                && !matches!(&entry.target, ItemGroupTargetV1::Item(_))
-                && target.top_level_default_container_possible
-            {
-                // A named-group modifier sees already-generated objects and
-                // may therefore fall back through several possible top-level
-                // type defaults. Retain those definitions, but fail closed
-                // until the protocol carries their aggregate wrapper closure.
-                return None;
-            }
+            let dynamic_default_container_possible =
+                entry.modifier_default_container_sealed.is_some()
+                    && !matches!(&entry.target, ItemGroupTargetV1::Item(_))
+                    && target.top_level_default_container_possible;
             if modifier_present && !target.modifier_side_effects_supported {
                 return None;
             }
@@ -842,6 +963,15 @@ impl<'a> ItemGroupEvaluator<'a> {
                 ));
             let count = u64::from(entry.count_max);
             let mut entry_outputs = target.outputs.checked_mul(count)?;
+            if dynamic_default_container_possible {
+                // The normalized leaf prototypes already carry every
+                // reachable default-container descriptor. A modifier on a
+                // named group inspects each completed top-level output and
+                // can add at most one such wrapper. `target.outputs` also
+                // includes nested objects, so using it as the candidate count
+                // is deliberately conservative while remaining bounded.
+                entry_outputs = entry_outputs.checked_add(target.outputs.checked_mul(count)?)?;
+            }
             let (contents_outputs, contents_depth, all_contents_estorable) =
                 entry.contents.iter().try_fold(
                     (0_u64, 0_usize, true),
@@ -849,7 +979,7 @@ impl<'a> ItemGroupEvaluator<'a> {
                         if matches!(
                             contents,
                             ItemGroupContentsSourceV1::Group(group_id)
-                                if is_reserved_item_group_dressing_marker(group_id)
+                                if is_reserved_item_group_internal_marker(group_id)
                         ) {
                             return Some((total, depth, all_estorable));
                         }
@@ -903,7 +1033,12 @@ impl<'a> ItemGroupEvaluator<'a> {
                 // has a type default therefore contributes both that item and
                 // its effective outer container; doubling the target count
                 // would undercount that three-node shape.
-                entry_outputs = entry_outputs.checked_add(container.outputs.checked_mul(count)?)?;
+                entry_outputs = entry_outputs.checked_add(
+                    container
+                        .outputs
+                        .checked_mul(target.outputs)?
+                        .checked_mul(count)?,
+                )?;
             }
             if entry.direct_wrapper.is_some() {
                 // One direct container wraps the entire count result. Spill
@@ -921,13 +1056,23 @@ impl<'a> ItemGroupEvaluator<'a> {
                 // Modifier containers replace every modified top-level item;
                 // unlike whole-output wrappers, their overflow policy is not
                 // part of the pinned Item_modifier behavior.
+                let container_instances = entry_result.outputs.checked_mul(count)?;
                 entry_result = container;
+                entry_result.charge_magazine_candidates = entry_result
+                    .charge_magazine_candidates
+                    .checked_mul(container_instances)?;
+                entry_result.charge_ammunition_candidates = entry_result
+                    .charge_ammunition_candidates
+                    .checked_mul(container_instances)?;
             }
             if let Some(wrapper) = &entry.direct_wrapper {
                 apply_output_wrapper_metrics(&mut entry_result, wrapper);
             }
             let entry_depth = target.depth.checked_add(1)?;
             let mut entry_containment_depth = target.containment_depth;
+            if dynamic_default_container_possible {
+                entry_containment_depth = entry_containment_depth.checked_add(1)?;
+            }
             if modifier_charges_apply && target.charge_magazine_candidates > 0 {
                 entry_containment_depth = entry_containment_depth.max(1);
             }
@@ -1112,8 +1257,6 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                     .is_some_and(|charges| !valid_item_group_charge_range(charges))
                 || (entry.modifier_charges.is_some()
                     && !matches!(&entry.target, ItemGroupTargetV1::Group(_)))
-                || (entry.modifier_container.is_some()
-                    && !matches!(&entry.target, ItemGroupTargetV1::Item(_)))
                 || entry.modifier_default_container_sealed.is_some_and(|_| {
                     entry.modifier_container.is_some()
                         || matches!(&entry.target, ItemGroupTargetV1::Node(_))
@@ -1130,12 +1273,13 @@ fn valid_item_group_graph_shape(graph: &ItemGroupGraphV1) -> bool {
                     .iter()
                     .any(|contents| !valid_item_group_contents(contents))
                 || item_group_dressing_policy(&entry.contents).is_none()
+                || item_group_custom_flags(&entry.contents).is_none()
                 || (entry.seal_contents
                     && !entry.contents.iter().any(|contents| {
                         !matches!(
                             contents,
                             ItemGroupContentsSourceV1::Group(group_id)
-                                if is_reserved_item_group_dressing_marker(group_id)
+                                if is_reserved_item_group_internal_marker(group_id)
                         )
                     }))
                 || entry
@@ -1215,6 +1359,10 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
             }
             None => corpse_source.is_none() && !corpse_flag,
         };
+    let degradation_metadata_valid =
+        item_degradation_state(&item.initial_variables).is_none_or(|(_, degradation)| {
+            degradation == 0 && item.maximum_raw_damage == MAX_ITEM_RAW_DAMAGE
+        });
     valid_craft_item_prototype(&item.prototype)
         && matches!(item.maximum_raw_damage, 0 | MAX_ITEM_RAW_DAMAGE)
         && valid_item_group_variants(&item.variants)
@@ -1224,11 +1372,21 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
             .is_none_or(item_description_expansion_is_valid)
         && valid_item_snippets(&item.snippets)
         && valid_item_variables(&item.initial_variables)
+        && degradation_metadata_valid
         && item_pocket_insulation_variables_are_valid(
             &item.initial_variables,
             item.prototype
                 .ammunition_containers
                 .iter()
+                .filter(|pocket| pocket.spawn_rules.is_some())
+                .map(|pocket| pocket.pocket_index),
+        )
+        && item_pocket_multiplier_variables_are_valid(
+            &item.initial_variables,
+            item.prototype
+                .ammunition_containers
+                .iter()
+                .filter(|pocket| pocket.spawn_rules.is_some())
                 .map(|pocket| pocket.pocket_index),
         )
         && rot_metadata_valid
@@ -1256,10 +1414,16 @@ fn valid_item_group_item_at_depth(item: &ItemGroupItemPrototypeV1, depth: usize)
             .tool_charge_storage
             .as_ref()
             .is_none_or(|storage| valid_tool_charge_storage(&item.prototype, storage))
-        && item
-            .tool_charge_storage
-            .as_ref()
-            .is_none_or(|_| item.charges_supported)
+        && match &item.tool_charge_storage {
+            Some(ItemGroupToolChargeStorageV1::MultiDetachable { .. }) => {
+                !item.charges_supported && item.charges.is_none()
+            }
+            Some(
+                ItemGroupToolChargeStorageV1::Integral { .. }
+                | ItemGroupToolChargeStorageV1::Detachable { .. },
+            ) => item.charges_supported,
+            None => true,
+        }
         && item.default_container.as_ref().is_none_or(|container| {
             depth < MAX_ITEM_COMPONENT_DEPTH
                 && container.overflow == ItemGroupOverflowV1::None
@@ -1359,26 +1523,57 @@ fn valid_tool_charge_storage(
             let [well] = owner.magazine_wells.as_slice() else {
                 return false;
             };
-            let [magazine_pocket] = magazine.integral_magazines.as_slice() else {
-                return false;
-            };
             owner.integral_magazines.is_empty()
-                && well.pocket_index == *well_pocket_index
-                && well
-                    .compatible_magazine_type_ids
-                    .binary_search(&magazine.type_id)
-                    .is_ok()
-                && magazine.charges == 0
-                && magazine.magazine_capacity == 0
-                && magazine.magazine_wells.is_empty()
-                && magazine.ammunition_containers.is_empty()
-                && magazine.residual_energy_millijoules == 0
-                && magazine.powered_tool.is_none()
-                && valid_craft_item_prototype(magazine)
-                && valid_craft_item_prototype(ammunition)
-                && valid_charge_ammunition_for_integral_pocket(ammunition, magazine_pocket)
+                && valid_detachable_storage(well, *well_pocket_index, magazine, ammunition)
+        }
+        ItemGroupToolChargeStorageV1::MultiDetachable { wells } => {
+            owner.integral_magazines.is_empty()
+                && owner.magazine_wells.len() > 1
+                && wells.len() <= owner.magazine_wells.len()
+                && wells
+                    .windows(2)
+                    .all(|pair| pair[0].well_pocket_index < pair[1].well_pocket_index)
+                && wells.iter().all(|storage| {
+                    owner
+                        .magazine_wells
+                        .iter()
+                        .find(|well| well.pocket_index == storage.well_pocket_index)
+                        .is_some_and(|well| {
+                            valid_detachable_storage(
+                                well,
+                                storage.well_pocket_index,
+                                &storage.magazine,
+                                &storage.ammunition,
+                            )
+                        })
+                })
         }
     }
+}
+
+fn valid_detachable_storage(
+    well: &super::MagazineWellPrototypeV1,
+    well_pocket_index: u16,
+    magazine: &CraftItemPrototypeV1,
+    ammunition: &CraftItemPrototypeV1,
+) -> bool {
+    let [magazine_pocket] = magazine.integral_magazines.as_slice() else {
+        return false;
+    };
+    well.pocket_index == well_pocket_index
+        && well
+            .compatible_magazine_type_ids
+            .binary_search(&magazine.type_id)
+            .is_ok()
+        && magazine.charges == 0
+        && magazine.magazine_capacity == 0
+        && magazine.magazine_wells.is_empty()
+        && magazine.ammunition_containers.is_empty()
+        && magazine.residual_energy_millijoules == 0
+        && magazine.powered_tool.is_none()
+        && valid_craft_item_prototype(magazine)
+        && valid_craft_item_prototype(ammunition)
+        && valid_charge_ammunition_for_integral_pocket(ammunition, magazine_pocket)
 }
 
 fn tool_charge_ammunition_and_capacity<'a>(
@@ -1398,6 +1593,7 @@ fn tool_charge_ammunition_and_capacity<'a>(
             .integral_magazines
             .first()
             .map(|pocket| (ammunition.as_ref(), pocket.capacity)),
+        ItemGroupToolChargeStorageV1::MultiDetachable { .. } => None,
     }
 }
 
@@ -1436,6 +1632,7 @@ fn item_group_item_containment_depth(item: &ItemGroupItemPrototypeV1) -> usize {
         ItemGroupToolChargeStorageV1::Detachable { .. } => {
             usize::from(modifier_applies) + usize::from(ammunition_possible)
         }
+        ItemGroupToolChargeStorageV1::MultiDetachable { .. } => 0,
     }
 }
 
@@ -1459,11 +1656,21 @@ fn raw_item_group_item_metrics(item: &ItemGroupItemPrototypeV1) -> ItemGroupMetr
         outputs: item_group_item_max_outputs(item),
         depth: 0,
         containment_depth: item_group_item_containment_depth(item),
-        charge_magazine_candidates: u64::from(matches!(
-            &item.tool_charge_storage,
-            Some(ItemGroupToolChargeStorageV1::Detachable { .. })
-        )),
-        charge_ammunition_candidates: u64::from(item.tool_charge_storage.is_some()),
+        charge_magazine_candidates: match &item.tool_charge_storage {
+            Some(ItemGroupToolChargeStorageV1::Detachable { .. }) => 1,
+            Some(ItemGroupToolChargeStorageV1::MultiDetachable { wells }) => {
+                u64::try_from(wells.len()).unwrap_or(u64::MAX)
+            }
+            Some(ItemGroupToolChargeStorageV1::Integral { .. }) | None => 0,
+        },
+        charge_ammunition_candidates: match &item.tool_charge_storage {
+            Some(ItemGroupToolChargeStorageV1::Integral { .. })
+            | Some(ItemGroupToolChargeStorageV1::Detachable { .. }) => 1,
+            Some(ItemGroupToolChargeStorageV1::MultiDetachable { wells }) => {
+                u64::try_from(wells.len()).unwrap_or(u64::MAX)
+            }
+            None => 0,
+        },
         modifier_side_effects_supported: item.modifier_side_effects_supported,
         charges_supported: item.charges_supported,
         estorable_contents_supported: contents_support.0,
@@ -1494,6 +1701,77 @@ pub fn valid_item_variables(variables: &BTreeMap<String, ItemVariableValueV1>) -
                     }
                 }
         })
+        && item_gun_fouling_variables_are_valid(variables)
+        && item_degradation_variables_are_valid(variables)
+}
+
+#[must_use]
+pub fn item_degradation_state(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+) -> Option<(u16, u16)> {
+    let (
+        Some(ItemVariableValueV1::Integer(increments)),
+        Some(ItemVariableValueV1::Integer(degradation)),
+    ) = (
+        variables.get(ITEM_DEGRADATION_INCREMENTS_VARIABLE),
+        variables.get(ITEM_DEGRADATION_VARIABLE),
+    )
+    else {
+        return None;
+    };
+    Some((
+        u16::try_from(*increments).ok().filter(|value| *value > 0)?,
+        u16::try_from(*degradation)
+            .ok()
+            .filter(|value| *value <= MAX_ITEM_RAW_DAMAGE)?,
+    ))
+}
+
+#[must_use]
+pub fn item_degradation_variables_are_valid(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+) -> bool {
+    match (
+        variables.get(ITEM_DEGRADATION_INCREMENTS_VARIABLE),
+        variables.get(ITEM_DEGRADATION_VARIABLE),
+    ) {
+        (None, None) => true,
+        (Some(_), Some(_)) => item_degradation_state(variables).is_some(),
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
+#[must_use]
+pub fn item_degradation_matches_damage(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    raw_damage: u16,
+) -> bool {
+    item_degradation_variables_are_valid(variables)
+        && item_degradation_state(variables)
+            .is_none_or(|(_, degradation)| degradation <= raw_damage)
+}
+
+fn item_gun_fouling_variables_are_valid(variables: &BTreeMap<String, ItemVariableValueV1>) -> bool {
+    let enabled = matches!(
+        variables.get(ITEM_GROUP_GUN_FOULING_VARIABLE),
+        None | Some(ItemVariableValueV1::Integer(1))
+    );
+    let dirt_fault = variables.get(ITEM_GUN_DIRT_FAULT_VARIABLE);
+    let unlubricated_fault = variables.get(ITEM_GUN_UNLUBRICATED_FAULT_VARIABLE);
+    let dirt = variables.get("dirt");
+    enabled
+        && matches!(dirt_fault, None | Some(ItemVariableValueV1::Integer(1)))
+        && matches!(
+            unlubricated_fault,
+            None | Some(ItemVariableValueV1::Integer(1))
+        )
+        && match (dirt_fault, dirt) {
+            (Some(_), Some(ItemVariableValueV1::Integer(value))) => *value > 0,
+            (None, _) => true,
+            (Some(_), None | Some(ItemVariableValueV1::String(_))) => false,
+        }
+        && (dirt_fault.is_none() && unlubricated_fault.is_none()
+            || variables.contains_key(ITEM_GROUP_GUN_FOULING_VARIABLE))
 }
 
 #[must_use]
@@ -1572,6 +1850,89 @@ pub fn item_pocket_insulation_variables_are_valid(
 }
 
 #[must_use]
+pub fn item_pocket_volume_multiplier_variable_key(pocket_index: u16) -> String {
+    format!("{ITEM_POCKET_VOLUME_MULTIPLIER_VARIABLE_PREFIX}{pocket_index}")
+}
+
+#[must_use]
+pub fn item_pocket_weight_multiplier_variable_key(pocket_index: u16) -> String {
+    format!("{ITEM_POCKET_WEIGHT_MULTIPLIER_VARIABLE_PREFIX}{pocket_index}")
+}
+
+fn item_pocket_multiplier(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    key: &str,
+) -> Option<f32> {
+    match variables.get(key) {
+        None => Some(1.0),
+        Some(ItemVariableValueV1::Integer(bits)) => {
+            let value = f32::from_bits(u32::try_from(*bits).ok()?);
+            (value.is_finite() && value >= 0.0).then_some(value)
+        }
+        Some(ItemVariableValueV1::String(_)) => None,
+    }
+}
+
+#[must_use]
+pub fn item_pocket_volume_multiplier(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    pocket_index: u16,
+) -> Option<f32> {
+    item_pocket_multiplier(
+        variables,
+        &item_pocket_volume_multiplier_variable_key(pocket_index),
+    )
+}
+
+#[must_use]
+pub fn item_pocket_weight_multiplier(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    pocket_index: u16,
+) -> Option<f32> {
+    item_pocket_multiplier(
+        variables,
+        &item_pocket_weight_multiplier_variable_key(pocket_index),
+    )
+}
+
+#[must_use]
+pub fn item_pocket_multiplier_variables_are_valid(
+    variables: &BTreeMap<String, ItemVariableValueV1>,
+    pocket_indices: impl IntoIterator<Item = u16>,
+) -> bool {
+    let pocket_indices = pocket_indices.into_iter().collect::<BTreeSet<_>>();
+    variables.iter().all(|(key, value)| {
+        let (prefix, canonical_key): (&str, fn(u16) -> String) =
+            if key.starts_with(ITEM_POCKET_VOLUME_MULTIPLIER_VARIABLE_PREFIX) {
+                (
+                    ITEM_POCKET_VOLUME_MULTIPLIER_VARIABLE_PREFIX,
+                    item_pocket_volume_multiplier_variable_key,
+                )
+            } else if key.starts_with(ITEM_POCKET_WEIGHT_MULTIPLIER_VARIABLE_PREFIX) {
+                (
+                    ITEM_POCKET_WEIGHT_MULTIPLIER_VARIABLE_PREFIX,
+                    item_pocket_weight_multiplier_variable_key,
+                )
+            } else {
+                return true;
+            };
+        let Ok(index) = key[prefix.len()..].parse::<u16>() else {
+            return false;
+        };
+        key == &canonical_key(index)
+            && pocket_indices.contains(&index)
+            && matches!(
+                value,
+                ItemVariableValueV1::Integer(bits)
+                    if u32::try_from(*bits).ok().is_some_and(|bits| {
+                        let multiplier = f32::from_bits(bits);
+                        multiplier.is_finite() && multiplier >= 0.0 && multiplier != 1.0
+                    })
+            )
+    })
+}
+
+#[must_use]
 pub fn item_snippet_is_valid(snippet: &ItemSnippetV1) -> bool {
     !snippet.id.is_empty()
         && snippet.id.len() <= 512
@@ -1601,6 +1962,8 @@ fn valid_item_group_contents(contents: &ItemGroupContentsSourceV1) -> bool {
         ItemGroupContentsSourceV1::Group(group_id) => {
             if is_reserved_item_group_dressing_marker(group_id) {
                 decode_item_group_dressing_marker(group_id).is_some()
+            } else if is_reserved_item_group_custom_flag_marker(group_id) {
+                decode_item_group_custom_flag_marker(group_id).is_some()
             } else {
                 valid_recipe_id(group_id)
             }
@@ -1780,13 +2143,11 @@ pub fn item_description_expansion_is_valid(expansion: &ItemDescriptionExpansionV
     {
         return false;
     }
-    let mut visiting = BTreeSet::new();
     let mut reachable = BTreeSet::new();
     let mut memoized_lengths = BTreeMap::new();
     let Some(maximum) = maximum_expanded_description_len(
         &expansion.template,
         &categories,
-        &mut visiting,
         &mut reachable,
         &mut memoized_lengths,
         0,
@@ -1804,7 +2165,6 @@ fn invalid_description_text(text: &str) -> bool {
 fn maximum_expanded_description_len(
     text: &str,
     categories: &BTreeMap<&str, &ItemDescriptionSnippetCategoryV1>,
-    visiting: &mut BTreeSet<String>,
     reachable: &mut BTreeSet<String>,
     memoized_lengths: &mut BTreeMap<(String, usize), usize>,
     depth: usize,
@@ -1836,24 +2196,31 @@ fn maximum_expanded_description_len(
             remaining = &remaining[end..];
             continue;
         }
-        if !visiting.insert(tag.to_owned()) {
-            return None;
-        }
         let mut replacement_maximum = None;
+        let mut has_positive_choice = false;
         for choice in category.choices.iter().filter(|choice| choice.weight > 0) {
-            let length = maximum_expanded_description_len(
+            has_positive_choice = true;
+            let Some(length) = maximum_expanded_description_len(
                 &choice.text,
                 categories,
-                visiting,
                 reachable,
                 memoized_lengths,
                 depth.checked_add(1)?,
-            )?;
+            ) else {
+                // Cyclic snippet families are valid upstream. A branch that
+                // exceeds the bounded interpreter's depth remains a
+                // fail-closed runtime outcome, while terminating choices keep
+                // the generalized category admissible.
+                continue;
+            };
             replacement_maximum =
                 Some(replacement_maximum.map_or(length, |current: usize| current.max(length)));
         }
-        visiting.remove(tag);
-        let replacement_maximum = replacement_maximum.unwrap_or(tag.len());
+        let replacement_maximum = if has_positive_choice {
+            replacement_maximum?
+        } else {
+            tag.len()
+        };
         memoized_lengths.insert((tag.to_owned(), depth), replacement_maximum);
         total = total.checked_add(replacement_maximum)?;
         if total > MAX_EXPANDED_DESCRIPTION_BYTES {
@@ -2012,7 +2379,7 @@ fn item_group_graph_references(graph: &ItemGroupGraphV1) -> impl Iterator<Item =
                 .into_iter()
                 .chain(entry.contents.iter().filter_map(|contents| match contents {
                     ItemGroupContentsSourceV1::Group(group_id)
-                        if !is_reserved_item_group_dressing_marker(group_id) =>
+                        if !is_reserved_item_group_internal_marker(group_id) =>
                     {
                         Some(group_id.as_str())
                     }
@@ -2445,7 +2812,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_named_group_default_fallback_is_retained_but_fails_closed() {
+    fn dynamic_named_group_default_fallback_has_a_conservative_object_bound() {
         let mut item = valid_test_item();
         let mut default_bottle = valid_test_container("default_bottle");
         default_bottle.item.default_container =
@@ -2462,7 +2829,16 @@ mod tests {
         });
         outer_entry.modifier_default_container_sealed = Some(true);
         let outer = test_group("outer_modifier", outer_entry);
-        assert!(!item_group_catalog_is_valid(&[inner, outer]));
+        let dynamic_catalog = [inner, outer];
+        assert!(item_group_catalog_is_valid(&dynamic_catalog));
+        assert_eq!(
+            item_group_source_max_outputs(
+                &ItemGroupSourceV1::Group(String::from("outer_modifier")),
+                &dynamic_catalog,
+            ),
+            Some(4),
+            "two reachable constructor objects plus at most one dynamic fallback per reachable object"
+        );
 
         let plain_inner = test_group(
             "plain_inner",
@@ -2560,6 +2936,15 @@ mod tests {
             ],
         };
         assert!(!item_description_expansion_is_valid(&cyclic));
+
+        let terminating_recursive = ItemDescriptionExpansionV1 {
+            template: String::from("<recursive>"),
+            categories: vec![category(
+                "<recursive>",
+                vec![choice("more <recursive>", 1), choice("done", 1)],
+            )],
+        };
+        assert!(item_description_expansion_is_valid(&terminating_recursive));
 
         let literal_zero_weight = ItemDescriptionExpansionV1 {
             template: String::from("<zero>"),
@@ -2676,6 +3061,30 @@ mod tests {
             item_pocket_insulation(&item.initial_variables, 0),
             Some(10.0)
         );
+        item.initial_variables.insert(
+            item_pocket_volume_multiplier_variable_key(0),
+            ItemVariableValueV1::Integer(i64::from(0.75_f32.to_bits())),
+        );
+        item.initial_variables.insert(
+            item_pocket_weight_multiplier_variable_key(0),
+            ItemVariableValueV1::Integer(i64::from(0.5_f32.to_bits())),
+        );
+        assert_eq!(
+            item_pocket_volume_multiplier(&item.initial_variables, 0),
+            Some(0.75)
+        );
+        assert_eq!(
+            item_pocket_weight_multiplier(&item.initial_variables, 0),
+            Some(0.5)
+        );
+        let rules = item.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("fixture has spawn rules");
+        rules
+            .item_restrictions
+            .push(SPAWN_POCKET_OPEN_CONTAINER_MARKER.to_owned());
+        assert!(spawn_pocket_is_open_container(rules));
         assert!(valid_item_group_item(&item));
 
         let mut unknown_pocket = item.clone();
@@ -2695,11 +3104,51 @@ mod tests {
         );
         assert!(!valid_item_group_item(&non_finite));
 
-        let mut malformed = item;
+        let mut malformed = item.clone();
         malformed.initial_variables.insert(
             format!("{ITEM_POCKET_INSULATION_VARIABLE_PREFIX}00"),
             ItemVariableValueV1::Integer(i64::from(1.0_f32.to_bits())),
         );
         assert!(!valid_item_group_item(&malformed));
+
+        let mut reserved_flag_collision = item;
+        reserved_flag_collision.prototype.ammunition_containers[0]
+            .spawn_rules
+            .as_mut()
+            .expect("fixture has spawn rules")
+            .flag_restrictions
+            .push(SPAWN_POCKET_OPEN_CONTAINER_MARKER.to_owned());
+        assert!(!valid_item_group_item(&reserved_flag_collision));
+    }
+
+    #[test]
+    fn degradation_metadata_is_typed_bounded_and_damage_consistent() {
+        let mut item = valid_test_item();
+        item.maximum_raw_damage = MAX_ITEM_RAW_DAMAGE;
+        item.initial_variables.insert(
+            ITEM_DEGRADATION_INCREMENTS_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(50),
+        );
+        assert!(!valid_item_group_item(&item));
+        item.initial_variables.insert(
+            ITEM_DEGRADATION_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(0),
+        );
+        assert!(valid_item_group_item(&item));
+        assert!(item_degradation_matches_damage(&item.initial_variables, 0));
+
+        item.initial_variables.insert(
+            ITEM_DEGRADATION_VARIABLE.to_owned(),
+            ItemVariableValueV1::Integer(51),
+        );
+        assert!(
+            !valid_item_group_item(&item),
+            "constructors must start at zero degradation"
+        );
+        assert!(!item_degradation_matches_damage(
+            &item.initial_variables,
+            50
+        ));
+        assert!(item_degradation_matches_damage(&item.initial_variables, 51));
     }
 }

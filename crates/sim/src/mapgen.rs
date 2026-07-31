@@ -1,11 +1,12 @@
 use cdda_protocol::{
     ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1,
     MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, WorldPosition, WorldgenCatalogV1,
-    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
-    worldgen_city_start_distance, worldgen_omt_identity_at, worldgen_omt_matches,
-    worldgen_overmap_contains,
+    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenNestedConditionsV1,
+    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
+    WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_city_start_distance,
+    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -28,16 +29,36 @@ pub(super) fn catalog_fits_one_id_reservation(
     // useful admission bound for low-chance production groups: planning uses
     // actual deterministic rolls, caps the complete bubble before mutation,
     // and the allocator still rejects any exhausted reservation at commit.
+    let placement_fits = |placement: &cdda_protocol::WorldgenItemGroupPlacementV1| {
+        item_group_source_max_outputs(
+            &ItemGroupSourceV1::Group(placement.group_id.clone()),
+            item_groups,
+        )
+        .and_then(|maximum| maximum.checked_mul(u64::from(placement.repeat_maximum)))
+        .is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
+    };
     catalog.omt_generators.iter().all(|generator| {
         generator.templates.iter().all(|template| {
-            template.cells.iter().all(|cell| {
-                cell.item_group.as_ref().is_none_or(|placement| {
-                    item_group_source_max_outputs(
-                        &ItemGroupSourceV1::Group(placement.group_id.clone()),
-                        item_groups,
-                    )
-                    .is_some_and(|maximum| maximum <= ID_RESERVATION_SIZE)
-                })
+            template
+                .cells
+                .iter()
+                .filter_map(|cell| cell.item_group.as_ref())
+                .all(&placement_fits)
+                && template
+                    .area_items
+                    .iter()
+                    .all(|placement| placement_fits(&placement.item_group))
+        }) && generator.nested_generators.iter().all(|nested| {
+            nested.templates.iter().all(|template| {
+                template
+                    .cells
+                    .iter()
+                    .filter_map(|cell| cell.item_group.as_ref())
+                    .all(&placement_fits)
+                    && template
+                        .area_items
+                        .iter()
+                        .all(|placement| placement_fits(&placement.item_group))
             })
         })
     })
@@ -237,58 +258,32 @@ fn plan_omt_cell(
         omt,
         &generator.omt_id,
     );
-    let template = choose_template(&generator.templates, &mut rng)?;
-    if template.cells.len() != OMT_TILE_COUNT {
-        return Err(SimError::InvalidTerrain);
-    }
+    let mut plan = OmtMapgenPlan::new();
+    apply_root_generator(
+        catalog,
+        generator,
+        item_groups,
+        omt,
+        identity.rotation,
+        &mut rng,
+        &mut plan,
+        0,
+    )?;
 
-    // CDDA applies terrain and furniture in distinct mapgen phases. Keep the
-    // choice streams phase-ordered, then perform regional pseudo resolution
-    // tile-by-tile (terrain before furniture) exactly as the pinned engine.
-    let terrain_targets = template
-        .cells
-        .iter()
-        .map(|cell| choose_terrain_target(&cell.terrain, &mut rng))
-        .collect::<Result<Vec<_>, _>>()?;
-    let furniture_targets = template
-        .cells
-        .iter()
-        .map(|cell| choose_furniture_target(&cell.furniture, &mut rng))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Item groups are default-phase pieces. Pinned mapgen resolves regional
-    // pseudo terrain/furniture only after every phase, so loot chance/group
-    // rolls precede the regional substitution rolls on this shared stream.
-    let mut planned_items = Vec::new();
-    for (index, cell) in template.cells.iter().enumerate() {
-        let Some(placement) = &cell.item_group else {
-            continue;
-        };
-        // Pinned map::place_items uses roll_remainder(chance / 100). An
-        // integral 1.0 is guaranteed and consumes no outer chance draw.
-        if !item_placement_succeeds(placement.chance, &mut rng) {
-            continue;
-        }
-        let prototypes = plan_item_group_source(
-            &ItemGroupSourceV1::Group(placement.group_id.clone()),
-            item_groups,
-            &mut rng,
-        )?;
-        for prototype in prototypes {
-            if planned_items.len() >= ID_RESERVATION_SIZE as usize {
-                return Err(SimError::InvalidItem);
-            }
-            planned_items.push((index, prototype));
-        }
-    }
+    // Regional pseudo terrain/furniture resolves only after all mapgen phases,
+    // including nested placement and ordinary loot planning.
     let mut terrain = Vec::with_capacity(OMT_TILE_COUNT);
     let mut furniture = Vec::with_capacity(OMT_TILE_COUNT);
-    for (terrain_target, furniture_target) in terrain_targets.iter().zip(furniture_targets.iter()) {
+    for (terrain_target, furniture_target) in plan.terrain.iter().zip(plan.furniture.iter()) {
+        let terrain_target = terrain_target.as_ref().ok_or(SimError::InvalidTerrain)?;
+        let furniture_target = furniture_target
+            .as_ref()
+            .ok_or(SimError::InvalidFurniture)?;
         terrain.push(resolve_terrain(catalog, terrain_target, &mut rng)?);
         furniture.push(resolve_furniture(catalog, furniture_target, &mut rng)?);
     }
-    let mut items = Vec::with_capacity(planned_items.len());
-    for (index, prototype) in planned_items {
+    let mut items = Vec::with_capacity(plan.items.len());
+    for (index, prototype) in plan.items {
         if terrain[index].move_cost <= 0
             || furniture[index]
                 .as_ref()
@@ -308,6 +303,471 @@ fn plan_omt_cell(
         chunks: chunks_from_tiles(omt, terrain, furniture)?.into(),
         items,
     })
+}
+
+struct OmtMapgenPlan {
+    terrain: Vec<Option<WorldgenTerrainTargetV1>>,
+    furniture: Vec<Option<WorldgenFurnitureTargetV1>>,
+    items: Vec<(usize, PlannedItemSpawn)>,
+}
+
+impl OmtMapgenPlan {
+    fn new() -> Self {
+        Self {
+            terrain: vec![None; OMT_TILE_COUNT],
+            furniture: vec![None; OMT_TILE_COUNT],
+            items: Vec::new(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_root_generator(
+    catalog: &WorldgenCatalogV1,
+    generator: &WorldgenOmtGeneratorV1,
+    item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
+    omt: ChunkCoord,
+    rotation: u8,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+    depth: usize,
+) -> Result<(), SimError> {
+    if depth >= cdda_protocol::MAX_WORLDGEN_NESTED_DEPTH {
+        return Err(SimError::InvalidTerrain);
+    }
+    let template = choose_template(&generator.templates, rng)?;
+    if let Some(predecessor_id) = &template.predecessor_id {
+        let predecessor = catalog
+            .omt_generators
+            .binary_search_by(|candidate| candidate.omt_id.as_str().cmp(predecessor_id.as_str()))
+            .ok()
+            .and_then(|index| catalog.omt_generators.get(index))
+            .ok_or(SimError::InvalidTerrain)?;
+        apply_root_generator(
+            catalog,
+            predecessor,
+            item_groups,
+            omt,
+            rotation,
+            rng,
+            plan,
+            depth + 1,
+        )?;
+        rotate_mapgen_plan(plan, (4 - rotation) % 4)?;
+    }
+    apply_template_body(
+        catalog,
+        generator,
+        item_groups,
+        omt,
+        rotation,
+        template.predecessor_id.as_deref(),
+        &template.cells,
+        OMT_TILE_WIDTH,
+        OMT_TILE_WIDTH,
+        &template.nested,
+        &template.area_items,
+        template.erase_all_before_placing_terrain,
+        0,
+        0,
+        rng,
+        plan,
+        depth,
+    )
+}
+
+fn rotate_mapgen_plan(plan: &mut OmtMapgenPlan, rotation: u8) -> Result<(), SimError> {
+    if rotation == 0 {
+        return Ok(());
+    }
+    let mut terrain = vec![None; OMT_TILE_COUNT];
+    let mut furniture = vec![None; OMT_TILE_COUNT];
+    for source in 0..OMT_TILE_COUNT {
+        let (target_x, target_y) =
+            rotate_tile_xy(source % OMT_TILE_WIDTH, source / OMT_TILE_WIDTH, rotation)?;
+        let target = target_y * OMT_TILE_WIDTH + target_x;
+        terrain[target] = plan.terrain[source];
+        furniture[target] = plan.furniture[source];
+    }
+    for (index, _) in &mut plan.items {
+        let (target_x, target_y) =
+            rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
+        *index = target_y * OMT_TILE_WIDTH + target_x;
+    }
+    plan.terrain = terrain;
+    plan.furniture = furniture;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_template_body(
+    catalog: &WorldgenCatalogV1,
+    root_generator: &WorldgenOmtGeneratorV1,
+    item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
+    omt: ChunkCoord,
+    rotation: u8,
+    predecessor_id: Option<&str>,
+    cells: &[cdda_protocol::WorldgenCellV1],
+    width: usize,
+    height: usize,
+    nested: &[WorldgenNestedPlacementV1],
+    area_items: &[cdda_protocol::WorldgenAreaItemPlacementV1],
+    erase_all_before_placing_terrain: bool,
+    offset_x: i32,
+    offset_y: i32,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+    depth: usize,
+) -> Result<(), SimError> {
+    if cells.len() != width.checked_mul(height).ok_or(SimError::NumericOverflow)? {
+        return Err(SimError::InvalidTerrain);
+    }
+
+    // Terrain and furniture are separate upstream phases. Empty vectors are
+    // overlay no-ops, while an explicit furniture `None` clears the tile.
+    let terrain_layers = cells
+        .iter()
+        .map(|cell| cell.terrain.len())
+        .max()
+        .unwrap_or(0);
+    for layer_index in 0..terrain_layers {
+        for (source, cell) in cells.iter().enumerate() {
+            let Some(layer) = cell.terrain.get(layer_index) else {
+                continue;
+            };
+            let Some(index) = offset_tile_index(source, width, offset_x, offset_y)? else {
+                continue;
+            };
+            if erase_all_before_placing_terrain {
+                plan.furniture[index] = Some(WorldgenFurnitureTargetV1::None);
+                plan.items.retain(|(item_index, _)| *item_index != index);
+            }
+            plan.terrain[index] = Some(choose_terrain_target(layer, rng)?);
+        }
+    }
+    let furniture_layers = cells
+        .iter()
+        .map(|cell| cell.furniture.len())
+        .max()
+        .unwrap_or(0);
+    for layer_index in 0..furniture_layers {
+        for (source, cell) in cells.iter().enumerate() {
+            let Some(layer) = cell.furniture.get(layer_index) else {
+                continue;
+            };
+            let Some(index) = offset_tile_index(source, width, offset_x, offset_y)? else {
+                continue;
+            };
+            plan.furniture[index] = Some(choose_furniture_target(layer, rng)?);
+        }
+    }
+
+    for placement in nested {
+        apply_nested_placement(
+            catalog,
+            root_generator,
+            item_groups,
+            omt,
+            rotation,
+            predecessor_id,
+            placement,
+            offset_x,
+            offset_y,
+            rng,
+            plan,
+            depth + 1,
+        )?;
+    }
+
+    for (source, cell) in cells.iter().enumerate() {
+        let Some(placement) = &cell.item_group else {
+            continue;
+        };
+        let Some(index) = offset_tile_index(source, width, offset_x, offset_y)? else {
+            continue;
+        };
+        plan_item_placement(placement, index, item_groups, rng, plan)?;
+    }
+    for placement in area_items {
+        let x = choose_i8_range(placement.x.minimum, placement.x.maximum, rng)?;
+        let y = choose_i8_range(placement.y.minimum, placement.y.maximum, rng)?;
+        let Some(index) = absolute_tile_index(
+            offset_x
+                .checked_add(i32::from(x))
+                .ok_or(SimError::NumericOverflow)?,
+            offset_y
+                .checked_add(i32::from(y))
+                .ok_or(SimError::NumericOverflow)?,
+        ) else {
+            continue;
+        };
+        plan_item_placement(&placement.item_group, index, item_groups, rng, plan)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_nested_placement(
+    catalog: &WorldgenCatalogV1,
+    root_generator: &WorldgenOmtGeneratorV1,
+    item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
+    omt: ChunkCoord,
+    rotation: u8,
+    predecessor_id: Option<&str>,
+    placement: &WorldgenNestedPlacementV1,
+    parent_offset_x: i32,
+    parent_offset_y: i32,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+    depth: usize,
+) -> Result<(), SimError> {
+    if depth >= cdda_protocol::MAX_WORLDGEN_NESTED_DEPTH {
+        return Err(SimError::InvalidTerrain);
+    }
+    let choices = if nested_conditions_match(
+        catalog,
+        omt,
+        rotation,
+        predecessor_id,
+        &placement.conditions,
+    )? {
+        &placement.chunks
+    } else {
+        &placement.else_chunks
+    };
+    if choices.is_empty() {
+        return Ok(());
+    }
+    let choice = choose_nested_choice(choices, rng)?;
+    if choice.nested_id == "null" {
+        return Ok(());
+    }
+    let nested_generator = root_generator
+        .nested_generators
+        .binary_search_by(|candidate| candidate.nested_id.as_str().cmp(choice.nested_id.as_str()))
+        .ok()
+        .and_then(|index| root_generator.nested_generators.get(index))
+        .ok_or(SimError::InvalidTerrain)?;
+    let template = choose_nested_template(nested_generator, rng)?;
+    let x = choose_i8_range(placement.x.minimum, placement.x.maximum, rng)?;
+    let y = choose_i8_range(placement.y.minimum, placement.y.maximum, rng)?;
+    apply_template_body(
+        catalog,
+        root_generator,
+        item_groups,
+        omt,
+        rotation,
+        predecessor_id,
+        &template.cells,
+        usize::from(template.width),
+        usize::from(template.height),
+        &template.nested,
+        &template.area_items,
+        template.erase_all_before_placing_terrain,
+        parent_offset_x
+            .checked_add(i32::from(x))
+            .ok_or(SimError::NumericOverflow)?,
+        parent_offset_y
+            .checked_add(i32::from(y))
+            .ok_or(SimError::NumericOverflow)?,
+        rng,
+        plan,
+        depth,
+    )
+}
+
+fn nested_conditions_match(
+    catalog: &WorldgenCatalogV1,
+    omt: ChunkCoord,
+    rotation: u8,
+    predecessor_id: Option<&str>,
+    conditions: &WorldgenNestedConditionsV1,
+) -> Result<bool, SimError> {
+    let matches = |condition: &cdda_protocol::WorldgenNeighborConditionV1| {
+        let (offset_x, offset_y) = rotate_neighbor_offset(
+            i32::from(condition.offset_x),
+            i32::from(condition.offset_y),
+            rotation,
+        )?;
+        let neighbor = ChunkCoord {
+            x: omt
+                .x
+                .checked_add(offset_x)
+                .ok_or(SimError::NumericOverflow)?,
+            y: omt
+                .y
+                .checked_add(offset_y)
+                .ok_or(SimError::NumericOverflow)?,
+            z: omt.z,
+        };
+        Ok(
+            worldgen_omt_identity_at(catalog, neighbor).is_some_and(|identity| {
+                condition
+                    .allowed_identity_ids
+                    .binary_search(&identity.full_id)
+                    .is_ok()
+            }),
+        )
+    };
+    for condition in &conditions.all_neighbors {
+        if !matches(condition)? {
+            return Ok(false);
+        }
+    }
+    if !conditions.any_neighbors.is_empty() {
+        let mut any = false;
+        for condition in &conditions.any_neighbors {
+            any |= matches(condition)?;
+        }
+        if !any {
+            return Ok(false);
+        }
+    }
+    Ok(conditions.predecessor_ids.is_empty()
+        || predecessor_id.is_some_and(|id| {
+            conditions
+                .predecessor_ids
+                .binary_search_by(|candidate| candidate.as_str().cmp(id))
+                .is_ok()
+        }))
+}
+
+fn rotate_neighbor_offset(x: i32, y: i32, rotation: u8) -> Result<(i32, i32), SimError> {
+    match rotation {
+        0 => Ok((x, y)),
+        1 => Ok((-y, x)),
+        2 => Ok((-x, -y)),
+        3 => Ok((y, -x)),
+        _ => Err(SimError::InvalidTerrain),
+    }
+}
+
+fn choose_nested_choice<'a>(
+    choices: &'a [cdda_protocol::WorldgenNestedChoiceV1],
+    rng: &mut ChaCha8Rng,
+) -> Result<&'a cdda_protocol::WorldgenNestedChoiceV1, SimError> {
+    let total = choices.iter().try_fold(0_u64, |total, choice| {
+        total.checked_add(u64::from(choice.weight))
+    });
+    let index = choose_weighted_index(
+        choices.len(),
+        total.ok_or(SimError::NumericOverflow)?,
+        rng,
+        |index| u64::from(choices[index].weight),
+        true,
+    )?;
+    choices.get(index).ok_or(SimError::InvalidTerrain)
+}
+
+fn choose_nested_template<'a>(
+    generator: &'a WorldgenNestedGeneratorV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<&'a WorldgenNestedTemplateV1, SimError> {
+    let total = generator
+        .templates
+        .iter()
+        .try_fold(0_u64, |total, template| {
+            total.checked_add(u64::from(template.weight))
+        });
+    let index = choose_weighted_index(
+        generator.templates.len(),
+        total.ok_or(SimError::NumericOverflow)?,
+        rng,
+        |index| u64::from(generator.templates[index].weight),
+        true,
+    )?;
+    generator
+        .templates
+        .get(index)
+        .ok_or(SimError::InvalidTerrain)
+}
+
+fn choose_i8_range(minimum: i8, maximum: i8, rng: &mut ChaCha8Rng) -> Result<i8, SimError> {
+    if minimum > maximum {
+        return Err(SimError::InvalidTerrain);
+    }
+    if minimum == maximum {
+        return Ok(minimum);
+    }
+    let width = i64::from(maximum)
+        .checked_sub(i64::from(minimum))
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(SimError::NumericOverflow)?;
+    let offset = inclusive_rng_u64(rng, 0, width - 1);
+    i8::try_from(i64::from(minimum) + i64::try_from(offset).map_err(|_| SimError::NumericOverflow)?)
+        .map_err(|_| SimError::NumericOverflow)
+}
+
+fn choose_repeat(
+    placement: &cdda_protocol::WorldgenItemGroupPlacementV1,
+    rng: &mut ChaCha8Rng,
+) -> Result<u16, SimError> {
+    if placement.repeat_minimum > placement.repeat_maximum {
+        return Err(SimError::InvalidItem);
+    }
+    if placement.repeat_minimum == placement.repeat_maximum {
+        return Ok(placement.repeat_minimum);
+    }
+    let value = inclusive_rng_u64(
+        rng,
+        u64::from(placement.repeat_minimum),
+        u64::from(placement.repeat_maximum),
+    );
+    u16::try_from(value).map_err(|_| SimError::NumericOverflow)
+}
+
+fn plan_item_placement(
+    placement: &cdda_protocol::WorldgenItemGroupPlacementV1,
+    index: usize,
+    item_groups: &std::collections::BTreeMap<String, ItemGroupDefinitionV1>,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    for _ in 0..choose_repeat(placement, rng)? {
+        if !item_placement_succeeds(placement.chance, rng) {
+            continue;
+        }
+        let prototypes = plan_item_group_source(
+            &ItemGroupSourceV1::Group(placement.group_id.clone()),
+            item_groups,
+            rng,
+        )?;
+        for prototype in prototypes {
+            if plan.items.len() >= ID_RESERVATION_SIZE as usize {
+                return Err(SimError::InvalidItem);
+            }
+            plan.items.push((index, prototype));
+        }
+    }
+    Ok(())
+}
+
+fn offset_tile_index(
+    source: usize,
+    width: usize,
+    offset_x: i32,
+    offset_y: i32,
+) -> Result<Option<usize>, SimError> {
+    let x = i32::try_from(source % width)
+        .map_err(|_| SimError::NumericOverflow)?
+        .checked_add(offset_x)
+        .ok_or(SimError::NumericOverflow)?;
+    let y = i32::try_from(source / width)
+        .map_err(|_| SimError::NumericOverflow)?
+        .checked_add(offset_y)
+        .ok_or(SimError::NumericOverflow)?;
+    Ok(absolute_tile_index(x, y))
+}
+
+fn absolute_tile_index(x: i32, y: i32) -> Option<usize> {
+    if !(0..OMT_TILE_WIDTH as i32).contains(&x) || !(0..OMT_TILE_WIDTH as i32).contains(&y) {
+        return None;
+    }
+    usize::try_from(y)
+        .ok()?
+        .checked_mul(OMT_TILE_WIDTH)?
+        .checked_add(usize::try_from(x).ok()?)
 }
 
 fn rotate_tile_xy(x: usize, y: usize, rotation: u8) -> Result<(usize, usize), SimError> {

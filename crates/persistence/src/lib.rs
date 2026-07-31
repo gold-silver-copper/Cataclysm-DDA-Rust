@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 74;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 96
-/// added city/start worldgen fields on top of Protocol 95 item-group capacity
-/// ownership. Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 74;
+pub const SCHEMA_VERSION: i64 = 75;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 97
+/// added production-road mapgen and the item-instance metadata required by its
+/// complete loot closure. Metadata-only databases may still migrate.
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 75;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -6756,14 +6756,14 @@ mod tests {
             close_flat: None,
         };
         let cell = cdda_protocol::WorldgenCellV1 {
-            terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+            terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
                 target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(0),
                 weight: 1,
-            }],
-            furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+            }]],
+            furniture: vec![vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
                 target: cdda_protocol::WorldgenFurnitureTargetV1::None,
                 weight: 1,
-            }],
+            }]],
             item_group: None,
         };
         let catalog = cdda_protocol::WorldgenCatalogV1 {
@@ -6801,8 +6801,14 @@ mod tests {
                 omt_id: String::from("sqlite_field"),
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {
                     weight: 1,
+                    predecessor_id: None,
                     cells: vec![cell; cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                    nested: Vec::new(),
+                    area_items: Vec::new(),
+                    erase_all_before_placing_terrain: false,
+                    deferred_fields: Vec::new(),
                 }],
+                nested_generators: Vec::new(),
             }],
         };
         let expected_overmap = catalog.overmap.clone();
@@ -6972,10 +6978,7 @@ mod tests {
             );
             assert_eq!(
                 store.reserve_id_block().expect("first reservation"),
-                ReservedIdBlock {
-                    start: 1,
-                    end: 4_096
-                }
+                ReservedIdBlock::new(1, ID_RESERVATION_SIZE).expect("first block should fit")
             );
             store.checkpoint().expect("checkpoint should succeed");
         }
@@ -6989,10 +6992,8 @@ mod tests {
             );
             assert_eq!(
                 store.reserve_id_block().expect("second reservation"),
-                ReservedIdBlock {
-                    start: 4_097,
-                    end: 8_192
-                }
+                ReservedIdBlock::new(ID_RESERVATION_SIZE + 1, ID_RESERVATION_SIZE * 2)
+                    .expect("second block should fit")
             );
         }
         remove_database(&path);
@@ -7996,7 +7997,9 @@ mod tests {
         let selected = (0..=u8::MAX).find_map(|seed_byte| {
             let mut world = WorldState::new(70, [seed_byte; 32]);
             world
-                .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("valid block"))
+                .install_reserved_block(
+                    ReservedIdBlock::new(1, ID_RESERVATION_SIZE).expect("valid block"),
+                )
                 .expect("block should install");
             world.insert_chunk(Chunk::floor(ChunkCoord { x: 0, y: 0, z: 0 }));
             let actor_id = world
@@ -8072,7 +8075,7 @@ mod tests {
             .expect("world should initialize");
         assert_eq!(
             store.reserve_id_block().expect("block should reserve"),
-            ReservedIdBlock::new(1, 4_096).expect("valid block")
+            ReservedIdBlock::new(1, ID_RESERVATION_SIZE).expect("valid block")
         );
         store
             .write_snapshot(0, &before_attack)

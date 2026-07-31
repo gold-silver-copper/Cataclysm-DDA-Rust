@@ -1,10 +1,10 @@
 {
   "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "green_parent_commit": "38ff729d97e073473bb26b4a9b8b28ac573ed29a",
-  "verified_commit": "db09119e73a68d1f67dd2276c6989b37e1ad7bf5",
-  "protocol_version": 96,
-  "persistence_schema_version": 74,
+  "green_parent_commit": "2d94134ed24b646690fb0939d04bf6bc2fda972c",
+  "verified_commit": null,
+  "protocol_version": 97,
+  "persistence_schema_version": 75,
   "replay_format_version": 3,
   "evidence_weights": {
     "generated": 1,
@@ -59,7 +59,7 @@
       ],
       "target_definitions": 13865,
       "maximum_weighted_points": 263435,
-      "earned_weighted_points": 305,
+      "earned_weighted_points": 343,
       "evidence_paths": ["docs/content-schema-inventory.json", "vendor/cdda-content-manifest.json"]
     }
   ],
@@ -67,13 +67,13 @@
     {
       "id": "admitted-mapgen-generator",
       "target_scope": "core-dda-ordinary-gameplay",
-      "generated_definitions": 1,
-      "authoritatively_interacted_definitions": 1,
-      "persisted_definitions": 1,
-      "client_accessible_definitions": 1,
-      "four_mode_definitions": 1,
-      "weighted_points": 19,
-      "ordinary_gameplay_loops": ["create a world, spawn in the production regional field, traverse its durable chunks, disconnect, recover from SQLite, and replay portably"],
+      "generated_definitions": 2,
+      "authoritatively_interacted_definitions": 2,
+      "persisted_definitions": 2,
+      "client_accessible_definitions": 2,
+      "four_mode_definitions": 2,
+      "weighted_points": 38,
+      "ordinary_gameplay_loops": ["create a world, generate the production regional field and connected road mapgens, traverse both through normal client movement, disconnect, recover from SQLite, and replay portably"],
       "evidence_paths": ["crates/server/src/worldgen.rs", "crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"]
     },
     {
@@ -111,6 +111,18 @@
       "weighted_points": 19,
       "ordinary_gameplay_loops": ["create the production world from pinned default city settings, retain deterministic city centers and stable IDs, explore the resulting heterogeneous field with two Iroh-authenticated clients, disconnect, recover from SQLite, and replay portably"],
       "evidence_paths": ["crates/content/src/city.rs", "crates/sim/src/cities.rs", "crates/server/src/worldgen.rs", "crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"]
+    },
+    {
+      "id": "overmap-road-network",
+      "target_scope": "core-dda-ordinary-gameplay",
+      "generated_definitions": 1,
+      "authoritatively_interacted_definitions": 1,
+      "persisted_definitions": 1,
+      "client_accessible_definitions": 1,
+      "four_mode_definitions": 1,
+      "weighted_points": 19,
+      "ordinary_gameplay_loops": ["generate deterministic city-to-city and boundary-connected roads, traverse adjacent production pavement through an Iroh-authenticated client, disconnect, recover the exact position from SQLite, and replay portably"],
+      "evidence_paths": ["crates/sim/src/roads.rs", "crates/sim/src/mapgen.rs", "crates/server/src/worldgen.rs", "crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"]
     },
     {
       "id": "regional-field-loot",

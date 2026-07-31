@@ -10,38 +10,51 @@ mod astronomy_table;
 mod item_groups;
 
 pub use item_groups::{
-    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_GROUP_DRESSING_MARKER_PREFIX,
-    ITEM_POCKET_INSULATION_VARIABLE_PREFIX, ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE,
+    ITEM_DEGRADATION_INCREMENTS_VARIABLE, ITEM_DEGRADATION_VARIABLE,
+    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_GROUP_CUSTOM_FLAG_MARKER_PREFIX,
+    ITEM_GROUP_DRESSING_MARKER_PREFIX, ITEM_GROUP_GUN_FOULING_VARIABLE,
+    ITEM_GUN_DIRT_FAULT_VARIABLE, ITEM_GUN_UNLUBRICATED_FAULT_VARIABLE,
+    ITEM_POCKET_INSULATION_VARIABLE_PREFIX, ITEM_POCKET_VOLUME_MULTIPLIER_VARIABLE_PREFIX,
+    ITEM_POCKET_WEIGHT_MULTIPLIER_VARIABLE_PREFIX, ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE,
     ITEM_ROT_TURNS_VARIABLE, ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS,
     ITEM_TEMPERATURE_NORMAL_AMBIENT_MILLIKELVIN, ITEM_TEMPERATURE_PROCESS_INTERVAL_TICKS,
     ITEM_TEMPERATURE_UNPROCESSED_ENERGY_MJ_PER_G, ITEM_TEMPERATURE_UNPROCESSED_MILLIKELVIN,
     InclusiveI32RangeV1, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
     ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
     ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
-    ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1, ItemGroupItemPrototypeV1,
-    ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1, ItemSnippetV1, ItemTemperatureStateV1,
-    ItemThermalPropertiesV1, ItemVariableValueV1, ItemVariantV1,
-    MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
-    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES, MAX_ITEM_GROUP_DEFINITIONS,
+    ItemGroupDetachableStorageV1, ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1,
+    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
+    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1,
+    ItemSnippetV1, ItemTemperatureStateV1, ItemThermalPropertiesV1, ItemVariableValueV1,
+    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_CATEGORIES, MAX_DESCRIPTION_SNIPPET_CHOICES,
+    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_EXPANDED_DESCRIPTION_BYTES,
+    MAX_ITEM_GROUP_CUSTOM_FLAG_BYTES, MAX_ITEM_GROUP_CUSTOM_FLAGS, MAX_ITEM_GROUP_DEFINITIONS,
     MAX_ITEM_GROUP_DEPTH, MAX_ITEM_GROUP_ENTRIES, MAX_ITEM_GROUP_NODES, MAX_ITEM_GROUP_OUTPUTS,
-    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, SPAWN_POCKET_SINGLE_ITEM_MARKER,
-    decode_item_group_dressing_marker, encode_item_group_dressing_marker,
-    initial_item_temperature_state, is_reserved_item_group_dressing_marker,
+    MAX_ITEM_SNIPPETS, MAX_ITEM_VARIABLES, MAX_ITEM_VARIANTS, SPAWN_POCKET_OPEN_CONTAINER_MARKER,
+    SPAWN_POCKET_SINGLE_ITEM_MARKER, decode_item_group_custom_flag_marker,
+    decode_item_group_dressing_marker, encode_item_group_custom_flag_marker,
+    encode_item_group_dressing_marker, initial_item_temperature_state,
+    is_reserved_item_group_custom_flag_marker, is_reserved_item_group_dressing_marker,
+    is_reserved_item_group_internal_marker, is_reserved_spawn_pocket_marker,
+    item_degradation_matches_damage, item_degradation_state, item_degradation_variables_are_valid,
     item_description_expansion_is_valid, item_group_catalog_is_valid,
     item_group_source_max_outputs, item_group_sources_are_valid, item_pocket_insulation,
     item_pocket_insulation_variable_key, item_pocket_insulation_variables_are_valid,
-    item_rot_state, item_rot_variables_are_valid, item_snippet_is_valid,
-    item_temperature_state_matches_phase, item_variant_is_valid,
-    spawn_pocket_external_volume_milliliters, spawn_pocket_has_item_restrictions,
-    spawn_pocket_is_single_item, valid_item_variables,
+    item_pocket_multiplier_variables_are_valid, item_pocket_volume_multiplier,
+    item_pocket_volume_multiplier_variable_key, item_pocket_weight_multiplier,
+    item_pocket_weight_multiplier_variable_key, item_rot_state, item_rot_variables_are_valid,
+    item_snippet_is_valid, item_temperature_state_matches_phase, item_variant_is_valid,
+    spawn_pocket_content_weight_with_multiplier_milligrams,
+    spawn_pocket_external_volume_milliliters,
+    spawn_pocket_external_volume_with_multiplier_milliliters, spawn_pocket_has_item_restrictions,
+    spawn_pocket_is_open_container, spawn_pocket_is_single_item, valid_item_variables,
 };
 use item_groups::{
     initial_item_fit_state, item_group_sources_have_exact_named_closure, valid_item_fit_state,
     valid_item_temperature_state,
 };
 
-pub const PROTOCOL_VERSION: u16 = 96;
+pub const PROTOCOL_VERSION: u16 = 97;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -137,7 +150,16 @@ pub const MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH: usize = 32;
 pub const MAX_WORLDGEN_OMT_GENERATORS: usize = 512;
 pub const MAX_WORLDGEN_TEMPLATES_PER_OMT: usize = 32;
 pub const MAX_WORLDGEN_TEMPLATES: usize = 512;
+pub const MAX_WORLDGEN_NESTED_GENERATORS_PER_OMT: usize = 4_096;
+pub const MAX_WORLDGEN_NESTED_TEMPLATES_PER_GENERATOR: usize = 32;
+pub const MAX_WORLDGEN_NESTED_TEMPLATES: usize = 16_384;
+pub const MAX_WORLDGEN_NESTED_PLACEMENTS_PER_TEMPLATE: usize = 1_024;
+pub const MAX_WORLDGEN_NESTED_PLACEMENTS: usize = 65_536;
+pub const MAX_WORLDGEN_NESTED_DEPTH: usize = 32;
+pub const MAX_WORLDGEN_DEFERRED_FIELDS: usize = 8;
+pub const MAX_WORLDGEN_ITEM_PLACEMENT_REPEAT: u16 = 256;
 pub const MAX_WORLDGEN_CELL_CHOICES: usize = 32;
+pub const MAX_WORLDGEN_CELL_LAYERS: usize = 32;
 pub const MAX_WORLDGEN_WEIGHTED_CELL_TARGETS: usize = 1_048_576;
 pub const MAX_WORLDGEN_ID_BYTES: usize = 512;
 pub const MAX_WORLDGEN_START_TARGETS: usize = 256;
@@ -1284,7 +1306,7 @@ pub fn item_snapshot_is_compatible_with_spawn_rules(
     let restricted =
         spawn_pocket_has_item_restrictions(rules) || !rules.flag_restrictions.is_empty();
     let accepted_restriction = rules.item_restrictions.iter().any(|restriction| {
-        restriction != SPAWN_POCKET_SINGLE_ITEM_MARKER && restriction == &content.type_id
+        !is_reserved_spawn_pocket_marker(restriction) && restriction == &content.type_id
     }) || rules
         .flag_restrictions
         .iter()
@@ -2813,6 +2835,59 @@ pub struct WorldgenItemGroupPlacementV1 {
     pub group_id: String,
     /// Independent pinned collection-style chance in 1..=100.
     pub chance: u8,
+    /// Inclusive pinned repetition interval. Zero retains a deterministic
+    /// no-placement branch without inventing an item-group roll.
+    pub repeat_minimum: u16,
+    pub repeat_maximum: u16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenCoordinateRangeV1 {
+    pub minimum: i8,
+    pub maximum: i8,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenAreaItemPlacementV1 {
+    pub item_group: WorldgenItemGroupPlacementV1,
+    pub x: WorldgenCoordinateRangeV1,
+    pub y: WorldgenCoordinateRangeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNestedChoiceV1 {
+    /// `null` is the pinned explicit no-op branch.
+    pub nested_id: String,
+    pub weight: u32,
+}
+
+/// One precompiled adjacent-OMT predicate. Keeping the exact allowed full IDs
+/// in canonical world data makes runtime mapgen independent of live content.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNeighborConditionV1 {
+    pub offset_x: i8,
+    pub offset_y: i8,
+    /// Full overmap-terrain IDs, sorted and unique.
+    pub allowed_identity_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNestedConditionsV1 {
+    /// Every predicate must match.
+    pub all_neighbors: Vec<WorldgenNeighborConditionV1>,
+    /// Empty means no disjunction; otherwise at least one predicate must match.
+    pub any_neighbors: Vec<WorldgenNeighborConditionV1>,
+    /// Root predecessor generator IDs, sorted and unique.
+    pub predecessor_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNestedPlacementV1 {
+    pub chunks: Vec<WorldgenNestedChoiceV1>,
+    pub else_chunks: Vec<WorldgenNestedChoiceV1>,
+    pub x: WorldgenCoordinateRangeV1,
+    pub y: WorldgenCoordinateRangeV1,
+    pub conditions: WorldgenNestedConditionsV1,
 }
 
 /// One row-major local-map cell. A multi-entry target consumes one weighted
@@ -2820,16 +2895,44 @@ pub struct WorldgenItemGroupPlacementV1 {
 /// consumes one additional weighted-table roll, even with one candidate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenCellV1 {
-    pub terrain: Vec<WorldgenWeightedTerrainTargetV1>,
-    pub furniture: Vec<WorldgenWeightedFurnitureTargetV1>,
+    /// Ordered mapgen phases; every inner vector is one weighted choice.
+    pub terrain: Vec<Vec<WorldgenWeightedTerrainTargetV1>>,
+    pub furniture: Vec<Vec<WorldgenWeightedFurnitureTargetV1>>,
     pub item_group: Option<WorldgenItemGroupPlacementV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenTemplateV1 {
     pub weight: u32,
+    /// Optional ordinary mapgen run before this overlay.
+    pub predecessor_id: Option<String>,
     /// Exactly 576 row-major cells: one 24x24 OMT or four 12x12 submaps.
+    /// Empty target vectors are explicit overlay no-ops.
     pub cells: Vec<WorldgenCellV1>,
+    pub nested: Vec<WorldgenNestedPlacementV1>,
+    pub area_items: Vec<WorldgenAreaItemPlacementV1>,
+    pub erase_all_before_placing_terrain: bool,
+    /// Sorted semantic phases owned by later generalized families.
+    pub deferred_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNestedTemplateV1 {
+    pub weight: u32,
+    pub width: u8,
+    pub height: u8,
+    /// Exactly `width * height` row-major overlay cells.
+    pub cells: Vec<WorldgenCellV1>,
+    pub nested: Vec<WorldgenNestedPlacementV1>,
+    pub area_items: Vec<WorldgenAreaItemPlacementV1>,
+    pub erase_all_before_placing_terrain: bool,
+    pub deferred_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenNestedGeneratorV1 {
+    pub nested_id: String,
+    pub templates: Vec<WorldgenNestedTemplateV1>,
 }
 
 /// One OMT-ID-sorted generator. Template order is source order because it is
@@ -2838,6 +2941,8 @@ pub struct WorldgenTemplateV1 {
 pub struct WorldgenOmtGeneratorV1 {
     pub omt_id: String,
     pub templates: Vec<WorldgenTemplateV1>,
+    /// ID-sorted exact closure reachable from this root generator.
+    pub nested_generators: Vec<WorldgenNestedGeneratorV1>,
 }
 
 /// The three upstream identities used by `is_ot_match`, plus the normalized
@@ -4490,33 +4595,223 @@ fn valid_worldgen_regional_furniture_graph(catalog: &WorldgenCatalogV1) -> bool 
     valid_worldgen_regional_graph(&edges)
 }
 
+fn valid_worldgen_item_placement(placement: &WorldgenItemGroupPlacementV1) -> bool {
+    valid_worldgen_id(&placement.group_id)
+        && (1..=100).contains(&placement.chance)
+        && placement.repeat_minimum <= placement.repeat_maximum
+        && placement.repeat_maximum <= MAX_WORLDGEN_ITEM_PLACEMENT_REPEAT
+}
+
+fn valid_worldgen_coordinate_range(range: WorldgenCoordinateRangeV1) -> bool {
+    range.minimum <= range.maximum
+        && i16::from(range.minimum).unsigned_abs() < WORLDGEN_OMT_SIZE as u16
+        && i16::from(range.maximum).unsigned_abs() < WORLDGEN_OMT_SIZE as u16
+}
+
+fn valid_worldgen_deferred_fields(fields: &[String]) -> bool {
+    fields.len() <= MAX_WORLDGEN_DEFERRED_FIELDS
+        && fields
+            .windows(2)
+            .all(|pair| pair[0].as_str() < pair[1].as_str())
+        && fields.iter().all(|field| {
+            matches!(
+                field.as_str(),
+                "place_monsters" | "place_vehicles" | "signage_text"
+            )
+        })
+}
+
 fn valid_worldgen_cell_shape(cell: &WorldgenCellV1, catalog: &WorldgenCatalogV1) -> bool {
-    !cell.terrain.is_empty()
-        && cell.terrain.len() <= MAX_WORLDGEN_CELL_CHOICES
-        && !cell.furniture.is_empty()
-        && cell.furniture.len() <= MAX_WORLDGEN_CELL_CHOICES
-        && checked_positive_weight_sum(cell.terrain.iter().map(|choice| choice.weight))
-        && checked_positive_weight_sum(cell.furniture.iter().map(|choice| choice.weight))
-        && cell.terrain.iter().all(|choice| match choice.target {
-            WorldgenTerrainTargetV1::Prototype(index) => {
-                usize::from(index) < catalog.terrain_prototypes.len()
-            }
-            WorldgenTerrainTargetV1::Regional(index) => {
-                usize::from(index) < catalog.regional_terrain.len()
-            }
+    cell.terrain.len() <= MAX_WORLDGEN_CELL_LAYERS
+        && cell.furniture.len() <= MAX_WORLDGEN_CELL_LAYERS
+        && cell.terrain.iter().all(|layer| {
+            !layer.is_empty()
+                && layer.len() <= MAX_WORLDGEN_CELL_CHOICES
+                && checked_positive_weight_sum(layer.iter().map(|choice| choice.weight))
+                && layer.iter().all(|choice| match choice.target {
+                    WorldgenTerrainTargetV1::Prototype(index) => {
+                        usize::from(index) < catalog.terrain_prototypes.len()
+                    }
+                    WorldgenTerrainTargetV1::Regional(index) => {
+                        usize::from(index) < catalog.regional_terrain.len()
+                    }
+                })
         })
-        && cell.furniture.iter().all(|choice| match choice.target {
-            WorldgenFurnitureTargetV1::None => true,
-            WorldgenFurnitureTargetV1::Prototype(index) => {
-                usize::from(index) < catalog.furniture_prototypes.len()
-            }
-            WorldgenFurnitureTargetV1::Regional(index) => {
-                usize::from(index) < catalog.regional_furniture.len()
-            }
+        && cell.furniture.iter().all(|layer| {
+            !layer.is_empty()
+                && layer.len() <= MAX_WORLDGEN_CELL_CHOICES
+                && checked_positive_weight_sum(layer.iter().map(|choice| choice.weight))
+                && layer.iter().all(|choice| match choice.target {
+                    WorldgenFurnitureTargetV1::None => true,
+                    WorldgenFurnitureTargetV1::Prototype(index) => {
+                        usize::from(index) < catalog.furniture_prototypes.len()
+                    }
+                    WorldgenFurnitureTargetV1::Regional(index) => {
+                        usize::from(index) < catalog.regional_furniture.len()
+                    }
+                })
         })
-        && cell.item_group.as_ref().is_none_or(|placement| {
-            valid_worldgen_id(&placement.group_id) && (1..=100).contains(&placement.chance)
+        && cell
+            .item_group
+            .as_ref()
+            .is_none_or(valid_worldgen_item_placement)
+}
+
+fn valid_worldgen_area_item_placement(placement: &WorldgenAreaItemPlacementV1) -> bool {
+    valid_worldgen_item_placement(&placement.item_group)
+        && valid_worldgen_coordinate_range(placement.x)
+        && valid_worldgen_coordinate_range(placement.y)
+}
+
+fn valid_worldgen_neighbor_condition(
+    condition: &WorldgenNeighborConditionV1,
+    identity_ids: &BTreeSet<&str>,
+) -> bool {
+    (-1..=1).contains(&condition.offset_x)
+        && (-1..=1).contains(&condition.offset_y)
+        && (condition.offset_x != 0 || condition.offset_y != 0)
+        && condition.allowed_identity_ids.len() <= MAX_WORLDGEN_OMT_IDENTITIES
+        && condition
+            .allowed_identity_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && condition
+            .allowed_identity_ids
+            .iter()
+            .all(|id| identity_ids.contains(id.as_str()))
+}
+
+fn valid_worldgen_nested_placement(
+    placement: &WorldgenNestedPlacementV1,
+    identity_ids: &BTreeSet<&str>,
+) -> bool {
+    let valid_choices = |choices: &[WorldgenNestedChoiceV1]| {
+        choices.len() <= MAX_WORLDGEN_CELL_CHOICES
+            && (choices.is_empty()
+                || checked_positive_weight_sum(choices.iter().map(|choice| choice.weight)))
+            && choices
+                .iter()
+                .all(|choice| valid_worldgen_id(&choice.nested_id))
+    };
+    (!placement.chunks.is_empty() || !placement.else_chunks.is_empty())
+        && valid_choices(&placement.chunks)
+        && valid_choices(&placement.else_chunks)
+        && valid_worldgen_coordinate_range(placement.x)
+        && valid_worldgen_coordinate_range(placement.y)
+        && placement
+            .conditions
+            .all_neighbors
+            .iter()
+            .all(|condition| valid_worldgen_neighbor_condition(condition, identity_ids))
+        && placement
+            .conditions
+            .any_neighbors
+            .iter()
+            .all(|condition| valid_worldgen_neighbor_condition(condition, identity_ids))
+        && placement
+            .conditions
+            .predecessor_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && placement
+            .conditions
+            .predecessor_ids
+            .iter()
+            .all(|id| valid_worldgen_id(id))
+}
+
+fn valid_worldgen_bounded_graph(edges: &[Vec<usize>], maximum_depth: usize) -> bool {
+    fn visit(
+        index: usize,
+        edges: &[Vec<usize>],
+        maximum_depth: usize,
+        visiting: &mut [bool],
+        resolved: &mut [Option<usize>],
+    ) -> Option<usize> {
+        if let Some(depth) = *resolved.get(index)? {
+            return Some(depth);
+        }
+        let active = visiting.get_mut(index)?;
+        if *active {
+            return None;
+        }
+        *active = true;
+        let mut depth = 1_usize;
+        for child in edges.get(index)? {
+            depth =
+                depth.max(visit(*child, edges, maximum_depth, visiting, resolved)?.checked_add(1)?);
+            if depth > maximum_depth {
+                return None;
+            }
+        }
+        visiting[index] = false;
+        resolved[index] = Some(depth);
+        Some(depth)
+    }
+
+    let mut resolved = vec![None; edges.len()];
+    (0..edges.len()).all(|index| {
+        visit(
+            index,
+            edges,
+            maximum_depth,
+            &mut vec![false; edges.len()],
+            &mut resolved,
+        )
+        .is_some()
+    })
+}
+
+fn valid_worldgen_predecessor_graph(catalog: &WorldgenCatalogV1) -> bool {
+    let lookup = catalog
+        .omt_generators
+        .iter()
+        .enumerate()
+        .map(|(index, generator)| (generator.omt_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let Some(edges) = catalog
+        .omt_generators
+        .iter()
+        .map(|generator| {
+            generator
+                .templates
+                .iter()
+                .filter_map(|template| template.predecessor_id.as_deref())
+                .map(|id| lookup.get(id).copied())
+                .collect::<Option<Vec<_>>>()
         })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    valid_worldgen_bounded_graph(&edges, MAX_WORLDGEN_NESTED_DEPTH)
+}
+
+fn valid_worldgen_nested_graph(generator: &WorldgenOmtGeneratorV1) -> bool {
+    let lookup = generator
+        .nested_generators
+        .iter()
+        .enumerate()
+        .map(|(index, nested)| (nested.nested_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let Some(edges) = generator
+        .nested_generators
+        .iter()
+        .map(|nested| {
+            nested
+                .templates
+                .iter()
+                .flat_map(|template| &template.nested)
+                .flat_map(|placement| placement.chunks.iter().chain(&placement.else_chunks))
+                .filter(|choice| choice.nested_id != "null")
+                .map(|choice| lookup.get(choice.nested_id.as_str()).copied())
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    valid_worldgen_bounded_graph(&edges, MAX_WORLDGEN_NESTED_DEPTH)
 }
 
 /// Validates all local bounds and indices without requiring an item-group
@@ -4602,7 +4897,15 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
         return false;
     }
 
+    let identity_ids = catalog
+        .overmap
+        .identities
+        .iter()
+        .map(|identity| identity.full_id.as_str())
+        .collect::<BTreeSet<_>>();
     let mut template_count = 0_usize;
+    let mut nested_template_count = 0_usize;
+    let mut nested_placement_count = 0_usize;
     let mut cell_target_count = 0_usize;
     for generator in &catalog.omt_generators {
         if !valid_worldgen_id(&generator.omt_id)
@@ -4622,7 +4925,34 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
             return false;
         }
         for template in &generator.templates {
-            if template.cells.len() != WORLDGEN_CELLS_PER_OMT {
+            if template.cells.len() != WORLDGEN_CELLS_PER_OMT
+                || template
+                    .predecessor_id
+                    .as_ref()
+                    .is_some_and(|id| !valid_worldgen_id(id))
+                || (template.predecessor_id.is_none()
+                    && template.cells.iter().any(|cell| cell.terrain.is_empty()))
+                || template.nested.len() > MAX_WORLDGEN_NESTED_PLACEMENTS_PER_TEMPLATE
+                || !template
+                    .nested
+                    .iter()
+                    .all(|placement| valid_worldgen_nested_placement(placement, &identity_ids))
+                || !template
+                    .area_items
+                    .iter()
+                    .all(valid_worldgen_area_item_placement)
+                || !valid_worldgen_deferred_fields(&template.deferred_fields)
+            {
+                return false;
+            }
+            let Some(total) = nested_placement_count
+                .checked_add(template.nested.len())
+                .and_then(|total| total.checked_add(template.area_items.len()))
+            else {
+                return false;
+            };
+            nested_placement_count = total;
+            if nested_placement_count > MAX_WORLDGEN_NESTED_PLACEMENTS {
                 return false;
             }
             for cell in &template.cells {
@@ -4630,8 +4960,10 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                     return false;
                 }
                 let Some(total) = cell_target_count
-                    .checked_add(cell.terrain.len())
-                    .and_then(|total| total.checked_add(cell.furniture.len()))
+                    .checked_add(cell.terrain.iter().map(Vec::len).sum::<usize>())
+                    .and_then(|total| {
+                        total.checked_add(cell.furniture.iter().map(Vec::len).sum::<usize>())
+                    })
                 else {
                     return false;
                 };
@@ -4641,14 +4973,90 @@ pub fn worldgen_catalog_shape_is_valid(catalog: &WorldgenCatalogV1) -> bool {
                 }
             }
         }
+        if generator.nested_generators.len() > MAX_WORLDGEN_NESTED_GENERATORS_PER_OMT
+            || !generator
+                .nested_generators
+                .windows(2)
+                .all(|pair| pair[0].nested_id < pair[1].nested_id)
+            || !valid_worldgen_nested_graph(generator)
+        {
+            return false;
+        }
+        for nested in &generator.nested_generators {
+            if !valid_worldgen_id(&nested.nested_id)
+                || nested.nested_id == "null"
+                || nested.templates.is_empty()
+                || nested.templates.len() > MAX_WORLDGEN_NESTED_TEMPLATES_PER_GENERATOR
+                || !checked_positive_weight_sum(
+                    nested.templates.iter().map(|template| template.weight),
+                )
+            {
+                return false;
+            }
+            let Some(total) = nested_template_count.checked_add(nested.templates.len()) else {
+                return false;
+            };
+            nested_template_count = total;
+            if nested_template_count > MAX_WORLDGEN_NESTED_TEMPLATES {
+                return false;
+            }
+            for template in &nested.templates {
+                let expected_cells =
+                    usize::from(template.width).checked_mul(usize::from(template.height));
+                if !(1..=WORLDGEN_OMT_SIZE as u8).contains(&template.width)
+                    || !(1..=WORLDGEN_OMT_SIZE as u8).contains(&template.height)
+                    || expected_cells != Some(template.cells.len())
+                    || template.nested.len() > MAX_WORLDGEN_NESTED_PLACEMENTS_PER_TEMPLATE
+                    || !template
+                        .nested
+                        .iter()
+                        .all(|placement| valid_worldgen_nested_placement(placement, &identity_ids))
+                    || !template
+                        .area_items
+                        .iter()
+                        .all(valid_worldgen_area_item_placement)
+                    || !valid_worldgen_deferred_fields(&template.deferred_fields)
+                {
+                    return false;
+                }
+                let Some(total) = nested_placement_count
+                    .checked_add(template.nested.len())
+                    .and_then(|total| total.checked_add(template.area_items.len()))
+                else {
+                    return false;
+                };
+                nested_placement_count = total;
+                if nested_placement_count > MAX_WORLDGEN_NESTED_PLACEMENTS {
+                    return false;
+                }
+                for cell in &template.cells {
+                    if !valid_worldgen_cell_shape(cell, catalog) {
+                        return false;
+                    }
+                    let Some(total) = cell_target_count
+                        .checked_add(cell.terrain.iter().map(Vec::len).sum::<usize>())
+                        .and_then(|total| {
+                            total.checked_add(cell.furniture.iter().map(Vec::len).sum::<usize>())
+                        })
+                    else {
+                        return false;
+                    };
+                    cell_target_count = total;
+                    if cell_target_count > MAX_WORLDGEN_WEIGHTED_CELL_TARGETS {
+                        return false;
+                    }
+                }
+            }
+        }
     }
 
-    catalog.overmap.identities.iter().all(|identity| {
-        catalog
-            .omt_generators
-            .binary_search_by(|generator| generator.omt_id.as_str().cmp(&identity.generator_id))
-            .is_ok()
-    })
+    valid_worldgen_predecessor_graph(catalog)
+        && catalog.overmap.identities.iter().all(|identity| {
+            catalog
+                .omt_generators
+                .binary_search_by(|generator| generator.omt_id.as_str().cmp(&identity.generator_id))
+                .is_ok()
+        })
 }
 
 /// Validates a canonical worldgen catalog and all named item-group placement
@@ -4665,13 +5073,35 @@ pub fn worldgen_catalog_is_valid(
         .iter()
         .map(|definition| definition.group_id.as_str())
         .collect::<BTreeSet<_>>();
-    catalog
+    let root_cells_are_valid = catalog
         .omt_generators
         .iter()
         .flat_map(|generator| &generator.templates)
         .flat_map(|template| &template.cells)
         .filter_map(|cell| cell.item_group.as_ref())
-        .all(|placement| group_ids.contains(placement.group_id.as_str()))
+        .all(|placement| group_ids.contains(placement.group_id.as_str()));
+    let root_areas_are_valid = catalog
+        .omt_generators
+        .iter()
+        .flat_map(|generator| &generator.templates)
+        .flat_map(|template| &template.area_items)
+        .all(|placement| group_ids.contains(placement.item_group.group_id.as_str()));
+    let nested_cells_are_valid = catalog
+        .omt_generators
+        .iter()
+        .flat_map(|generator| &generator.nested_generators)
+        .flat_map(|generator| &generator.templates)
+        .flat_map(|template| &template.cells)
+        .filter_map(|cell| cell.item_group.as_ref())
+        .all(|placement| group_ids.contains(placement.group_id.as_str()));
+    let nested_areas_are_valid = catalog
+        .omt_generators
+        .iter()
+        .flat_map(|generator| &generator.nested_generators)
+        .flat_map(|generator| &generator.templates)
+        .flat_map(|template| &template.area_items)
+        .all(|placement| group_ids.contains(placement.item_group.group_id.as_str()));
+    root_cells_are_valid && root_areas_are_valid && nested_cells_are_valid && nested_areas_are_valid
 }
 
 impl WorldSnapshotV1 {
@@ -4699,6 +5129,33 @@ impl WorldSnapshotV1 {
                 .flat_map(|template| &template.cells)
                 .filter_map(|cell| cell.item_group.as_ref())
                 .map(|placement| ItemGroupSourceV1::Group(placement.group_id.clone())),
+        );
+        sources.extend(
+            self.worldgen
+                .iter()
+                .flat_map(|catalog| &catalog.omt_generators)
+                .flat_map(|generator| &generator.templates)
+                .flat_map(|template| &template.area_items)
+                .map(|placement| ItemGroupSourceV1::Group(placement.item_group.group_id.clone())),
+        );
+        sources.extend(
+            self.worldgen
+                .iter()
+                .flat_map(|catalog| &catalog.omt_generators)
+                .flat_map(|generator| &generator.nested_generators)
+                .flat_map(|generator| &generator.templates)
+                .flat_map(|template| &template.cells)
+                .filter_map(|cell| cell.item_group.as_ref())
+                .map(|placement| ItemGroupSourceV1::Group(placement.group_id.clone())),
+        );
+        sources.extend(
+            self.worldgen
+                .iter()
+                .flat_map(|catalog| &catalog.omt_generators)
+                .flat_map(|generator| &generator.nested_generators)
+                .flat_map(|generator| &generator.templates)
+                .flat_map(|template| &template.area_items)
+                .map(|placement| ItemGroupSourceV1::Group(placement.item_group.group_id.clone())),
         );
         let source_refs = sources.iter().collect::<Vec<_>>();
         item_group_sources_are_valid(&self.item_groups, source_refs.iter().copied())
@@ -4925,6 +5382,7 @@ fn valid_item_snapshot_at(item: &ItemSnapshot, depth: usize) -> bool {
         && item.variant.as_ref().is_none_or(item_variant_is_valid)
         && item.snippet.as_ref().is_none_or(item_snippet_is_valid)
         && valid_item_variables(&item.variables)
+        && item_degradation_matches_damage(&item.variables, item.raw_damage)
         && item
             .type_id
             .chars()
@@ -5244,7 +5702,7 @@ fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
         && !rules
             .flag_restrictions
             .iter()
-            .any(|restriction| restriction == SPAWN_POCKET_SINGLE_ITEM_MARKER)
+            .any(|restriction| is_reserved_spawn_pocket_marker(restriction))
         && rules
             .item_restrictions
             .windows(2)
@@ -5268,6 +5726,7 @@ fn valid_spawn_pocket_rules(rules: &SpawnPocketRulesV1) -> bool {
                     && rules.magazine_well_volume_milliliters == 0
                     && !rules.contents_collapsed_by_default
                     && !spawn_pocket_is_single_item(rules)
+                    && !spawn_pocket_is_open_container(rules)
             }
         }
 }
@@ -5511,8 +5970,12 @@ pub fn item_snapshot_containment_weight_milligrams(item: &ItemSnapshot) -> Optio
             {
                 return Some(total);
             }
+            let multiplier = item_pocket_weight_multiplier(&item.variables, pocket.pocket_index)?;
             pocket.contents.iter().try_fold(total, |total, content| {
-                total.checked_add(item_snapshot_containment_weight_milligrams(content)?)
+                total.checked_add(spawn_pocket_content_weight_with_multiplier_milligrams(
+                    item_snapshot_containment_weight_milligrams(content)?,
+                    multiplier,
+                )?)
             })
         })?;
     own.checked_add(integral)?
@@ -5552,12 +6015,14 @@ pub fn item_snapshot_containment_volume_milliliters(item: &ItemSnapshot) -> Opti
             let contents_volume = pocket.contents.iter().try_fold(0_u64, |volume, content| {
                 volume.checked_add(item_snapshot_containment_volume_milliliters(content)?)
             })?;
-            let external = pocket
-                .spawn_state
-                .as_ref()
-                .map_or(contents_volume, |state| {
-                    spawn_pocket_external_volume_milliliters(&state.rules, contents_volume)
-                });
+            let external = match pocket.spawn_state.as_ref() {
+                None => Some(contents_volume),
+                Some(state) => spawn_pocket_external_volume_with_multiplier_milliliters(
+                    &state.rules,
+                    contents_volume,
+                    item_pocket_volume_multiplier(&item.variables, pocket.pocket_index)?,
+                ),
+            }?;
             total.checked_add(external)
         })?;
     own.checked_add(integral)?
@@ -5724,6 +6189,7 @@ fn valid_item_component(
         && component.variant.as_ref().is_none_or(item_variant_is_valid)
         && component.snippet.as_ref().is_none_or(item_snippet_is_valid)
         && valid_item_variables(&component.variables)
+        && item_degradation_matches_damage(&component.variables, component.raw_damage)
         && valid_item_containment_profile(&component.containment)
         && component.count_by_charges == component.containment.count_by_charges
         && (!component.count_by_charges || component.charges > 0)
@@ -6570,7 +7036,7 @@ mod tests {
 
     fn worldgen_test_catalog() -> WorldgenCatalogV1 {
         let cell = WorldgenCellV1 {
-            terrain: vec![
+            terrain: vec![vec![
                 WorldgenWeightedTerrainTargetV1 {
                     target: WorldgenTerrainTargetV1::Prototype(0),
                     weight: 3,
@@ -6579,8 +7045,8 @@ mod tests {
                     target: WorldgenTerrainTargetV1::Regional(0),
                     weight: 1,
                 },
-            ],
-            furniture: vec![
+            ]],
+            furniture: vec![vec![
                 WorldgenWeightedFurnitureTargetV1 {
                     target: WorldgenFurnitureTargetV1::None,
                     weight: 3,
@@ -6589,13 +7055,15 @@ mod tests {
                     target: WorldgenFurnitureTargetV1::Regional(0),
                     weight: 1,
                 },
-            ],
+            ]],
             item_group: None,
         };
         let mut cells = vec![cell; WORLDGEN_CELLS_PER_OMT];
         cells[0].item_group = Some(WorldgenItemGroupPlacementV1 {
             group_id: String::from("field_loot"),
             chance: 25,
+            repeat_minimum: 1,
+            repeat_maximum: 1,
         });
         WorldgenCatalogV1 {
             generator_version: WORLDGEN_GENERATOR_VERSION_V2,
@@ -6676,8 +7144,14 @@ mod tests {
                 omt_id: String::from("field"),
                 templates: vec![WorldgenTemplateV1 {
                     weight: 1_000,
+                    predecessor_id: None,
                     cells,
+                    nested: Vec::new(),
+                    area_items: Vec::new(),
+                    erase_all_before_placing_terrain: false,
+                    deferred_fields: Vec::new(),
                 }],
+                nested_generators: Vec::new(),
             }],
         }
     }
@@ -6856,7 +7330,7 @@ mod tests {
         assert!(!worldgen_catalog_is_valid(&invalid, &item_groups));
 
         let mut invalid = worldgen_test_catalog();
-        invalid.omt_generators[0].templates[0].cells[0].furniture[0].weight = 0;
+        invalid.omt_generators[0].templates[0].cells[0].furniture[0][0].weight = 0;
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
         let mut invalid = worldgen_test_catalog();
@@ -6925,7 +7399,7 @@ mod tests {
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
         let mut invalid = worldgen_test_catalog();
-        invalid.omt_generators[0].templates[0].cells[0].terrain[0].target =
+        invalid.omt_generators[0].templates[0].cells[0].terrain[0][0].target =
             WorldgenTerrainTargetV1::Prototype(u16::MAX);
         assert!(!worldgen_catalog_shape_is_valid(&invalid));
 
@@ -6973,7 +7447,7 @@ mod tests {
         assert!(!worldgen_catalog_shape_is_valid(&regional_overflow));
 
         let mut cell_overflow = worldgen_test_catalog();
-        cell_overflow.omt_generators[0].templates[0].cells[0].terrain = vec![
+        cell_overflow.omt_generators[0].templates[0].cells[0].terrain = vec![vec![
             WorldgenWeightedTerrainTargetV1 {
                 target: WorldgenTerrainTargetV1::Prototype(0),
                 weight: u32::MAX,
@@ -6982,7 +7456,7 @@ mod tests {
                 target: WorldgenTerrainTargetV1::Prototype(1),
                 weight: 1,
             },
-        ];
+        ]];
         assert!(!worldgen_catalog_shape_is_valid(&cell_overflow));
 
         let mut template_overflow = worldgen_test_catalog();

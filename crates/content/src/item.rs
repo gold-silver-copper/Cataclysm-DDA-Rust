@@ -357,9 +357,18 @@ pub struct StrictSpawnPocketDefinition {
     /// Runtime serialization retains non-default values in the existing typed
     /// item-variable map while Protocol 95 remains frozen.
     pub insulation_f32_bits: u32,
+    /// Exact upstream `float` bits controlling how contained volume expands
+    /// the owning item.
+    pub volume_multiplier_f32_bits: u32,
+    /// Exact upstream `float` bits controlling contained weight on the owning
+    /// item. Capacity checks continue to use unscaled content weight.
+    pub weight_multiplier_f32_bits: u32,
     pub rigid: bool,
     pub watertight: bool,
     pub transparent: bool,
+    /// Unsealed contents spill from and remain visibly exposed by this
+    /// pocket. A successful seal suppresses both effects upstream.
+    pub open_container: bool,
     pub forbidden: bool,
     pub sealable: bool,
     /// Pinned holster/ablative pockets accept at most one non-combinable item.
@@ -495,11 +504,13 @@ impl PocketDefinition {
             "max_item_volume",
             "min_item_volume",
             "moves",
+            "open_container",
             "pocket_type",
             "rigid",
             "sealed_data",
             "transparent",
             "volume_encumber_modifier",
+            "volume_multiplier",
             "watertight",
             "weight_multiplier",
         ];
@@ -517,15 +528,18 @@ impl PocketDefinition {
         {
             return None;
         }
-        let weight_multiplier = match self.raw_fields.get("weight_multiplier") {
-            Some(value) => Some(value.as_f64()?),
-            None => None,
+        let multiplier = |field: &str| {
+            let value = self
+                .raw_fields
+                .get(field)
+                .map_or(Some(1.0_f32), |value| Some(value.as_f64()? as f32))?;
+            (value.is_finite() && value >= 0.0).then_some(value)
         };
-        if (kind == SpawnPocketKindDefinition::EFileStorage
-            && (weight_multiplier != Some(0.0)
-                || self.raw_fields.get("rigid").and_then(Value::as_bool) != Some(true)))
-            || (kind == SpawnPocketKindDefinition::Container
-                && weight_multiplier.is_some_and(|multiplier| multiplier != 1.0))
+        let volume_multiplier = multiplier("volume_multiplier")?;
+        let weight_multiplier = multiplier("weight_multiplier")?;
+        if kind == SpawnPocketKindDefinition::EFileStorage
+            && (weight_multiplier != 0.0
+                || self.raw_fields.get("rigid").and_then(Value::as_bool) != Some(true))
         {
             return None;
         }
@@ -641,9 +655,12 @@ impl PocketDefinition {
             flag_restrictions: self.flag_restrictions.clone(),
             access_moves,
             insulation_f32_bits: insulation.to_bits(),
+            volume_multiplier_f32_bits: volume_multiplier.to_bits(),
+            weight_multiplier_f32_bits: weight_multiplier.to_bits(),
             rigid: boolean("rigid", false)?,
             watertight: boolean("watertight", false)?,
             transparent: boolean("transparent", false)?,
+            open_container: boolean("open_container", false)?,
             forbidden: boolean("forbidden", false)?,
             sealable,
             single_item: boolean("holster", false)? || boolean("ablative", false)?,
@@ -3892,9 +3909,12 @@ mod tests {
                     "flag_restriction": ["ELECTRONIC"],
                     "moves": 80,
                     "insulation": 10,
+                    "volume_multiplier": 0.75,
+                    "weight_multiplier": 0.5,
                     "rigid": true,
                     "watertight": true,
                     "transparent": true,
+                    "open_container": true,
                     "sealed_data": {"spoil_multiplier": 0.0}
                 },
                 {
@@ -3926,9 +3946,12 @@ mod tests {
                 flag_restrictions: BTreeSet::from([String::from("ELECTRONIC")]),
                 access_moves: 80,
                 insulation_f32_bits: 10.0_f32.to_bits(),
+                volume_multiplier_f32_bits: 0.75_f32.to_bits(),
+                weight_multiplier_f32_bits: 0.5_f32.to_bits(),
                 rigid: true,
                 watertight: true,
                 transparent: true,
+                open_container: true,
                 forbidden: false,
                 sealable: true,
                 single_item: false,
@@ -4026,12 +4049,12 @@ mod tests {
                 }),
             ),
             (
-                "test_bad_container_multiplier",
+                "test_negative_container_multiplier",
                 serde_json::json!({
                     "pocket_type": "CONTAINER",
                     "max_contains_volume": "1 L",
                     "max_contains_weight": "1 kg",
-                    "weight_multiplier": 0.5
+                    "weight_multiplier": -0.5
                 }),
             ),
             (

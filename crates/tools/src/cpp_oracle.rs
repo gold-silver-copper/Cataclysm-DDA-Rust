@@ -4196,14 +4196,14 @@ fn rust_item_group_tool_charge_case_with_replacement(
     };
     let mut cells = vec![
         WorldgenCellV1 {
-            terrain: vec![WorldgenWeightedTerrainTargetV1 {
+            terrain: vec![vec![WorldgenWeightedTerrainTargetV1 {
                 target: WorldgenTerrainTargetV1::Prototype(0),
                 weight: 1,
-            }],
-            furniture: vec![WorldgenWeightedFurnitureTargetV1 {
+            }]],
+            furniture: vec![vec![WorldgenWeightedFurnitureTargetV1 {
                 target: WorldgenFurnitureTargetV1::None,
                 weight: 1,
-            }],
+            }]],
             item_group: None,
         };
         WORLDGEN_CELLS_PER_OMT
@@ -4211,6 +4211,8 @@ fn rust_item_group_tool_charge_case_with_replacement(
     cells[0].item_group = Some(WorldgenItemGroupPlacementV1 {
         group_id: placement_group_id,
         chance: 100,
+        repeat_minimum: 1,
+        repeat_maximum: 1,
     });
     let identity = WorldgenOmtIdentityV1 {
         full_id: String::from("direct_tool_charge_north"),
@@ -4241,7 +4243,16 @@ fn rust_item_group_tool_charge_case_with_replacement(
         regional_furniture: Vec::new(),
         omt_generators: vec![WorldgenOmtGeneratorV1 {
             omt_id: identity.generator_id,
-            templates: vec![WorldgenTemplateV1 { weight: 1, cells }],
+            templates: vec![WorldgenTemplateV1 {
+                weight: 1,
+                predecessor_id: None,
+                cells,
+                nested: Vec::new(),
+                area_items: Vec::new(),
+                erase_all_before_placing_terrain: false,
+                deferred_fields: Vec::new(),
+            }],
+            nested_generators: Vec::new(),
         }],
     };
     let mut world = WorldState::new(5, [u8::try_from(leaf_maximum.min(255))?; 32]);
@@ -4706,28 +4717,28 @@ fn rust_static_template_snapshot(
     };
     let mut cells = vec![
         WorldgenCellV1 {
-            terrain: vec![WorldgenWeightedTerrainTargetV1 {
+            terrain: vec![vec![WorldgenWeightedTerrainTargetV1 {
                 target: WorldgenTerrainTargetV1::Prototype(0),
                 weight: 1,
-            }],
-            furniture: vec![WorldgenWeightedFurnitureTargetV1 {
+            }]],
+            furniture: vec![vec![WorldgenWeightedFurnitureTargetV1 {
                 target: WorldgenFurnitureTargetV1::None,
                 weight: 1,
-            }],
+            }]],
             item_group: None,
         };
         WORLDGEN_CELLS_PER_OMT
     ];
     let source_marker = 5 * WORLDGEN_OMT_SIZE + 2;
     cells[source_marker] = WorldgenCellV1 {
-        terrain: vec![WorldgenWeightedTerrainTargetV1 {
+        terrain: vec![vec![WorldgenWeightedTerrainTargetV1 {
             target: WorldgenTerrainTargetV1::Prototype(1),
             weight: 1,
-        }],
-        furniture: vec![WorldgenWeightedFurnitureTargetV1 {
+        }]],
+        furniture: vec![vec![WorldgenWeightedFurnitureTargetV1 {
             target: WorldgenFurnitureTargetV1::Prototype(0),
             weight: 1,
-        }],
+        }]],
         item_group: None,
     };
     let catalog = WorldgenCatalogV1 {
@@ -4759,7 +4770,16 @@ fn rust_static_template_snapshot(
         regional_furniture: Vec::new(),
         omt_generators: vec![WorldgenOmtGeneratorV1 {
             omt_id: identity.generator_id.clone(),
-            templates: vec![WorldgenTemplateV1 { weight: 1, cells }],
+            templates: vec![WorldgenTemplateV1 {
+                weight: 1,
+                predecessor_id: None,
+                cells,
+                nested: Vec::new(),
+                area_items: Vec::new(),
+                erase_all_before_placing_terrain: false,
+                deferred_fields: Vec::new(),
+            }],
+            nested_generators: Vec::new(),
         }],
     };
     let mut world = WorldState::new(1, [47; 32]);

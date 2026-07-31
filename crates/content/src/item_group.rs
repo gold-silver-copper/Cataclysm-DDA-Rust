@@ -43,6 +43,7 @@ const IMPLEMENTED_ENTRY_FIELDS: &[&str] = &[
     "container-item",
     "contents-item",
     "contents-group",
+    "custom-flags",
     "sealed",
 ];
 
@@ -156,6 +157,9 @@ pub struct ItemGroupNode {
     /// Sources generated independently for every completed target item and
     /// inserted through upstream's spawn-time pocket selection.
     pub contents: Vec<ItemGroupContentsSource>,
+    /// Item-instance flags applied after contents insertion and sealing by the
+    /// pinned `Item_modifier`.
+    pub custom_flags: BTreeSet<String>,
     pub event: Option<ItemGroupEvent>,
     pub unsupported_fields: BTreeMap<String, Value>,
     pub source: String,
@@ -199,6 +203,7 @@ pub struct StrictItemGroupNode {
     pub modifier_container: Option<String>,
     pub modifier_sealed: Option<bool>,
     pub contents: Vec<ItemGroupContentsSource>,
+    pub custom_flags: BTreeSet<String>,
     pub event: Option<ItemGroupEvent>,
 }
 
@@ -658,6 +663,7 @@ impl ItemGroupRegistry {
                             }
                         })
                         .collect::<Result<_, ItemGroupRegistryError>>()?,
+                    custom_flags: node.custom_flags.clone(),
                     event: node.event,
                 })
             })
@@ -968,6 +974,7 @@ fn append_legacy_items(
                             modifier_container: None,
                             modifier_sealed: None,
                             contents: Vec::new(),
+                            custom_flags: BTreeSet::new(),
                             event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
@@ -1026,6 +1033,7 @@ fn append_shortcut_array(
                     modifier_container: None,
                     modifier_sealed: None,
                     contents: Vec::new(),
+                    custom_flags: BTreeSet::new(),
                     event: None,
                     unsupported_fields: BTreeMap::new(),
                     source: location,
@@ -1050,6 +1058,7 @@ fn append_shortcut_array(
                             modifier_container: None,
                             modifier_sealed: None,
                             contents: Vec::new(),
+                            custom_flags: BTreeSet::new(),
                             event: None,
                             unsupported_fields: BTreeMap::new(),
                             source: location,
@@ -1145,6 +1154,7 @@ fn parse_object_entry(
         modifier_container,
         modifier_sealed,
         contents,
+        custom_flags,
     ) = if nested_group {
         // Pinned add_entry returns immediately after building a local group;
         // leaf modifiers on that object are not evaluated. Strict admission
@@ -1158,6 +1168,7 @@ fn parse_object_entry(
             "container-item",
             "contents-item",
             "contents-group",
+            "custom-flags",
             "sealed",
         ] {
             if let Some(value) = object.get(field) {
@@ -1173,6 +1184,7 @@ fn parse_object_entry(
             None,
             None,
             Vec::new(),
+            BTreeSet::new(),
         )
     } else {
         let count = admissible_range(
@@ -1223,13 +1235,25 @@ fn parse_object_entry(
                 .into_iter()
                 .map(ItemGroupContentsSource::Group),
         );
+        let custom_flags =
+            optional_string_or_strings(object.get("custom-flags"), source, "custom-flags")?
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+        if custom_flags.len() > 256
+            || custom_flags
+                .iter()
+                .any(|flag| flag.len() > 128 || flag.chars().any(char::is_control))
+        {
+            return Err(invalid(source, "custom-flags"));
+        }
         let modifier_present = object.contains_key("count")
             || object.contains_key("charges")
             || object.contains_key("damage")
             || variant.is_some()
             || modifier_container.is_some()
             || modifier_sealed.is_some()
-            || !contents.is_empty();
+            || !contents.is_empty()
+            || !custom_flags.is_empty();
         let damage = if modifier_present {
             Some(
                 admissible_damage_range(object.get("damage"), source, &mut unsupported_fields)?
@@ -1250,6 +1274,7 @@ fn parse_object_entry(
             modifier_container,
             modifier_sealed,
             contents,
+            custom_flags,
         )
     };
     Ok(Some(push_node(
@@ -1265,6 +1290,7 @@ fn parse_object_entry(
             modifier_container,
             modifier_sealed,
             contents,
+            custom_flags,
             event,
             unsupported_fields,
             source: source.to_owned(),

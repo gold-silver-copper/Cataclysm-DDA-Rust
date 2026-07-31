@@ -2,18 +2,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
-    MapgenIdChoice, MapgenRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
-    StartLocationDefinition, StrictMapgenDefinition, TerrainRegistry,
+    MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, OvermapTerrainMatchType,
+    OvermapTerrainRegistry, StartLocationDefinition, StrictMapgenAreaItemPlacement,
+    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenNeighborFlags,
+    StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
+    TerrainRegistry,
 };
 use cdda_protocol::{
-    ItemGroupDefinitionV1, WorldgenCatalogV1, WorldgenCellV1, WorldgenCityV1,
-    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1,
-    WorldgenOmtGeneratorV1, WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1,
-    WorldgenOvermapLayoutV1, WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1,
-    WorldgenRegionalTerrainTableV1, WorldgenStartLocationV1, WorldgenStartTargetV1,
-    WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenWeightedFurniturePrototypeV1,
-    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
-    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    ItemGroupDefinitionV1, WorldgenAreaItemPlacementV1, WorldgenCatalogV1, WorldgenCellV1,
+    WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
+    WorldgenFurnitureTargetV1, WorldgenItemGroupPlacementV1, WorldgenNeighborConditionV1,
+    WorldgenNestedChoiceV1, WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1,
+    WorldgenNestedPlacementV1, WorldgenNestedTemplateV1, WorldgenOmtGeneratorV1,
+    WorldgenOmtIdentityV1, WorldgenOmtMatchTypeV1, WorldgenOvermapLayerV1, WorldgenOvermapLayoutV1,
+    WorldgenOvermapRunV1, WorldgenRegionalFurnitureTableV1, WorldgenRegionalTerrainTableV1,
+    WorldgenStartLocationV1, WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1,
+    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
+    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
+    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_ROAD_MASK_IDS, OvermapCitySettings, OvermapRoadExit, place_overmap_cities,
@@ -56,11 +62,7 @@ pub(super) fn bootstrap_regional_city_overmap(
         full_id: source.full_id.clone(),
         type_id: source.type_id.clone(),
         subtype_id: source.subtype_id.clone(),
-        // `place_cities` owns the road OMT identity, but its nested local-map
-        // construction belongs to the following roads family. Use the exact
-        // pinned `fallback_predecessor_mapgen` (`field`) until that family is
-        // admitted; no unsupported road collision or loot is fabricated.
-        generator_id: String::from("field"),
+        generator_id: source.generator_id.clone(),
         rotation: source.rotation,
     };
     place_overmap_cities(
@@ -79,8 +81,6 @@ pub(super) fn bootstrap_regional_city_overmap(
 }
 
 /// Production regional layout after the inter-city road-topology family.
-/// Road OMT ownership is exact; local road rendering continues to use the
-/// pinned field predecessor until nested road mapgen is admitted.
 type RegionalRoadOvermap = (
     WorldgenOvermapLayoutV1,
     Vec<WorldgenCityV1>,
@@ -104,7 +104,7 @@ pub(super) fn bootstrap_regional_road_overmap(
                 full_id: source.full_id.clone(),
                 type_id: source.type_id.clone(),
                 subtype_id: source.subtype_id.clone(),
-                generator_id: String::from("field"),
+                generator_id: source.generator_id.clone(),
                 rotation: source.rotation,
             })
         })
@@ -151,10 +151,87 @@ fn bootstrap_uniform_overmap(
 
 pub(super) struct RuntimeMapgenContent<'a> {
     pub mapgen: &'a MapgenRegistry,
+    pub overmap_terrain: &'a OvermapTerrainRegistry,
     pub regions: &'a DefaultRegionTerrainFurnitureRegistry,
     pub terrain: &'a TerrainRegistry,
     pub furniture: &'a FurnitureRegistry,
     pub item_groups: &'a [ItemGroupDefinitionV1],
+}
+
+/// Exact named item-group roots referenced by every mapgen template reachable
+/// from this overmap, including predecessor and nested-mapgen closures. This
+/// keeps production admission driven by the selected world rather than by a
+/// hand-maintained aggregate group such as `road`.
+pub(super) fn runtime_mapgen_item_group_roots(
+    overmap: &WorldgenOvermapLayoutV1,
+    mapgen: &MapgenRegistry,
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    let mut generator_ids = overmap
+        .identities
+        .iter()
+        .map(|identity| identity.generator_id.clone())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let mut predecessors = BTreeSet::new();
+        for generator_id in &generator_ids {
+            let definitions = mapgen.get(generator_id).ok_or_else(|| {
+                format!("pinned mapgen {generator_id} is unavailable while collecting item groups")
+            })?;
+            predecessors.extend(
+                definitions
+                    .iter()
+                    .filter_map(|definition| definition.fallback_predecessor_mapgen.clone()),
+            );
+        }
+        let prior_len = generator_ids.len();
+        generator_ids.extend(predecessors);
+        if generator_ids.len() == prior_len {
+            break;
+        }
+    }
+    let mut roots = BTreeSet::new();
+    for generator_id in generator_ids {
+        let definitions = mapgen
+            .get(&generator_id)
+            .ok_or_else(|| format!("pinned mapgen {generator_id} disappeared"))?;
+        for definition in definitions {
+            roots.extend(
+                definition
+                    .items
+                    .values()
+                    .map(|placement| placement.item_group.clone()),
+            );
+            roots.extend(
+                definition
+                    .area_items
+                    .iter()
+                    .map(|placement| placement.item_group.clone()),
+            );
+        }
+        for nested_id in mapgen
+            .strict_nested_closure(&generator_id)
+            .map_err(|error| format!("pinned mapgen {generator_id} nested closure: {error}"))?
+        {
+            let definitions = mapgen
+                .nested(&nested_id)
+                .ok_or_else(|| format!("nested mapgen {nested_id} disappeared"))?;
+            for definition in definitions {
+                roots.extend(
+                    definition
+                        .items
+                        .values()
+                        .map(|placement| placement.item_group.clone()),
+                );
+                roots.extend(
+                    definition
+                        .area_items
+                        .iter()
+                        .map(|placement| placement.item_group.clone()),
+                );
+            }
+        }
+    }
+    Ok(roots)
 }
 
 pub(super) fn runtime_mapgen_worldgen(
@@ -165,6 +242,7 @@ pub(super) fn runtime_mapgen_worldgen(
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
     let RuntimeMapgenContent {
         mapgen,
+        overmap_terrain,
         regions,
         terrain,
         furniture,
@@ -202,11 +280,34 @@ pub(super) fn runtime_mapgen_worldgen(
             maximum: start_location.city_distance.maximum,
         },
     };
-    let generator_ids = overmap
+    let mut generator_ids = overmap
         .identities
         .iter()
         .map(|identity| identity.generator_id.clone())
         .collect::<BTreeSet<_>>();
+    loop {
+        let mut predecessors = BTreeSet::new();
+        for omt_id in &generator_ids {
+            let variants = mapgen.get(omt_id).ok_or_else(|| {
+                let reason = mapgen
+                    .unavailable_reports(omt_id)
+                    .and_then(|reports| reports.first())
+                    .and_then(|report| report.rejection_reason.as_deref())
+                    .unwrap_or("no selected definition");
+                format!("pinned mapgen {omt_id} is unavailable: {reason}")
+            })?;
+            predecessors.extend(
+                variants
+                    .iter()
+                    .filter_map(|definition| definition.fallback_predecessor_mapgen.clone()),
+            );
+        }
+        let old_len = generator_ids.len();
+        generator_ids.extend(predecessors);
+        if generator_ids.len() == old_len {
+            break;
+        }
+    }
     let definitions = generator_ids
         .iter()
         .map(|omt_id| {
@@ -224,6 +325,17 @@ pub(super) fn runtime_mapgen_worldgen(
             Ok((omt_id.as_str(), definitions))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let nested_closures = definitions
+        .iter()
+        .map(|(omt_id, _)| {
+            Ok((
+                (*omt_id).to_owned(),
+                mapgen
+                    .strict_nested_closure(omt_id)
+                    .map_err(|error| format!("pinned mapgen {omt_id} nested closure: {error}"))?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
 
     let mut terrain_ids = BTreeSet::new();
     let mut furniture_ids = BTreeSet::new();
@@ -258,6 +370,44 @@ pub(super) fn runtime_mapgen_worldgen(
                     &mut furniture_ids,
                     &mut regional_furniture_ids,
                 )?;
+            }
+        }
+        for nested_id in nested_closures
+            .get(*omt_id)
+            .ok_or("nested mapgen closure disappeared")?
+        {
+            let variants = mapgen
+                .nested(nested_id)
+                .ok_or_else(|| format!("nested mapgen {nested_id} disappeared"))?;
+            for definition in variants {
+                if matches!(definition.fill_terrain, Some(MapgenIdChoice::Weighted(_))) {
+                    return Err(format!(
+                        "nested mapgen {nested_id} uses a weighted one-time fill that worldgen v2 cannot encode"
+                    )
+                    .into());
+                }
+                for choice in definition
+                    .fill_terrain
+                    .iter()
+                    .chain(definition.terrain.values().flatten())
+                {
+                    collect_runtime_terrain_choice(
+                        choice,
+                        regions,
+                        terrain,
+                        &mut terrain_ids,
+                        &mut regional_terrain_ids,
+                    )?;
+                }
+                for choice in definition.furniture.values().flatten() {
+                    collect_runtime_furniture_choice(
+                        choice,
+                        regions,
+                        furniture,
+                        &mut furniture_ids,
+                        &mut regional_furniture_ids,
+                    )?;
+                }
             }
         }
     }
@@ -371,7 +521,36 @@ pub(super) fn runtime_mapgen_worldgen(
                             &furniture_indices,
                             &regional_terrain_indices,
                             &regional_furniture_indices,
+                            &overmap,
+                            overmap_terrain,
                         )
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+                nested_generators: nested_closures
+                    .get(*omt_id)
+                    .ok_or("nested mapgen closure disappeared")?
+                    .iter()
+                    .map(|nested_id| {
+                        let definitions = mapgen
+                            .nested(nested_id)
+                            .ok_or_else(|| format!("nested mapgen {nested_id} disappeared"))?;
+                        Ok(WorldgenNestedGeneratorV1 {
+                            nested_id: nested_id.clone(),
+                            templates: definitions
+                                .iter()
+                                .map(|definition| {
+                                    runtime_nested_mapgen_template(
+                                        definition,
+                                        &terrain_indices,
+                                        &furniture_indices,
+                                        &regional_terrain_indices,
+                                        &regional_furniture_indices,
+                                        &overmap,
+                                        overmap_terrain,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+                        })
                     })
                     .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
             })
@@ -388,8 +567,56 @@ pub(super) fn runtime_mapgen_worldgen(
         regional_furniture,
         omt_generators,
     };
+    if !worldgen_catalog_shape_is_valid(&catalog) {
+        return Err(
+            "pinned mapgens produced an invalid coordinate-owned worldgen catalog shape".into(),
+        );
+    }
     if !worldgen_catalog_is_valid(&catalog, item_groups) {
-        return Err("pinned mapgens produced an invalid coordinate-owned worldgen catalog".into());
+        let available = item_groups
+            .iter()
+            .map(|definition| definition.group_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut required = BTreeSet::new();
+        for generator in &catalog.omt_generators {
+            for template in &generator.templates {
+                required.extend(
+                    template
+                        .cells
+                        .iter()
+                        .filter_map(|cell| cell.item_group.as_ref())
+                        .map(|placement| placement.group_id.as_str()),
+                );
+                required.extend(
+                    template
+                        .area_items
+                        .iter()
+                        .map(|placement| placement.item_group.group_id.as_str()),
+                );
+            }
+            for nested in &generator.nested_generators {
+                for template in &nested.templates {
+                    required.extend(
+                        template
+                            .cells
+                            .iter()
+                            .filter_map(|cell| cell.item_group.as_ref())
+                            .map(|placement| placement.group_id.as_str()),
+                    );
+                    required.extend(
+                        template
+                            .area_items
+                            .iter()
+                            .map(|placement| placement.item_group.group_id.as_str()),
+                    );
+                }
+            }
+        }
+        let missing = required.difference(&available).copied().collect::<Vec<_>>();
+        return Err(format!(
+            "pinned mapgens reference an invalid or incomplete item-group catalog; missing {missing:?}"
+        )
+        .into());
     }
     Ok(catalog)
 }
@@ -560,65 +787,288 @@ fn runtime_mapgen_template(
     furniture: &BTreeMap<String, u16>,
     regional_terrain: &BTreeMap<String, u16>,
     regional_furniture: &BTreeMap<String, u16>,
+    overmap: &WorldgenOvermapLayoutV1,
+    overmap_terrain: &OvermapTerrainRegistry,
 ) -> Result<WorldgenTemplateV1, Box<dyn std::error::Error>> {
-    let fill = definition.fill_terrain.as_ref();
-    let cells = definition
-        .cells
+    Ok(WorldgenTemplateV1 {
+        weight: definition.weight,
+        predecessor_id: definition.fallback_predecessor_mapgen.clone(),
+        cells: runtime_mapgen_cells(
+            &definition.source,
+            &definition.cells,
+            definition.fill_terrain.as_ref(),
+            &definition.terrain,
+            &definition.furniture,
+            &definition.items,
+            definition.fallback_predecessor_mapgen.is_some(),
+            terrain,
+            furniture,
+            regional_terrain,
+            regional_furniture,
+        )?,
+        nested: definition
+            .nested
+            .iter()
+            .map(|placement| runtime_nested_placement(placement, overmap, overmap_terrain))
+            .collect::<Result<Vec<_>, _>>()?,
+        area_items: definition
+            .area_items
+            .iter()
+            .map(runtime_area_item_placement)
+            .collect(),
+        erase_all_before_placing_terrain: definition.erase_all_before_placing_terrain,
+        deferred_fields: definition.deferred_fields.iter().cloned().collect(),
+    })
+}
+
+fn runtime_nested_mapgen_template(
+    definition: &StrictNestedMapgenDefinition,
+    terrain: &BTreeMap<String, u16>,
+    furniture: &BTreeMap<String, u16>,
+    regional_terrain: &BTreeMap<String, u16>,
+    regional_furniture: &BTreeMap<String, u16>,
+    overmap: &WorldgenOvermapLayoutV1,
+    overmap_terrain: &OvermapTerrainRegistry,
+) -> Result<WorldgenNestedTemplateV1, Box<dyn std::error::Error>> {
+    Ok(WorldgenNestedTemplateV1 {
+        weight: definition.weight,
+        width: definition.width,
+        height: definition.height,
+        cells: runtime_mapgen_cells(
+            &definition.source,
+            &definition.cells,
+            definition.fill_terrain.as_ref(),
+            &definition.terrain,
+            &definition.furniture,
+            &definition.items,
+            true,
+            terrain,
+            furniture,
+            regional_terrain,
+            regional_furniture,
+        )?,
+        nested: definition
+            .nested
+            .iter()
+            .map(|placement| runtime_nested_placement(placement, overmap, overmap_terrain))
+            .collect::<Result<Vec<_>, _>>()?,
+        area_items: definition
+            .area_items
+            .iter()
+            .map(runtime_area_item_placement)
+            .collect(),
+        erase_all_before_placing_terrain: definition.erase_all_before_placing_terrain,
+        deferred_fields: definition.deferred_fields.iter().cloned().collect(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_mapgen_cells(
+    source: &str,
+    glyphs: &[String],
+    fill: Option<&MapgenIdChoice>,
+    terrain_bindings: &BTreeMap<String, Vec<MapgenIdChoice>>,
+    furniture_bindings: &BTreeMap<String, Vec<MapgenIdChoice>>,
+    item_bindings: &BTreeMap<String, cdda_content::StrictMapgenItemPlacement>,
+    overlay: bool,
+    terrain: &BTreeMap<String, u16>,
+    furniture: &BTreeMap<String, u16>,
+    regional_terrain: &BTreeMap<String, u16>,
+    regional_furniture: &BTreeMap<String, u16>,
+) -> Result<Vec<WorldgenCellV1>, Box<dyn std::error::Error>> {
+    glyphs
         .iter()
         .map(|glyph| {
-            let terrain_layers = definition.terrain.get(glyph);
-            if terrain_layers.is_some_and(|layers| layers.len() != 1) {
-                return Err(format!(
-                    "mapgen {} has multiple terrain layers for glyph {glyph:?}",
-                    definition.source
-                )
-                .into());
+            let mut terrain_layers = fill
+                .iter()
+                .map(|choice| runtime_mapgen_terrain_choice(choice, terrain, regional_terrain))
+                .collect::<Result<Vec<_>, _>>()?;
+            terrain_layers.extend(
+                terrain_bindings
+                    .get(glyph)
+                    .into_iter()
+                    .flatten()
+                    .map(|choice| runtime_mapgen_terrain_choice(choice, terrain, regional_terrain))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            if terrain_layers.is_empty() && !overlay {
+                return Err(format!("mapgen {source} has no terrain for glyph {glyph:?}").into());
             }
-            let terrain_choice = terrain_layers
-                .and_then(|layers| layers.first())
-                .or(fill)
-                .ok_or_else(|| {
-                    format!(
-                        "mapgen {} has no terrain for glyph {glyph:?}",
-                        definition.source
-                    )
-                })?;
-            let furniture_layers = definition.furniture.get(glyph);
-            if furniture_layers.is_some_and(|layers| layers.len() != 1) {
-                return Err(format!(
-                    "mapgen {} has multiple furniture layers for glyph {glyph:?}",
-                    definition.source
-                )
-                .into());
+            let mut furniture_layers = furniture_bindings
+                .get(glyph)
+                .into_iter()
+                .flatten()
+                .map(|choice| {
+                    runtime_mapgen_furniture_choice(choice, furniture, regional_furniture)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if furniture_layers.is_empty() && !overlay {
+                furniture_layers.push(vec![WorldgenWeightedFurnitureTargetV1 {
+                    target: WorldgenFurnitureTargetV1::None,
+                    weight: 1,
+                }]);
             }
             Ok(WorldgenCellV1 {
-                terrain: runtime_mapgen_terrain_choice(terrain_choice, terrain, regional_terrain)?,
-                furniture: furniture_layers
-                    .and_then(|layers| layers.first())
-                    .map_or_else(
-                        || {
-                            Ok(vec![WorldgenWeightedFurnitureTargetV1 {
-                                target: WorldgenFurnitureTargetV1::None,
-                                weight: 1,
-                            }])
-                        },
-                        |choice| {
-                            runtime_mapgen_furniture_choice(choice, furniture, regional_furniture)
-                        },
-                    )?,
-                item_group: definition.items.get(glyph).map(|placement| {
+                terrain: terrain_layers,
+                furniture: furniture_layers,
+                item_group: item_bindings.get(glyph).map(|placement| {
                     WorldgenItemGroupPlacementV1 {
                         group_id: placement.item_group.clone(),
                         chance: placement.chance,
+                        repeat_minimum: placement.repeat_minimum,
+                        repeat_maximum: placement.repeat_maximum,
                     }
                 }),
             })
         })
-        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-    Ok(WorldgenTemplateV1 {
-        weight: definition.weight,
-        cells,
+        .collect()
+}
+
+fn runtime_area_item_placement(
+    placement: &StrictMapgenAreaItemPlacement,
+) -> WorldgenAreaItemPlacementV1 {
+    WorldgenAreaItemPlacementV1 {
+        item_group: WorldgenItemGroupPlacementV1 {
+            group_id: placement.item_group.clone(),
+            chance: placement.chance,
+            repeat_minimum: 1,
+            repeat_maximum: 1,
+        },
+        x: runtime_coordinate_range(placement.x),
+        y: runtime_coordinate_range(placement.y),
+    }
+}
+
+const fn runtime_coordinate_range(range: MapgenCoordinateRange) -> WorldgenCoordinateRangeV1 {
+    WorldgenCoordinateRangeV1 {
+        minimum: range.minimum,
+        maximum: range.maximum,
+    }
+}
+
+fn runtime_nested_placement(
+    placement: &StrictMapgenNestedPlacement,
+    overmap: &WorldgenOvermapLayoutV1,
+    overmap_terrain: &OvermapTerrainRegistry,
+) -> Result<WorldgenNestedPlacementV1, Box<dyn std::error::Error>> {
+    let mut predecessor_ids = placement.conditions.predecessors.clone();
+    predecessor_ids.sort();
+    Ok(WorldgenNestedPlacementV1 {
+        chunks: runtime_nested_choices(&placement.chunks),
+        else_chunks: runtime_nested_choices(&placement.else_chunks),
+        x: runtime_coordinate_range(placement.x),
+        y: runtime_coordinate_range(placement.y),
+        conditions: WorldgenNestedConditionsV1 {
+            all_neighbors: placement
+                .conditions
+                .neighbors
+                .iter()
+                .map(|condition| runtime_neighbor_match(condition, overmap))
+                .chain(
+                    placement.conditions.flags.iter().map(|condition| {
+                        runtime_neighbor_flags(condition, overmap, overmap_terrain)
+                    }),
+                )
+                .collect::<Result<Vec<_>, _>>()?,
+            any_neighbors: placement
+                .conditions
+                .flags_any
+                .iter()
+                .map(|condition| runtime_neighbor_flags(condition, overmap, overmap_terrain))
+                .collect::<Result<Vec<_>, _>>()?,
+            predecessor_ids,
+        },
     })
+}
+
+fn runtime_nested_choices(choices: &[StrictMapgenChunkChoice]) -> Vec<WorldgenNestedChoiceV1> {
+    choices
+        .iter()
+        .map(|choice| WorldgenNestedChoiceV1 {
+            nested_id: choice.nested_id.clone(),
+            weight: choice.weight,
+        })
+        .collect()
+}
+
+fn runtime_neighbor_match(
+    condition: &StrictMapgenNeighborMatch,
+    overmap: &WorldgenOvermapLayoutV1,
+) -> Result<WorldgenNeighborConditionV1, Box<dyn std::error::Error>> {
+    let (offset_x, offset_y) = runtime_neighbor_offset(&condition.direction)?;
+    let allowed_identity_ids = overmap
+        .identities
+        .iter()
+        .filter(|identity| {
+            condition.alternatives.iter().any(|alternative| {
+                worldgen_omt_matches(
+                    &alternative.omt,
+                    runtime_match_type(alternative.match_type),
+                    identity,
+                )
+            })
+        })
+        .map(|identity| identity.full_id.clone())
+        .collect();
+    Ok(WorldgenNeighborConditionV1 {
+        offset_x,
+        offset_y,
+        allowed_identity_ids,
+    })
+}
+
+fn runtime_neighbor_flags(
+    condition: &StrictMapgenNeighborFlags,
+    overmap: &WorldgenOvermapLayoutV1,
+    overmap_terrain: &OvermapTerrainRegistry,
+) -> Result<WorldgenNeighborConditionV1, Box<dyn std::error::Error>> {
+    let (offset_x, offset_y) = runtime_neighbor_offset(&condition.direction)?;
+    let allowed_identity_ids = overmap
+        .identities
+        .iter()
+        .map(|identity| {
+            let definition = overmap_terrain
+                .get_type(&identity.type_id)
+                .ok_or_else(|| format!("overmap terrain type {} disappeared", identity.type_id))?;
+            Ok(condition
+                .flags
+                .iter()
+                .any(|flag| definition.flags.contains(flag))
+                .then(|| identity.full_id.clone()))
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(WorldgenNeighborConditionV1 {
+        offset_x,
+        offset_y,
+        allowed_identity_ids,
+    })
+}
+
+const fn runtime_match_type(match_type: OvermapTerrainMatchType) -> WorldgenOmtMatchTypeV1 {
+    match match_type {
+        OvermapTerrainMatchType::Exact => WorldgenOmtMatchTypeV1::Exact,
+        OvermapTerrainMatchType::Type => WorldgenOmtMatchTypeV1::Type,
+        OvermapTerrainMatchType::Subtype => WorldgenOmtMatchTypeV1::Subtype,
+        OvermapTerrainMatchType::Prefix => WorldgenOmtMatchTypeV1::Prefix,
+        OvermapTerrainMatchType::Contains => WorldgenOmtMatchTypeV1::Contains,
+    }
+}
+
+fn runtime_neighbor_offset(direction: &str) -> Result<(i8, i8), Box<dyn std::error::Error>> {
+    match direction {
+        "north" => Ok((0, -1)),
+        "north_east" => Ok((1, -1)),
+        "east" => Ok((1, 0)),
+        "south_east" => Ok((1, 1)),
+        "south" => Ok((0, 1)),
+        "south_west" => Ok((-1, 1)),
+        "west" => Ok((-1, 0)),
+        "north_west" => Ok((-1, -1)),
+        _ => Err(format!("invalid retained mapgen direction {direction:?}").into()),
+    }
 }
 
 pub(super) fn runtime_mapgen_terrain_choice(
@@ -714,11 +1164,17 @@ mod tests {
     use std::path::Path;
 
     use cdda_content::{
-        CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, FurnitureRegistry,
-        ItemGroupRegistry, MapgenRegistry, ModCatalog, OvermapTerrainRegistry, TerrainRegistry,
+        CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
+        DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemGroupRegistry,
+        MapgenRegistry, ModCatalog, OvermapTerrainRegistry, StartLocationRegistry, TerrainRegistry,
     };
+    use cdda_protocol::{
+        ItemGroupDefinitionV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupNodeV1, WorldPosition,
+        worldgen_omt_identity_at,
+    };
+    use cdda_sim::{ReservedIdBlock, WorldState};
 
-    use super::bootstrap_regional_road_overmap;
+    use super::{RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_worldgen};
 
     #[test]
     fn pinned_city_and_road_topology_reach_production_content() {
@@ -744,6 +1200,18 @@ mod tests {
             &item_groups,
         )
         .expect("mapgen");
+        for root_id in [
+            "road_end",
+            "road_straight",
+            "road_curved",
+            "road_tee",
+            "road_four_way",
+        ] {
+            let closure = mapgen
+                .strict_nested_closure(root_id)
+                .unwrap_or_else(|error| panic!("{root_id} nested closure is blocked: {error}"));
+            assert!(!closure.is_empty(), "{root_id} should use named mapgen");
+        }
         let overmap = OvermapTerrainRegistry::load_selected(&manifest, root, &mods, &enabled)
             .expect("overmap terrain");
         let settings = CitySettingsRegistry::load_selected(&manifest, root, &mods, &enabled)
@@ -773,9 +1241,83 @@ mod tests {
         );
         assert!(
             mapgen.get(&center.generator_id).is_some(),
-            "production city-center predecessor {:?} is blocked: {:?}",
+            "production city-center generator {:?} is blocked: {:?}",
             center.generator_id,
             mapgen.unavailable_reports(&center.generator_id)
         );
+
+        let regions = DefaultRegionTerrainFurnitureRegistry::load_selected(
+            &manifest, root, &mods, &enabled, &terrain, &furniture,
+        )
+        .expect("regional substitutions");
+        let starts = StartLocationRegistry::load_selected(&manifest, root, &mods, &enabled)
+            .expect("start locations");
+        let empty_group = |group_id: &str| ItemGroupDefinitionV1 {
+            group_id: group_id.to_owned(),
+            graph: ItemGroupGraphV1 {
+                root_node: 0,
+                nodes: vec![ItemGroupNodeV1 {
+                    node_id: 0,
+                    kind: ItemGroupKindV1::Collection,
+                    entries: Vec::new(),
+                }],
+                wrapper: None,
+            },
+        };
+        let runtime_groups = [
+            "SUS_trash_floor",
+            "SUS_trash_trashcan_public",
+            "fast_food",
+            "field",
+            "road",
+        ]
+        .into_iter()
+        .map(empty_group)
+        .collect::<Vec<_>>();
+        let catalog = runtime_mapgen_worldgen(
+            layout,
+            cities,
+            starts.get("sloc_field").expect("field start"),
+            RuntimeMapgenContent {
+                mapgen: &mapgen,
+                overmap_terrain: &overmap,
+                regions: &regions,
+                terrain: &terrain,
+                furniture: &furniture,
+                item_groups: &runtime_groups,
+            },
+        )
+        .expect("production road mapgen should compile");
+        let road_omt = (-86..86)
+            .flat_map(|y| (-86..86).map(move |x| cdda_protocol::ChunkCoord { x, y, z: 0 }))
+            .find(|coord| {
+                worldgen_omt_identity_at(&catalog, *coord)
+                    .is_some_and(|identity| identity.type_id == "road")
+            })
+            .expect("road coordinate");
+        let mut world = WorldState::new(1, [37; 32]);
+        world
+            .install_reserved_block(ReservedIdBlock::new(1, 4_096).expect("ID block"))
+            .expect("install ID block");
+        world
+            .register_item_group_catalog(runtime_groups)
+            .expect("register empty production group identities");
+        world
+            .configure_worldgen(catalog)
+            .expect("configure production road worldgen");
+        world
+            .generate_initial_bubble(WorldPosition {
+                x: road_omt.x * 24 + 12,
+                y: road_omt.y * 24 + 12,
+                z: 0,
+            })
+            .expect("materialize a road-centered active bubble");
+        let snapshot = world.snapshot();
+        assert!(snapshot.chunks.iter().any(|chunk| {
+            chunk
+                .tiles
+                .iter()
+                .any(|tile| tile.terrain_id.starts_with("t_pavement"))
+        }));
     }
 }

@@ -915,6 +915,23 @@ snapshot, SQLite, portable replay, and real-Iroh two-client exploration and
 restart. Roads are the next dependency boundary; rivers, specials, and spawning
 remain closed.
 
+Protocol 97/schema 75/CanonicalStateV73 complete the production road family
+while retaining replay format 3 and CanonicalEventsV18. A deterministic
+server-owned network connects city centers to one another and to three stable
+overmap boundaries, assigns all 16 canonical road masks, and persists the
+result independently of discovery order. The generalized static-mapgen engine
+now executes predecessor/fallback templates, nested generators and conditions,
+layered terrain and furniture, rotations, areas, repeats, signs, and exact
+runtime item-group closure for real road content. Production loot admission
+also completes the reusable item semantics encountered by that closure,
+including multi-well dressing, vehicle-part degradation, fouling, custom flags,
+open and flexible pockets, and named modifier containers. Unsupported vehicle,
+monster, and sign-text side effects remain retained and fail closed for their
+later families. The production scenario generates real pavement and makes one
+of two independently Iroh-authenticated clients traverse it before disconnect,
+SQLite recovery, and portable replay. Rivers are the next dependency boundary;
+specials and spawning remain closed.
+
 Inherited
 `extend.using` requirements append to root requirements; pinned
 `ch_sheet_metal_small` therefore retains blacksmithing plus carbon. Main results

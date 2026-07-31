@@ -1204,9 +1204,9 @@ mod tests {
             expected: ScenarioExpectationV1 {
                 final_tick: SimTick(80),
                 final_state_hash: [
-                    0x30, 0x90, 0x1c, 0x70, 0x61, 0x2b, 0x20, 0x59, 0xed, 0xa9, 0xe6, 0x8a, 0xe5,
-                    0xae, 0xe7, 0xfc, 0x38, 0x12, 0x58, 0xef, 0x6e, 0xba, 0xb4, 0x94, 0xad, 0x25,
-                    0xc6, 0xff, 0xd3, 0x27, 0x5e, 0xa9,
+                    0x96, 0x40, 0x3a, 0xc5, 0x36, 0x1f, 0xb1, 0x3c, 0xee, 0x8b, 0x45, 0x4b, 0x8c,
+                    0x6c, 0xcd, 0x44, 0x6f, 0xe8, 0xf3, 0xa2, 0x50, 0x38, 0x31, 0x22, 0x71, 0x2e,
+                    0x7b, 0x18, 0x15, 0x59, 0xa5, 0xec,
                 ],
                 event_trace_hash: [
                     0x44, 0x45, 0x7b, 0xe9, 0xc8, 0xc2, 0xfe, 0x22, 0xa1, 0x86, 0x4f, 0x43, 0x0f,
@@ -1245,16 +1245,16 @@ mod tests {
         assert_eq!(observation.final_snapshot.ground_items.len(), 1);
         let encoded = postcard::to_stdvec(&observation.final_snapshot)
             .expect("the audited snapshot should encode");
-        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV70");
+        let mut legacy_hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV72");
         legacy_hasher.update(&encoded);
         assert_eq!(
             legacy_hasher.finalize().as_bytes(),
             &[
-                0xc0, 0x73, 0xbe, 0xbf, 0xd0, 0xe2, 0x7f, 0xdd, 0xc7, 0x76, 0xdf, 0x55, 0x8c, 0xdc,
-                0x9f, 0xe8, 0xa7, 0xc1, 0x1a, 0x86, 0xf8, 0x58, 0xfe, 0x8f, 0xa0, 0xaf, 0x0a, 0x4f,
-                0x04, 0xee, 0x6d, 0x08,
+                0x91, 0x6f, 0x4a, 0x8d, 0x8d, 0x41, 0x95, 0xec, 0xbd, 0x51, 0x02, 0x44, 0xd3, 0x22,
+                0x3a, 0xfb, 0x8e, 0xc1, 0x8a, 0xa0, 0x9c, 0x69, 0x79, 0x46, 0x1f, 0x68, 0x2d, 0x4d,
+                0x93, 0x15, 0x72, 0xec,
             ],
-            "the old V70 domain must pin the Protocol 95 item-flow Postcard bytes independently of the V71 domain bump"
+            "the old V72 domain must pin the Protocol 97 item-flow Postcard bytes independently of the V73 domain bump"
         );
         assert_eq!(
             observation.final_snapshot.ground_items[0].item.type_id,
@@ -1279,14 +1279,14 @@ mod tests {
             close_flat: None,
         };
         let cell = |prototype_index| cdda_protocol::WorldgenCellV1 {
-            terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+            terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
                 target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(prototype_index),
                 weight: 1,
-            }],
-            furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+            }]],
+            furniture: vec![vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
                 target: cdda_protocol::WorldgenFurnitureTargetV1::None,
                 weight: 1,
-            }],
+            }]],
             item_group: None,
         };
         let worldgen = WorldgenCatalogV1 {
@@ -1360,15 +1360,27 @@ mod tests {
                     omt_id: String::from("field"),
                     templates: vec![cdda_protocol::WorldgenTemplateV1 {
                         weight: 1,
+                        predecessor_id: None,
                         cells: vec![cell(0); cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                        nested: Vec::new(),
+                        area_items: Vec::new(),
+                        erase_all_before_placing_terrain: false,
+                        deferred_fields: Vec::new(),
                     }],
+                    nested_generators: Vec::new(),
                 },
                 cdda_protocol::WorldgenOmtGeneratorV1 {
                     omt_id: String::from("lmoe"),
                     templates: vec![cdda_protocol::WorldgenTemplateV1 {
                         weight: 1,
+                        predecessor_id: None,
                         cells: vec![cell(1); cdda_protocol::WORLDGEN_CELLS_PER_OMT],
+                        nested: Vec::new(),
+                        area_items: Vec::new(),
+                        erase_all_before_placing_terrain: false,
+                        deferred_fields: Vec::new(),
                     }],
+                    nested_generators: Vec::new(),
                 },
             ],
         };

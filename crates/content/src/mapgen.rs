@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ContentManifest, FurnitureRegistry, ItemGroupRegistry, ModCatalog, ModCatalogError,
-    SelectedContentFile, TerrainRegistry,
+    OvermapTerrainMatchType, SelectedContentFile, TerrainRegistry,
 };
 
 pub const MAPGEN_WIDTH: usize = 24;
@@ -28,6 +28,9 @@ pub const MAX_MAPGEN_PALETTE_DEPTH: usize = 32;
 pub const MAX_MAPGEN_PALETTE_LAYERS: usize = 4_096;
 pub const MAX_MAPGEN_OMT_ASSIGNMENTS: usize = 65_536;
 pub const MAX_MAPGEN_REPORT_ASSIGNMENTS: usize = 65_536;
+pub const MAX_NESTED_MAPGEN_DEFINITIONS: usize = 8_192;
+pub const MAX_NESTED_MAPGEN_PLACEMENTS: usize = 1_024;
+pub const MAX_NESTED_MAPGEN_DEPTH: usize = 32;
 
 const MAX_DISCOVERED_OM_TERRAINS: usize = 1_024;
 const ROOT_FIELDS: &[&str] = &["type", "om_terrain", "weight", "object"];
@@ -38,8 +41,36 @@ const OBJECT_FIELDS: &[&str] = &[
     "furniture",
     "items",
     "palettes",
+    "rotation",
+    "fallback_predecessor_mapgen",
+    "place_nested",
+    "place_items",
+    "flags",
 ];
-const PALETTE_FIELDS: &[&str] = &["type", "id", "terrain", "furniture", "items", "palettes"];
+const NESTED_OBJECT_FIELDS: &[&str] = &[
+    "mapgensize",
+    "fill_ter",
+    "rows",
+    "terrain",
+    "furniture",
+    "items",
+    "palettes",
+    "rotation",
+    "place_nested",
+    "place_items",
+    "place_vehicles",
+    "place_monsters",
+    "flags",
+];
+const PALETTE_FIELDS: &[&str] = &[
+    "type",
+    "id",
+    "terrain",
+    "furniture",
+    "items",
+    "palettes",
+    "signs",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WeightedMapgenId {
@@ -51,6 +82,63 @@ pub struct WeightedMapgenId {
 pub struct StrictMapgenItemPlacement {
     pub item_group: String,
     pub chance: u8,
+    pub repeat_minimum: u16,
+    pub repeat_maximum: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapgenCoordinateRange {
+    pub minimum: i8,
+    pub maximum: i8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenAreaItemPlacement {
+    pub item_group: String,
+    pub chance: u8,
+    pub x: MapgenCoordinateRange,
+    pub y: MapgenCoordinateRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenChunkChoice {
+    pub nested_id: String,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenOmtMatch {
+    pub omt: String,
+    pub match_type: OvermapTerrainMatchType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenNeighborMatch {
+    pub direction: String,
+    pub alternatives: Vec<StrictMapgenOmtMatch>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenNeighborFlags {
+    pub direction: String,
+    pub flags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StrictMapgenNestedConditions {
+    pub neighbors: Vec<StrictMapgenNeighborMatch>,
+    pub flags: Vec<StrictMapgenNeighborFlags>,
+    pub flags_any: Vec<StrictMapgenNeighborFlags>,
+    pub predecessors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictMapgenNestedPlacement {
+    pub chunks: Vec<StrictMapgenChunkChoice>,
+    pub else_chunks: Vec<StrictMapgenChunkChoice>,
+    pub x: MapgenCoordinateRange,
+    pub y: MapgenCoordinateRange,
+    pub conditions: StrictMapgenNestedConditions,
 }
 
 /// A single upstream placement choice. Each value in a binding's `Vec` is a
@@ -104,6 +192,14 @@ pub struct StrictMapgenDefinition {
     /// Named palettes in deterministic reference-expansion order. Repeated
     /// references remain repeated because upstream applies them repeatedly.
     pub palette_closure: Vec<String>,
+    /// The pinned fallback mapgen runs before this overlay. It is retained as
+    /// an ordinary generator edge rather than being expanded during loading.
+    pub fallback_predecessor_mapgen: Option<String>,
+    pub nested: Vec<StrictMapgenNestedPlacement>,
+    pub area_items: Vec<StrictMapgenAreaItemPlacement>,
+    pub erase_all_before_placing_terrain: bool,
+    /// Side-effect phases deliberately owned by the later spawning family.
+    pub deferred_fields: BTreeSet<String>,
 }
 
 impl StrictMapgenDefinition {
@@ -114,6 +210,25 @@ impl StrictMapgenDefinition {
         }
         self.cells.get(y * MAPGEN_WIDTH + x).map(String::as_str)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictNestedMapgenDefinition {
+    pub source: String,
+    pub nested_id: String,
+    pub weight: u32,
+    pub width: u8,
+    pub height: u8,
+    pub cells: Vec<String>,
+    pub fill_terrain: Option<MapgenIdChoice>,
+    pub terrain: BTreeMap<String, Vec<MapgenIdChoice>>,
+    pub furniture: BTreeMap<String, Vec<MapgenIdChoice>>,
+    pub items: BTreeMap<String, StrictMapgenItemPlacement>,
+    pub palette_closure: Vec<String>,
+    pub nested: Vec<StrictMapgenNestedPlacement>,
+    pub area_items: Vec<StrictMapgenAreaItemPlacement>,
+    pub erase_all_before_placing_terrain: bool,
+    pub deferred_fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,6 +250,8 @@ pub struct MapgenRegistry {
     definitions: BTreeMap<String, Vec<Arc<StrictMapgenDefinition>>>,
     unavailable: BTreeMap<String, Vec<Arc<MapgenRootReport>>>,
     reports: Vec<Arc<MapgenRootReport>>,
+    nested: BTreeMap<String, Vec<Arc<StrictNestedMapgenDefinition>>>,
+    unavailable_nested: BTreeMap<String, Vec<Arc<MapgenRootReport>>>,
 }
 
 impl MapgenRegistry {
@@ -150,9 +267,10 @@ impl MapgenRegistry {
         let files = catalog
             .selected_json_files(manifest, enabled)
             .map_err(MapgenRegistryError::Catalog)?;
-        let (roots, palettes) = read_mapgen(content_root.as_ref(), files)?;
+        let (roots, nested, palettes) = read_mapgen(content_root.as_ref(), files)?;
         compile_registry(
             &roots,
+            &nested,
             &palettes,
             &|id| terrain.get(id).is_some(),
             &|id| id == "f_null" || furniture.get(id).is_some(),
@@ -187,6 +305,75 @@ impl MapgenRegistry {
 
     pub fn reports(&self) -> impl Iterator<Item = &MapgenRootReport> {
         self.reports.iter().map(Arc::as_ref)
+    }
+
+    #[must_use]
+    pub fn nested(&self, id: &str) -> Option<&[Arc<StrictNestedMapgenDefinition>]> {
+        self.nested.get(id).map(Vec::as_slice)
+    }
+
+    #[must_use]
+    pub fn unavailable_nested_reports(&self, id: &str) -> Option<&[Arc<MapgenRootReport>]> {
+        self.unavailable_nested.get(id).map(Vec::as_slice)
+    }
+
+    /// Returns every named nested generator reachable from all variants of an
+    /// ordinary root. Missing definitions and cycles fail closed before a
+    /// server can persist a partially executable mapgen family.
+    pub fn strict_nested_closure(&self, root_id: &str) -> Result<BTreeSet<String>, String> {
+        let roots = self
+            .get(root_id)
+            .ok_or_else(|| format!("ordinary mapgen {root_id:?} is unavailable"))?;
+        let mut closure = BTreeSet::new();
+        let mut active = Vec::new();
+        for root in roots {
+            self.visit_nested_placements(&root.nested, &mut closure, &mut active)?;
+        }
+        Ok(closure)
+    }
+
+    fn visit_nested_placements(
+        &self,
+        placements: &[StrictMapgenNestedPlacement],
+        closure: &mut BTreeSet<String>,
+        active: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if active.len() >= MAX_NESTED_MAPGEN_DEPTH {
+            return Err(format!(
+                "nested mapgen depth exceeds {MAX_NESTED_MAPGEN_DEPTH} at {}",
+                active.join(" -> ")
+            ));
+        }
+        for id in placements
+            .iter()
+            .flat_map(|placement| placement.chunks.iter().chain(&placement.else_chunks))
+            .map(|choice| choice.nested_id.as_str())
+            .filter(|id| *id != "null")
+        {
+            if active.iter().any(|ancestor| ancestor == id) {
+                let mut cycle = active.clone();
+                cycle.push(id.to_owned());
+                return Err(format!("nested mapgen cycle: {}", cycle.join(" -> ")));
+            }
+            if closure.contains(id) {
+                continue;
+            }
+            let variants = self.nested(id).ok_or_else(|| {
+                let reason = self
+                    .unavailable_nested_reports(id)
+                    .and_then(|reports| reports.first())
+                    .and_then(|report| report.rejection_reason.as_deref())
+                    .unwrap_or("definition is missing");
+                format!("nested mapgen {id:?} is unavailable: {reason}")
+            })?;
+            active.push(id.to_owned());
+            for variant in variants {
+                self.visit_nested_placements(&variant.nested, closure, active)?;
+            }
+            active.pop();
+            closure.insert(id.to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -233,6 +420,14 @@ struct RawMapgenRoot {
 }
 
 #[derive(Clone)]
+struct RawNestedMapgen {
+    source: String,
+    nested_id: String,
+    weight: u32,
+    object: Map<String, Value>,
+}
+
+#[derive(Clone)]
 struct RawPalette {
     source: String,
     object: Map<String, Value>,
@@ -243,8 +438,9 @@ type PaletteCatalog = BTreeMap<String, Vec<RawPalette>>;
 fn read_mapgen(
     root: &Path,
     files: Vec<SelectedContentFile>,
-) -> Result<(Vec<RawMapgenRoot>, PaletteCatalog), MapgenRegistryError> {
+) -> Result<(Vec<RawMapgenRoot>, Vec<RawNestedMapgen>, PaletteCatalog), MapgenRegistryError> {
     let mut roots = Vec::new();
+    let mut nested = Vec::new();
     let mut palettes: PaletteCatalog = BTreeMap::new();
     let mut palette_count = 0_usize;
     for file in files {
@@ -260,6 +456,7 @@ fn read_mapgen(
                         index,
                         value,
                         &mut roots,
+                        &mut nested,
                         &mut palettes,
                         &mut palette_count,
                     )?;
@@ -270,12 +467,13 @@ fn read_mapgen(
                 0,
                 value,
                 &mut roots,
+                &mut nested,
                 &mut palettes,
                 &mut palette_count,
             )?,
         }
     }
-    Ok((roots, palettes))
+    Ok((roots, nested, palettes))
 }
 
 fn collect_definition(
@@ -283,6 +481,7 @@ fn collect_definition(
     index: usize,
     value: Value,
     roots: &mut Vec<RawMapgenRoot>,
+    nested: &mut Vec<RawNestedMapgen>,
     palettes: &mut PaletteCatalog,
     palette_count: &mut usize,
 ) -> Result<(), MapgenRegistryError> {
@@ -300,6 +499,55 @@ fn collect_definition(
             roots.push(RawMapgenRoot {
                 source: format!("{}#{index}", file.upstream_path),
                 object: object.clone(),
+            });
+        }
+        Some("mapgen") if object.contains_key("nested_mapgen_id") => {
+            if nested.len() >= MAX_NESTED_MAPGEN_DEFINITIONS {
+                return Err(MapgenRegistryError::LimitExceeded(
+                    "nested mapgen definitions",
+                    MAX_NESTED_MAPGEN_DEFINITIONS,
+                ));
+            }
+            let nested_id = object
+                .get("nested_mapgen_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    MapgenRegistryError::Json(
+                        file.destination.clone(),
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "nested_mapgen_id must be a non-empty string",
+                        )),
+                    )
+                })?;
+            let weight = parse_nested_weight(object.get("weight")).map_err(|reason| {
+                MapgenRegistryError::Json(
+                    file.destination.clone(),
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        reason,
+                    )),
+                )
+            })?;
+            let nested_object = object
+                .get("object")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| {
+                    MapgenRegistryError::Json(
+                        file.destination.clone(),
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "nested mapgen object must be an object",
+                        )),
+                    )
+                })?;
+            nested.push(RawNestedMapgen {
+                source: format!("{}#{index}", file.upstream_path),
+                nested_id: nested_id.to_owned(),
+                weight,
+                object: nested_object,
             });
         }
         Some("palette") => {
@@ -328,6 +576,7 @@ fn collect_definition(
 
 fn compile_registry<TerrainExists, FurnitureExists, ItemGroupExists>(
     roots: &[RawMapgenRoot],
+    raw_nested: &[RawNestedMapgen],
     palettes: &PaletteCatalog,
     terrain_exists: &TerrainExists,
     furniture_exists: &FurnitureExists,
@@ -410,10 +659,50 @@ where
     for id in unavailable.keys() {
         definitions.remove(id);
     }
+    let mut nested: BTreeMap<String, Vec<Arc<StrictNestedMapgenDefinition>>> = BTreeMap::new();
+    let mut unavailable_nested: BTreeMap<String, Vec<Arc<MapgenRootReport>>> = BTreeMap::new();
+    for raw in raw_nested {
+        if raw.weight == 0 {
+            continue;
+        }
+        match compile_nested_definition(
+            raw,
+            palettes,
+            terrain_exists,
+            furniture_exists,
+            item_group_exists,
+        ) {
+            Ok(definition) => {
+                let variants = nested.entry(raw.nested_id.clone()).or_default();
+                if variants.len() >= MAX_MAPGEN_VARIANTS {
+                    return Err(MapgenRegistryError::LimitExceeded(
+                        "variants for one nested mapgen",
+                        MAX_MAPGEN_VARIANTS,
+                    ));
+                }
+                variants.push(Arc::new(definition));
+            }
+            Err(reason) => {
+                unavailable_nested
+                    .entry(raw.nested_id.clone())
+                    .or_default()
+                    .push(Arc::new(MapgenRootReport {
+                        source: raw.source.clone(),
+                        om_terrains: vec![raw.nested_id.clone()],
+                        rejection_reason: Some(reason),
+                    }));
+            }
+        }
+    }
+    for id in unavailable_nested.keys() {
+        nested.remove(id);
+    }
     Ok(MapgenRegistry {
         definitions,
         unavailable,
         reports,
+        nested,
+        unavailable_nested,
     })
 }
 
@@ -495,12 +784,29 @@ where
         item_group_exists,
         &mut state,
     )?;
+    let fallback_predecessor_mapgen = parse_optional_id(
+        object.get("fallback_predecessor_mapgen"),
+        "fallback_predecessor_mapgen",
+    )?;
+    let nested = parse_nested_placements(object.get("place_nested"), "mapgen object")?;
+    let area_items = parse_area_items(
+        object.get("place_items"),
+        "mapgen object",
+        item_group_exists,
+    )?;
+    let erase_all_before_placing_terrain = parse_erase_all_flag(object.get("flags"))?;
     if fill_terrain.is_none() {
-        if object.get("rows").is_none() {
+        if object.get("rows").is_none()
+            && fallback_predecessor_mapgen.is_none()
+            && nested.is_empty()
+        {
             return Err(String::from("mapgen without rows requires fill_ter"));
         }
         for cell in &cells {
-            if !state.terrain.contains_key(cell) {
+            if !state.terrain.contains_key(cell)
+                && fallback_predecessor_mapgen.is_none()
+                && nested.is_empty()
+            {
                 return Err(format!(
                     "row cell {cell:?} has no terrain binding and fill_ter is absent"
                 ));
@@ -518,7 +824,513 @@ where
         furniture: state.furniture,
         items: state.items,
         palette_closure: state.palette_closure,
+        fallback_predecessor_mapgen,
+        nested,
+        area_items,
+        erase_all_before_placing_terrain,
+        deferred_fields: state.deferred_fields,
     })
+}
+
+fn compile_nested_definition<TerrainExists, FurnitureExists, ItemGroupExists>(
+    raw: &RawNestedMapgen,
+    palettes: &PaletteCatalog,
+    terrain_exists: &TerrainExists,
+    furniture_exists: &FurnitureExists,
+    item_group_exists: &ItemGroupExists,
+) -> Result<StrictNestedMapgenDefinition, String>
+where
+    TerrainExists: Fn(&str) -> bool,
+    FurnitureExists: Fn(&str) -> bool,
+    ItemGroupExists: Fn(&str) -> bool,
+{
+    reject_unknown_fields(
+        &raw.object,
+        NESTED_OBJECT_FIELDS,
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    let (width, height) = parse_mapgen_size(
+        raw.object.get("mapgensize"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    parse_nested_rotation(
+        raw.object.get("rotation"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    let fill_terrain = raw
+        .object
+        .get("fill_ter")
+        .map(|value| parse_choice(value, "nested fill_ter", terrain_exists))
+        .transpose()?;
+    let cells = parse_rows_sized(
+        raw.object.get("rows"),
+        usize::from(width),
+        usize::from(height),
+    )?;
+    let mut state = CompileState::default();
+    let palette_ids = parse_palette_ids(
+        raw.object.get("palettes"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    let mut ancestors = Vec::new();
+    for id in palette_ids {
+        append_palette(
+            id,
+            palettes,
+            terrain_exists,
+            furniture_exists,
+            item_group_exists,
+            &mut ancestors,
+            &mut state,
+        )?;
+    }
+    append_local_bindings(
+        &raw.object,
+        &format!("nested mapgen {:?}", raw.nested_id),
+        terrain_exists,
+        furniture_exists,
+        item_group_exists,
+        &mut state,
+    )?;
+    let nested = parse_nested_placements(
+        raw.object.get("place_nested"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+    )?;
+    let area_items = parse_area_items(
+        raw.object.get("place_items"),
+        &format!("nested mapgen {:?}", raw.nested_id),
+        item_group_exists,
+    )?;
+    for field in ["place_vehicles", "place_monsters"] {
+        if raw
+            .object
+            .get(field)
+            .is_some_and(|value| !value.as_array().is_some_and(Vec::is_empty) && !value.is_null())
+        {
+            state.deferred_fields.insert(field.to_owned());
+        }
+    }
+    Ok(StrictNestedMapgenDefinition {
+        source: raw.source.clone(),
+        nested_id: raw.nested_id.clone(),
+        weight: raw.weight,
+        width,
+        height,
+        cells,
+        fill_terrain,
+        terrain: state.terrain,
+        furniture: state.furniture,
+        items: state.items,
+        palette_closure: state.palette_closure,
+        nested,
+        area_items,
+        erase_all_before_placing_terrain: parse_erase_all_flag(raw.object.get("flags"))?,
+        deferred_fields: state.deferred_fields,
+    })
+}
+
+fn parse_optional_id(value: Option<&Value>, context: &str) -> Result<Option<String>, String> {
+    value
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 512)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{context} must be a non-empty bounded id"))
+        })
+        .transpose()
+}
+
+fn parse_mapgen_size(value: Option<&Value>, context: &str) -> Result<(u8, u8), String> {
+    let values = value
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 2)
+        .ok_or_else(|| format!("mapgensize in {context} must contain width and height"))?;
+    let width = values[0]
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| (1..=MAPGEN_WIDTH as u8).contains(value))
+        .ok_or_else(|| format!("mapgensize width in {context} must be 1..={MAPGEN_WIDTH}"))?;
+    let height = values[1]
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| (1..=MAPGEN_HEIGHT as u8).contains(value))
+        .ok_or_else(|| format!("mapgensize height in {context} must be 1..={MAPGEN_HEIGHT}"))?;
+    Ok((width, height))
+}
+
+fn parse_nested_rotation(value: Option<&Value>, context: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let values = value
+        .as_array()
+        .filter(|values| matches!(values.len(), 1 | 2))
+        .ok_or_else(|| format!("rotation in {context} must contain one or two quarter turns"))?;
+    let rotations = values
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|rotation| *rotation <= 3)
+                .ok_or_else(|| format!("rotation in {context} must be between 0 and 3"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if rotations.len() == 2 && rotations[0] > rotations[1] {
+        return Err(format!("rotation range in {context} is reversed"));
+    }
+    Ok(())
+}
+
+fn parse_erase_all_flag(value: Option<&Value>) -> Result<bool, String> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    let flags = value
+        .as_array()
+        .ok_or_else(|| String::from("mapgen flags must be an array"))?;
+    let mut erase_all = false;
+    for value in flags {
+        match value.as_str() {
+            Some("ERASE_ALL_BEFORE_PLACING_TERRAIN") => erase_all = true,
+            Some(flag) => return Err(format!("unsupported mapgen flag {flag:?}")),
+            None => return Err(String::from("mapgen flags must be strings")),
+        }
+    }
+    Ok(erase_all)
+}
+
+fn parse_area_items<Exists>(
+    value: Option<&Value>,
+    context: &str,
+    exists: &Exists,
+) -> Result<Vec<StrictMapgenAreaItemPlacement>, String>
+where
+    Exists: Fn(&str) -> bool,
+{
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let placements = value
+        .as_array()
+        .ok_or_else(|| format!("place_items in {context} must be an array"))?;
+    if placements.len() > MAX_NESTED_MAPGEN_PLACEMENTS {
+        return Err(format!(
+            "place_items in {context} exceeds {MAX_NESTED_MAPGEN_PLACEMENTS} placements"
+        ));
+    }
+    placements
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("place_items[{index}] in {context} must be an object"))?;
+            reject_unknown_fields(
+                object,
+                &["item", "chance", "x", "y"],
+                &format!("place_items[{index}] in {context}"),
+            )?;
+            let item_group = object
+                .get("item")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && exists(id))
+                .ok_or_else(|| {
+                    format!("place_items[{index}] in {context} references an unknown item group")
+                })?;
+            let chance = object
+                .get("chance")
+                .and_then(Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok())
+                .filter(|chance| (1..=100).contains(chance))
+                .ok_or_else(|| {
+                    format!("place_items[{index}] chance in {context} must be 1..=100")
+                })?;
+            Ok(StrictMapgenAreaItemPlacement {
+                item_group: item_group.to_owned(),
+                chance,
+                x: parse_coordinate_range(object.get("x"), "x", context)?,
+                y: parse_coordinate_range(object.get("y"), "y", context)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_nested_placements(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenNestedPlacement>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let placements = value
+        .as_array()
+        .ok_or_else(|| format!("place_nested in {context} must be an array"))?;
+    if placements.len() > MAX_NESTED_MAPGEN_PLACEMENTS {
+        return Err(format!(
+            "place_nested in {context} exceeds {MAX_NESTED_MAPGEN_PLACEMENTS} placements"
+        ));
+    }
+    placements
+        .iter()
+        .enumerate()
+        .map(|(index, value)| parse_nested_placement(value, index, context))
+        .collect()
+}
+
+fn parse_nested_placement(
+    value: &Value,
+    index: usize,
+    context: &str,
+) -> Result<StrictMapgenNestedPlacement, String> {
+    let placement_context = format!("place_nested[{index}] in {context}");
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{placement_context} must be an object"))?;
+    reject_unknown_fields(
+        object,
+        &[
+            "chunks",
+            "else_chunks",
+            "x",
+            "y",
+            "neighbors",
+            "flags",
+            "flags_any",
+            "predecessors",
+        ],
+        &placement_context,
+    )?;
+    let chunks = parse_chunk_choices(object.get("chunks"), &placement_context)?;
+    let else_chunks = parse_chunk_choices(object.get("else_chunks"), &placement_context)?;
+    if chunks.is_empty() && else_chunks.is_empty() {
+        return Err(format!("{placement_context} has no chunks or else_chunks"));
+    }
+    Ok(StrictMapgenNestedPlacement {
+        chunks,
+        else_chunks,
+        x: parse_coordinate_range(object.get("x"), "x", &placement_context)?,
+        y: parse_coordinate_range(object.get("y"), "y", &placement_context)?,
+        conditions: StrictMapgenNestedConditions {
+            neighbors: parse_neighbor_matches(object.get("neighbors"), &placement_context)?,
+            flags: parse_neighbor_flags(object.get("flags"), "flags", &placement_context)?,
+            flags_any: parse_neighbor_flags(
+                object.get("flags_any"),
+                "flags_any",
+                &placement_context,
+            )?,
+            predecessors: parse_string_array(object.get("predecessors"), "predecessors")?,
+        },
+    })
+}
+
+fn parse_chunk_choices(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenChunkChoice>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .filter(|values| !values.is_empty() && values.len() <= MAX_MAPGEN_CHOICE_ENTRIES)
+        .ok_or_else(|| {
+            format!("chunks in {context} must contain 1..={MAX_MAPGEN_CHOICE_ENTRIES} entries")
+        })?;
+    let mut total = 0_u64;
+    values
+        .iter()
+        .map(|value| {
+            let (id, weight) = if let Some(id) = value.as_str() {
+                (id, 1_u32)
+            } else {
+                let pair = value
+                    .as_array()
+                    .filter(|pair| pair.len() == 2)
+                    .ok_or_else(|| format!("invalid weighted chunk in {context}"))?;
+                let id = pair[0]
+                    .as_str()
+                    .ok_or_else(|| format!("chunk id in {context} must be a string"))?;
+                let weight = pair[1]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|weight| (1..=MAX_MAPGEN_CHOICE_WEIGHT).contains(weight))
+                    .ok_or_else(|| format!("chunk weight in {context} is out of bounds"))?;
+                (id, weight)
+            };
+            if id.is_empty() || id.len() > 512 {
+                return Err(format!("chunk id in {context} is empty or too long"));
+            }
+            total = total
+                .checked_add(u64::from(weight))
+                .ok_or_else(|| format!("chunk weights in {context} overflow"))?;
+            if total > MAX_MAPGEN_CHOICE_TOTAL_WEIGHT {
+                return Err(format!("chunk weights in {context} exceed the total bound"));
+            }
+            Ok(StrictMapgenChunkChoice {
+                nested_id: id.to_owned(),
+                weight,
+            })
+        })
+        .collect()
+}
+
+fn parse_coordinate_range(
+    value: Option<&Value>,
+    field: &str,
+    context: &str,
+) -> Result<MapgenCoordinateRange, String> {
+    let value = value.ok_or_else(|| format!("{field} is required in {context}"))?;
+    let (minimum, maximum) = if let Some(value) = value.as_i64() {
+        (value, value)
+    } else {
+        let values = value
+            .as_array()
+            .filter(|values| values.len() == 2)
+            .ok_or_else(|| format!("{field} in {context} must be an integer or interval"))?;
+        (
+            values[0]
+                .as_i64()
+                .ok_or_else(|| format!("{field} minimum in {context} must be an integer"))?,
+            values[1]
+                .as_i64()
+                .ok_or_else(|| format!("{field} maximum in {context} must be an integer"))?,
+        )
+    };
+    let minimum = i8::try_from(minimum)
+        .ok()
+        .filter(|value| i32::from(*value).abs() < MAPGEN_WIDTH as i32)
+        .ok_or_else(|| format!("{field} minimum in {context} is outside one OMT offset"))?;
+    let maximum = i8::try_from(maximum)
+        .ok()
+        .filter(|value| i32::from(*value).abs() < MAPGEN_WIDTH as i32 && *value >= minimum)
+        .ok_or_else(|| format!("{field} maximum in {context} is invalid"))?;
+    Ok(MapgenCoordinateRange { minimum, maximum })
+}
+
+fn parse_neighbor_matches(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<StrictMapgenNeighborMatch>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let directions = value
+        .as_object()
+        .ok_or_else(|| format!("neighbors in {context} must be an object"))?;
+    directions
+        .iter()
+        .map(|(direction, value)| {
+            validate_direction(direction, context)?;
+            let alternatives = value
+                .as_array()
+                .filter(|values| !values.is_empty() && values.len() <= MAX_MAPGEN_CHOICE_ENTRIES)
+                .ok_or_else(|| format!("neighbor {direction} in {context} must be an array"))?
+                .iter()
+                .map(|value| {
+                    let object = value.as_object().ok_or_else(|| {
+                        format!("neighbor alternative {direction} in {context} must be an object")
+                    })?;
+                    reject_unknown_fields(
+                        object,
+                        &["om_terrain", "om_terrain_match_type"],
+                        &format!("neighbor {direction} in {context}"),
+                    )?;
+                    let omt = object
+                        .get("om_terrain")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 512)
+                        .ok_or_else(|| format!("neighbor {direction} has invalid om_terrain"))?;
+                    let match_type = match object
+                        .get("om_terrain_match_type")
+                        .and_then(Value::as_str)
+                    {
+                        Some("EXACT") => OvermapTerrainMatchType::Exact,
+                        Some("TYPE") => OvermapTerrainMatchType::Type,
+                        Some("SUBTYPE") => OvermapTerrainMatchType::Subtype,
+                        Some("PREFIX") => OvermapTerrainMatchType::Prefix,
+                        Some("CONTAINS") => OvermapTerrainMatchType::Contains,
+                        _ => return Err(format!("neighbor {direction} has invalid match type")),
+                    };
+                    Ok(StrictMapgenOmtMatch {
+                        omt: omt.to_owned(),
+                        match_type,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(StrictMapgenNeighborMatch {
+                direction: direction.clone(),
+                alternatives,
+            })
+        })
+        .collect()
+}
+
+fn parse_neighbor_flags(
+    value: Option<&Value>,
+    field: &str,
+    context: &str,
+) -> Result<Vec<StrictMapgenNeighborFlags>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let directions = value
+        .as_object()
+        .ok_or_else(|| format!("{field} in {context} must be an object"))?;
+    directions
+        .iter()
+        .map(|(direction, value)| {
+            validate_direction(direction, context)?;
+            let flags = parse_string_array(Some(value), field)?;
+            if flags.is_empty() {
+                return Err(format!("{field} {direction} in {context} is empty"));
+            }
+            Ok(StrictMapgenNeighborFlags {
+                direction: direction.clone(),
+                flags,
+            })
+        })
+        .collect()
+}
+
+fn parse_string_array(value: Option<&Value>, field: &str) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .filter(|values| values.len() <= MAX_MAPGEN_CHOICE_ENTRIES)
+        .ok_or_else(|| format!("{field} must be a bounded string array"))?;
+    let mut unique = BTreeSet::new();
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        let entry = value
+            .as_str()
+            .filter(|entry| !entry.is_empty() && entry.len() <= 512)
+            .ok_or_else(|| format!("{field} entries must be non-empty bounded strings"))?;
+        if !unique.insert(entry) {
+            return Err(format!("{field} contains duplicate {entry:?}"));
+        }
+        result.push(entry.to_owned());
+    }
+    Ok(result)
+}
+
+fn validate_direction(direction: &str, context: &str) -> Result<(), String> {
+    const DIRECTIONS: [&str; 8] = [
+        "north",
+        "north_east",
+        "east",
+        "south_east",
+        "south",
+        "south_west",
+        "west",
+        "north_west",
+    ];
+    DIRECTIONS
+        .contains(&direction)
+        .then_some(())
+        .ok_or_else(|| format!("invalid neighbor direction {direction:?} in {context}"))
 }
 
 fn parse_om_terrains(value: Option<&Value>) -> Result<Vec<String>, String> {
@@ -598,25 +1410,46 @@ fn parse_root_weight(value: Option<&Value>) -> Result<u32, String> {
     Ok(weight)
 }
 
-fn parse_rows(value: Option<&Value>) -> Result<Vec<String>, String> {
+fn parse_nested_weight(value: Option<&Value>) -> Result<u32, String> {
     let Some(value) = value else {
-        return Ok(vec![String::from(" "); MAPGEN_WIDTH * MAPGEN_HEIGHT]);
+        return Ok(DEFAULT_MAPGEN_WEIGHT);
+    };
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| String::from("nested mapgen weight must be a nonnegative integer"))?;
+    u32::try_from(raw)
+        .ok()
+        .filter(|weight| *weight <= MAX_MAPGEN_WEIGHT)
+        .ok_or_else(|| format!("nested mapgen weight exceeds {MAX_MAPGEN_WEIGHT}"))
+}
+
+fn parse_rows(value: Option<&Value>) -> Result<Vec<String>, String> {
+    parse_rows_sized(value, MAPGEN_WIDTH, MAPGEN_HEIGHT)
+}
+
+fn parse_rows_sized(
+    value: Option<&Value>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(vec![String::from(" "); width * height]);
     };
     let rows = value
         .as_array()
         .ok_or_else(|| String::from("rows must be an array"))?;
-    if rows.len() != MAPGEN_HEIGHT {
-        return Err(format!("rows must contain exactly {MAPGEN_HEIGHT} rows"));
+    if rows.len() != height {
+        return Err(format!("rows must contain exactly {height} rows"));
     }
-    let mut cells = Vec::with_capacity(MAPGEN_WIDTH * MAPGEN_HEIGHT);
+    let mut cells = Vec::with_capacity(width * height);
     for (y, row) in rows.iter().enumerate() {
         let row = row
             .as_str()
             .ok_or_else(|| format!("row {y} must be a string"))?;
         let row_cells = split_display_cells(row, &format!("row {y}"))?;
-        if row_cells.len() != MAPGEN_WIDTH {
+        if row_cells.len() != width {
             return Err(format!(
-                "row {y} must contain exactly {MAPGEN_WIDTH} Unicode display cells, found {}",
+                "row {y} must contain exactly {width} Unicode display cells, found {}",
                 row_cells.len()
             ));
         }
@@ -632,6 +1465,7 @@ struct CompileState {
     items: BTreeMap<String, StrictMapgenItemPlacement>,
     palette_closure: Vec<String>,
     layer_count: usize,
+    deferred_fields: BTreeSet<String>,
 }
 
 fn append_palette<TerrainExists, FurnitureExists, ItemGroupExists>(
@@ -761,7 +1595,73 @@ where
         item_group_exists,
         &mut state.items,
         &mut state.layer_count,
+    )?;
+    append_sign_binding_map(
+        object.get("signs"),
+        context,
+        furniture_exists,
+        &mut state.furniture,
+        &mut state.layer_count,
+        &mut state.deferred_fields,
     )
+}
+
+fn append_sign_binding_map<Exists>(
+    value: Option<&Value>,
+    context: &str,
+    exists: &Exists,
+    furniture: &mut BTreeMap<String, Vec<MapgenIdChoice>>,
+    layer_count: &mut usize,
+    deferred_fields: &mut BTreeSet<String>,
+) -> Result<(), String>
+where
+    Exists: Fn(&str) -> bool,
+{
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let bindings = value
+        .as_object()
+        .ok_or_else(|| format!("signs in {context} must be a glyph object"))?;
+    if bindings.len() > MAX_MAPGEN_BINDINGS {
+        return Err(format!(
+            "signs in {context} exceeds {MAX_MAPGEN_BINDINGS} bindings"
+        ));
+    }
+    for (key, value) in bindings {
+        let key = parse_binding_key(key, "signs", context)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("signs[{key:?}] in {context} must be an object"))?;
+        reject_unknown_fields(
+            object,
+            &["furniture", "signage"],
+            &format!("signs[{key:?}] in {context}"),
+        )?;
+        let furniture_id = object
+            .get("furniture")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && exists(id))
+            .ok_or_else(|| {
+                format!("signs[{key:?}] in {context} has unknown or missing furniture")
+            })?;
+        *layer_count = layer_count
+            .checked_add(1)
+            .ok_or_else(|| String::from("mapgen placement layer count overflow"))?;
+        if *layer_count > MAX_MAPGEN_PALETTE_LAYERS {
+            return Err(format!(
+                "mapgen placement layers exceed {MAX_MAPGEN_PALETTE_LAYERS}"
+            ));
+        }
+        furniture
+            .entry(key)
+            .or_default()
+            .push(MapgenIdChoice::Fixed(furniture_id.to_owned()));
+        if object.contains_key("signage") {
+            deferred_fields.insert(String::from("signage_text"));
+        }
+    }
+    Ok(())
 }
 
 fn append_binding_map<Exists>(
@@ -830,7 +1730,7 @@ where
         })?;
         if let Some(field) = object
             .keys()
-            .find(|field| !["item", "chance"].contains(&field.as_str()))
+            .find(|field| !["item", "chance", "repeat"].contains(&field.as_str()))
         {
             return Err(format!(
                 "unsupported field {field:?} in items[{key:?}] in {context}"
@@ -856,6 +1756,7 @@ where
             .ok_or_else(|| {
                 format!("chance in items[{key:?}] in {context} must be an integer from 1 to 100")
             })?;
+        let (repeat_minimum, repeat_maximum) = parse_repeat_range(object.get("repeat"), context)?;
         *layer_count = layer_count
             .checked_add(1)
             .ok_or_else(|| String::from("mapgen placement layer count overflow"))?;
@@ -870,6 +1771,8 @@ where
                 StrictMapgenItemPlacement {
                     item_group: item_group.to_owned(),
                     chance,
+                    repeat_minimum,
+                    repeat_maximum,
                 },
             )
             .is_some()
@@ -880,6 +1783,37 @@ where
         }
     }
     Ok(())
+}
+
+fn parse_repeat_range(value: Option<&Value>, context: &str) -> Result<(u16, u16), String> {
+    let Some(value) = value else {
+        return Ok((1, 1));
+    };
+    let (minimum, maximum) = if let Some(value) = value.as_u64() {
+        (value, value)
+    } else {
+        let values = value
+            .as_array()
+            .filter(|values| values.len() == 2)
+            .ok_or_else(|| format!("repeat in {context} must be an integer or interval"))?;
+        (
+            values[0]
+                .as_u64()
+                .ok_or_else(|| format!("repeat minimum in {context} must be an integer"))?,
+            values[1]
+                .as_u64()
+                .ok_or_else(|| format!("repeat maximum in {context} must be an integer"))?,
+        )
+    };
+    let minimum = u16::try_from(minimum)
+        .ok()
+        .filter(|value| *value <= 256)
+        .ok_or_else(|| format!("repeat minimum in {context} exceeds 256"))?;
+    let maximum = u16::try_from(maximum)
+        .ok()
+        .filter(|value| *value <= 256 && *value >= minimum)
+        .ok_or_else(|| format!("repeat maximum in {context} is invalid"))?;
+    Ok((minimum, maximum))
 }
 
 fn parse_binding_key(key: &str, field: &str, context: &str) -> Result<String, String> {
@@ -1088,14 +2022,14 @@ mod tests {
                 "om_terrain": "fixture",
                 "object": {
                     "fill_ter": "t_floor",
-                    "items": { "x": { "item": "test", "chance": 1, "repeat": 2 } }
+                    "items": { "x": { "item": "test", "chance": 1, "unsupported": 2 } }
                 }
             }))
             .expect("fixture object"),
         };
         let error = compile_root(&raw, &BTreeMap::new(), &|_| true, &|_| true, &|_| true)
-            .expect_err("repeat remains outside this slice");
-        assert!(error.contains("unsupported field \"repeat\""));
+            .expect_err("unknown item-placement fields remain fail-closed");
+        assert!(error.contains("unsupported field \"unsupported\""));
     }
 
     #[test]
@@ -1116,13 +2050,14 @@ mod tests {
                 "om_terrain": "fixture",
                 "object": {
                     "fill_ter": "t_floor",
-                    "items": { "x": { "item": "test", "chance": 1, "repeat": 2 } }
+                    "items": { "x": { "item": "test", "chance": 1, "unsupported": 2 } }
                 }
             }))
             .expect("fixture object"),
         };
         let registry = compile_registry(
             &[supported, unsupported],
+            &[],
             &BTreeMap::new(),
             &|_| true,
             &|_| true,
@@ -1166,6 +2101,7 @@ mod tests {
         };
         let registry = compile_registry(
             &[supported, unsupported],
+            &[],
             &BTreeMap::new(),
             &|_| true,
             &|_| true,
@@ -1209,6 +2145,8 @@ mod tests {
             Some(&StrictMapgenItemPlacement {
                 item_group: String::from("field"),
                 chance: 1,
+                repeat_minimum: 1,
+                repeat_maximum: 1,
             })
         );
     }

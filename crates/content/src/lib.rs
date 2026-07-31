@@ -38,8 +38,8 @@ pub use furniture::{FurnitureDefinition, FurnitureRegistry, FurnitureRegistryErr
 pub use item::{
     ItemDefinition, ItemQualityDefinition, ItemRegistry, ItemRegistryError, ItemSnippetDefinition,
     ItemTemperatureRuntimeClass, ItemVariableValueDefinition, ItemVariantDefinition,
-    PocketDefinition, PocketTypeDefinition, SpawnPocketKindDefinition, StrictMagazineDefinition,
-    StrictSpawnPocketDefinition,
+    MagazineWellDefinition, PocketDefinition, PocketTypeDefinition, SpawnPocketKindDefinition,
+    StrictMagazineDefinition, StrictSpawnPocketDefinition,
 };
 pub use item_group::{
     ItemGroupChargesRange, ItemGroupContentsSource, ItemGroupDefinition, ItemGroupEntryWrapper,
@@ -54,8 +54,12 @@ pub use mapgen::{
     MAX_MAPGEN_CHOICE_ENTRIES, MAX_MAPGEN_CHOICE_TOTAL_WEIGHT, MAX_MAPGEN_CHOICE_WEIGHT,
     MAX_MAPGEN_OM_TERRAINS, MAX_MAPGEN_OMT_ASSIGNMENTS, MAX_MAPGEN_PALETTE_DEPTH,
     MAX_MAPGEN_PALETTE_LAYERS, MAX_MAPGEN_REPORT_ASSIGNMENTS, MAX_MAPGEN_ROOTS,
-    MAX_MAPGEN_VARIANTS, MAX_MAPGEN_WEIGHT, MAX_NAMED_PALETTES, MapgenIdChoice, MapgenRegistry,
-    MapgenRegistryError, MapgenRootReport, StrictMapgenDefinition, StrictMapgenItemPlacement,
+    MAX_MAPGEN_VARIANTS, MAX_MAPGEN_WEIGHT, MAX_NAMED_PALETTES, MAX_NESTED_MAPGEN_DEFINITIONS,
+    MAX_NESTED_MAPGEN_DEPTH, MAX_NESTED_MAPGEN_PLACEMENTS, MapgenCoordinateRange, MapgenIdChoice,
+    MapgenRegistry, MapgenRegistryError, MapgenRootReport, StrictMapgenAreaItemPlacement,
+    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenItemPlacement,
+    StrictMapgenNeighborFlags, StrictMapgenNeighborMatch, StrictMapgenNestedConditions,
+    StrictMapgenNestedPlacement, StrictMapgenOmtMatch, StrictNestedMapgenDefinition,
     WeightedMapgenId,
 };
 pub use material::{
@@ -1631,6 +1635,8 @@ mod tests {
             Some(&StrictMapgenItemPlacement {
                 item_group: String::from("field"),
                 chance: 1,
+                repeat_minimum: 1,
+                repeat_maximum: 1,
             })
         );
         assert!(mapgen.unavailable_reports("field").is_none());

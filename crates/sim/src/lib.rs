@@ -79,7 +79,9 @@ pub use roads::{
     place_overmap_roads,
 };
 
-pub const ID_RESERVATION_SIZE: u64 = 4_096;
+/// Persistent stores reserve counters in blocks large enough for one admitted
+/// item-group invocation or one atomic active-bubble generation transaction.
+pub const ID_RESERVATION_SIZE: u64 = 32_768;
 pub const DEFAULT_ACTOR_HP: i32 = 100;
 pub const UNARMED_DAMAGE: u16 = 10;
 /// Character generation is not yet modeled; new survivors use CDDA's default
@@ -984,6 +986,7 @@ fn validate_item_snapshot_at(snapshot: &ItemSnapshot, depth: usize) -> Result<()
             .as_ref()
             .is_some_and(|snippet| !cdda_protocol::item_snippet_is_valid(snippet))
         || !cdda_protocol::valid_item_variables(&snapshot.variables)
+        || !cdda_protocol::item_degradation_matches_damage(&snapshot.variables, snapshot.raw_damage)
         || snapshot.melee_damage_milli.len() > 32
         || snapshot.melee_damage_milli.iter().any(|(kind, damage)| {
             kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) || *damage < 0
@@ -1396,7 +1399,7 @@ fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
         && !rules
             .flag_restrictions
             .iter()
-            .any(|restriction| restriction == cdda_protocol::SPAWN_POCKET_SINGLE_ITEM_MARKER)
+            .any(|restriction| cdda_protocol::is_reserved_spawn_pocket_marker(restriction))
         && rules
             .item_restrictions
             .windows(2)
@@ -1420,6 +1423,7 @@ fn valid_spawn_pocket_rules(rules: &cdda_protocol::SpawnPocketRulesV1) -> bool {
                     && rules.magazine_well_volume_milliliters == 0
                     && !rules.contents_collapsed_by_default
                     && !cdda_protocol::spawn_pocket_is_single_item(rules)
+                    && !cdda_protocol::spawn_pocket_is_open_container(rules)
             }
         }
 }
@@ -1690,6 +1694,10 @@ fn validate_item_component(
             .as_ref()
             .is_some_and(|snippet| !cdda_protocol::item_snippet_is_valid(snippet))
         || !cdda_protocol::valid_item_variables(&component.variables)
+        || !cdda_protocol::item_degradation_matches_damage(
+            &component.variables,
+            component.raw_damage,
+        )
         || component.count_by_charges != component.containment.count_by_charges
         || (component.count_by_charges && component.charges <= 0)
         || component.melee_damage_milli.len() > 32
@@ -13773,7 +13781,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV72");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV73");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -13915,14 +13923,14 @@ mod tests {
     ) -> WorldgenCatalogV1 {
         let mut cells = vec![
             cdda_protocol::WorldgenCellV1 {
-                terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
                     target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(0),
                     weight: 1,
-                }],
-                furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                }]],
+                furniture: vec![vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
                     target: cdda_protocol::WorldgenFurnitureTargetV1::None,
                     weight: 1,
-                }],
+                }]],
                 item_group: None,
             };
             cdda_protocol::WORLDGEN_CELLS_PER_OMT
@@ -13931,6 +13939,8 @@ mod tests {
             cells[0].item_group = Some(cdda_protocol::WorldgenItemGroupPlacementV1 {
                 group_id: group_id.to_owned(),
                 chance: 100,
+                repeat_minimum: 1,
+                repeat_maximum: 1,
             });
         }
         WorldgenCatalogV1 {
@@ -13962,7 +13972,16 @@ mod tests {
             regional_furniture: Vec::new(),
             omt_generators: vec![cdda_protocol::WorldgenOmtGeneratorV1 {
                 omt_id: String::from("field_test"),
-                templates: vec![cdda_protocol::WorldgenTemplateV1 { weight: 1, cells }],
+                templates: vec![cdda_protocol::WorldgenTemplateV1 {
+                    weight: 1,
+                    predecessor_id: None,
+                    cells,
+                    nested: Vec::new(),
+                    area_items: Vec::new(),
+                    erase_all_before_placing_terrain: false,
+                    deferred_fields: Vec::new(),
+                }],
+                nested_generators: Vec::new(),
             }],
         }
     }
@@ -29150,31 +29169,33 @@ mod tests {
         catalog.omt_generators[0].omt_id = String::from("field_a");
         let mut field_b_cells = vec![
             cdda_protocol::WorldgenCellV1 {
-                terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+                terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
                     target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(1),
                     weight: 1,
-                }],
-                furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+                }]],
+                furniture: vec![vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
                     target: cdda_protocol::WorldgenFurnitureTargetV1::None,
                     weight: 1,
-                }],
+                }]],
                 item_group: None,
             };
             cdda_protocol::WORLDGEN_CELLS_PER_OMT
         ];
         let source_marker = 5 * mapgen::OMT_TILE_WIDTH + 2;
         field_b_cells[source_marker] = cdda_protocol::WorldgenCellV1 {
-            terrain: vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
+            terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
                 target: cdda_protocol::WorldgenTerrainTargetV1::Prototype(2),
                 weight: 1,
-            }],
-            furniture: vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
+            }]],
+            furniture: vec![vec![cdda_protocol::WorldgenWeightedFurnitureTargetV1 {
                 target: cdda_protocol::WorldgenFurnitureTargetV1::Prototype(0),
                 weight: 1,
-            }],
+            }]],
             item_group: Some(cdda_protocol::WorldgenItemGroupPlacementV1 {
                 group_id: String::from("marker_group"),
                 chance: 100,
+                repeat_minimum: 1,
+                repeat_maximum: 1,
             }),
         };
         catalog
@@ -29183,8 +29204,14 @@ mod tests {
                 omt_id: String::from("field_b"),
                 templates: vec![cdda_protocol::WorldgenTemplateV1 {
                     weight: 1,
+                    predecessor_id: None,
                     cells: field_b_cells,
+                    nested: Vec::new(),
+                    area_items: Vec::new(),
+                    erase_all_before_placing_terrain: false,
+                    deferred_fields: Vec::new(),
                 }],
+                nested_generators: Vec::new(),
             });
         catalog.start_location = Some(cdda_protocol::WorldgenStartLocationV1 {
             start_location_id: String::from("sloc_field_b"),
@@ -29599,8 +29626,11 @@ mod tests {
         let catalog = test_worldgen_catalog(test_terrain("t_grass"), Some("field_loot"));
 
         let mut oversized_group = group.clone();
-        oversized_group.graph.nodes[0].entries[0].count_min = 114;
-        oversized_group.graph.nodes[0].entries[0].count_max = 114;
+        // The initial four-chunk transaction reaches 36 atomic placements:
+        // 36 * 911 = 32,796 objects, just beyond one 32,768-ID block while
+        // each individual group invocation remains valid.
+        oversized_group.graph.nodes[0].entries[0].count_min = 911;
+        oversized_group.graph.nodes[0].entries[0].count_max = 911;
         oversized_group.graph.nodes[0].entries[0].raw_damage =
             Some(cdda_protocol::InclusiveU16RangeV1 {
                 minimum: 0,

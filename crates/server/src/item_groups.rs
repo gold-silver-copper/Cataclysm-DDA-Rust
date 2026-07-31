@@ -12,19 +12,23 @@ use cdda_content::{
 use cdda_protocol::item_rot_state;
 use cdda_protocol::{
     AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, CraftItemPrototypeV1,
-    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE,
-    ITEM_ROT_TURNS_VARIABLE, ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS, InclusiveU16RangeV1,
-    ItemDescriptionExpansionV1, ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1,
-    ItemGroupChargeCapacityV1, ItemGroupChargeRangeV1, ItemGroupContainerV1,
-    ItemGroupContentsSourceV1, ItemGroupDefinitionV1, ItemGroupEntryV1, ItemGroupEventV1,
-    ItemGroupGraphV1, ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1,
-    ItemGroupOverflowV1, ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1,
-    ItemGroupVariantOptionV1, ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1,
-    ItemVariantV1, MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE,
-    SPAWN_POCKET_SINGLE_ITEM_MARKER, SpawnPocketKindV1, SpawnPocketRulesV1,
-    encode_item_group_dressing_marker, is_reserved_item_group_dressing_marker,
-    item_description_expansion_is_valid, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_pocket_insulation_variable_key,
+    ITEM_DEGRADATION_INCREMENTS_VARIABLE, ITEM_DEGRADATION_VARIABLE,
+    ITEM_GROUP_CORPSE_SOURCE_MONSTER_VARIABLE, ITEM_GROUP_GUN_FOULING_VARIABLE,
+    ITEM_ROT_SHELF_LIFE_TURNS_VARIABLE, ITEM_ROT_TURNS_VARIABLE,
+    ITEM_STATIC_CORPSE_SHELF_LIFE_TURNS, InclusiveU16RangeV1, ItemDescriptionExpansionV1,
+    ItemDescriptionSnippetCategoryV1, ItemDescriptionSnippetChoiceV1, ItemGroupChargeCapacityV1,
+    ItemGroupChargeRangeV1, ItemGroupContainerV1, ItemGroupContentsSourceV1, ItemGroupDefinitionV1,
+    ItemGroupDetachableStorageV1, ItemGroupEntryV1, ItemGroupEventV1, ItemGroupGraphV1,
+    ItemGroupItemPrototypeV1, ItemGroupKindV1, ItemGroupNodeV1, ItemGroupOverflowV1,
+    ItemGroupSourceV1, ItemGroupTargetV1, ItemGroupToolChargeStorageV1, ItemGroupVariantOptionV1,
+    ItemSnippetV1, ItemThermalPropertiesV1, ItemVariableValueV1, ItemVariantV1,
+    MAX_DESCRIPTION_SNIPPET_DEPTH, MAX_ITEM_RAW_DAMAGE, MAX_ITEM_VARIABLES,
+    SPAWN_POCKET_OPEN_CONTAINER_MARKER, SPAWN_POCKET_SINGLE_ITEM_MARKER, SpawnPocketKindV1,
+    SpawnPocketRulesV1, encode_item_group_custom_flag_marker, encode_item_group_dressing_marker,
+    is_reserved_item_group_internal_marker, item_description_expansion_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs,
+    item_pocket_insulation_variable_key, item_pocket_volume_multiplier_variable_key,
+    item_pocket_weight_multiplier_variable_key,
 };
 
 use super::{craft_item_group_prototype, craft_item_prototype, default_instance_charges};
@@ -567,20 +571,24 @@ pub(super) fn assert_regional_field_item_group_closure(
 fn runtime_spawn_pocket_item_restrictions(
     pocket: &StrictSpawnPocketDefinition,
 ) -> Option<Vec<String>> {
-    if pocket
-        .item_restrictions
-        .contains(SPAWN_POCKET_SINGLE_ITEM_MARKER)
-        || pocket
-            .flag_restrictions
-            .contains(SPAWN_POCKET_SINGLE_ITEM_MARKER)
-    {
+    if [
+        SPAWN_POCKET_SINGLE_ITEM_MARKER,
+        SPAWN_POCKET_OPEN_CONTAINER_MARKER,
+    ]
+    .into_iter()
+    .any(|marker| {
+        pocket.item_restrictions.contains(marker) || pocket.flag_restrictions.contains(marker)
+    }) {
         return None;
     }
     let mut restrictions = pocket.item_restrictions.iter().cloned().collect::<Vec<_>>();
     if pocket.single_item {
         restrictions.push(SPAWN_POCKET_SINGLE_ITEM_MARKER.to_owned());
-        restrictions.sort_unstable();
     }
+    if pocket.open_container {
+        restrictions.push(SPAWN_POCKET_OPEN_CONTAINER_MARKER.to_owned());
+    }
+    restrictions.sort_unstable();
     Some(restrictions)
 }
 
@@ -615,7 +623,7 @@ pub(super) fn runtime_ammunition_containers(
             let item_restrictions =
                 runtime_spawn_pocket_item_restrictions(pocket).ok_or_else(|| {
                     format!(
-                        "item {} spawn pocket {} collides with reserved single-item marker",
+                        "item {} spawn pocket {} collides with a reserved spawn-pocket marker",
                         item.id, pocket.pocket_index
                     )
                 })?;
@@ -993,6 +1001,21 @@ pub(super) fn runtime_named_item_group_catalog(
     Ok(catalog)
 }
 
+pub(super) fn runtime_named_item_group_catalogs<'a>(
+    group_ids: impl IntoIterator<Item = &'a str>,
+    item_groups: &ItemGroupRegistry,
+    content: RuntimeItemGroupContent<'_>,
+) -> Result<Vec<ItemGroupDefinitionV1>, Box<dyn std::error::Error>> {
+    let catalogs = group_ids
+        .into_iter()
+        .map(|group_id| {
+            let graph = item_groups.strict_graph(group_id)?;
+            runtime_named_item_group_catalog(&graph, content)
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    merge_item_group_catalogs(catalogs)
+}
+
 /// Finds the lowest named groups whose complete dependency closures fail
 /// protocol validation. This runs only on the error path and keeps production
 /// admission diagnostics tied to the actual semantic frontier instead of an
@@ -1065,7 +1088,7 @@ fn item_group_definition_references(definition: &ItemGroupDefinitionV1) -> BTree
                     let ItemGroupContentsSourceV1::Group(group_id) = source else {
                         return None;
                     };
-                    (!is_reserved_item_group_dressing_marker(group_id)).then_some(group_id.as_str())
+                    (!is_reserved_item_group_internal_marker(group_id)).then_some(group_id.as_str())
                 }))
         })
         .collect()
@@ -1169,9 +1192,9 @@ pub(super) fn runtime_item_group_graph(
     definition: &StrictItemGroupDefinition,
     content: RuntimeItemGroupContent<'_>,
 ) -> Result<ItemGroupGraphV1, Box<dyn std::error::Error>> {
-    if is_reserved_item_group_dressing_marker(&definition.id) {
+    if is_reserved_item_group_internal_marker(&definition.id) {
         return Err(format!(
-            "item group {} collides with the reserved dressing namespace",
+            "item group {} collides with the reserved internal namespace",
             definition.id
         )
         .into());
@@ -1331,6 +1354,7 @@ fn runtime_item_group_entry(
         || node.modifier_container.is_some()
         || node.modifier_sealed.is_some()
         || !node.contents.is_empty()
+        || !node.custom_flags.is_empty()
         || dressing_marker.is_some();
     let target = match &node.kind {
         StrictItemGroupNodeKind::Item(item_id) => {
@@ -1379,9 +1403,9 @@ fn runtime_item_group_entry(
                 )))
             }
             ItemGroupContentsSource::Group(group_id) => {
-                if is_reserved_item_group_dressing_marker(group_id) {
+                if is_reserved_item_group_internal_marker(group_id) {
                     return Err(format!(
-                        "item group {} contents reference {} collides with the reserved dressing namespace",
+                        "item group {} contents reference {} collides with the reserved internal namespace",
                         definition.id, group_id
                     )
                     .into());
@@ -1391,6 +1415,15 @@ fn runtime_item_group_entry(
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     if let Some(marker) = dressing_marker {
+        contents.push(ItemGroupContentsSourceV1::Group(marker));
+    }
+    for flag in &node.custom_flags {
+        let marker = encode_item_group_custom_flag_marker(flag).ok_or_else(|| {
+            format!(
+                "item group {} has invalid custom flag {flag}",
+                definition.id
+            )
+        })?;
         contents.push(ItemGroupContentsSourceV1::Group(marker));
     }
     Ok(ItemGroupEntryV1 {
@@ -1480,7 +1513,7 @@ fn runtime_item_group_item_inner(
     content: RuntimeItemGroupContent<'_>,
     default_container_stack: &mut Vec<String>,
 ) -> Result<ItemGroupItemPrototypeV1, Box<dyn std::error::Error>> {
-    let (charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
+    let (mut charges, minimum_one_charge) = runtime_item_group_charges(item, charges)?;
     let mut prototype = craft_item_group_prototype(
         item,
         default_instance_charges(item),
@@ -1489,15 +1522,36 @@ fn runtime_item_group_item_inner(
     )?;
     let corpse_source = runtime_static_corpse_identity(item, &mut prototype, content.monsters)?;
     validate_item_group_item_spawn(item, &prototype, false)?;
-    let modifier_side_effects_supported =
+    let mut modifier_side_effects_supported =
         validate_item_group_item_spawn(item, &prototype, true).is_ok();
     let tool_charge_storage = runtime_item_charge_storage(item, &prototype, content)?;
+    if charges.is_none() && item.subtypes.contains("MAGAZINE") && item.count > 0 {
+        charges = Some(ItemGroupChargeRangeV1 {
+            minimum: item.count,
+            maximum: item.count,
+        });
+    }
     let uses_ammunition_loading = item
         .subtypes
         .iter()
         .any(|subtype| matches!(subtype.as_str(), "TOOL" | "GUN" | "MAGAZINE"));
+    if uses_ammunition_loading
+        && tool_charge_storage.is_none()
+        && (!prototype.integral_magazines.is_empty() || !prototype.magazine_wells.is_empty())
+    {
+        // Multi-well and otherwise unresolved ammunition owners remain valid
+        // unmodified loot, while any item-group modifier fails closed before
+        // it can invent owner-local charge or dressing behavior.
+        modifier_side_effects_supported = false;
+    }
     let charges_supported = if uses_ammunition_loading {
-        tool_charge_storage.is_some()
+        matches!(
+            tool_charge_storage,
+            Some(
+                ItemGroupToolChargeStorageV1::Integral { .. }
+                    | ItemGroupToolChargeStorageV1::Detachable { .. }
+            )
+        )
     } else {
         item_group_charges_supported(item)
     };
@@ -1518,6 +1572,40 @@ fn runtime_item_group_item_inner(
             (key.clone(), value)
         })
         .collect::<BTreeMap<_, _>>();
+    let retains_gun_fouling = item.subtypes.contains("GUN")
+        && !item.flags.contains("PRIMITIVE_RANGED_WEAPON")
+        && !item.flags.contains("NON_FOULING");
+    if retains_gun_fouling
+        && initial_variables
+            .insert(
+                ITEM_GROUP_GUN_FOULING_VARIABLE.to_owned(),
+                ItemVariableValueV1::Integer(1),
+            )
+            .is_some()
+    {
+        return Err(format!(
+            "item group gun {} collides with reserved fouling metadata",
+            item.id
+        )
+        .into());
+    }
+    if item.category == "veh_parts" && !item.count_by_charges() {
+        for (key, value) in [
+            (
+                ITEM_DEGRADATION_INCREMENTS_VARIABLE,
+                ItemVariableValueV1::Integer(50),
+            ),
+            (ITEM_DEGRADATION_VARIABLE, ItemVariableValueV1::Integer(0)),
+        ] {
+            if initial_variables.insert(key.to_owned(), value).is_some() {
+                return Err(format!(
+                    "item group vehicle part {} collides with reserved degradation metadata",
+                    item.id
+                )
+                .into());
+            }
+        }
+    }
     if let Some(shelf_life_turns) =
         runtime_item_temperature_capability(item, content.materials)?.rot_shelf_life_turns
     {
@@ -1558,6 +1646,32 @@ fn runtime_item_group_item_inner(
             .into());
         }
     }
+    for pocket in &item.spawn_pockets {
+        for (bits, key) in [
+            (
+                pocket.volume_multiplier_f32_bits,
+                item_pocket_volume_multiplier_variable_key(pocket.pocket_index),
+            ),
+            (
+                pocket.weight_multiplier_f32_bits,
+                item_pocket_weight_multiplier_variable_key(pocket.pocket_index),
+            ),
+        ] {
+            if bits == 1.0_f32.to_bits() {
+                continue;
+            }
+            if initial_variables
+                .insert(key.clone(), ItemVariableValueV1::Integer(i64::from(bits)))
+                .is_some()
+            {
+                return Err(format!(
+                    "item group item {} collides with reserved pocket multiplier metadata {key}",
+                    item.id
+                )
+                .into());
+            }
+        }
+    }
     if let Some(corpse_source) = corpse_source
         && initial_variables
             .insert(
@@ -1568,6 +1682,13 @@ fn runtime_item_group_item_inner(
     {
         return Err(format!(
             "item group corpse {} collides with reserved constructor metadata",
+            item.id
+        )
+        .into());
+    }
+    if retains_gun_fouling && initial_variables.len() > MAX_ITEM_VARIABLES.saturating_sub(3) {
+        return Err(format!(
+            "item group gun {} leaves no bounded variable capacity for fouling state",
             item.id
         )
         .into());
@@ -1746,18 +1867,43 @@ fn runtime_item_charge_storage(
     if !uses_ammunition_loading {
         return Ok(None);
     }
-    if !item_group_charge_storage_owner_supported(item) {
-        // Pinned guns retain a separate owner-local/ammo_set transition and
-        // RNG schedule. Neither integral nor detachable gun charges can reuse
-        // the magazine/tool planner, so the complete gun family stays closed.
-        return Ok(None);
-    }
+    let has_single_integral =
+        prototype.integral_magazines.len() == 1 && prototype.magazine_wells.is_empty();
     if let [pocket] = prototype.integral_magazines.as_slice()
         && prototype.magazine_wells.is_empty()
     {
+        if !item_group_charge_storage_owner_supported(item, has_single_integral) {
+            return Ok(None);
+        }
         let ammunition =
             runtime_default_ammunition_prototype(item, &pocket.ammunition_type, content)?;
         return Ok(Some(ItemGroupToolChargeStorageV1::Integral { ammunition }));
+    }
+    if prototype.magazine_wells.len() > 1 {
+        if !prototype.integral_magazines.is_empty()
+            || prototype.magazine_wells.len() != item.magazine_wells.len()
+        {
+            return Ok(None);
+        }
+        let mut wells = Vec::new();
+        for (well, raw_well) in prototype.magazine_wells.iter().zip(&item.magazine_wells) {
+            if raw_well.pocket_index != well.pocket_index {
+                return Ok(None);
+            }
+            let Some(storage) = runtime_detachable_storage(item, well, raw_well, content)? else {
+                continue;
+            };
+            wells.push(storage);
+        }
+        return Ok(Some(ItemGroupToolChargeStorageV1::MultiDetachable {
+            wells,
+        }));
+    }
+    if !item_group_charge_storage_owner_supported(item, has_single_integral) {
+        // Detachable guns retain a distinct owner-local/ammo_set transition.
+        // Integral guns use the same explicit loaded-ammunition state and RNG
+        // phases as tools, so the generalized integral path is safe.
+        return Ok(None);
     }
     let ([well], [raw_well]) = (
         prototype.magazine_wells.as_slice(),
@@ -1765,10 +1911,26 @@ fn runtime_item_charge_storage(
     ) else {
         return Ok(None);
     };
-    if !prototype.integral_magazines.is_empty()
-        || raw_well.pocket_index != well.pocket_index
-        || raw_well.default_magazine.is_empty()
-    {
+    if !prototype.integral_magazines.is_empty() || raw_well.pocket_index != well.pocket_index {
+        return Ok(None);
+    }
+    let Some(storage) = runtime_detachable_storage(item, well, raw_well, content)? else {
+        return Ok(None);
+    };
+    Ok(Some(ItemGroupToolChargeStorageV1::Detachable {
+        well_pocket_index: storage.well_pocket_index,
+        magazine: storage.magazine,
+        ammunition: storage.ammunition,
+    }))
+}
+
+fn runtime_detachable_storage(
+    item: &ItemDefinition,
+    well: &cdda_protocol::MagazineWellPrototypeV1,
+    raw_well: &cdda_content::MagazineWellDefinition,
+    content: RuntimeItemGroupContent<'_>,
+) -> Result<Option<ItemGroupDetachableStorageV1>, Box<dyn std::error::Error>> {
+    if raw_well.default_magazine.is_empty() {
         return Ok(None);
     }
     let magazine_definition = content
@@ -1802,15 +1964,18 @@ fn runtime_item_charge_storage(
     validate_item_group_item_spawn(magazine_definition, &magazine, false)?;
     let ammunition =
         runtime_default_ammunition_prototype(item, &magazine_shape.ammunition_type, content)?;
-    Ok(Some(ItemGroupToolChargeStorageV1::Detachable {
+    Ok(Some(ItemGroupDetachableStorageV1 {
         well_pocket_index: well.pocket_index,
         magazine,
         ammunition: Box::new(ammunition),
     }))
 }
 
-fn item_group_charge_storage_owner_supported(item: &ItemDefinition) -> bool {
-    !item.subtypes.contains("GUN")
+fn item_group_charge_storage_owner_supported(
+    item: &ItemDefinition,
+    has_single_integral: bool,
+) -> bool {
+    !item.subtypes.contains("GUN") || has_single_integral
 }
 
 fn runtime_default_ammunition_prototype(
@@ -2144,10 +2309,14 @@ fn collect_description_category(
     if reachable.contains_key(category_id) || snippets.get(category_id).is_none() {
         return Ok(());
     }
-    if depth > MAX_DESCRIPTION_SNIPPET_DEPTH || !visiting.insert(category_id.to_owned()) {
-        return Err(
-            format!("cyclic or oversized description snippet category {category_id}").into(),
-        );
+    if depth > MAX_DESCRIPTION_SNIPPET_DEPTH {
+        return Err(format!("oversized description snippet category {category_id}").into());
+    }
+    if !visiting.insert(category_id.to_owned()) {
+        // Upstream permits probabilistically terminating recursive snippet
+        // categories such as `<name_b>`. The protocol validator proves that
+        // at least one bounded path terminates before runtime admission.
+        return Ok(());
     }
     let category = snippets
         .get(category_id)
@@ -2226,13 +2395,6 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    if item.subtypes.contains("MAGAZINE") && item.count > 0 {
-        return Err(format!(
-            "item group magazine {} requires unimplemented preloaded ammunition",
-            item.id
-        )
-        .into());
-    }
     const CONSTRUCTOR_RNG_FIELDS: &[&str] = &[
         "nanofab_template_group",
         "trait_group",
@@ -2277,20 +2439,9 @@ fn validate_item_group_item_spawn(
         )
         .into());
     }
-    if modifier_present && item.category == "veh_parts" && !item.count_by_charges() {
+    if item.unsupported_fields.contains("degradation_multiplier") {
         return Err(format!(
-            "item group modifier for {} requires unimplemented degradation state",
-            item.id
-        )
-        .into());
-    }
-    if modifier_present
-        && item.subtypes.contains("GUN")
-        && !item.flags.contains("PRIMITIVE_RANGED_WEAPON")
-        && !item.flags.contains("NON_FOULING")
-    {
-        return Err(format!(
-            "item group modifier for {} requires unimplemented gun dirt and fault state",
+            "item group item {} has an unsupported degradation multiplier",
             item.id
         )
         .into());
@@ -2422,6 +2573,7 @@ mod tests {
             modifier_container: None,
             modifier_sealed: None,
             contents: Vec::new(),
+            custom_flags: BTreeSet::new(),
             event: None,
         }
     }
@@ -2488,9 +2640,12 @@ mod tests {
                 flag_restrictions: BTreeSet::new(),
                 access_moves: 100,
                 insulation_f32_bits: 1.0_f32.to_bits(),
+                volume_multiplier_f32_bits: 1.0_f32.to_bits(),
+                weight_multiplier_f32_bits: 1.0_f32.to_bits(),
                 rigid: true,
                 watertight: false,
                 transparent: false,
+                open_container: false,
                 forbidden: false,
                 sealable: false,
                 single_item: false,
@@ -2501,7 +2656,7 @@ mod tests {
             runtime_ammunition_containers(&item)
                 .expect_err("reserved marker collisions must not erase canonical pockets")
                 .to_string(),
-            "item hostile_marker_collision spawn pocket 0 collides with reserved single-item marker"
+            "item hostile_marker_collision spawn pocket 0 collides with a reserved spawn-pocket marker"
         );
     }
 
@@ -2696,23 +2851,24 @@ mod tests {
     }
 
     #[test]
-    fn gun_charge_storage_stays_fail_closed_for_every_pocket_shape() {
+    fn gun_charge_storage_admits_integral_and_rejects_other_pocket_shapes() {
         let gun = ItemDefinition {
             id: String::from("test_detachable_gun"),
             subtypes: BTreeSet::from([String::from("GUN")]),
             ..ItemDefinition::default()
         };
         assert!(
-            !item_group_charge_storage_owner_supported(&gun),
-            "integral and detachable guns use distinct owner-local/ammo_set state and RNG semantics"
+            item_group_charge_storage_owner_supported(&gun, true),
+            "integral guns share the explicit loaded-ammunition state"
         );
+        assert!(!item_group_charge_storage_owner_supported(&gun, false));
 
         let tool = ItemDefinition {
             id: String::from("test_detachable_tool"),
             subtypes: BTreeSet::from([String::from("TOOL")]),
             ..ItemDefinition::default()
         };
-        assert!(item_group_charge_storage_owner_supported(&tool));
+        assert!(item_group_charge_storage_owner_supported(&tool, false));
     }
 
     #[test]

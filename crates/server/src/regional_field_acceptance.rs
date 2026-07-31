@@ -12,14 +12,14 @@ use cdda_conformance::{
 };
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
-    MapgenRegistry, OvermapTerrainRegistry, StartLocationRegistry, StrictItemGroupGraph,
+    ItemGroupRegistry, MapgenRegistry, OvermapTerrainRegistry, StartLocationRegistry,
     TerrainRegistry,
 };
 use cdda_persistence::{ReplayBundleV1, WorldStore};
 use cdda_protocol::{
     AccountId, AccountRole, ActorId, CharacterRequest, ClientCommand, ClientHello, CommandKind,
     CommandSequence, ContentIdentity, ControlMessage, EndpointIdentity, GAME_ALPN,
-    ReplicationSnapshotV1, SimTick, WorldPosition,
+    ReplicationSnapshotV1, SUBMAP_SIZE, SimTick, WorldPosition, WorldSnapshotV1,
 };
 use cdda_server::{
     AuthorizationChangeHub, ChatHub, CommittedEventHub, PersistenceHandle, PersistenceHost,
@@ -30,9 +30,10 @@ use cdda_server::{
 use cdda_sim::WorldState;
 use iroh::{Endpoint, EndpointAddr, SecretKey, endpoint::presets};
 
-use super::item_groups::{RuntimeItemGroupContent, runtime_named_item_group_catalog};
+use super::item_groups::{RuntimeItemGroupContent, runtime_named_item_group_catalogs};
 use super::worldgen::{
-    RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_worldgen,
+    RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_item_group_roots,
+    runtime_mapgen_worldgen,
 };
 use super::{PendingJournal, flush_journal, record_simulation_output, utc_now_seconds};
 
@@ -244,6 +245,60 @@ fn start_field_persistence_pump(
     (stop, pump)
 }
 
+fn is_passable_pavement(snapshot: &WorldSnapshotV1, position: WorldPosition) -> bool {
+    let (chunk_coord, local) = position.chunk_and_local();
+    let Some(chunk) = snapshot
+        .chunks
+        .iter()
+        .find(|chunk| chunk.coord == chunk_coord)
+    else {
+        return false;
+    };
+    let index = usize::from(local.y) * SUBMAP_SIZE as usize + usize::from(local.x);
+    chunk.tiles.get(index).is_some_and(|terrain| {
+        terrain.terrain_id.starts_with("t_pavement") && terrain.move_cost > 0
+    }) && chunk.furniture.get(index).is_some_and(|furniture| {
+        furniture
+            .as_ref()
+            .is_none_or(|furniture| furniture.move_cost_mod >= 0)
+    })
+}
+
+fn production_road_exploration_step(
+    snapshot: &WorldSnapshotV1,
+    occupied: Option<WorldPosition>,
+) -> Option<(WorldPosition, WorldPosition, i8, i8)> {
+    for chunk in &snapshot.chunks {
+        for local_y in 0..SUBMAP_SIZE {
+            for local_x in 0..SUBMAP_SIZE {
+                let start = WorldPosition {
+                    x: chunk
+                        .coord
+                        .x
+                        .checked_mul(SUBMAP_SIZE)?
+                        .checked_add(local_x)?,
+                    y: chunk
+                        .coord
+                        .y
+                        .checked_mul(SUBMAP_SIZE)?
+                        .checked_add(local_y)?,
+                    z: chunk.coord.z,
+                };
+                if occupied == Some(start) || !is_passable_pavement(snapshot, start) {
+                    continue;
+                }
+                for (dx, dy) in [(1_i8, 0_i8), (0, 1), (-1, 0), (0, -1)] {
+                    let target = start.checked_offset(dx, dy, 0)?;
+                    if occupied != Some(target) && is_passable_pavement(snapshot, target) {
+                        return Some((start, target, dx, dy));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn assert_two_client_field_path(
     item_groups: &[cdda_protocol::ItemGroupDefinitionV1],
     worldgen: &cdda_protocol::WorldgenCatalogV1,
@@ -323,16 +378,20 @@ fn assert_two_client_field_path(
         let corpse_id = corpse.item.id;
         let corpse_position = corpse.position;
         let nested_loot = corpse.item.ammunition_containers[0].contents[0].id;
+        let (road_start, road_target, road_dx, road_dy) =
+            production_road_exploration_step(&initial_snapshot, Some(corpse_position))
+                .expect("production world should expose adjacent passable pavement tiles");
         let alpha_actor = world
             .spawn_actor(corpse_position, false)
             .expect("alpha should spawn on the field corpse");
         let beta_actor = world
-            .spawn_actor_first_available(false)
-            .expect("beta should spawn at the field start");
+            .spawn_actor(road_start, false)
+            .expect("beta should spawn on the production road");
         let beta_initial_position = world
             .actor_snapshot(beta_actor)
             .expect("beta should exist")
             .position;
+        assert_eq!(beta_initial_position, road_start);
         store
             .create_character(
                 alpha_account,
@@ -440,7 +499,7 @@ fn assert_two_client_field_path(
         );
         assert!(
             beta.snapshot.controlled_actor.position == beta_initial_position,
-            "beta should enter at the production field start"
+            "beta should enter on production pavement"
         );
 
         write_control_frame(
@@ -517,8 +576,8 @@ fn assert_two_client_field_path(
                 sequence: CommandSequence(1),
                 client_tick: beta.snapshot.tick,
                 kind: CommandKind::Move {
-                    dx: 0,
-                    dy: 1,
+                    dx: road_dx,
+                    dy: road_dy,
                     dz: 0,
                 },
             }),
@@ -532,7 +591,10 @@ fn assert_two_client_field_path(
             |snapshot| snapshot.controlled_actor.position != beta_initial_position,
         )
         .await;
-        assert_ne!(explored.controlled_actor.position, beta_initial_position);
+        assert_eq!(
+            explored.controlled_actor.position, road_target,
+            "the normal client command should traverse adjacent production pavement"
+        );
         assert!(
             nested_removed
                 .controlled_actor
@@ -575,6 +637,15 @@ fn assert_two_client_field_path(
         .await
         .expect("both field actors should become disconnected");
         assert_eq!(disconnected.actors.len(), 2);
+        assert_eq!(
+            disconnected
+                .actors
+                .iter()
+                .find(|actor| actor.id == beta_actor)
+                .expect("disconnected beta should remain physically present")
+                .position,
+            road_target
+        );
         alpha.endpoint.close().await;
         beta.endpoint.close().await;
         server.close().await;
@@ -619,6 +690,14 @@ fn assert_two_client_field_path(
                 .canonical_hash()
                 .expect("checkpoint should hash")
         );
+        assert_eq!(
+            recovered
+                .actor_snapshot(beta_actor)
+                .expect("recovered beta should remain present")
+                .position,
+            road_target,
+            "SQLite recovery should preserve the production-road exploration step"
+        );
         let encoded = postcard::to_stdvec(
             &recovered_store
                 .export_replay(content.clone())
@@ -637,12 +716,20 @@ fn assert_two_client_field_path(
                 .canonical_hash()
                 .expect("recovered field should hash again")
         );
+        assert_eq!(
+            replayed
+                .actor_snapshot(beta_actor)
+                .expect("replayed beta should remain present")
+                .position,
+            road_target,
+            "portable replay should preserve the production-road exploration step"
+        );
     });
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn assert_production_regional_field_gameplay(
-    field_graph: &StrictItemGroupGraph,
+    item_groups: &ItemGroupRegistry,
     item_group_content: RuntimeItemGroupContent<'_>,
     overmap_terrain: &OvermapTerrainRegistry,
     start_locations: &StartLocationRegistry,
@@ -652,13 +739,18 @@ pub(super) fn assert_production_regional_field_gameplay(
     terrain: &TerrainRegistry,
     furniture: &FurnitureRegistry,
 ) {
-    let production_field_catalog =
-        runtime_named_item_group_catalog(field_graph, item_group_content)
-            .expect("production field catalog should normalize");
     let (production_overmap, cities, road_exits) =
         bootstrap_regional_road_overmap(overmap_terrain, [31; 32], city_settings)
             .expect("regional road overmap should normalize");
     assert_eq!(road_exits.len(), 3);
+    let mapgen_item_group_roots = runtime_mapgen_item_group_roots(&production_overmap, mapgen)
+        .expect("production mapgen item-group roots should resolve");
+    let production_field_catalog = runtime_named_item_group_catalogs(
+        mapgen_item_group_roots.iter().map(String::as_str),
+        item_groups,
+        item_group_content,
+    )
+    .expect("production mapgen item-group closures should normalize");
     let production_field_worldgen = runtime_mapgen_worldgen(
         production_overmap,
         cities,
@@ -667,6 +759,7 @@ pub(super) fn assert_production_regional_field_gameplay(
             .expect("field start should exist"),
         RuntimeMapgenContent {
             mapgen,
+            overmap_terrain,
             regions,
             terrain,
             furniture,
@@ -721,6 +814,13 @@ pub(super) fn assert_production_regional_field_gameplay(
         .spawn_actor_first_available(true)
         .expect("second field actor should spawn");
     let production_field_snapshot = production_field.snapshot();
+    let (_, production_road_target, _, _) =
+        production_road_exploration_step(&production_field_snapshot, None)
+            .expect("production initial bubble should contain traversable road pavement");
+    assert!(is_passable_pavement(
+        &production_field_snapshot,
+        production_road_target
+    ));
     fn collect_item_types(
         item: &cdda_protocol::ItemSnapshot,
         item_types: &mut std::collections::BTreeSet<String>,
@@ -769,7 +869,20 @@ pub(super) fn assert_production_regional_field_gameplay(
         })
         .map(|ground| ground.item.type_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(production_field_snapshot.ground_items.len(), 59);
+    assert_eq!(
+        production_field_snapshot.ground_items.len(),
+        48,
+        "production ground items were {:?}",
+        production_field_snapshot
+            .ground_items
+            .iter()
+            .map(|ground| (
+                ground.position.x,
+                ground.position.y,
+                ground.item.type_id.as_str(),
+            ))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(nested_ground_items, ["corpse_generic_male"]);
     assert_eq!(
         second_field_actor.counter(),
@@ -877,18 +990,28 @@ pub(super) fn assert_production_regional_field_gameplay(
         (direct_field.final_state_hash, direct_field.event_trace_hash),
         (
             [
-                0x7b, 0xa9, 0x46, 0x89, 0x89, 0xab, 0x15, 0x9d, 0x59, 0xf2, 0x0f, 0x06, 0x51, 0x33,
-                0xc0, 0x8a, 0xa7, 0x96, 0xce, 0x3c, 0x55, 0xa4, 0x0d, 0x61, 0x1a, 0xee, 0x28, 0xad,
-                0x01, 0x79, 0x77, 0x78,
+                0xb8, 0x1e, 0xf5, 0x02, 0xd8, 0xde, 0xdb, 0xf9, 0xd6, 0xe5, 0xcc, 0x87, 0xb4, 0xd3,
+                0x41, 0x5d, 0xe4, 0x2e, 0xdf, 0xd5, 0x3b, 0x2a, 0xa6, 0x1c, 0xd5, 0x78, 0x56, 0x11,
+                0x8f, 0x44, 0xd9, 0xba,
             ],
             [
-                0xf3, 0x0e, 0x04, 0x53, 0x11, 0xd9, 0x76, 0xb1, 0x28, 0xbb, 0x69, 0x6d, 0xd9, 0x71,
-                0x51, 0xed, 0xe4, 0xc8, 0xcc, 0x75, 0xf3, 0x56, 0x5d, 0xa9, 0x50, 0x3c, 0x3e, 0x0d,
-                0xbf, 0x5f, 0xf7, 0x0c,
+                0x54, 0x08, 0x4d, 0x59, 0xe3, 0x67, 0xee, 0x8d, 0xcd, 0xfb, 0xa8, 0x4f, 0xe4, 0x2e,
+                0x46, 0xb2, 0x64, 0x63, 0x03, 0xcc, 0x41, 0x16, 0x8b, 0xe0, 0x62, 0x59, 0xdd, 0xab,
+                0xe8, 0x6d, 0xce, 0xfd,
             ],
         )
     );
-    assert_eq!(direct_field.final_snapshot.chunks.len(), 208);
+    assert_eq!(
+        direct_field.final_snapshot.chunks.len(),
+        168,
+        "production chunk coordinates were {:?}",
+        direct_field
+            .final_snapshot
+            .chunks
+            .iter()
+            .map(|chunk| chunk.coord)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(direct_field.final_snapshot.actors.len(), 2);
     assert!(
         direct_field

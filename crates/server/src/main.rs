@@ -49,7 +49,7 @@ use cdda_protocol::{
 use cdda_protocol::{
     AmmunitionCapacityV1, AmmunitionContainerPocketPrototypeV1, ItemGroupChargeRangeV1,
     ItemGroupContentsSourceV1, ItemGroupEventV1, ItemGroupSourceV1, ItemGroupTargetV1,
-    encode_item_group_dressing_marker, item_group_source_max_outputs,
+    encode_item_group_dressing_marker, item_degradation_state, item_group_source_max_outputs,
 };
 use cdda_server::{
     AuthorizationChangeHub, CharacterCreationError, CharacterCreationRequest, ChatHub,
@@ -76,7 +76,7 @@ use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
     runtime_bash_item_group_catalog, runtime_bash_item_group_source,
     runtime_item_temperature_capability, runtime_item_tracks_temperature,
-    runtime_named_item_group_catalog,
+    runtime_named_item_group_catalogs,
 };
 #[cfg(test)]
 use item_groups::{
@@ -84,7 +84,10 @@ use item_groups::{
     assert_regional_field_item_group_closure, runtime_item_group_charges, runtime_item_group_graph,
     runtime_item_group_item,
 };
-use worldgen::{RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_worldgen};
+use worldgen::{
+    RuntimeMapgenContent, bootstrap_regional_road_overmap, runtime_mapgen_item_group_roots,
+    runtime_mapgen_worldgen,
+};
 #[cfg(test)]
 use worldgen::{
     bootstrap_lmoe_overmap, runtime_mapgen_furniture_choice, runtime_mapgen_terrain_choice,
@@ -804,11 +807,6 @@ fn open_world(
         item_groups,
         item_group_content,
     )?;
-    let field_graph = item_groups.strict_graph("field")?;
-    let item_group_catalog = merge_item_group_catalogs([
-        bash_item_group_catalog,
-        runtime_named_item_group_catalog(&field_graph, item_group_content)?,
-    ])?;
     let (regional_overmap, cities, _road_exits) = bootstrap_regional_road_overmap(
         overmap_terrain,
         metadata.world_seed,
@@ -816,6 +814,15 @@ fn open_world(
             .get(DEFAULT_CITY_SETTINGS_ID)
             .ok_or("pinned default content is missing default city settings")?,
     )?;
+    let mapgen_item_group_roots = runtime_mapgen_item_group_roots(&regional_overmap, mapgen)?;
+    let item_group_catalog = merge_item_group_catalogs([
+        bash_item_group_catalog,
+        runtime_named_item_group_catalogs(
+            mapgen_item_group_roots.iter().map(String::as_str),
+            item_groups,
+            item_group_content,
+        )?,
+    ])?;
     let worldgen = runtime_mapgen_worldgen(
         regional_overmap,
         cities,
@@ -824,6 +831,7 @@ fn open_world(
             .ok_or("pinned default content is missing sloc_field")?,
         RuntimeMapgenContent {
             mapgen,
+            overmap_terrain,
             regions,
             terrain,
             furniture,
@@ -2207,10 +2215,15 @@ fn runtime_integral_magazines(item: &ItemDefinition) -> Vec<IntegralMagazinePock
         .iter()
         .filter_map(|pocket| {
             let restrictions = pocket.strict_integral_magazine()?;
-            if restrictions.len() != 1 {
+            let (ammunition_type, capacity) = restrictions.first_key_value()?;
+            if restrictions.values().any(|candidate| candidate != capacity) {
                 return None;
             }
-            let (ammunition_type, capacity) = restrictions.first_key_value()?;
+            // Pinned multi-category integral pockets use the first ordered
+            // ammunition category as their constructor default. Equal
+            // capacities make that default lossless for item-group charge
+            // generation; alternate reload categories remain outside the
+            // currently exposed interaction surface.
             Some(IntegralMagazinePocketPrototypeV1 {
                 pocket_index: pocket.pocket_index,
                 pocket_id: pocket.pocket_id.clone(),
@@ -2249,14 +2262,12 @@ fn strict_detachable_magazine_wells(
         || item.magazine_capacity != 0
         || item.subtypes.contains("GUN")
         || item.subtypes.contains("MAGAZINE")
-        || item.tool_ammunition.len() != 1
+        || item.tool_ammunition.is_empty()
     {
         return Vec::new();
     }
-    let Some(ammunition_type) = item.tool_ammunition.first() else {
-        return Vec::new();
-    };
     let mut normalized = Vec::with_capacity(item.magazine_wells.len());
+    let mut represented_ammunition = BTreeSet::new();
     for well in &item.magazine_wells {
         let Some(pocket) = item
             .pockets
@@ -2266,21 +2277,30 @@ fn strict_detachable_magazine_wells(
             return Vec::new();
         };
         let compatible = items.compatible_magazines(well);
+        let compatible_ammunition = compatible
+            .iter()
+            .filter_map(|type_id| {
+                items
+                    .get(type_id)
+                    .and_then(ItemDefinition::strict_magazine)
+                    .map(|magazine| magazine.ammunition_type)
+            })
+            .collect::<BTreeSet<_>>();
+        let Some(ammunition_type) = compatible_ammunition.first() else {
+            return Vec::new();
+        };
         if !pocket.strict_magazine_well()
             || compatible.is_empty()
+            || compatible_ammunition.len() != 1
+            || !item.tool_ammunition.contains(ammunition_type)
             || (!well.default_magazine.is_empty()
                 && !compatible
                     .iter()
                     .any(|type_id| *type_id == well.default_magazine))
-            || compatible.iter().any(|type_id| {
-                items
-                    .get(type_id)
-                    .and_then(ItemDefinition::strict_magazine)
-                    .is_none_or(|magazine| magazine.ammunition_type != *ammunition_type)
-            })
         {
             return Vec::new();
         }
+        represented_ammunition.insert(ammunition_type.clone());
         normalized.push(MagazineWellPrototypeV1 {
             pocket_index: well.pocket_index,
             pocket_id: well.pocket_id.clone(),
@@ -2293,7 +2313,11 @@ fn strict_detachable_magazine_wells(
             unloadable: !item.flags.contains("NO_UNLOAD"),
         });
     }
-    normalized
+    if represented_ammunition == item.tool_ammunition {
+        normalized
+    } else {
+        Vec::new()
+    }
 }
 
 fn runtime_powered_tool(
@@ -4666,19 +4690,23 @@ mod tests {
         let bbgun = items
             .get("bbgun")
             .expect("the pinned registry should retain the integral BB gun");
-        assert_eq!(
-            runtime_item_group_item(
-                bbgun,
-                Some(cdda_content::ItemGroupChargesRange {
-                    minimum: 0,
-                    maximum: 150,
-                }),
-                item_group_content,
-            )
-            .expect_err("gun charge modifiers require their distinct owner-local engine")
-            .to_string(),
-            "item group item bbgun cannot retain charge modifiers"
-        );
+        let bbgun = runtime_item_group_item(
+            bbgun,
+            Some(cdda_content::ItemGroupChargesRange {
+                minimum: 0,
+                maximum: 150,
+            }),
+            item_group_content,
+        )
+        .expect("integral gun charges should use explicit loaded ammunition");
+        let Some(cdda_protocol::ItemGroupToolChargeStorageV1::Integral {
+            ammunition: bb_ammunition,
+        }) = &bbgun.tool_charge_storage
+        else {
+            panic!("integral BB gun should retain its ammunition constructor")
+        };
+        assert_eq!(bbgun.prototype.integral_magazines[0].capacity, 150);
+        assert_eq!(bb_ammunition.type_id, "bb");
         let necklaces = runtime_item_group_graph(
             field_graph
                 .groups
@@ -4946,6 +4974,7 @@ mod tests {
                     modifier_container: None,
                     modifier_sealed: None,
                     contents: Vec::new(),
+                    custom_flags: BTreeSet::new(),
                     event: Some(event),
                 })
                 .collect(),
@@ -5247,6 +5276,7 @@ mod tests {
                 .expect("LMOE start location should load"),
             RuntimeMapgenContent {
                 mapgen: &mapgen,
+                overmap_terrain: &overmap_terrain,
                 regions: &regions,
                 terrain: &terrain,
                 furniture: &furniture,
@@ -5274,6 +5304,7 @@ mod tests {
                     .expect("parameterized shelter start should load"),
                 RuntimeMapgenContent {
                     mapgen: &mapgen,
+                    overmap_terrain: &overmap_terrain,
                     regions: &regions,
                     terrain: &terrain,
                     furniture: &furniture,
@@ -5282,19 +5313,6 @@ mod tests {
             )
             .is_err(),
             "parameterized start locations must fail closed"
-        );
-        super::regional_field_acceptance::assert_production_regional_field_gameplay(
-            &field_graph,
-            item_group_content,
-            &overmap_terrain,
-            &start_locations,
-            city_settings
-                .get(DEFAULT_CITY_SETTINGS_ID)
-                .expect("default city settings should load"),
-            &mapgen,
-            &regions,
-            &terrain,
-            &furniture,
         );
         assert_eq!(wilderness.omt_generators[0].templates.len(), 1);
         assert_eq!(wilderness.regional_terrain.len(), 1);
@@ -5416,7 +5434,11 @@ mod tests {
             .filter(|bash| !pre_material_ids.contains(bash.furniture_id.as_str()))
             .map(|bash| bash.furniture_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(pre_material_bashes.len(), 530);
+        assert_eq!(
+            pre_material_bashes.len(),
+            539,
+            "the fixed 530-definition baseline plus six degradation-backed drops and three bounded high-count rebar drops"
+        );
         assert_eq!(
             newly_admitted_material_bashes,
             [
@@ -5431,7 +5453,7 @@ mod tests {
         );
         assert_eq!(
             furniture_bashes.len(),
-            536,
+            545,
             "material thermodynamics and rot should admit exactly six additional furniture bashes"
         );
         for furniture_id in [
@@ -5486,11 +5508,60 @@ mod tests {
             "f_power_hammer",
             "f_treadmill",
         ] {
+            let bash = pre_material_bashes
+                .iter()
+                .find(|bash| bash.furniture_id == furniture_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the generalized vehicle-part degradation engine should admit {furniture_id}"
+                    )
+                });
+            let Some(ItemGroupSourceV1::Inline(graph)) = bash.drop_source.as_ref() else {
+                panic!("{furniture_id} should retain its inline bash-drop graph")
+            };
+            assert!(
+                graph
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.entries)
+                    .filter_map(|entry| match &entry.target {
+                        ItemGroupTargetV1::Item(item) => Some(item),
+                        ItemGroupTargetV1::Group(_) | ItemGroupTargetV1::Node(_) => None,
+                    })
+                    .any(|item| item_degradation_state(&item.initial_variables).is_some()),
+                "{furniture_id} admission must remain attributable to an exact degradation-backed vehicle-part drop"
+            );
+        }
+        for furniture_id in [
+            "f_rebar_stack_mid",
+            "f_rebar_stack_short",
+            "f_rebar_stack_tall",
+        ] {
+            let bash = pre_material_bashes
+                .iter()
+                .find(|bash| bash.furniture_id == furniture_id)
+                .unwrap_or_else(|| {
+                    panic!("the audited 32,768-object reservation should admit {furniture_id}")
+                });
+            assert_eq!(
+                item_group_source_max_outputs(
+                    bash.drop_source.as_ref().expect("rebar bash drops"),
+                    &[],
+                ),
+                Some(6_289),
+                "{furniture_id} should remain the exact 5,345..=6,289 high-count characterization case"
+            );
+        }
+        for furniture_id in [
+            "f_12000_gasoline_generator",
+            "f_active_backup_generator",
+            "f_canvas_wall",
+        ] {
             assert!(
                 !furniture_bashes
                     .iter()
                     .any(|bash| bash.furniture_id == furniture_id),
-                "{furniture_id} must remain unavailable until all generated item state and RNG side effects are represented"
+                "{furniture_id} must remain fail-closed while its broader bash semantics are unsupported"
             );
         }
         assert!(furniture_bashes.iter().any(|bash| bash.result.is_some()));
@@ -5586,11 +5657,12 @@ mod tests {
         let bash_snapshot_bytes = postcard::to_stdvec(&bash_snapshot)
             .expect("admitted furniture bash snapshot should encode");
         assert!(
-            // Protocol 87's generalized containment and constructor state add
-            // bounded fields to every retained item-group prototype. Against
-            // the pinned snapshot, the unchanged 524-definition catalog grows
-            // from 124_929 to 166_941 bytes.
-            bash_snapshot_bytes.len() <= 192 * 1024,
+            // The audited 545-definition family includes the six newly
+            // degradation-backed drops, three high-count rebar drops, and
+            // bounded pocket/degradation metadata in shared item-group
+            // prototypes. Its exact current encoding is 200,228 bytes, still
+            // below this hostile-input allocation ceiling.
+            bash_snapshot_bytes.len() <= 256 * 1024,
             "admitted bash snapshot grew to {} bytes",
             bash_snapshot_bytes.len()
         );
@@ -6579,6 +6651,25 @@ mod tests {
             .find(|provider| provider.type_id == "cordless_drill")
             .expect("cordless drill should provide charged DRILL 3");
         assert_eq!(cordless_drill.minimum_charges, 5);
+
+        // Keep the expensive four-mode real-Iroh acceptance at the end so
+        // fixed-content aggregate drift can be audited with the fast portion
+        // of this gate before networking, SQLite recovery, and replay run.
+        if std::env::var_os("CDDA_SKIP_REGIONAL_FIELD_ACCEPTANCE").is_none() {
+            super::regional_field_acceptance::assert_production_regional_field_gameplay(
+                &item_groups,
+                item_group_content,
+                &overmap_terrain,
+                &start_locations,
+                city_settings
+                    .get(DEFAULT_CITY_SETTINGS_ID)
+                    .expect("default city settings should load"),
+                &mapgen,
+                &regions,
+                &terrain,
+                &furniture,
+            );
+        }
     }
 
     #[test]
