@@ -11,7 +11,8 @@ use rand_core::Rng;
 
 use crate::{
     SimError, UNARMED_DAMAGE, WorldState, combat::ActorDamageUnit, horizontal_distance_squared,
-    horizontally_adjacent, ranged_distance, ranged_sound_description,
+    horizontally_adjacent, mapgen::creature_spawn_from_worldgen, ranged_distance,
+    ranged_sound_description,
 };
 
 fn insert_whole_creature_effect(
@@ -588,6 +589,13 @@ impl WorldState {
                     // polymorph clears the current turn's moves.
                     return Ok(0);
                 }
+                WorldgenMonsterSpecialAttackKindV1::Spell => self.execute_creature_summon_spell(
+                    source,
+                    visible_target,
+                    profile,
+                    sequence,
+                    events,
+                )?,
             };
             if !used {
                 continue;
@@ -613,6 +621,104 @@ impl WorldState {
                 .ok_or(SimError::NumericOverflow)?;
         }
         Ok(total_cost)
+    }
+
+    fn execute_creature_summon_spell(
+        &mut self,
+        source: CreatureId,
+        visible_target: Option<(ActorId, WorldPosition)>,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<bool, SimError> {
+        let origin = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?
+            .position;
+        let center = if profile.spell_target_self {
+            origin
+        } else {
+            let Some((target, target_position)) = visible_target else {
+                return Ok(false);
+            };
+            if self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
+                || ranged_distance(origin, target_position) > profile.range
+                || !self.has_clear_shot(origin, target_position)
+            {
+                return Ok(false);
+            }
+            target_position
+        };
+        let prototype = self
+            .worldgen
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .monster_prototypes
+                    .binary_search_by(|prototype| {
+                        prototype
+                            .base
+                            .monster_type_id
+                            .as_str()
+                            .cmp(&profile.spell_summoned_monster_type_id)
+                    })
+                    .ok()
+                    .and_then(|index| catalog.monster_prototypes.get(index))
+            })
+            .cloned()
+            .ok_or(SimError::InvalidCreature)?;
+        let radius = i32::from(profile.spell_aoe);
+        let mut candidates = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let Some(x) = center.x.checked_add(dx) else {
+                    continue;
+                };
+                let Some(y) = center.y.checked_add(dy) else {
+                    continue;
+                };
+                let position = WorldPosition { x, y, z: center.z };
+                if ranged_distance(center, position) <= u32::from(profile.spell_aoe)
+                    && self.is_passable(position)
+                    && self.actor_at(position).is_none()
+                    && self.creature_at(position).is_none()
+                {
+                    candidates.push(position);
+                }
+            }
+        }
+        candidates.sort_unstable();
+        let mut rng = self.named_rng(b"creature-special-summon", &[source.as_u128()], sequence);
+        let requested = if profile.spell_random_summons {
+            roll_inclusive_u32(
+                u32::from(profile.spell_minimum_summons),
+                u32::from(profile.spell_maximum_summons),
+                &mut rng,
+            )?
+        } else {
+            u32::from(profile.spell_minimum_summons)
+        };
+        let actual = usize::try_from(requested)
+            .map_err(|_| SimError::NumericOverflow)?
+            .min(candidates.len());
+        if self.allocator.remaining() < u64::try_from(actual).unwrap_or(u64::MAX) {
+            return Err(SimError::IdReservationExhausted);
+        }
+        for _ in 0..actual {
+            let index = usize::try_from(rng.next_u64() % candidates.len() as u64)
+                .map_err(|_| SimError::NumericOverflow)?;
+            let position = candidates.remove(index);
+            let creature_id =
+                self.spawn_creature(creature_spawn_from_worldgen(&prototype, position))?;
+            events.push(self.make_event(WorldEventKind::CreatureSummoned {
+                caster: source,
+                creature_id,
+                monster_type_id: prototype.base.monster_type_id.clone(),
+                position,
+            })?);
+        }
+        Ok(true)
     }
 
     fn execute_creature_polymorph(

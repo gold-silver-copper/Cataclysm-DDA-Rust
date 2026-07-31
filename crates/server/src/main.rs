@@ -17,7 +17,7 @@ use cdda_content::{
     ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
     MonsterDefinition, MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry,
     OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
-    SkillRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    SkillRegistry, SpellRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -128,6 +128,7 @@ struct RuntimeWorldContent<'a> {
     materials: &'a MaterialRegistry,
     item_groups: &'a ItemGroupRegistry,
     monsters: &'a MonsterRegistry,
+    spells: &'a SpellRegistry,
     monster_groups: &'a MonsterGroupRegistry,
     fields: &'a FieldTypeRegistry,
     bash_profiles: &'a BashDamageProfileRegistry,
@@ -305,6 +306,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let spells =
+        SpellRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
     let anatomy = AnatomyRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -466,6 +469,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             materials: &materials,
             item_groups: &item_groups,
             monsters: &monsters,
+            spells: &spells,
             monster_groups: &monster_groups,
             fields: &fields,
             bash_profiles: &bash_profiles,
@@ -813,6 +817,7 @@ fn open_world(
     )?;
     let item_groups = content.item_groups;
     let monsters = content.monsters;
+    let spells = content.spells;
     let monster_groups = content.monster_groups;
     let fields = content.fields;
     let bash_profiles = content.bash_profiles;
@@ -924,6 +929,7 @@ fn open_world(
             ammunition_effects: content.ammunition_effects,
             fields,
             monsters,
+            spells,
             monster_groups,
             eoc_definitions: &eoc_catalog.0,
         },
@@ -4704,6 +4710,8 @@ mod tests {
                 .expect("description snippets should load");
         let monsters = MonsterRegistry::load_selected(&manifest, content_root, &mods, &enabled)
             .expect("monsters should load");
+        let spells = SpellRegistry::load_selected(&manifest, content_root, &mods, &enabled)
+            .expect("spells should load");
         let monster_groups =
             MonsterGroupRegistry::load_selected(&manifest, content_root, &mods, &enabled)
                 .expect("monster groups should load");
@@ -5394,6 +5402,7 @@ mod tests {
                 ammunition_effects: &AmmunitionEffectRegistry::default(),
                 fields: &fields,
                 monsters: &monsters,
+                spells: &spells,
                 monster_groups: &monster_groups,
                 eoc_definitions: &[],
             },
@@ -5430,6 +5439,7 @@ mod tests {
                     ammunition_effects: &AmmunitionEffectRegistry::default(),
                     fields: &fields,
                     monsters: &monsters,
+                    spells: &spells,
                     monster_groups: &monster_groups,
                     eoc_definitions: &[],
                 },
@@ -6783,6 +6793,7 @@ mod tests {
                 &item_groups,
                 item_group_content,
                 &monster_groups,
+                &spells,
                 &overmap_terrain,
                 &start_locations,
                 city_settings

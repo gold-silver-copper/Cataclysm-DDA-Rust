@@ -5,7 +5,7 @@ use cdda_content::{
     FieldTypeRegistry, FurnitureRegistry, ItemRegistry, MapgenCoordinateRange, MapgenIdChoice,
     MapgenRegistry, MonsterGroupRegistry, MonsterGroupTarget, MonsterRegistry,
     MonsterSpecialAttackKind, OvermapSpecialDefinition, OvermapSpecialRegistry,
-    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition,
+    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition, SpellRegistry,
     StartLocationDefinition, StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice,
     StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
@@ -506,6 +506,7 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub ammunition_effects: &'a AmmunitionEffectRegistry,
     pub fields: &'a FieldTypeRegistry,
     pub monsters: &'a MonsterRegistry,
+    pub spells: &'a SpellRegistry,
     pub monster_groups: &'a MonsterGroupRegistry,
     pub eoc_definitions: &'a [EocDefinitionV1],
 }
@@ -529,6 +530,18 @@ struct RuntimeMonsterGunProfile {
     no_damage_scaling: bool,
     blinds_eyes: bool,
     target_moving_vehicles: bool,
+}
+
+#[derive(Clone)]
+struct RuntimeMonsterSpellProfile {
+    summoned_monster_type_id: String,
+    target_self: bool,
+    minimum_summons: u16,
+    maximum_summons: u16,
+    random_summons: bool,
+    range: u32,
+    aoe: u8,
+    casting_time_moves: u32,
 }
 
 fn runtime_monster_gun_profile(
@@ -912,6 +925,137 @@ fn monster_firearm_sound_volume(
     Ok(u16::try_from(volume)?)
 }
 
+fn rounded_millionths_product(level: u32, increment_millionths: i64) -> Option<i64> {
+    let product = i128::from(level).checked_mul(i128::from(increment_millionths))?;
+    let quotient = product / 1_000_000;
+    let remainder = product % 1_000_000;
+    let rounded = if remainder.unsigned_abs() >= 500_000 {
+        quotient.checked_add(if product.is_negative() { -1 } else { 1 })?
+    } else {
+        quotient
+    };
+    i64::try_from(rounded).ok()
+}
+
+fn finalized_spell_stat(
+    minimum: i32,
+    maximum: i32,
+    increment_millionths: i64,
+    level: u32,
+) -> Option<i32> {
+    let value =
+        i64::from(minimum).checked_add(rounded_millionths_product(level, increment_millionths)?)?;
+    let clamped = if minimum <= maximum {
+        value.min(i64::from(maximum))
+    } else {
+        value.max(i64::from(maximum))
+    };
+    i32::try_from(clamped).ok()
+}
+
+fn runtime_monster_spell_profile(
+    attack: &cdda_content::MonsterSpecialAttackDefinition,
+    spells: &SpellRegistry,
+) -> Result<Option<RuntimeMonsterSpellProfile>, Box<dyn std::error::Error>> {
+    if attack.kind != MonsterSpecialAttackKind::Spell {
+        return Ok(None);
+    }
+    let spell = spells.get(&attack.spell_id).ok_or_else(|| {
+        format!(
+            "monster spell actor references unknown SPELL {}",
+            attack.spell_id
+        )
+    })?;
+    if !spell.supports_hostile_permanent_summoning()
+        || attack.spell_min_level > 1_000
+        || attack
+            .spell_max_level
+            .is_some_and(|maximum| maximum > 1_000)
+        || attack
+            .spell_max_level
+            .is_some_and(|maximum| maximum != attack.spell_min_level)
+        || attack.spell_min_level > u32::try_from(spell.maximum_level.max(0))?
+    {
+        return Ok(None);
+    }
+    let target_self = attack.spell_hit_self || attack.spell_allow_no_target;
+    if (target_self && !spell.valid_targets.contains("self"))
+        || (!target_self
+            && !spell.valid_targets.contains("hostile")
+            && !spell.valid_targets.contains("ground"))
+        || (target_self
+            && attack.condition.as_ref().is_some_and(|condition| {
+                cdda_protocol::eoc_condition_requires_target_context(
+                    &crate::eocs::runtime_condition(condition),
+                )
+            }))
+    {
+        return Ok(None);
+    }
+    let level = attack.spell_min_level;
+    let leveled_summons = finalized_spell_stat(
+        spell.minimum_summons,
+        spell.maximum_summons,
+        spell.summon_increment_millionths,
+        level,
+    );
+    let range = finalized_spell_stat(
+        spell.minimum_range,
+        spell.maximum_range,
+        spell.range_increment_millionths,
+        level,
+    );
+    let aoe = finalized_spell_stat(
+        spell.minimum_aoe,
+        spell.maximum_aoe,
+        spell.aoe_increment_millionths,
+        level,
+    );
+    let casting_time = finalized_spell_stat(
+        spell.base_casting_time_moves,
+        spell.final_casting_time_moves,
+        spell.casting_time_increment_millionths,
+        level,
+    );
+    let Some((leveled_summons, range, aoe, casting_time)) = leveled_summons
+        .zip(range)
+        .zip(aoe)
+        .zip(casting_time)
+        .map(|(((summons, range), aoe), casting_time)| (summons, range, aoe, casting_time))
+    else {
+        return Ok(None);
+    };
+    let random_summons = spell.flags.contains("RANDOM_DAMAGE");
+    let (minimum_summons, maximum_summons) = if random_summons {
+        (
+            leveled_summons.min(spell.maximum_summons),
+            leveled_summons.max(spell.maximum_summons),
+        )
+    } else {
+        (leveled_summons, leveled_summons)
+    };
+    if !(1..=64).contains(&minimum_summons)
+        || !(minimum_summons..=64).contains(&maximum_summons)
+        || !(0..=1_000).contains(&range)
+        || !(1..=32).contains(&aoe)
+        || !(0..=1_000_000_000).contains(&casting_time)
+        || (target_self && range != 0)
+        || (!target_self && range == 0)
+    {
+        return Ok(None);
+    }
+    Ok(Some(RuntimeMonsterSpellProfile {
+        summoned_monster_type_id: spell.summoned_monster_type_id.clone(),
+        target_self,
+        minimum_summons: u16::try_from(minimum_summons)?,
+        maximum_summons: u16::try_from(maximum_summons)?,
+        random_summons,
+        range: u32::try_from(range)?,
+        aoe: u8::try_from(aoe)?,
+        casting_time_moves: u32::try_from(casting_time)?,
+    }))
+}
+
 fn runtime_monster_catalog(
     roots: BTreeSet<String>,
     mut monster_ids: BTreeSet<String>,
@@ -920,6 +1064,7 @@ fn runtime_monster_catalog(
     items: &ItemRegistry,
     ammunition_effects: &AmmunitionEffectRegistry,
     fields: &FieldTypeRegistry,
+    spells: &SpellRegistry,
     creature_eoc_ids: &BTreeSet<String>,
 ) -> Result<
     (
@@ -980,28 +1125,41 @@ fn runtime_monster_catalog(
         );
     }
     monster_ids.remove("mon_null");
-    let mut polymorph_dependencies = monster_ids.iter().cloned().collect::<VecDeque<_>>();
-    while let Some(monster_id) = polymorph_dependencies.pop_front() {
+    let mut monster_dependencies = monster_ids.iter().cloned().collect::<VecDeque<_>>();
+    while let Some(monster_id) = monster_dependencies.pop_front() {
         let monster = monsters
             .get(&monster_id)
             .ok_or_else(|| format!("monster group references unknown MONSTER {monster_id}"))?;
-        for target_id in monster
+        for attack in monster
             .special_attacks
             .values()
-            .filter(|attack| {
-                attack.is_fully_supported() && attack.kind == MonsterSpecialAttackKind::Polymorph
-            })
-            .map(|attack| &attack.polymorph_monster_type_id)
+            .filter(|attack| attack.is_fully_supported())
         {
-            if monsters.get(target_id).is_none() {
+            let target_id = match attack.kind {
+                MonsterSpecialAttackKind::Polymorph => {
+                    Some(attack.polymorph_monster_type_id.clone())
+                }
+                MonsterSpecialAttackKind::Spell => runtime_monster_spell_profile(attack, spells)?
+                    .map(|profile| profile.summoned_monster_type_id),
+                MonsterSpecialAttackKind::Melee
+                | MonsterSpecialAttackKind::Bite
+                | MonsterSpecialAttackKind::Leap
+                | MonsterSpecialAttackKind::Eoc
+                | MonsterSpecialAttackKind::Gun
+                | MonsterSpecialAttackKind::Unsupported => None,
+            };
+            let Some(target_id) = target_id else {
+                continue;
+            };
+            if monsters.get(&target_id).is_none() {
                 return Err(format!(
-                    "monster {} polymorph actor references unknown MONSTER {target_id}",
+                    "monster {} special actor references unknown MONSTER {target_id}",
                     monster.id
                 )
                 .into());
             }
             if monster_ids.insert(target_id.clone()) {
-                polymorph_dependencies.push_back(target_id.clone());
+                monster_dependencies.push_back(target_id);
             }
         }
     }
@@ -1148,6 +1306,21 @@ fn runtime_monster_catalog(
                         .insert(format!("special_attacks.{}.gun_runtime_context", attack.id));
                 }
             }
+            let mut spell_profiles = BTreeMap::new();
+            for attack in monster.special_attacks.values().filter(|attack| {
+                attack.is_fully_supported()
+                    && creature_eoc_context_is_supported(attack)
+                    && attack.kind == MonsterSpecialAttackKind::Spell
+            }) {
+                if let Some(profile) = runtime_monster_spell_profile(attack, spells)? {
+                    spell_profiles.insert(attack.id.clone(), profile);
+                } else {
+                    deferred_behavior_fields.insert(format!(
+                        "special_attacks.{}.spell_runtime_context",
+                        attack.id
+                    ));
+                }
+            }
             let special_attacks = monster
                 .special_attacks
                 .values()
@@ -1156,6 +1329,8 @@ fn runtime_monster_catalog(
                         && creature_eoc_context_is_supported(attack)
                         && (attack.kind != MonsterSpecialAttackKind::Gun
                             || gun_profiles.contains_key(&attack.id))
+                        && (attack.kind != MonsterSpecialAttackKind::Spell
+                            || spell_profiles.contains_key(&attack.id))
                 })
                 .map(|attack| {
                     let kind = match attack.kind {
@@ -1169,6 +1344,9 @@ fn runtime_monster_catalog(
                         MonsterSpecialAttackKind::Polymorph => {
                             WorldgenMonsterSpecialAttackKindV1::Polymorph
                         }
+                        MonsterSpecialAttackKind::Spell => {
+                            WorldgenMonsterSpecialAttackKindV1::Spell
+                        }
                         MonsterSpecialAttackKind::Unsupported => {
                             return Err(
                                 "unsupported special attack reached runtime admission".into()
@@ -1176,13 +1354,15 @@ fn runtime_monster_catalog(
                         }
                     };
                     let gun_profile = gun_profiles.get(&attack.id);
+                    let spell_profile = spell_profiles.get(&attack.id);
                     Ok(WorldgenMonsterSpecialAttackV1 {
                         attack_id: attack.id.clone(),
                         kind,
                         cooldown_turns: attack.cooldown_turns,
-                        move_cost_moves: attack.move_cost_moves,
+                        move_cost_moves: spell_profile
+                            .map_or(attack.move_cost_moves, |profile| profile.casting_time_moves),
                         accuracy: attack.accuracy,
-                        range: attack.range,
+                        range: spell_profile.map_or(attack.range, |profile| profile.range),
                         no_adjacent: attack.no_adjacent,
                         dodgeable: attack.dodgeable,
                         minimum_damage_multiplier_millionths: attack
@@ -1256,6 +1436,17 @@ fn runtime_monster_catalog(
                         polymorph_keep_aggression: attack.kind
                             == MonsterSpecialAttackKind::Polymorph
                             && attack.polymorph_keep_aggression,
+                        spell_summoned_monster_type_id: spell_profile
+                            .map(|profile| profile.summoned_monster_type_id.clone())
+                            .unwrap_or_default(),
+                        spell_target_self: spell_profile.is_some_and(|profile| profile.target_self),
+                        spell_minimum_summons: spell_profile
+                            .map_or(0, |profile| profile.minimum_summons),
+                        spell_maximum_summons: spell_profile
+                            .map_or(0, |profile| profile.maximum_summons),
+                        spell_random_summons: spell_profile
+                            .is_some_and(|profile| profile.random_summons),
+                        spell_aoe: spell_profile.map_or(0, |profile| profile.aoe),
                         gun_type_id: gun_profile
                             .map(|_| attack.gun_type_id.clone())
                             .unwrap_or_default(),
@@ -1604,6 +1795,7 @@ pub(super) fn runtime_mapgen_worldgen(
         ammunition_effects,
         fields,
         monsters,
+        spells,
         monster_groups,
         eoc_definitions,
     } = content;
@@ -1763,6 +1955,7 @@ pub(super) fn runtime_mapgen_worldgen(
             items,
             ammunition_effects,
             fields,
+            spells,
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
         )?;
 
@@ -2715,10 +2908,11 @@ mod tests {
     use std::path::Path;
 
     use cdda_content::{
-        CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID, DEFAULT_RIVER_SETTINGS_ID,
-        DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemGroupRegistry, ItemRegistry,
-        MapgenRegistry, ModCatalog, MonsterGroupRegistry, MonsterRegistry, OvermapTerrainRegistry,
-        RiverSettingsRegistry, StartLocationRegistry, TerrainRegistry,
+        AmmunitionEffectRegistry, CitySettingsRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
+        DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry, FieldTypeRegistry,
+        FurnitureRegistry, ItemGroupRegistry, ItemRegistry, MapgenRegistry, ModCatalog,
+        MonsterGroupRegistry, MonsterRegistry, OvermapTerrainRegistry, RiverSettingsRegistry,
+        SpellRegistry, StartLocationRegistry, TerrainRegistry,
     };
     use cdda_protocol::{
         ItemGroupDefinitionV1, ItemGroupGraphV1, ItemGroupKindV1, ItemGroupNodeV1, WorldPosition,
@@ -2745,6 +2939,8 @@ mod tests {
         let items = ItemRegistry::load_selected(&manifest, root, &mods, &enabled).expect("items");
         let monsters =
             MonsterRegistry::load_selected(&manifest, root, &mods, &enabled).expect("monsters");
+        let spells =
+            SpellRegistry::load_selected(&manifest, root, &mods, &enabled).expect("spells");
         let monster_groups = MonsterGroupRegistry::load_selected(&manifest, root, &mods, &enabled)
             .expect("monster groups");
         let mapgen = MapgenRegistry::load_selected(
@@ -2853,6 +3049,7 @@ mod tests {
                 ammunition_effects: &AmmunitionEffectRegistry::default(),
                 fields: &FieldTypeRegistry::default(),
                 monsters: &monsters,
+                spells: &spells,
                 monster_groups: &monster_groups,
                 eoc_definitions: &[],
             },

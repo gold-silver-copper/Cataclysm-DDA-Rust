@@ -23,6 +23,7 @@ mod region;
 mod river;
 mod skill;
 mod snippet;
+mod spell;
 mod start_location;
 mod terrain;
 
@@ -136,6 +137,7 @@ pub use snippet::{
     DescriptionSnippetCategory, DescriptionSnippetChoice, DescriptionSnippetRegistry,
     DescriptionSnippetRegistryError,
 };
+pub use spell::{SpellDefinition, SpellEffectKind, SpellRegistry, SpellRegistryError};
 pub use start_location::{
     DEFAULT_START_LOCATION_MAX_Z, DEFAULT_START_LOCATION_MIN_Z, InclusiveI32Interval,
     MAX_START_LOCATION_FLAGS, MAX_START_LOCATION_ID_BYTES, MAX_START_LOCATION_NAME_BYTES,
@@ -523,6 +525,7 @@ fn definition_support(kind: &str) -> SupportStatus {
             | "construction_group"
             | "field_type"
             | "item_group"
+            | "SPELL"
     ) {
         SupportStatus::LoaderImplemented
     } else {
@@ -545,6 +548,7 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "recipe" && recipe::recipe_field_is_implemented(field))
         || (kind == "requirement" && recipe::requirement_field_is_implemented(field))
         || (kind == "skill" && skill::field_is_implemented(field))
+        || (kind == "SPELL" && spell::field_is_implemented(field))
     {
         SupportStatus::LoaderImplemented
     } else if kind == "item_group" {

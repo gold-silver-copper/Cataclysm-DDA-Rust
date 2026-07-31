@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 124,
-  "persistence_schema_version": 102,
+  "protocol_version": 125,
+  "persistence_schema_version": 103,
   "replay_format_version": 3,
   "active_milestone": "monsters",
   "completion_gate": [
@@ -481,7 +481,8 @@
         { "id": "range-selected-firing-modes-and-bounded-bursts", "state": "implementation_complete_verification_deferred" },
         { "id": "stable-identity-polymorph-special-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "target-context-eoc-special-actors", "state": "implementation_complete_verification_deferred" },
-        { "id": "spell-special-actors", "state": "planned" }
+        { "id": "permanent-hostile-summon-spell-special-actors", "state": "implementation_complete_verification_deferred" },
+        { "id": "damage-effect-and-extra-chain-spell-special-actors", "state": "planned" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],

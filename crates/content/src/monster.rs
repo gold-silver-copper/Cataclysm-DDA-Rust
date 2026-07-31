@@ -93,6 +93,7 @@ pub enum MonsterSpecialAttackKind {
     Eoc,
     Gun,
     Polymorph,
+    Spell,
     Unsupported,
 }
 
@@ -137,6 +138,15 @@ pub struct MonsterSpecialAttackDefinition {
     pub polymorph_keep_speed: bool,
     pub polymorph_keep_hp: bool,
     pub polymorph_keep_aggression: bool,
+    /// Fake-spell reference compiled against the selected SPELL catalog by the
+    /// server. The content layer retains the actor contract without guessing
+    /// unsupported spell effects.
+    pub spell_id: String,
+    pub spell_hit_self: bool,
+    pub spell_once_in: u32,
+    pub spell_min_level: u32,
+    pub spell_max_level: Option<u32>,
+    pub spell_allow_no_target: bool,
     pub gun_type_id: String,
     pub gun_ammunition_type_id: String,
     pub gun_fake_skills: BTreeMap<String, u16>,
@@ -195,6 +205,12 @@ impl MonsterSpecialAttackDefinition {
                             .unwrap_or(0)))
             && (self.kind != MonsterSpecialAttackKind::Polymorph
                 || !self.polymorph_monster_type_id.is_empty())
+            && (self.kind != MonsterSpecialAttackKind::Spell
+                || (!self.spell_id.is_empty()
+                    && self.spell_once_in == 1
+                    && self
+                        .spell_max_level
+                        .is_none_or(|maximum| maximum >= self.spell_min_level)))
     }
 }
 
@@ -773,6 +789,12 @@ fn unsupported_special_attack(id: &str, field: &str) -> MonsterSpecialAttackDefi
         polymorph_keep_speed: false,
         polymorph_keep_hp: false,
         polymorph_keep_aggression: false,
+        spell_id: String::new(),
+        spell_hit_self: false,
+        spell_once_in: 1,
+        spell_min_level: 0,
+        spell_max_level: None,
+        spell_allow_no_target: false,
         gun_type_id: String::new(),
         gun_ammunition_type_id: String::new(),
         gun_fake_skills: BTreeMap::new(),
@@ -820,6 +842,7 @@ fn parse_special_attack(
         "eoc" => MonsterSpecialAttackKind::Eoc,
         "gun" => MonsterSpecialAttackKind::Gun,
         "polymorph_special" => MonsterSpecialAttackKind::Polymorph,
+        "spell" => MonsterSpecialAttackKind::Spell,
         "monster_attack" => base
             .map(|base| base.kind)
             .unwrap_or(MonsterSpecialAttackKind::Unsupported),
@@ -836,7 +859,7 @@ fn parse_special_attack(
     if declared_type != "monster_attack"
         && !matches!(
             declared_type,
-            "melee" | "bite" | "leap" | "eoc" | "gun" | "polymorph_special"
+            "melee" | "bite" | "leap" | "eoc" | "gun" | "polymorph_special" | "spell"
         )
     {
         attack
@@ -931,6 +954,37 @@ fn parse_special_attack(
         attack.polymorph_keep_hp = true;
         attack.polymorph_keep_aggression = true;
     }
+    if kind == MonsterSpecialAttackKind::Spell
+        && base.is_none_or(|base| base.kind != MonsterSpecialAttackKind::Spell)
+    {
+        attack.move_cost_moves = 0;
+        attack.accuracy = None;
+        // The selected SPELL definition owns the effective range. A positive
+        // placeholder keeps the generic actor bounds valid until compilation.
+        attack.range = 1;
+        attack.no_adjacent = false;
+        attack.dodgeable = false;
+        attack.minimum_damage_multiplier_millionths = 0;
+        attack.maximum_damage_multiplier_millionths = 0;
+        attack.damage.clear();
+        attack.effects.clear();
+        attack.effects_require_damage = false;
+        attack.infection_chance_millionths = 0;
+        attack.eoc_ids.clear();
+        attack.polymorph_monster_type_id.clear();
+        attack.polymorph_keep_speed = false;
+        attack.polymorph_keep_hp = false;
+        attack.polymorph_keep_aggression = false;
+        attack.spell_id.clear();
+        attack.spell_hit_self = false;
+        attack.spell_once_in = 1;
+        attack.spell_min_level = 0;
+        attack.spell_max_level = None;
+        attack.spell_allow_no_target = false;
+        attack.gun_type_id.clear();
+        attack.gun_ammunition_type_id.clear();
+        attack.gun_ranges.clear();
+    }
     if let Some(value) = fields.get("move_cost") {
         attack.move_cost_moves = parse_u32(value, source, "special_attacks.move_cost")?;
     }
@@ -1003,6 +1057,82 @@ fn parse_special_attack(
             attack.unsupported_fields.insert(String::from("eoc"));
         } else {
             attack.eoc_ids = eoc_ids;
+        }
+    }
+    if kind == MonsterSpecialAttackKind::Spell {
+        if let Some(spell_data) = fields.get("spell_data") {
+            let spell_data = spell_data
+                .as_object()
+                .ok_or_else(|| invalid(source, "special_attacks.spell_data"))?;
+            if let Some(value) = spell_data.get("id") {
+                attack.spell_id = value
+                    .as_str()
+                    .filter(|id| {
+                        !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| invalid(source, "special_attacks.spell_data.id"))?
+                    .to_owned();
+            } else if base.is_none() || attack.spell_id.is_empty() {
+                return Err(invalid(source, "special_attacks.spell_data.id"));
+            }
+            if let Some(value) = spell_data.get("hit_self") {
+                attack.spell_hit_self = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(source, "special_attacks.spell_data.hit_self"))?;
+            }
+            if let Some(value) = spell_data.get("once_in") {
+                attack.spell_once_in =
+                    parse_u32(value, source, "special_attacks.spell_data.once_in")?;
+            }
+            if let Some(value) = spell_data.get("min_level") {
+                attack.spell_min_level =
+                    parse_u32(value, source, "special_attacks.spell_data.min_level")?;
+            }
+            if let Some(value) = spell_data.get("max_level") {
+                attack.spell_max_level = Some(parse_u32(
+                    value,
+                    source,
+                    "special_attacks.spell_data.max_level",
+                )?);
+            }
+            for field in spell_data.keys().filter(|field| !field.starts_with("//")) {
+                if !matches!(
+                    field.as_str(),
+                    "id" | "hit_self"
+                        | "once_in"
+                        | "min_level"
+                        | "max_level"
+                        | "message"
+                        | "npc_message"
+                ) {
+                    attack
+                        .unsupported_fields
+                        .insert(format!("spell_data.{field}"));
+                }
+            }
+            if spell_data.contains_key("level") {
+                attack
+                    .unsupported_fields
+                    .insert(String::from("spell_data.bounds"));
+            }
+        } else if base.is_none_or(|base| base.kind != MonsterSpecialAttackKind::Spell)
+            || attack.spell_id.is_empty()
+        {
+            return Err(invalid(source, "special_attacks.spell_data"));
+        }
+        if attack.spell_once_in != 1
+            || attack
+                .spell_max_level
+                .is_some_and(|maximum| maximum < attack.spell_min_level)
+        {
+            attack
+                .unsupported_fields
+                .insert(String::from("spell_data.bounds"));
+        }
+        if let Some(value) = fields.get("allow_no_target") {
+            attack.spell_allow_no_target = value
+                .as_bool()
+                .ok_or_else(|| invalid(source, "special_attacks.allow_no_target"))?;
         }
     }
     if kind == MonsterSpecialAttackKind::Gun {
@@ -1248,6 +1378,7 @@ fn parse_special_attack(
         "failure_msg",
         "no_ammo_sound",
         "targeting_sound",
+        "monster_message",
     ];
     const IMPLEMENTED: &[&str] = &[
         "type",
@@ -1306,6 +1437,7 @@ fn parse_special_attack(
         "poly_keep_speed",
         "poly_keep_hp",
         "poly_keep_anger",
+        "spell_data",
     ];
     for field in fields.keys().filter(|field| !field.starts_with("//")) {
         if COSMETIC_FIELDS.contains(&field.as_str()) {
@@ -1380,11 +1512,13 @@ fn parse_special_attack(
         "poly_keep_hp",
         "poly_keep_anger",
     ];
+    const SPELL_ONLY_FIELDS: &[&str] = &["spell_data"];
     let inapplicable = match kind {
         MonsterSpecialAttackKind::Leap => MELEE_ONLY_FIELDS,
         MonsterSpecialAttackKind::Melee | MonsterSpecialAttackKind::Bite => LEAP_ONLY_FIELDS,
         MonsterSpecialAttackKind::Eoc | MonsterSpecialAttackKind::Gun => &[],
         MonsterSpecialAttackKind::Polymorph => &[],
+        MonsterSpecialAttackKind::Spell => &[],
         MonsterSpecialAttackKind::Unsupported => &[],
     };
     attack.unsupported_fields.extend(
@@ -1406,6 +1540,27 @@ fn parse_special_attack(
                 .iter()
                 .chain(LEAP_ONLY_FIELDS)
                 .chain(GUN_ONLY_FIELDS)
+                .copied()
+                .chain(["move_cost", "range", "eoc"])
+                .filter(|field| fields.contains_key(*field))
+                .map(str::to_owned),
+        );
+    }
+    if kind != MonsterSpecialAttackKind::Spell {
+        attack.unsupported_fields.extend(
+            SPELL_ONLY_FIELDS
+                .iter()
+                .filter(|field| fields.contains_key(**field))
+                .map(|field| (*field).to_owned()),
+        );
+    } else {
+        attack.unsupported_fields.extend(
+            MELEE_ONLY_FIELDS
+                .iter()
+                .chain(LEAP_ONLY_FIELDS)
+                .filter(|field| !matches!(**field, "allow_no_target"))
+                .chain(GUN_ONLY_FIELDS)
+                .chain(POLYMORPH_ONLY_FIELDS)
                 .copied()
                 .chain(["move_cost", "range", "eoc"])
                 .filter(|field| fields.contains_key(*field))

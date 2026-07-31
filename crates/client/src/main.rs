@@ -4444,6 +4444,9 @@ fn event_message(event: &WorldEvent) -> String {
             to_type_id,
             ..
         } => format!("A creature changed from {from_type_id} into {to_type_id}."),
+        WorldEventKind::CreatureSummoned {
+            monster_type_id, ..
+        } => format!("A creature summoned {monster_type_id}."),
         WorldEventKind::CreatureBashed {
             target_type_id,
             success,

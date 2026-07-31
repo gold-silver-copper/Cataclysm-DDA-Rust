@@ -5068,6 +5068,7 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::CreatureCorpseCreated { .. }
         | WorldEventKind::CreatureRevived { .. }
         | WorldEventKind::CreaturePolymorphed { .. }
+        | WorldEventKind::CreatureSummoned { .. }
         | WorldEventKind::CreatureBashed { .. }
         | WorldEventKind::CreatureOpenedTerrain { .. }
         | WorldEventKind::FieldIntensityChanged { .. } => false,

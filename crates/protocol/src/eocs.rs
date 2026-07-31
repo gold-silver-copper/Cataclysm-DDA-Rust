@@ -493,6 +493,11 @@ fn condition_requires_target_context(condition: &EocConditionV1) -> bool {
     }
 }
 
+#[must_use]
+pub fn eoc_condition_requires_target_context(condition: &EocConditionV1) -> bool {
+    condition_requires_target_context(condition)
+}
+
 fn effects_require_target_context(effects: &[EocEffectV1]) -> bool {
     effects.iter().any(|effect| match effect {
         EocEffectV1::AddTargetEffect { .. }

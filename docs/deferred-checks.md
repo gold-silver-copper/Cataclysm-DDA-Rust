@@ -43,8 +43,11 @@ Run only when the user explicitly requests a verification checkpoint.
   exact keep-speed/HP/aggression overrides, stable creature identity, target
   special-cooldown reset, authoritative transform events, beta/target effect and
   variable conditions/mutations, no-target root rejection, target-context
-  reference closure, and combat scenarios at protocol 124/schema 102,
-  CanonicalStateV100, canonical-event-V24.
+  reference closure, permanent hostile summon SPELL inheritance/stat scaling,
+  self/hostile targeting, bounded deterministic placement, transitive summoned
+  prototype closure, stable IDs and authoritative summon events, and combat
+  scenarios at protocol 125/schema 103, CanonicalStateV101,
+  canonical-event-V25.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
   possible-value selection traces, strict
@@ -67,8 +70,8 @@ Run only when the user explicitly requests a verification checkpoint.
   creature effect expiry and unsafe target-context/delayed graph rejection,
   two-client item activation, target/beta effect and variable reads and writes,
   target-context reference closure, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 124/schema 102, CanonicalStateV100,
-  canonical-event-V24, and
+  expiry, stale-response, protocol 125/schema 103, CanonicalStateV101,
+  canonical-event-V25, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, stationary/disconnected

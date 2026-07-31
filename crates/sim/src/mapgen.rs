@@ -349,7 +349,7 @@ fn plan_omt_cell(
     })
 }
 
-fn creature_spawn_from_worldgen(
+pub(super) fn creature_spawn_from_worldgen(
     prototype: &cdda_protocol::WorldgenMonsterPrototypeV1,
     position: WorldPosition,
 ) -> CreatureSpawn {

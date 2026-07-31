@@ -13,7 +13,7 @@ use cdda_conformance::{
 use cdda_content::{
     CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry,
     ItemGroupRegistry, MapgenRegistry, MonsterGroupRegistry, OvermapTerrainRegistry,
-    RiverSettingsDefinition, StartLocationRegistry, TerrainRegistry,
+    RiverSettingsDefinition, SpellRegistry, StartLocationRegistry, TerrainRegistry,
 };
 use cdda_persistence::{ReplayBundleV1, WorldStore};
 use cdda_protocol::{
@@ -732,6 +732,7 @@ pub(super) fn assert_production_regional_field_gameplay(
     item_groups: &ItemGroupRegistry,
     item_group_content: RuntimeItemGroupContent<'_>,
     monster_groups: &MonsterGroupRegistry,
+    spells: &SpellRegistry,
     overmap_terrain: &OvermapTerrainRegistry,
     start_locations: &StartLocationRegistry,
     city_settings: &CitySettingsDefinition,
@@ -772,6 +773,7 @@ pub(super) fn assert_production_regional_field_gameplay(
             ammunition_effects: &cdda_content::AmmunitionEffectRegistry::default(),
             fields: &cdda_content::FieldTypeRegistry::default(),
             monsters: item_group_content.monsters,
+            spells,
             monster_groups,
             eoc_definitions: &[],
         },
