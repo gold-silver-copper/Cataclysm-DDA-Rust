@@ -2,7 +2,7 @@
   "format_version": 2,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
   "green_parent_commit": "40037fbb1db9eaac8d4889b811d29f8c00380e6b",
-  "verified_commit": null,
+  "verified_commit": "38ff729d97e073473bb26b4a9b8b28ac573ed29a",
   "protocol_version": 95,
   "persistence_schema_version": 73,
   "replay_format_version": 3,

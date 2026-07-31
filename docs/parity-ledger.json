@@ -93,7 +93,7 @@
       "direct_rust_cpp_comparison": ["crates/tools/src/cpp_oracle.rs"],
       "four_mode_conformance": ["crates/server/src/regional_field_acceptance.rs", "crates/conformance/src/lib.rs"],
       "runtime_content_admission": ["crates/server/src/worldgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/regional_field_acceptance.rs"],
-      "authoritative_client_path": ["crates/client/src/main.rs"]
+      "authoritative_client_path": ["crates/server/src/regional_field_acceptance.rs", "crates/client/src/main.rs"]
     }
   ],
   "milestones": [
@@ -198,7 +198,7 @@
       "rust_paths": ["crates/content/src/region.rs", "crates/content/src/mapgen.rs", "crates/content/src/item_group.rs", "crates/content/src/item.rs", "crates/content/src/material.rs", "crates/protocol/src/item_groups.rs", "crates/sim/src/items.rs", "crates/sim/src/mapgen.rs", "crates/server/src/item_groups.rs", "crates/server/src/worldgen.rs", "crates/server/src/regional_field_acceptance.rs", "crates/server/src/main.rs", "crates/client/src/main.rs"],
       "scenario_families": ["recursive-regional-pseudo-substitution", "production-field-base-loot-closure", "multi-pocket-selection-and-general-containment", "perishable-food-and-static-corpse-rot", "insulated-container-metadata", "two-client-exploration-nested-loot-disconnect-sqlite-and-portable-replay"],
       "differential_oracle": "verified",
-      "multiplayer_adaptation": "The server generates the production regional field continuously, allocates stable identities for all loot, preserves nested ownership and world-time rot, and reproduces the same two-client trace through snapshot, SQLite recovery, and portable replay.",
+      "multiplayer_adaptation": "The server generates the production regional field continuously, allocates stable identities for all loot, preserves nested ownership and world-time rot, serves two independently authenticated Iroh clients, and reproduces the same authoritative gameplay through snapshot, SQLite recovery, and portable replay.",
       "unlocks": ["ordinary field surface", "runtime-usable default regional content", "forest-city-road-river population substrate"]
     },
     {
