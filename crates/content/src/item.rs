@@ -62,6 +62,7 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "dispersion",
     "loudness",
     "skill",
+    "modes",
     "ammo_effects",
     "effects",
     "damage",
@@ -200,6 +201,9 @@ pub struct ItemDefinition {
     pub dispersion: i32,
     /// Final inherited gun-skill identity used by authoritative fake shooters.
     pub gun_skill: String,
+    /// Final inherited firing modes keyed by stable mode identity. Cosmetic
+    /// names are discarded; shot count and behavior flags remain explicit.
+    pub gun_modes: BTreeMap<String, GunModeDefinition>,
     /// Final inherited projectile effect identities. Consumers admit only the
     /// effect subset whose impact semantics they execute.
     pub ammunition_effects: BTreeSet<String>,
@@ -239,6 +243,12 @@ pub struct ItemDefinition {
     pub variables: BTreeMap<String, ItemVariableValueDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GunModeDefinition {
+    pub shot_count: u16,
+    pub flags: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1256,6 +1266,7 @@ fn apply_common_fields(
     apply_integer(object, "range", &mut item.range, source)?;
     apply_integer(object, "dispersion", &mut item.dispersion, source)?;
     apply_string(object, "skill", &mut item.gun_skill, source)?;
+    apply_gun_modes(object, item, source)?;
     apply_string_set(object, "ammo_effects", &mut item.ammunition_effects, source)?;
     if item.subtypes.contains("AMMO") {
         apply_string_set(object, "effects", &mut item.ammunition_effects, source)?;
@@ -1672,6 +1683,82 @@ fn apply_item_variables(
             Ok((key.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>, ItemRegistryError>>()?;
+    Ok(())
+}
+
+fn apply_gun_modes(
+    object: &Map<String, Value>,
+    item: &mut ItemDefinition,
+    source: &str,
+) -> Result<(), ItemRegistryError> {
+    if let Some(value) = object.get("modes") {
+        let values = value
+            .as_array()
+            .filter(|values| values.len() <= 128)
+            .ok_or_else(|| invalid_field(source, "modes"))?;
+        let mut modes = BTreeMap::new();
+        for value in values {
+            let mode = value
+                .as_array()
+                .filter(|mode| matches!(mode.len(), 3 | 4))
+                .ok_or_else(|| invalid_field(source, "modes"))?;
+            let mode_id = mode[0]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+                .ok_or_else(|| invalid_field(source, "modes"))?;
+            match &mode[1] {
+                Value::String(name) if name.len() <= 512 && !name.chars().any(char::is_control) => {
+                }
+                Value::Object(name)
+                    if ["str", "str_sp", "str_pl"].into_iter().any(|field| {
+                        name.get(field).and_then(Value::as_str).is_some_and(|name| {
+                            name.len() <= 512 && !name.chars().any(char::is_control)
+                        })
+                    }) => {}
+                _ => return Err(invalid_field(source, "modes")),
+            }
+            let shot_count = mode[2]
+                .as_u64()
+                .and_then(|shots| u16::try_from(shots).ok())
+                .ok_or_else(|| invalid_field(source, "modes"))?;
+            let flags = match mode.get(3) {
+                None => BTreeSet::new(),
+                Some(Value::String(flag)) => [flag.clone()].into_iter().collect(),
+                Some(Value::Array(flags)) if flags.len() <= 64 => flags
+                    .iter()
+                    .map(|flag| {
+                        flag.as_str()
+                            .filter(|flag| {
+                                !flag.is_empty()
+                                    && flag.len() <= 512
+                                    && !flag.chars().any(char::is_control)
+                            })
+                            .map(str::to_owned)
+                            .ok_or_else(|| invalid_field(source, "modes"))
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(_) => return Err(invalid_field(source, "modes")),
+            };
+            modes
+                .entry(mode_id.to_owned())
+                .or_insert(GunModeDefinition { shot_count, flags });
+        }
+        item.gun_modes = modes;
+        item.unsupported_fields.remove("modes");
+    }
+    for modifier_name in ["extend", "delete", "relative", "proportional"] {
+        if modifier(object, modifier_name, "modes", source)?.is_some() {
+            item.unsupported_fields.insert(String::from("modes"));
+        }
+    }
+    if item.subtypes.contains("GUN") {
+        item.gun_modes
+            .entry(String::from("DEFAULT"))
+            .or_insert_with(|| GunModeDefinition {
+                shot_count: 1,
+                flags: BTreeSet::new(),
+            });
+    }
     Ok(())
 }
 

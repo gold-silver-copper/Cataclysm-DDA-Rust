@@ -36,8 +36,11 @@ Run only when the user explicitly requests a verification checkpoint.
   targeting/laser-lock acquisition and signed timeout-extension traces;
   data-driven ammunition-effect inheritance, trail ordering, endpoint field
   bursts on hit and miss, chance/intensity/passability boundaries, and
-  body-part on-hit duration/intensity traces; combat scenarios at protocol
-  121/schema 99, CanonicalStateV97, canonical-event-V23.
+  body-part on-hit duration/intensity traces; inherited firing-mode selection,
+  overlapping range precedence, bounded burst ammunition consumption,
+  per-projectile fields/damage/sound, stun blocking, intra-burst recoil and
+  cycling boundaries; combat scenarios at protocol 122/schema 100,
+  CanonicalStateV98, canonical-event-V23.
 - EOC/use-action checkpoint: run pinned condition/effect and `run_eocs`
   differentials, actor-variable comparison/set/remove and deterministic
   possible-value selection traces, strict

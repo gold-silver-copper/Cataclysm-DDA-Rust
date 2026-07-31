@@ -89,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 121;
+pub const PROTOCOL_VERSION: u16 = 122;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3224,6 +3224,8 @@ pub enum WorldgenMonsterSpecialAttackKindV1 {
 pub struct WorldgenMonsterGunRangeV1 {
     pub minimum: u32,
     pub maximum: u32,
+    pub mode_id: String,
+    pub shot_count: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3286,10 +3288,10 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     /// Empty outside strict content-derived gun actors.
     pub gun_type_id: String,
     /// Empty for ammo-free pseudo guns; otherwise the concrete item ID whose
-    /// owning creature pool loses one charge per admitted single shot.
+    /// owning creature pool loses one charge per emitted projectile.
     pub gun_ammunition_type_id: String,
-    /// Lexicographically sorted single-shot engagement bands. Overlap is
-    /// harmless because strict admission permits only the same default mode.
+    /// Range-sorted engagement bands with their finalized firing mode and
+    /// bounded projectile count. The first matching band wins.
     pub gun_ranges: Vec<WorldgenMonsterGunRangeV1>,
     pub gun_item_range: u32,
     /// Finalized fake-shooter dispersion in pinned engine dispersion units.
@@ -5616,7 +5618,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                                 .get(&attack.gun_ammunition_type_id)
                                                 .is_some_and(|amount| *amount > 0)))
                                     && !attack.gun_ranges.is_empty()
-                                    && (1..=1_000_000).contains(&attack.gun_item_range)
+                                    && (1..=1_000).contains(&attack.gun_item_range)
                                     && (1..=1_000_000).contains(&attack.gun_dispersion)
                                     && attack.gun_targeting_cost_moves <= 1_000_000_000
                                     && attack.gun_targeting_timeout_turns <= 1_000_000_000
@@ -5637,7 +5639,10 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                         range.minimum <= range.maximum
                                             && range.maximum <= attack.range
                                             && range.maximum <= attack.gun_item_range
+                                            && valid_worldgen_id(&range.mode_id)
+                                            && (1..=100).contains(&range.shot_count)
                                     })
+                                    && worldgen_monster_gun_work_is_bounded(attack)
                                     && attack.range
                                         == attack
                                             .gun_ranges
@@ -5754,6 +5759,39 @@ fn valid_worldgen_monster_projectile_effects(
                         && (1..=1_000_000).contains(&on_hit.intensity)
                 })
         })
+}
+
+fn worldgen_monster_gun_work_is_bounded(attack: &WorldgenMonsterSpecialAttackV1) -> bool {
+    let Some(maximum_shots) = attack
+        .gun_ranges
+        .iter()
+        .map(|range| u64::from(range.shot_count))
+        .max()
+    else {
+        return false;
+    };
+    let Some(per_shot) = attack
+        .gun_projectile_effects
+        .iter()
+        .try_fold(1_u64, |total, effect| {
+            let trails = u64::try_from(effect.trail_fields.len())
+                .ok()?
+                .checked_mul(u64::from(attack.gun_item_range))?;
+            let area = effect.area_fields.iter().try_fold(0_u64, |area, field| {
+                let diameter = u64::from(field.radius).checked_mul(2)?.checked_add(1)?;
+                area.checked_add(diameter.checked_mul(diameter)?)
+            })?;
+            total
+                .checked_add(trails)?
+                .checked_add(area)?
+                .checked_add(u64::try_from(effect.on_hit_effects.len()).ok()?)
+        })
+    else {
+        return false;
+    };
+    per_shot
+        .checked_mul(maximum_shots)
+        .is_some_and(|work| work <= 100_000)
 }
 
 fn valid_worldgen_monster_damage(units: &[WorldgenMonsterMeleeDamageUnitV1]) -> bool {

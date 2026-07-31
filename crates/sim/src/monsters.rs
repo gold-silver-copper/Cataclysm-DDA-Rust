@@ -519,15 +519,27 @@ impl WorldState {
                         .ok_or(SimError::UnknownCreature)?
                         .position;
                     let distance = ranged_distance(source_position, target_position);
+                    let selected_range = profile
+                        .gun_ranges
+                        .iter()
+                        .find(|range| (range.minimum..=range.maximum).contains(&distance));
                     if distance == 0
                         || distance > profile.gun_item_range
-                        || !profile
-                            .gun_ranges
-                            .iter()
-                            .any(|range| (range.minimum..=range.maximum).contains(&distance))
+                        || selected_range.is_none()
                         || !self.has_clear_shot(source_position, target_position)
                         || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
                     {
+                        continue;
+                    }
+                    if self.creatures.get(&source).is_some_and(|creature| {
+                        creature.effects.iter().any(|effect| {
+                            effect.expires_at_tick > self.tick
+                                && matches!(
+                                    effect.effect_id.as_str(),
+                                    "stunned" | "psi_stunned" | "sensor_stun"
+                                )
+                        })
+                    }) {
                         continue;
                     }
                     if !self.prepare_creature_gun_targeting(
@@ -541,6 +553,9 @@ impl WorldState {
                         starts_cooldown = false;
                         true
                     } else {
+                        let shot_count = selected_range
+                            .map(|range| range.shot_count)
+                            .ok_or(SimError::InvalidCreature)?;
                         if !profile.gun_ammunition_type_id.is_empty()
                             && self.creatures.get(&source).is_none_or(|creature| {
                                 creature
@@ -556,6 +571,7 @@ impl WorldState {
                             target,
                             source_position,
                             profile,
+                            shot_count,
                             sequence,
                             events,
                         )?;
@@ -703,17 +719,10 @@ impl WorldState {
         target: ActorId,
         origin: WorldPosition,
         profile: &WorldgenMonsterSpecialAttackV1,
+        requested_shots: u16,
         turn_sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        if !profile.gun_ammunition_type_id.is_empty() {
-            let remaining = self
-                .creatures
-                .get_mut(&source)
-                .and_then(|creature| creature.ammunition.get_mut(&profile.gun_ammunition_type_id))
-                .ok_or(SimError::InvalidCreature)?;
-            *remaining = remaining.checked_sub(1).ok_or(SimError::InvalidCreature)?;
-        }
         let target_position = self
             .actors
             .get(&target)
@@ -725,72 +734,108 @@ impl WorldState {
             &[source.as_u128(), target.as_u128()],
             turn_sequence,
         );
-        let miss_per_thousand = u64::from(profile.gun_dispersion)
-            .checked_mul(u64::from(distance))
-            .ok_or(SimError::NumericOverflow)?
-            .checked_div(u64::from(profile.gun_item_range))
-            .ok_or(SimError::NumericOverflow)?
-            .min(900);
-        let hit = u64::from(rng.next_u32() % 1_000) >= miss_per_thousand;
-        events.push(
-            self.make_event(WorldEventKind::CreatureRangedAttackResolved {
+        let shot_count = if profile.gun_ammunition_type_id.is_empty() {
+            requested_shots
+        } else {
+            let remaining = self
+                .creatures
+                .get(&source)
+                .and_then(|creature| creature.ammunition.get(&profile.gun_ammunition_type_id))
+                .copied()
+                .ok_or(SimError::InvalidCreature)?;
+            u16::try_from(remaining.min(u32::from(requested_shots)))
+                .map_err(|_| SimError::NumericOverflow)?
+        };
+        for _shot in 0..shot_count {
+            let live_target = self.actors.get(&target).is_some_and(|actor| actor.hp > 0);
+            if !profile.gun_ammunition_type_id.is_empty() {
+                let remaining = self
+                    .creatures
+                    .get_mut(&source)
+                    .and_then(|creature| {
+                        creature.ammunition.get_mut(&profile.gun_ammunition_type_id)
+                    })
+                    .ok_or(SimError::InvalidCreature)?;
+                *remaining = remaining.checked_sub(1).ok_or(SimError::InvalidCreature)?;
+            }
+            let miss_per_thousand = u64::from(profile.gun_dispersion)
+                .checked_mul(u64::from(distance))
+                .ok_or(SimError::NumericOverflow)?
+                .checked_div(u64::from(profile.gun_item_range))
+                .ok_or(SimError::NumericOverflow)?
+                .min(900);
+            let hit = u64::from(rng.next_u32() % 1_000) >= miss_per_thousand;
+            events.push(
+                self.make_event(WorldEventKind::CreatureRangedAttackResolved {
+                    source,
+                    target,
+                    origin,
+                    gun_type_id: profile.gun_type_id.clone(),
+                    hit,
+                    sound: ranged_sound_description(profile.gun_sound_volume).to_owned(),
+                    sound_volume: profile.gun_sound_volume,
+                })?,
+            );
+            self.apply_creature_projectile_trails(
+                origin,
+                target_position,
+                profile,
+                &mut rng,
+                events,
+            )?;
+            if !hit || !live_target {
+                self.apply_creature_projectile_area(target_position, profile, &mut rng, events)?;
+                continue;
+            }
+            let damage = profile
+                .damage
+                .iter()
+                .map(|unit| ActorDamageUnit {
+                    damage_type_id: unit.damage_type_id.clone(),
+                    amount_milli: unit.amount_milli,
+                    armor_penetration_milli: unit.armor_penetration_milli,
+                    armor_multiplier_millionths: unit.armor_multiplier_millionths,
+                    damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                    constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
+                    constant_damage_multiplier_millionths: unit
+                        .constant_damage_multiplier_millionths,
+                })
+                .collect::<Vec<_>>();
+            let (outcome, was_sleeping, _cut_or_stab_damage) =
+                self.damage_actor_components(target, &damage, &mut rng)?;
+            if profile.gun_blinds_eyes {
+                self.apply_creature_projectile_blindness(target, &outcome.body_part_id, &mut rng)?;
+            }
+            self.apply_creature_projectile_on_hit_effects(target, &outcome.body_part_id, profile)?;
+            events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
                 source,
                 target,
-                origin,
-                gun_type_id: profile.gun_type_id.clone(),
-                hit,
-                sound: ranged_sound_description(profile.gun_sound_volume).to_owned(),
-                sound_volume: profile.gun_sound_volume,
-            })?,
-        );
-        self.apply_creature_projectile_trails(origin, target_position, profile, &mut rng, events)?;
-        if !hit {
+                body_part_id: outcome.body_part_id,
+                amount: outcome.amount,
+                remaining_part_hp: outcome.remaining_part_hp,
+                remaining_hp: outcome.remaining_hp,
+            })?);
+            if outcome.amount > 0 {
+                self.interrupt_craft(target, events)?;
+                self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
+                self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
+                self.interrupt_construction(
+                    target,
+                    ConstructionInterruptionReason::Damage,
+                    events,
+                )?;
+                if was_sleeping && outcome.remaining_hp > 0 {
+                    self.wake_actor(target, cdda_protocol::WakeReason::Damage, events)?;
+                }
+                if outcome.remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
+                        actor_id: target,
+                        killer: source,
+                    })?);
+                }
+            }
             self.apply_creature_projectile_area(target_position, profile, &mut rng, events)?;
-            return Ok(());
         }
-        let damage = profile
-            .damage
-            .iter()
-            .map(|unit| ActorDamageUnit {
-                damage_type_id: unit.damage_type_id.clone(),
-                amount_milli: unit.amount_milli,
-                armor_penetration_milli: unit.armor_penetration_milli,
-                armor_multiplier_millionths: unit.armor_multiplier_millionths,
-                damage_multiplier_millionths: unit.damage_multiplier_millionths,
-                constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
-                constant_damage_multiplier_millionths: unit.constant_damage_multiplier_millionths,
-            })
-            .collect::<Vec<_>>();
-        let (outcome, was_sleeping, _cut_or_stab_damage) =
-            self.damage_actor_components(target, &damage, &mut rng)?;
-        if profile.gun_blinds_eyes {
-            self.apply_creature_projectile_blindness(target, &outcome.body_part_id, &mut rng)?;
-        }
-        self.apply_creature_projectile_on_hit_effects(target, &outcome.body_part_id, profile)?;
-        events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
-            source,
-            target,
-            body_part_id: outcome.body_part_id,
-            amount: outcome.amount,
-            remaining_part_hp: outcome.remaining_part_hp,
-            remaining_hp: outcome.remaining_hp,
-        })?);
-        if outcome.amount > 0 {
-            self.interrupt_craft(target, events)?;
-            self.interrupt_book_study(target, BookStudyInterruptionReason::Damage, events)?;
-            self.interrupt_disassembly(target, DisassemblyInterruptionReason::Damage, events)?;
-            self.interrupt_construction(target, ConstructionInterruptionReason::Damage, events)?;
-            if was_sleeping && outcome.remaining_hp > 0 {
-                self.wake_actor(target, cdda_protocol::WakeReason::Damage, events)?;
-            }
-            if outcome.remaining_hp <= 0 {
-                events.push(self.make_event(WorldEventKind::ActorKilledByCreature {
-                    actor_id: target,
-                    killer: source,
-                })?);
-            }
-        }
-        self.apply_creature_projectile_area(target_position, profile, &mut rng, events)?;
         Ok(())
     }
 
@@ -802,6 +847,13 @@ impl WorldState {
         rng: &mut impl Rng,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        if profile
+            .gun_projectile_effects
+            .iter()
+            .all(|effect| effect.trail_fields.is_empty())
+        {
+            return Ok(());
+        }
         for position in projectile_line(origin, endpoint) {
             for effect in &profile.gun_projectile_effects {
                 for field in &effect.trail_fields {

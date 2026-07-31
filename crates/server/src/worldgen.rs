@@ -547,11 +547,33 @@ fn runtime_monster_gun_profile(
             attack.gun_type_id
         )
     })?;
-    let single_shot_ranges = !attack.gun_ranges.is_empty()
-        && attack
-            .gun_ranges
-            .iter()
-            .all(|range| matches!(range.mode_id.as_str(), "" | "DEFAULT"));
+    let ranges = attack
+        .gun_ranges
+        .iter()
+        .map(|range| {
+            let mode_id = if range.mode_id.is_empty() {
+                "DEFAULT"
+            } else {
+                &range.mode_id
+            };
+            let mode = gun.gun_modes.get(mode_id)?;
+            if mode.shot_count == 0
+                || mode.shot_count > 100
+                || !mode.flags.iter().all(|flag| flag == "NPC_AVOID")
+            {
+                return None;
+            }
+            Some(WorldgenMonsterGunRangeV1 {
+                minimum: range.minimum,
+                maximum: range.maximum,
+                mode_id: mode_id.to_owned(),
+                shot_count: mode.shot_count,
+            })
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(ranges) = ranges.filter(|ranges| !ranges.is_empty()) else {
+        return Ok(None);
+    };
     let ammunition = if attack.gun_ammunition_type_id.is_empty() {
         None
     } else {
@@ -609,9 +631,9 @@ fn runtime_monster_gun_profile(
     let gun_is_supported = gun.subtypes.contains("GUN")
         && gun.flags.contains("NEVER_JAMS")
         && ammunition_shape_is_supported
-        && attack.gun_max_ammunition.is_none()
-        && single_shot_ranges
         && !attack.gun_require_sunlight
+        && !attack.gun_require_targeting_npc
+        && !attack.gun_require_targeting_monster
         && attack.gun_targeting_sound.len() <= 512
         && !attack.gun_targeting_sound.chars().any(char::is_control)
         && !attack.gun_fake_skills.contains_key("throw")
@@ -637,7 +659,10 @@ fn runtime_monster_gun_profile(
         return Ok(None);
     };
     let item_range = u32::try_from(combined_range)?;
-    if attack.range > item_range {
+    if attack.range > item_range
+        || item_range > 1_000
+        || !runtime_monster_gun_work_is_bounded(&ranges, item_range, &projectile_effect_profiles)
+    {
         return Ok(None);
     }
     let raw_dispersion = u32::try_from(combined_dispersion)?;
@@ -715,14 +740,6 @@ fn runtime_monster_gun_profile(
     } else if !has_fixed_damage {
         return Ok(None);
     }
-    let ranges = attack
-        .gun_ranges
-        .iter()
-        .map(|range| WorldgenMonsterGunRangeV1 {
-            minimum: range.minimum,
-            maximum: range.maximum,
-        })
-        .collect();
     Ok(Some(RuntimeMonsterGunProfile {
         damage,
         ammunition_type_id: attack.gun_ammunition_type_id.clone(),
@@ -742,6 +759,34 @@ fn runtime_monster_gun_profile(
         blinds_eyes: projectile_effects.contains("BLINDS_EYES"),
         target_moving_vehicles: attack.gun_target_moving_vehicles,
     }))
+}
+
+fn runtime_monster_gun_work_is_bounded(
+    ranges: &[WorldgenMonsterGunRangeV1],
+    item_range: u32,
+    effects: &[WorldgenMonsterProjectileEffectV1],
+) -> bool {
+    let Some(maximum_shots) = ranges.iter().map(|range| u64::from(range.shot_count)).max() else {
+        return false;
+    };
+    let Some(per_shot) = effects.iter().try_fold(1_u64, |total, effect| {
+        let trails = u64::try_from(effect.trail_fields.len())
+            .ok()?
+            .checked_mul(u64::from(item_range))?;
+        let area = effect.area_fields.iter().try_fold(0_u64, |area, field| {
+            let diameter = u64::from(field.radius).checked_mul(2)?.checked_add(1)?;
+            area.checked_add(diameter.checked_mul(diameter)?)
+        })?;
+        total
+            .checked_add(trails)?
+            .checked_add(area)?
+            .checked_add(u64::try_from(effect.on_hit_effects.len()).ok()?)
+    }) else {
+        return false;
+    };
+    per_shot
+        .checked_mul(maximum_shots)
+        .is_some_and(|work| work <= 100_000)
 }
 
 fn runtime_monster_projectile_effects(
