@@ -111,6 +111,8 @@ pub struct EocDefinitionV1 {
     pub condition: Option<EocConditionV1>,
     pub effects: Vec<EocEffectV1>,
     pub false_effects: Vec<EocEffectV1>,
+    pub recurrence: Option<EocDelayV1>,
+    pub deactivate_condition: Option<EocConditionV1>,
 }
 
 impl EocDefinitionV1 {
@@ -140,6 +142,11 @@ pub fn eoc_catalog_is_valid(
 ) -> bool {
     if definitions.len() > MAX_EOC_DEFINITIONS
         || item_use_types.len() > MAX_EOC_ITEM_USE_TYPES
+        || definitions
+            .iter()
+            .filter(|definition| definition.recurrence.is_some())
+            .count()
+            > MAX_ACTOR_SCHEDULED_EOCS
         || !definitions
             .windows(2)
             .all(|pair| pair[0].eoc_id < pair[1].eoc_id)
@@ -167,11 +174,19 @@ pub fn eoc_catalog_is_valid(
     {
         return false;
     }
+    let activation_ids = definitions
+        .iter()
+        .filter(|definition| definition.recurrence.is_none())
+        .map(|definition| definition.eoc_id.as_str())
+        .collect::<BTreeSet<_>>();
     item_use_types.iter().all(|item| {
         valid_id(&item.item_type_id)
             && !item.eoc_ids.is_empty()
             && item.eoc_ids.len() <= MAX_EOC_REFERENCES
-            && item.eoc_ids.iter().all(|id| ids.contains(id.as_str()))
+            && item
+                .eoc_ids
+                .iter()
+                .all(|id| activation_ids.contains(id.as_str()))
     })
 }
 
@@ -181,6 +196,15 @@ fn valid_eoc_tree(definition: &EocDefinitionV1) -> bool {
         .condition
         .as_ref()
         .is_none_or(|condition| valid_condition(condition, 0, &mut nodes))
+        && definition.recurrence.as_ref().is_none_or(|recurrence| {
+            recurrence.minimum_turns > 0 && recurrence.maximum_turns >= recurrence.minimum_turns
+        })
+        && definition
+            .deactivate_condition
+            .as_ref()
+            .is_none_or(|condition| {
+                definition.recurrence.is_some() && valid_condition(condition, 0, &mut nodes)
+            })
         && valid_effects(&definition.effects, 0, &mut nodes)
         && valid_effects(&definition.false_effects, 0, &mut nodes)
         && nodes <= MAX_EOC_TREE_NODES
@@ -317,6 +341,13 @@ pub fn actor_eoc_schedule_is_valid(schedule: &[ScheduledEocV1], next_sequence: u
                 && entry.due_tick > crate::SimTick(0)
                 && valid_id(&entry.eoc_id)
         })
+}
+
+#[must_use]
+pub fn actor_inactive_recurring_eocs_are_valid(inactive: &[String]) -> bool {
+    inactive.len() <= MAX_ACTOR_SCHEDULED_EOCS
+        && inactive.windows(2).all(|pair| pair[0] < pair[1])
+        && inactive.iter().all(|id| valid_id(id))
 }
 
 fn valid_variable_value(value: &str) -> bool {

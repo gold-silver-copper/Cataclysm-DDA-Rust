@@ -27,7 +27,7 @@ pub use eocs::{
     MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_DEFINITIONS, MAX_EOC_EFFECTS,
     MAX_EOC_ITEM_USE_TYPES, MAX_EOC_MESSAGE_BYTES, MAX_EOC_REFERENCES, MAX_EOC_TREE_DEPTH,
     MAX_EOC_TREE_NODES, MAX_EOC_VARIABLE_VALUE_BYTES, ScheduledEocV1, actor_eoc_schedule_is_valid,
-    actor_eoc_variables_are_valid, eoc_catalog_is_valid,
+    actor_eoc_variables_are_valid, actor_inactive_recurring_eocs_are_valid, eoc_catalog_is_valid,
 };
 pub use interactions::{
     InteractionCancellationReasonV1, InteractionChoiceV1, InteractionContextV1,
@@ -85,7 +85,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 110;
+pub const PROTOCOL_VERSION: u16 = 111;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2679,6 +2679,8 @@ pub struct ActorSnapshot {
     pub next_eoc_schedule_sequence: u64,
     /// Due-tick/sequence sorted server-authoritative delayed activations.
     pub scheduled_eocs: Vec<ScheduledEocV1>,
+    /// ID-sorted recurring EOCs paused by their deactivation conditions.
+    pub inactive_recurring_eocs: Vec<String>,
     /// Base Strength. Until limb anatomy lands, a healthy actor's arm-strength
     /// modifier is exactly one and structural smashing derives from this.
     pub base_strength: u16,
@@ -7313,6 +7315,9 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
         && actor_eoc_schedule_is_valid(
             &snapshot.controlled_actor.scheduled_eocs,
             snapshot.controlled_actor.next_eoc_schedule_sequence,
+        )
+        && actor_inactive_recurring_eocs_are_valid(
+            &snapshot.controlled_actor.inactive_recurring_eocs,
         )
         && snapshot.visible_actors.len() <= 65_536
         && snapshot.creatures.len() <= 65_536

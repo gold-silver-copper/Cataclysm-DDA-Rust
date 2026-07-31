@@ -2648,6 +2648,7 @@ struct Actor {
     eoc_variables: BTreeMap<String, String>,
     next_eoc_schedule_sequence: u64,
     scheduled_eocs: Vec<ScheduledEocV1>,
+    inactive_recurring_eocs: Vec<String>,
     base_strength: u16,
     base_dexterity: u16,
     base_intelligence: u16,
@@ -2692,6 +2693,7 @@ impl Actor {
             eoc_variables: self.eoc_variables.clone(),
             next_eoc_schedule_sequence: self.next_eoc_schedule_sequence,
             scheduled_eocs: self.scheduled_eocs.clone(),
+            inactive_recurring_eocs: self.inactive_recurring_eocs.clone(),
             base_strength: self.base_strength,
             base_dexterity: self.base_dexterity,
             base_intelligence: self.base_intelligence,
@@ -2810,6 +2812,9 @@ fn valid_actor_schedule(
         || !cdda_protocol::actor_eoc_schedule_is_valid(
             &snapshot.scheduled_eocs,
             snapshot.next_eoc_schedule_sequence,
+        )
+        || !cdda_protocol::actor_inactive_recurring_eocs_are_valid(
+            &snapshot.inactive_recurring_eocs,
         )
         || [
             snapshot.base_strength,
@@ -5576,6 +5581,8 @@ impl WorldState {
         let hp = cdda_protocol::actor_body_part_summary_hp(&self.actor_anatomy, &body_parts)
             .ok_or(SimError::InvalidActorAnatomy)?;
         let id = self.allocator.allocate_actor()?;
+        let (next_eoc_schedule_sequence, scheduled_eocs) =
+            self.initial_recurring_eoc_schedule(id)?;
         self.actors.insert(
             id,
             Actor {
@@ -5585,8 +5592,9 @@ impl WorldState {
                 body_parts,
                 effects: Vec::new(),
                 eoc_variables: BTreeMap::new(),
-                next_eoc_schedule_sequence: 0,
-                scheduled_eocs: Vec::new(),
+                next_eoc_schedule_sequence,
+                scheduled_eocs,
+                inactive_recurring_eocs: Vec::new(),
                 base_strength: base_stats.strength,
                 base_dexterity: base_stats.dexterity,
                 base_intelligence: base_stats.intelligence,
@@ -5713,6 +5721,11 @@ impl WorldState {
                 .scheduled_eocs
                 .iter()
                 .any(|entry| !self.eoc_definitions.contains_key(&entry.eoc_id))
+            || !eocs::actor_recurring_eoc_state_is_valid(
+                &self.eoc_definitions,
+                &actor.scheduled_eocs,
+                &actor.inactive_recurring_eocs,
+            )
             || actor.craft_activity.is_some()
             || actor.read_activity.is_some()
             || actor.disassembly_activity.is_some()
@@ -5803,6 +5816,7 @@ impl WorldState {
                 eoc_variables: actor.eoc_variables,
                 next_eoc_schedule_sequence: actor.next_eoc_schedule_sequence,
                 scheduled_eocs: actor.scheduled_eocs,
+                inactive_recurring_eocs: actor.inactive_recurring_eocs,
                 base_strength: actor.base_strength,
                 base_dexterity: actor.base_dexterity,
                 base_intelligence: actor.base_intelligence,
@@ -14034,6 +14048,16 @@ impl WorldState {
                     .scheduled_eocs
                     .iter()
                     .any(|entry| !eoc_definitions.contains_key(&entry.eoc_id))
+                || actor.inactive_recurring_eocs.iter().any(|eoc_id| {
+                    eoc_definitions.get(eoc_id).is_none_or(|definition| {
+                        definition.recurrence.is_none() || definition.deactivate_condition.is_none()
+                    })
+                })
+                || !eocs::actor_recurring_eoc_state_is_valid(
+                    &eoc_definitions,
+                    &actor.scheduled_eocs,
+                    &actor.inactive_recurring_eocs,
+                )
                 || (actor.hp > 0 && !occupied.insert(actor.position))
             {
                 return Err(SimError::InvalidSnapshot);
@@ -14170,6 +14194,7 @@ impl WorldState {
                     eoc_variables: actor.eoc_variables.clone(),
                     next_eoc_schedule_sequence: actor.next_eoc_schedule_sequence,
                     scheduled_eocs: actor.scheduled_eocs.clone(),
+                    inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                     base_strength: actor.base_strength,
                     base_dexterity: actor.base_dexterity,
                     base_intelligence: actor.base_intelligence,
@@ -14386,7 +14411,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV86");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV87");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -21359,6 +21384,7 @@ mod tests {
             eoc_variables: BTreeMap::new(),
             next_eoc_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
+            inactive_recurring_eocs: Vec::new(),
             base_strength: DEFAULT_ACTOR_BASE_STAT,
             base_dexterity: DEFAULT_ACTOR_BASE_STAT,
             base_intelligence: DEFAULT_ACTOR_BASE_STAT,
@@ -21409,6 +21435,7 @@ mod tests {
                 eoc_variables: BTreeMap::new(),
                 next_eoc_schedule_sequence: 0,
                 scheduled_eocs: Vec::new(),
+                inactive_recurring_eocs: Vec::new(),
                 base_strength: DEFAULT_ACTOR_BASE_STAT,
                 base_dexterity: DEFAULT_ACTOR_BASE_STAT,
                 base_intelligence: DEFAULT_ACTOR_BASE_STAT,

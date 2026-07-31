@@ -99,6 +99,8 @@ pub struct EffectOnConditionDefinition {
     pub condition: Option<EocConditionDefinition>,
     pub effects: Vec<EocEffectDefinition>,
     pub false_effects: Vec<EocEffectDefinition>,
+    pub recurrence: Option<EocDelayDefinition>,
+    pub deactivate_condition: Option<EocConditionDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -275,6 +277,8 @@ fn parse_definition(
         condition: None,
         effects: Vec::new(),
         false_effects: Vec::new(),
+        recurrence: None,
+        deactivate_condition: None,
         unsupported_fields: BTreeSet::new(),
         source: source.to_owned(),
     });
@@ -301,6 +305,26 @@ fn parse_definition(
         definition.false_effects =
             parse_effects(value, "false_effect", 0, &mut definition.unsupported_fields);
     }
+    if let Some(value) = object.get("recurrence") {
+        definition.unsupported_fields.remove("recurrence");
+        definition.recurrence = parse_delay(value);
+        if definition.recurrence.is_none() {
+            definition
+                .unsupported_fields
+                .insert(String::from("recurrence"));
+        }
+    }
+    if let Some(value) = object.get("deactivate_condition") {
+        definition
+            .unsupported_fields
+            .retain(|field| !field.starts_with("deactivate_condition"));
+        definition.deactivate_condition = parse_condition(
+            value,
+            "deactivate_condition",
+            0,
+            &mut definition.unsupported_fields,
+        );
+    }
 
     const TOP_LEVEL_FIELDS: &[&str] = &[
         "type",
@@ -321,18 +345,39 @@ fn parse_definition(
             definition.unsupported_fields.insert(field.clone());
         }
     }
-    if object
-        .get("eoc_type")
-        .is_some_and(|value| value.as_str() != Some("ACTIVATION"))
+    if let Some(eoc_type) = object.get("eoc_type") {
+        definition.unsupported_fields.remove("eoc_type");
+        match eoc_type.as_str() {
+            Some("ACTIVATION") if !object.contains_key("recurrence") => {
+                definition.recurrence = None;
+                definition.deactivate_condition = None;
+            }
+            Some("RECURRING") if definition.recurrence.is_some() => {}
+            _ => {
+                definition
+                    .unsupported_fields
+                    .insert(String::from("eoc_type"));
+            }
+        }
+    }
+    if object.contains_key("recurrence")
+        && object
+            .get("eoc_type")
+            .is_some_and(|value| value.as_str() != Some("RECURRING"))
     {
         definition
             .unsupported_fields
             .insert(String::from("eoc_type"));
     }
-    for field in ["recurrence", "deactivate_condition", "required_event"] {
-        if object.contains_key(field) {
-            definition.unsupported_fields.insert(field.to_owned());
-        }
+    if definition.deactivate_condition.is_some() && definition.recurrence.is_none() {
+        definition
+            .unsupported_fields
+            .insert(String::from("deactivate_condition"));
+    }
+    if object.contains_key("required_event") {
+        definition
+            .unsupported_fields
+            .insert(String::from("required_event"));
     }
     for field in ["global", "run_for_npcs"] {
         if object

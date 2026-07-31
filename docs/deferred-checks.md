@@ -35,9 +35,11 @@ Run only when the user explicitly requests a verification checkpoint.
   possible-value selection traces, strict
   transform/use-action and delayed-activation traces, production catalog
   admission, CanonicalStateV86 queue persistence/replay, hostile recursive,
-  variable-bound, queue-bound, overdue catch-up, and failed-execution cases,
+  variable-bound, queue-bound, overdue catch-up, failed-execution, recurring
+  enrollment/range/reschedule/deactivation/reactivation, and disconnected cases,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 110/schema 88, canonical-event-V19, and
+  expiry, stale-response, protocol 111/schema 89, CanonicalStateV87,
+  canonical-event-V19, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, stationary/disconnected

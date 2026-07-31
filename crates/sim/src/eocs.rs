@@ -16,6 +16,7 @@ use crate::{SimError, WorldState, inclusive_rng_u64};
 const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
 const MAX_EOC_OPERATIONS_PER_COMMAND: usize = 16_384;
 const MAX_SCHEDULED_EOC_ACTIVATIONS_PER_TICK: usize = 256;
+const MAX_RECURRING_EOC_REACTIVATION_CHECKS_PER_TICK: usize = 256;
 
 impl WorldState {
     pub fn register_eoc_catalog(
@@ -74,6 +75,7 @@ impl WorldState {
             variables: actor.eoc_variables.clone(),
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
+            inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
             messages: Vec::new(),
             activations: 0,
             operations: 0,
@@ -117,6 +119,7 @@ impl WorldState {
             actor.eoc_variables = execution.variables;
             actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
             actor.scheduled_eocs = execution.scheduled_eocs;
+            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
             let item = actor
                 .inventory
                 .get_mut(&item_id)
@@ -149,6 +152,7 @@ impl WorldState {
         &mut self,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        self.reactivate_recurring_eocs()?;
         let mut due = self
             .actors
             .iter()
@@ -181,6 +185,7 @@ impl WorldState {
                     variables: actor.eoc_variables.clone(),
                     next_schedule_sequence: actor.next_eoc_schedule_sequence,
                     scheduled_eocs: actor.scheduled_eocs.clone(),
+                    inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                     messages: Vec::new(),
                     activations: 0,
                     operations: 0,
@@ -189,9 +194,44 @@ impl WorldState {
                 };
                 (entry, execution)
             };
-            if execute_eoc(&self.eoc_definitions, &entry.eoc_id, &mut execution, 0).is_err()
-                || execution.effects.len() > 1_024
-            {
+            let Ok(condition_matches) =
+                execute_eoc(&self.eoc_definitions, &entry.eoc_id, &mut execution, 0)
+            else {
+                continue;
+            };
+            let Some(definition) = self.eoc_definitions.get(&entry.eoc_id) else {
+                continue;
+            };
+            if let Some(recurrence) = definition.recurrence {
+                execution
+                    .inactive_recurring_eocs
+                    .retain(|eoc_id| eoc_id != &entry.eoc_id);
+                let should_deactivate = if !condition_matches && definition.false_effects.is_empty()
+                {
+                    match definition.deactivate_condition.as_ref() {
+                        Some(condition) => match evaluate_condition(
+                            condition,
+                            &execution.effects,
+                            &execution.variables,
+                            &mut execution.operations,
+                        ) {
+                            Ok(matches) => matches,
+                            Err(_) => continue,
+                        },
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                if should_deactivate {
+                    execution.inactive_recurring_eocs.push(entry.eoc_id.clone());
+                    execution.inactive_recurring_eocs.sort();
+                    execution.inactive_recurring_eocs.dedup();
+                } else if schedule_eoc(&mut execution, &entry.eoc_id, recurrence).is_err() {
+                    continue;
+                }
+            }
+            if execution.effects.len() > 1_024 {
                 continue;
             }
             execution.effects.sort_by(|left, right| {
@@ -208,9 +248,122 @@ impl WorldState {
             actor.eoc_variables = execution.variables;
             actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
             actor.scheduled_eocs = execution.scheduled_eocs;
+            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
             for text in execution.messages {
                 events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn initial_recurring_eoc_schedule(
+        &self,
+        actor_id: ActorId,
+    ) -> Result<(u64, Vec<ScheduledEocV1>), SimError> {
+        let mut execution = EocExecution {
+            effects: Vec::new(),
+            variables: BTreeMap::new(),
+            next_schedule_sequence: 0,
+            scheduled_eocs: Vec::new(),
+            inactive_recurring_eocs: Vec::new(),
+            messages: Vec::new(),
+            activations: 0,
+            operations: 0,
+            tick: self.tick,
+            rng: self.named_rng(b"recurring-eoc-enrollment", &[actor_id.as_u128()], 0),
+        };
+        for definition in self.eoc_definitions.values() {
+            if let Some(recurrence) = definition.recurrence {
+                schedule_eoc(&mut execution, &definition.eoc_id, recurrence)?;
+            }
+        }
+        execution
+            .scheduled_eocs
+            .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        Ok((execution.next_schedule_sequence, execution.scheduled_eocs))
+    }
+
+    fn reactivate_recurring_eocs(&mut self) -> Result<(), SimError> {
+        let inactive = self
+            .actors
+            .iter()
+            .flat_map(|(actor_id, actor)| {
+                actor
+                    .inactive_recurring_eocs
+                    .iter()
+                    .map(|eoc_id| (*actor_id, eoc_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        if inactive.is_empty() {
+            return Ok(());
+        }
+        let start = usize::try_from(self.tick.0 % inactive.len() as u64)
+            .map_err(|_| SimError::NumericOverflow)?;
+        let candidates = inactive
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(
+                inactive
+                    .len()
+                    .min(MAX_RECURRING_EOC_REACTIVATION_CHECKS_PER_TICK),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut operations = 0;
+        for (actor_id, eoc_id) in candidates {
+            let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+            let mut execution = EocExecution {
+                effects: actor.effects.clone(),
+                variables: actor.eoc_variables.clone(),
+                next_schedule_sequence: actor.next_eoc_schedule_sequence,
+                scheduled_eocs: actor.scheduled_eocs.clone(),
+                inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
+                messages: Vec::new(),
+                activations: 0,
+                operations,
+                tick: self.tick,
+                rng: self.named_rng(
+                    b"recurring-eoc-reactivation",
+                    &[actor_id.as_u128()],
+                    actor.next_eoc_schedule_sequence,
+                ),
+            };
+            let definition = self
+                .eoc_definitions
+                .get(&eoc_id)
+                .ok_or(SimError::InvalidItem)?;
+            let recurrence = definition.recurrence.ok_or(SimError::InvalidItem)?;
+            let deactivate_condition = definition
+                .deactivate_condition
+                .as_ref()
+                .ok_or(SimError::InvalidItem)?;
+            let Ok(still_deactivated) = evaluate_condition(
+                deactivate_condition,
+                &execution.effects,
+                &execution.variables,
+                &mut execution.operations,
+            ) else {
+                break;
+            };
+            operations = execution.operations;
+            if still_deactivated {
+                continue;
+            }
+            schedule_eoc(&mut execution, &eoc_id, recurrence)?;
+            execution
+                .inactive_recurring_eocs
+                .retain(|inactive_id| inactive_id != &eoc_id);
+            execution
+                .scheduled_eocs
+                .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
+            actor.scheduled_eocs = execution.scheduled_eocs;
+            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
         }
         Ok(())
     }
@@ -221,6 +374,7 @@ struct EocExecution {
     variables: BTreeMap<String, String>,
     next_schedule_sequence: u64,
     scheduled_eocs: Vec<ScheduledEocV1>,
+    inactive_recurring_eocs: Vec<String>,
     messages: Vec<String>,
     activations: usize,
     operations: usize,
@@ -233,7 +387,7 @@ fn execute_eoc(
     eoc_id: &str,
     execution: &mut EocExecution,
     depth: usize,
-) -> Result<(), SimError> {
+) -> Result<bool, SimError> {
     if depth >= cdda_protocol::MAX_EOC_TREE_DEPTH
         || execution.activations >= MAX_EOC_ACTIVATIONS_PER_COMMAND
         || execution.operations >= MAX_EOC_OPERATIONS_PER_COMMAND
@@ -257,7 +411,8 @@ fn execute_eoc(
     } else {
         &definition.false_effects
     };
-    execute_effects(catalog, selected, execution, depth + 1)
+    execute_effects(catalog, selected, execution, depth + 1)?;
+    Ok(condition_matches)
 }
 
 fn evaluate_condition(
@@ -524,8 +679,32 @@ pub(super) fn eoc_body_parts_are_valid(
         .condition
         .as_ref()
         .is_none_or(|condition| condition_body_parts_are_valid(condition, &valid_part))
+        && definition
+            .deactivate_condition
+            .as_ref()
+            .is_none_or(|condition| condition_body_parts_are_valid(condition, &valid_part))
         && effects_body_parts_are_valid(&definition.effects, &valid_part)
         && effects_body_parts_are_valid(&definition.false_effects, &valid_part)
+}
+
+pub(super) fn actor_recurring_eoc_state_is_valid(
+    catalog: &BTreeMap<String, EocDefinitionV1>,
+    scheduled: &[ScheduledEocV1],
+    inactive: &[String],
+) -> bool {
+    inactive.iter().all(|eoc_id| {
+        catalog.get(eoc_id).is_some_and(|definition| {
+            definition.recurrence.is_some() && definition.deactivate_condition.is_some()
+        })
+    }) && catalog
+        .values()
+        .filter(|definition| definition.recurrence.is_some())
+        .all(|definition| {
+            scheduled
+                .iter()
+                .any(|entry| entry.eoc_id == definition.eoc_id)
+                || inactive.binary_search(&definition.eoc_id).is_ok()
+        })
 }
 
 fn condition_body_parts_are_valid(

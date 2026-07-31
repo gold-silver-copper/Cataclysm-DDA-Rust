@@ -80,10 +80,11 @@ pub(super) fn runtime_eoc_catalog(
                 || !item.comestible_type.is_empty()
                 || !action.deferred_fields.is_empty()
                 || action.eoc_ids.is_empty()
-                || action
-                    .eoc_ids
-                    .iter()
-                    .any(|id| !definitions.contains_key(id))
+                || action.eoc_ids.iter().any(|id| {
+                    definitions
+                        .get(id)
+                        .is_none_or(|definition| definition.recurrence.is_some())
+                })
             {
                 return None;
             }
@@ -118,6 +119,12 @@ fn runtime_eoc_body_parts_are_supported(
         .condition
         .as_ref()
         .is_none_or(|condition| runtime_condition_body_parts_are_supported(condition, &valid_part))
+        && definition
+            .deactivate_condition
+            .as_ref()
+            .is_none_or(|condition| {
+                runtime_condition_body_parts_are_supported(condition, &valid_part)
+            })
         && runtime_effect_body_parts_are_supported(&definition.effects, &valid_part)
         && runtime_effect_body_parts_are_supported(&definition.false_effects, &valid_part)
 }
@@ -173,6 +180,19 @@ fn runtime_eoc_definition(definition: &EffectOnConditionDefinition) -> EocDefini
             .iter()
             .map(runtime_effect)
             .collect(),
+        recurrence: definition.recurrence.map(
+            |EocDelayDefinition {
+                 minimum_turns,
+                 maximum_turns,
+             }| EocDelayV1 {
+                minimum_turns,
+                maximum_turns,
+            },
+        ),
+        deactivate_condition: definition
+            .deactivate_condition
+            .as_ref()
+            .map(runtime_condition),
     }
 }
 
