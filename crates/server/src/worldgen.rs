@@ -11,14 +11,16 @@ use cdda_content::{
     StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictMapgenNpcPlacement,
-    StrictNestedMapgenDefinition, TerrainRegistry,
+    StrictMapgenVehicleBinding, StrictMapgenVehiclePlacement, StrictNestedMapgenDefinition,
+    TerrainRegistry, VehicleRegistry,
 };
 use cdda_protocol::{
     ActorEffectLimbScoreModifierV1, ActorEffectModifiersV1, EocDefinitionV1, ItemGroupDefinitionV1,
-    NpcTemplateV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1, WorldgenCatalogV1,
-    WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1, WorldgenFurniturePrototypeTargetV1,
-    WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
-    WorldgenIndividualMonsterTargetV1, WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
+    NpcTemplateV1, VehicleSpawnStatusV1, WorldgenAreaItemPlacementV1, WorldgenBuiltinMapgenV1,
+    WorldgenCatalogV1, WorldgenCellV1, WorldgenCityV1, WorldgenCoordinateRangeV1,
+    WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
+    WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
+    WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1,
     WorldgenMonsterEffectIntensityApplicationV1, WorldgenMonsterGroupEntryV1,
     WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterGunRangeV1,
     WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1,
@@ -33,9 +35,10 @@ use cdda_protocol::{
     WorldgenRegionalTerrainTableV1, WorldgenRiverNodeV1, WorldgenSpecialPlacementV1,
     WorldgenSpecialPopulationV1, WorldgenSpecialUniquenessV1, WorldgenStartLocationV1,
     WorldgenStartTargetV1, WorldgenTemplateV1, WorldgenTerrainTargetV1, WorldgenU16RangeV1,
-    WorldgenU32RangeV1, WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid,
-    worldgen_catalog_shape_is_valid, worldgen_omt_matches,
+    WorldgenU32RangeV1, WorldgenVehiclePlacementV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, worldgen_catalog_is_valid, worldgen_catalog_shape_is_valid,
+    worldgen_omt_matches,
 };
 use cdda_sim::{
     OVERMAP_BRIDGE_IDS, OVERMAP_RIVER_IDS, OVERMAP_ROAD_MASK_IDS, OvermapCitySettings,
@@ -45,6 +48,7 @@ use cdda_sim::{
     place_overmap_specials,
 };
 
+use super::vehicles::runtime_vehicle_catalog;
 use super::{
     furniture_tile, monster_attack_cost, monster_blood_field_type, monster_path_settings,
     monster_size, terrain_tile,
@@ -568,6 +572,7 @@ fn bootstrap_uniform_overmap(
 
 pub(super) struct RuntimeMapgenContent<'a> {
     pub mapgen: &'a MapgenRegistry,
+    pub vehicles: &'a VehicleRegistry,
     pub overmap_terrain: &'a OvermapTerrainRegistry,
     pub regions: &'a DefaultRegionTerrainFurnitureRegistry,
     pub terrain: &'a TerrainRegistry,
@@ -2378,6 +2383,7 @@ pub(super) fn runtime_mapgen_worldgen(
 ) -> Result<WorldgenCatalogV1, Box<dyn std::error::Error>> {
     let RuntimeMapgenContent {
         mapgen,
+        vehicles,
         overmap_terrain,
         regions,
         terrain,
@@ -2489,6 +2495,7 @@ pub(super) fn runtime_mapgen_worldgen(
 
     let mut monster_group_roots = BTreeSet::new();
     let mut individual_monster_roots = BTreeSet::new();
+    let mut vehicle_group_roots = BTreeSet::new();
     monster_group_roots.extend(
         specials
             .iter()
@@ -2497,6 +2504,19 @@ pub(super) fn runtime_mapgen_worldgen(
     );
     for (omt_id, variants) in &definitions {
         for definition in *variants {
+            vehicle_group_roots.extend(
+                definition
+                    .vehicles
+                    .values()
+                    .flatten()
+                    .map(|vehicle| vehicle.vehicle_group_id.clone()),
+            );
+            vehicle_group_roots.extend(
+                definition
+                    .vehicle_placements
+                    .iter()
+                    .map(|placement| placement.vehicle.vehicle_group_id.clone()),
+            );
             monster_group_roots.extend(
                 definition
                     .monster_placements
@@ -2522,6 +2542,19 @@ pub(super) fn runtime_mapgen_worldgen(
                 .nested(nested_id)
                 .ok_or_else(|| format!("nested mapgen {nested_id} disappeared"))?;
             for definition in variants {
+                vehicle_group_roots.extend(
+                    definition
+                        .vehicles
+                        .values()
+                        .flatten()
+                        .map(|vehicle| vehicle.vehicle_group_id.clone()),
+                );
+                vehicle_group_roots.extend(
+                    definition
+                        .vehicle_placements
+                        .iter()
+                        .map(|placement| placement.vehicle.vehicle_group_id.clone()),
+                );
                 monster_group_roots.extend(
                     definition
                         .monster_placements
@@ -2554,6 +2587,7 @@ pub(super) fn runtime_mapgen_worldgen(
             spells,
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
         )?;
+    let vehicle_catalog = runtime_vehicle_catalog(vehicle_group_roots, vehicles)?;
 
     let mut terrain_ids = BTreeSet::new();
     let mut furniture_ids = BTreeSet::new();
@@ -2766,6 +2800,7 @@ pub(super) fn runtime_mapgen_worldgen(
                             &regional_furniture_indices,
                             &monster_group_indices,
                             &monster_indices,
+                            &vehicle_catalog.group_indices,
                             npc_templates,
                             &overmap,
                             overmap_terrain,
@@ -2793,6 +2828,7 @@ pub(super) fn runtime_mapgen_worldgen(
                                         &regional_furniture_indices,
                                         &monster_group_indices,
                                         &monster_indices,
+                                        &vehicle_catalog.group_indices,
                                         npc_templates,
                                         &overmap,
                                         overmap_terrain,
@@ -2833,6 +2869,9 @@ pub(super) fn runtime_mapgen_worldgen(
         furniture_prototypes,
         monster_prototypes,
         monster_groups: runtime_monster_groups,
+        vehicle_part_types: vehicle_catalog.part_types,
+        vehicle_prototypes: vehicle_catalog.prototypes,
+        vehicle_groups: vehicle_catalog.groups,
         regional_terrain,
         regional_furniture,
         npc_name_categories,
@@ -2932,6 +2971,7 @@ fn runtime_builtin_generator(
             nested: Vec::new(),
             area_items: Vec::new(),
             npc_placements: Vec::new(),
+            vehicle_placements: Vec::new(),
             monster_placements: Vec::new(),
             individual_monster_placements: Vec::new(),
             erase_all_before_placing_terrain: false,
@@ -3109,6 +3149,7 @@ fn runtime_mapgen_template(
     regional_furniture: &BTreeMap<String, u16>,
     monster_groups: &BTreeMap<String, u16>,
     monsters: &BTreeMap<String, u16>,
+    vehicle_groups: &BTreeMap<String, u16>,
     npc_templates: &[NpcTemplateV1],
     overmap: &WorldgenOvermapLayoutV1,
     overmap_terrain: &OvermapTerrainRegistry,
@@ -3145,6 +3186,13 @@ fn runtime_mapgen_template(
             .iter()
             .map(|placement| runtime_npc_placement(placement, npc_templates))
             .collect::<Result<Vec<_>, _>>()?,
+        vehicle_placements: runtime_vehicle_placements(
+            &definition.cells,
+            cdda_protocol::WORLDGEN_OMT_SIZE,
+            &definition.vehicles,
+            &definition.vehicle_placements,
+            vehicle_groups,
+        )?,
         monster_placements: definition
             .monster_placements
             .iter()
@@ -3170,6 +3218,7 @@ fn runtime_nested_mapgen_template(
     regional_furniture: &BTreeMap<String, u16>,
     monster_groups: &BTreeMap<String, u16>,
     monsters: &BTreeMap<String, u16>,
+    vehicle_groups: &BTreeMap<String, u16>,
     npc_templates: &[NpcTemplateV1],
     overmap: &WorldgenOvermapLayoutV1,
     overmap_terrain: &OvermapTerrainRegistry,
@@ -3206,6 +3255,13 @@ fn runtime_nested_mapgen_template(
             .iter()
             .map(|placement| runtime_npc_placement(placement, npc_templates))
             .collect::<Result<Vec<_>, _>>()?,
+        vehicle_placements: runtime_vehicle_placements(
+            &definition.cells,
+            usize::from(definition.width),
+            &definition.vehicles,
+            &definition.vehicle_placements,
+            vehicle_groups,
+        )?,
         monster_placements: definition
             .monster_placements
             .iter()
@@ -3220,6 +3276,91 @@ fn runtime_nested_mapgen_template(
             .collect::<Result<Vec<_>, _>>()?,
         erase_all_before_placing_terrain: definition.erase_all_before_placing_terrain,
         deferred_fields: definition.deferred_fields.iter().cloned().collect(),
+    })
+}
+
+fn runtime_vehicle_placements(
+    cells: &[String],
+    width: usize,
+    glyph_bindings: &BTreeMap<String, Vec<StrictMapgenVehicleBinding>>,
+    positioned: &[StrictMapgenVehiclePlacement],
+    group_indices: &BTreeMap<String, u16>,
+) -> Result<Vec<WorldgenVehiclePlacementV1>, Box<dyn std::error::Error>> {
+    if width == 0 || cells.len() % width != 0 {
+        return Err("vehicle glyph source has an invalid row-major shape".into());
+    }
+    let mut output = Vec::new();
+    for (index, glyph) in cells.iter().enumerate() {
+        let Some(bindings) = glyph_bindings.get(glyph) else {
+            continue;
+        };
+        let x = i8::try_from(index % width)?;
+        let y = i8::try_from(index / width)?;
+        for binding in bindings {
+            output.push(runtime_vehicle_placement(
+                binding,
+                cdda_content::MapgenCoordinateRange {
+                    minimum: x,
+                    maximum: x,
+                },
+                cdda_content::MapgenCoordinateRange {
+                    minimum: y,
+                    maximum: y,
+                },
+                group_indices,
+            )?);
+        }
+    }
+    for placement in positioned {
+        output.push(runtime_vehicle_placement(
+            &placement.vehicle,
+            placement.x,
+            placement.y,
+            group_indices,
+        )?);
+    }
+    Ok(output)
+}
+
+fn runtime_vehicle_placement(
+    binding: &StrictMapgenVehicleBinding,
+    x: cdda_content::MapgenCoordinateRange,
+    y: cdda_content::MapgenCoordinateRange,
+    group_indices: &BTreeMap<String, u16>,
+) -> Result<WorldgenVehiclePlacementV1, Box<dyn std::error::Error>> {
+    let status = match binding.status {
+        -1 => VehicleSpawnStatusV1::DefaultLightDamage,
+        0 => VehicleSpawnStatusV1::Undamaged,
+        1 => VehicleSpawnStatusV1::Disabled,
+        2 => VehicleSpawnStatusV1::Pristine,
+        _ => return Err("vehicle spawn status escaped strict content validation".into()),
+    };
+    Ok(WorldgenVehiclePlacementV1 {
+        group_index: *group_indices
+            .get(&binding.vehicle_group_id)
+            .ok_or_else(|| {
+                format!(
+                    "vehicle group {} disappeared from runtime closure",
+                    binding.vehicle_group_id
+                )
+            })?,
+        chance_percent: binding.chance_percent,
+        rotations_degrees: binding.rotations_degrees.clone(),
+        fuel_percent: binding.fuel_percent,
+        status,
+        faction_id: binding.faction_id.clone(),
+        repeat: WorldgenU16RangeV1 {
+            minimum: binding.repeat.minimum,
+            maximum: binding.repeat.maximum,
+        },
+        x: WorldgenCoordinateRangeV1 {
+            minimum: x.minimum,
+            maximum: x.maximum,
+        },
+        y: WorldgenCoordinateRangeV1 {
+            minimum: y.minimum,
+            maximum: y.maximum,
+        },
     })
 }
 

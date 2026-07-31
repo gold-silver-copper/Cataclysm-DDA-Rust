@@ -152,6 +152,8 @@ pub struct VisibleVehicleTileV1 {
     pub hp: u32,
     pub maximum_hp: u32,
     pub open: bool,
+    /// Authoritative boardable part at this displayed tile, if one is live.
+    pub boardable_prototype_part_index: Option<u16>,
     pub passenger: Option<ActorId>,
 }
 

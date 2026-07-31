@@ -1,15 +1,15 @@
 use cdda_protocol::{
     ChunkCoord, FurnitureTileSnapshot, ItemGroupDefinitionV1, ItemGroupSourceV1,
-    MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, WorldPosition, WorldgenBuiltinMapgenV1,
-    WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1, WorldgenFurnitureTargetV1,
-    WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
-    WorldgenMonsterGroupTargetV1, WorldgenMonsterPlacementV1, WorldgenNestedConditionsV1,
-    WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
-    WorldgenNpcPlacementV1, WorldgenOmtGeneratorV1, WorldgenTerrainTargetV1,
-    WorldgenWeightedFurniturePrototypeV1, WorldgenWeightedFurnitureTargetV1,
-    WorldgenWeightedPrototypeV1, WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs,
-    worldgen_city_start_distance, worldgen_omt_identity_at, worldgen_omt_matches,
-    worldgen_overmap_contains,
+    MAX_WORLDGEN_REGIONAL_RESOLUTION_DEPTH, VehiclePartSnapshotV1, VehicleSpawnStatusV1,
+    WorldPosition, WorldgenBuiltinMapgenV1, WorldgenCatalogV1, WorldgenFurniturePrototypeTargetV1,
+    WorldgenFurnitureTargetV1, WorldgenIndividualMonsterPlacementV1,
+    WorldgenIndividualMonsterTargetV1, WorldgenMonsterGroupTargetV1, WorldgenMonsterPlacementV1,
+    WorldgenNestedConditionsV1, WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1,
+    WorldgenNestedTemplateV1, WorldgenNpcPlacementV1, WorldgenOmtGeneratorV1,
+    WorldgenTerrainTargetV1, WorldgenVehiclePlacementV1, WorldgenWeightedFurniturePrototypeV1,
+    WorldgenWeightedFurnitureTargetV1, WorldgenWeightedPrototypeV1,
+    WorldgenWeightedTerrainTargetV1, item_group_source_max_outputs, worldgen_city_start_distance,
+    worldgen_omt_identity_at, worldgen_omt_matches, worldgen_overmap_contains,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -24,6 +24,7 @@ pub(super) const OMT_TILE_WIDTH: usize = (SUBMAP_SIZE as usize) * (OMT_SUBMAP_WI
 const OMT_TILE_COUNT: usize = OMT_TILE_WIDTH * OMT_TILE_WIDTH;
 const MAX_PLANNED_CREATURES_PER_OMT: usize = 4_096;
 const MAX_PLANNED_NPCS_PER_OMT: usize = 4_096;
+const MAX_PLANNED_VEHICLES_PER_OMT: usize = 1_024;
 
 pub(super) fn catalog_fits_one_id_reservation(
     catalog: &WorldgenCatalogV1,
@@ -115,12 +116,21 @@ pub(super) struct PlannedBubble {
     pub item_object_count: u64,
     pub creatures: Vec<CreatureSpawn>,
     pub npcs: Vec<PlannedNpcSpawn>,
+    pub vehicles: Vec<PlannedVehicleSpawn>,
 }
 
 pub(super) struct PlannedNpcSpawn {
     pub template_id: String,
     pub generated_name: Option<String>,
     pub position: WorldPosition,
+}
+
+pub(super) struct PlannedVehicleSpawn {
+    pub prototype_index: u16,
+    pub origin: WorldPosition,
+    pub facing_degrees: i16,
+    pub owner_faction_id: String,
+    pub parts: Vec<VehiclePartSnapshotV1>,
 }
 
 pub(super) fn catalog_initial_bubble_is_admissible(
@@ -221,6 +231,7 @@ pub(super) fn plan_active_bubble(
         item_object_count: 0,
         creatures: Vec::new(),
         npcs: Vec::new(),
+        vehicles: Vec::new(),
     };
     let mut planned_occupied = occupied.clone();
     for omt_y in minimum_omt_y..=maximum_omt_y {
@@ -256,6 +267,7 @@ pub(super) fn plan_active_bubble(
                     planned.items.extend(cell.items);
                     planned.creatures.extend(cell.creatures);
                     planned.npcs.extend(cell.npcs);
+                    planned.vehicles.extend(cell.vehicles);
                 }
                 4 => {}
                 _ => return Err(SimError::InvalidTerrain),
@@ -373,6 +385,93 @@ fn plan_omt_cell(
             prototype,
         ));
     }
+    let mut vehicles = Vec::with_capacity(plan.vehicles.len());
+    for vehicle in plan.vehicles {
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let origin = omt_tile_position(
+            omt,
+            vehicle.origin_index % OMT_TILE_WIDTH,
+            vehicle.origin_index / OMT_TILE_WIDTH,
+        )?;
+        let parts = prototype
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(index, prototype_part)| {
+                let state = vehicle.parts.get(index).ok_or(SimError::InvalidTerrain)?;
+                Ok(VehiclePartSnapshotV1 {
+                    prototype_part_index: u16::try_from(index)
+                        .map_err(|_| SimError::NumericOverflow)?,
+                    position: super::vehicles::vehicle_part_position(
+                        origin,
+                        prototype_part.mount_x,
+                        prototype_part.mount_y,
+                        vehicle.facing_degrees,
+                    )?,
+                    hp: state.hp,
+                    enabled: state.enabled,
+                    open: state.open,
+                    locked: state.locked,
+                    passenger: None,
+                })
+            })
+            .collect::<Result<Vec<_>, SimError>>()?;
+        let mut structure_positions = std::collections::BTreeSet::new();
+        for (index, part) in parts.iter().enumerate() {
+            let prototype_part = prototype.parts.get(index).ok_or(SimError::InvalidTerrain)?;
+            let part_type = catalog
+                .vehicle_part_types
+                .get(usize::from(prototype_part.part_type_index))
+                .ok_or(SimError::InvalidTerrain)?;
+            if part.hp == 0 || part_type.location != "structure" {
+                continue;
+            }
+            let local_x = part
+                .position
+                .x
+                .checked_sub(
+                    omt.x
+                        .checked_mul(OMT_TILE_WIDTH as i32)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .ok_or(SimError::NumericOverflow)?;
+            let local_y = part
+                .position
+                .y
+                .checked_sub(
+                    omt.y
+                        .checked_mul(OMT_TILE_WIDTH as i32)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .ok_or(SimError::NumericOverflow)?;
+            let local_index =
+                absolute_tile_index(local_x, local_y).ok_or(SimError::InvalidTerrain)?;
+            if terrain[local_index].move_cost <= 0
+                || furniture[local_index]
+                    .as_ref()
+                    .is_some_and(|furniture| furniture.move_cost_mod < 0)
+                || !structure_positions.insert(part.position)
+            {
+                return Err(SimError::InvalidTerrain);
+            }
+        }
+        if structure_positions
+            .iter()
+            .any(|position| !occupied.insert(*position))
+        {
+            return Err(SimError::InvalidTerrain);
+        }
+        vehicles.push(PlannedVehicleSpawn {
+            prototype_index: vehicle.prototype_index,
+            origin,
+            facing_degrees: vehicle.facing_degrees,
+            owner_faction_id: vehicle.owner_faction_id,
+            parts,
+        });
+    }
     let mut npcs = Vec::with_capacity(plan.npcs.len());
     for (index, template_id, generated_name) in plan.npcs {
         if terrain[index].move_cost <= 0
@@ -420,6 +519,7 @@ fn plan_omt_cell(
         item_object_count,
         creatures,
         npcs,
+        vehicles,
     })
 }
 
@@ -480,6 +580,22 @@ struct OmtMapgenPlan {
     individual_monster_placements: Vec<PlannedIndividualMonsterPlacement>,
     npcs: Vec<(usize, String, Option<String>)>,
     monsters: Vec<(usize, u16)>,
+    vehicles: Vec<PlannedMapgenVehicle>,
+}
+
+struct PlannedVehiclePartState {
+    hp: u32,
+    enabled: bool,
+    open: bool,
+    locked: bool,
+}
+
+struct PlannedMapgenVehicle {
+    prototype_index: u16,
+    origin_index: usize,
+    facing_degrees: i16,
+    owner_faction_id: String,
+    parts: Vec<PlannedVehiclePartState>,
 }
 
 struct PlannedMonsterPlacement {
@@ -504,6 +620,7 @@ impl OmtMapgenPlan {
             individual_monster_placements: Vec::new(),
             npcs: Vec::new(),
             monsters: Vec::new(),
+            vehicles: Vec::new(),
         }
     }
 
@@ -608,6 +725,7 @@ fn apply_root_generator(
         &template.nested,
         &template.area_items,
         &template.npc_placements,
+        &template.vehicle_placements,
         &template.monster_placements,
         &template.individual_monster_placements,
         template.erase_all_before_placing_terrain,
@@ -962,6 +1080,19 @@ fn rotate_mapgen_plan(plan: &mut OmtMapgenPlan, rotation: u8) -> Result<(), SimE
             rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
         *index = target_y * OMT_TILE_WIDTH + target_x;
     }
+    for vehicle in &mut plan.vehicles {
+        let (target_x, target_y) = rotate_tile_xy(
+            vehicle.origin_index % OMT_TILE_WIDTH,
+            vehicle.origin_index / OMT_TILE_WIDTH,
+            rotation,
+        )?;
+        vehicle.origin_index = target_y * OMT_TILE_WIDTH + target_x;
+        vehicle.facing_degrees = vehicle
+            .facing_degrees
+            .checked_add(i16::from(rotation) * 90)
+            .ok_or(SimError::NumericOverflow)?
+            .rem_euclid(360);
+    }
     plan.terrain = terrain;
     plan.furniture = furniture;
     Ok(())
@@ -981,6 +1112,7 @@ fn apply_template_body(
     nested: &[WorldgenNestedPlacementV1],
     area_items: &[cdda_protocol::WorldgenAreaItemPlacementV1],
     npc_placements: &[WorldgenNpcPlacementV1],
+    vehicle_placements: &[WorldgenVehiclePlacementV1],
     monster_placements: &[WorldgenMonsterPlacementV1],
     individual_monster_placements: &[WorldgenIndividualMonsterPlacementV1],
     erase_all_before_placing_terrain: bool,
@@ -1046,23 +1178,6 @@ fn apply_template_body(
         plan_npc_placement(catalog, placement, offset_x, offset_y, rng, plan)?;
     }
 
-    for placement in nested {
-        apply_nested_placement(
-            catalog,
-            root_generator,
-            item_groups,
-            omt,
-            rotation,
-            predecessor_id,
-            placement,
-            offset_x,
-            offset_y,
-            rng,
-            plan,
-            depth + 1,
-        )?;
-    }
-
     for (source, cell) in cells.iter().enumerate() {
         let Some(placement) = &cell.item_group else {
             continue;
@@ -1080,6 +1195,29 @@ fn apply_template_body(
     }
     for placement in individual_monster_placements {
         plan_individual_monster_placement_request(placement, offset_x, offset_y, plan)?;
+    }
+    for placement in vehicle_placements {
+        plan_vehicle_placement(catalog, placement, offset_x, offset_y, rng, plan)?;
+    }
+
+    // Nested mapgen is a later pinned phase than ordinary NPC, item, monster,
+    // and vehicle pieces. It may therefore overlay their tiles but must not
+    // consume its selector RNG before those default-phase objects.
+    for placement in nested {
+        apply_nested_placement(
+            catalog,
+            root_generator,
+            item_groups,
+            omt,
+            rotation,
+            predecessor_id,
+            placement,
+            offset_x,
+            offset_y,
+            rng,
+            plan,
+            depth + 1,
+        )?;
     }
     Ok(())
 }
@@ -1135,6 +1273,235 @@ fn plan_npc_placement(
             .push((index, placement.template_id.clone(), generated_name));
     }
     Ok(())
+}
+
+fn plan_vehicle_placement(
+    catalog: &WorldgenCatalogV1,
+    placement: &WorldgenVehiclePlacementV1,
+    offset_x: i32,
+    offset_y: i32,
+    rng: &mut ChaCha8Rng,
+    plan: &mut OmtMapgenPlan,
+) -> Result<(), SimError> {
+    let repeat = if placement.repeat.minimum == placement.repeat.maximum {
+        placement.repeat.minimum
+    } else {
+        choose_worldgen_u16_range(placement.repeat, rng)?
+    };
+    for _ in 0..repeat {
+        // Pinned `x_in_y` always evaluates its random distribution, including
+        // the 0% and 100% boundaries.
+        let chance_roll = inclusive_rng_u64(rng, 0, 99);
+        if chance_roll >= u64::from(placement.chance_percent) {
+            continue;
+        }
+        let group = catalog
+            .vehicle_groups
+            .get(usize::from(placement.group_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let total_weight = group.entries.iter().try_fold(0_u64, |total, entry| {
+            total.checked_add(u64::from(entry.weight))
+        });
+        let entry_index = choose_weighted_index(
+            group.entries.len(),
+            total_weight.ok_or(SimError::NumericOverflow)?,
+            rng,
+            |index| u64::from(group.entries[index].weight),
+            true,
+        )?;
+        let prototype_index = group
+            .entries
+            .get(entry_index)
+            .ok_or(SimError::InvalidTerrain)?
+            .prototype_index;
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(prototype_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let x = offset_x
+            .checked_add(i32::from(choose_i8_range(
+                placement.x.minimum,
+                placement.x.maximum,
+                rng,
+            )?))
+            .ok_or(SimError::NumericOverflow)?;
+        let y = offset_y
+            .checked_add(i32::from(choose_i8_range(
+                placement.y.minimum,
+                placement.y.maximum,
+                rng,
+            )?))
+            .ok_or(SimError::NumericOverflow)?;
+        let Some(origin_index) = absolute_tile_index(x, y) else {
+            continue;
+        };
+        let rotation_index = if placement.rotations_degrees.len() == 1 {
+            0
+        } else {
+            usize::try_from(inclusive_rng_u64(
+                rng,
+                0,
+                u64::try_from(placement.rotations_degrees.len() - 1)
+                    .map_err(|_| SimError::NumericOverflow)?,
+            ))
+            .map_err(|_| SimError::NumericOverflow)?
+        };
+        let facing_degrees = *placement
+            .rotations_degrees
+            .get(rotation_index)
+            .ok_or(SimError::InvalidTerrain)?;
+        let parts = initial_vehicle_parts(
+            catalog,
+            prototype,
+            placement.status,
+            placement.fuel_percent,
+            placement.faction_id.is_empty(),
+            rng,
+        )?;
+        if plan.vehicles.len() >= MAX_PLANNED_VEHICLES_PER_OMT {
+            return Err(SimError::InvalidTerrain);
+        }
+        plan.vehicles.push(PlannedMapgenVehicle {
+            prototype_index,
+            origin_index,
+            facing_degrees,
+            owner_faction_id: placement.faction_id.clone(),
+            parts,
+        });
+    }
+    Ok(())
+}
+
+fn initial_vehicle_parts(
+    catalog: &WorldgenCatalogV1,
+    prototype: &cdda_protocol::WorldgenVehiclePrototypeV1,
+    status: VehicleSpawnStatusV1,
+    fuel_percent: i16,
+    unowned: bool,
+    rng: &mut ChaCha8Rng,
+) -> Result<Vec<PlannedVehiclePartState>, SimError> {
+    let disabled_failure = if status == VehicleSpawnStatusV1::Disabled {
+        u8::try_from(inclusive_rng_u64(rng, 1, 5)).map_err(|_| SimError::NumericOverflow)?
+    } else {
+        0
+    };
+    let mut has_no_key = one_in_mapgen(rng, 3);
+    let mut destroy_alarm = !one_in_mapgen(rng, 3);
+    let mut destroy_engine = disabled_failure == 4 || one_in_mapgen(rng, 3);
+    if status == VehicleSpawnStatusV1::Pristine {
+        has_no_key = false;
+        destroy_alarm = false;
+        destroy_engine = false;
+    }
+    let undamaged = matches!(
+        status,
+        VehicleSpawnStatusV1::Undamaged | VehicleSpawnStatusV1::Pristine
+    );
+    let has_engine = prototype.parts.iter().any(|part| {
+        catalog
+            .vehicle_part_types
+            .get(usize::from(part.part_type_index))
+            .is_some_and(|part_type| vehicle_part_has_flag(part_type, "ENGINE"))
+    });
+    if !undamaged {
+        if fuel_percent != 0 && has_engine {
+            let _ = one_in_mapgen(rng, 4);
+        }
+        for denominator in [20_u64, 20, 16, 8, 4, 4, 2] {
+            let _ = one_in_mapgen(rng, denominator);
+        }
+    }
+    let blood_covered = !undamaged && one_in_mapgen(rng, 10);
+    let blood_inside = !undamaged && one_in_mapgen(rng, 8);
+    let mut blood_inside_mount = None::<(i16, i16)>;
+    let mut output = Vec::with_capacity(prototype.parts.len());
+    for part in &prototype.parts {
+        let part_type = catalog
+            .vehicle_part_types
+            .get(usize::from(part.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        let mut open = vehicle_part_has_flag(part_type, "OPENABLE") && one_in_mapgen(rng, 4);
+        let mut hp =
+            super::vehicles::initial_vehicle_part_hp(part_type.durability, undamaged, rng)?;
+        if !undamaged {
+            if destroy_engine && vehicle_part_has_flag(part_type, "ENGINE") {
+                hp = 0;
+            } else if (disabled_failure == 1
+                && (vehicle_part_has_flag(part_type, "SEAT")
+                    || vehicle_part_has_flag(part_type, "SEATBELT")))
+                || (disabled_failure == 2
+                    && (vehicle_part_has_flag(part_type, "CONTROLS")
+                        || vehicle_part_has_flag(part_type, "SECURITY")))
+                || (destroy_alarm && vehicle_part_has_flag(part_type, "SECURITY"))
+                || (disabled_failure == 3
+                    && (vehicle_part_has_flag(part_type, "FUEL_TANK")
+                        || vehicle_part_has_flag(part_type, "FUEL_STORE")))
+            {
+                hp = 0;
+            }
+            if vehicle_part_has_flag(part_type, "SOLAR_PANEL") && one_in_mapgen(rng, 4) {
+                hp = 0;
+            }
+            if blood_covered && part.mount_x > 0 {
+                if one_in_mapgen(rng, 3) {
+                    let _ = inclusive_rng_u64(rng, 200, 600);
+                } else {
+                    let _ = inclusive_rng_u64(rng, 50, 200);
+                }
+            }
+            if blood_inside {
+                if let Some((center_x, center_y)) = blood_inside_mount {
+                    let dx = i32::from(center_x) - i32::from(part.mount_x);
+                    let dy = i32::from(center_y) - i32::from(part.mount_y);
+                    if dx * dx + dy * dy <= 1 {
+                        let _ = inclusive_rng_u64(rng, 200, 400);
+                    }
+                } else if vehicle_part_has_flag(part_type, "SEAT") {
+                    blood_inside_mount = Some((part.mount_x, part.mount_y));
+                }
+            }
+        }
+        let locked = has_no_key
+            && hp > 0
+            && (vehicle_part_has_flag(part_type, "LOCKABLE_DOOR")
+                || vehicle_part_has_flag(part_type, "LOCKABLE_CARGO"));
+        if locked {
+            open = false;
+            let _ = one_in_mapgen(rng, 2);
+        }
+        output.push(PlannedVehiclePartState {
+            hp,
+            enabled: unowned && vehicle_part_has_flag(part_type, "ENGINE"),
+            open,
+            locked,
+        });
+    }
+    if status == VehicleSpawnStatusV1::Disabled {
+        if disabled_failure == 5 {
+            for (index, part) in output.iter_mut().enumerate() {
+                let prototype_part = prototype.parts.get(index).ok_or(SimError::InvalidTerrain)?;
+                let part_type = catalog
+                    .vehicle_part_types
+                    .get(usize::from(prototype_part.part_type_index))
+                    .ok_or(SimError::InvalidTerrain)?;
+                if vehicle_part_has_flag(part_type, "WHEEL") {
+                    part.hp = 0;
+                }
+            }
+        }
+        if one_in_mapgen(rng, 2) {
+            for part in &mut output {
+                part.hp /= 2;
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn vehicle_part_has_flag(part: &cdda_protocol::WorldgenVehiclePartTypeV1, flag: &str) -> bool {
+    part.flags
+        .binary_search_by(|candidate| candidate.as_str().cmp(flag))
+        .is_ok()
 }
 
 fn expand_npc_name(
@@ -1728,6 +2095,7 @@ fn apply_nested_placement(
         &template.nested,
         &template.area_items,
         &template.npc_placements,
+        &template.vehicle_placements,
         &template.monster_placements,
         &template.individual_monster_placements,
         template.erase_all_before_placing_terrain,

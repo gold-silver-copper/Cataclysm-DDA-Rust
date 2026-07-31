@@ -18,7 +18,7 @@ use cdda_content::{
     ItemRegistry, MapgenRegistry, MaterialRegistry, MissionRegistry, ModCatalog, MonsterDefinition,
     MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
     ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry,
-    StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    StartLocationRegistry, TerrainDefinition, TerrainRegistry, VehicleRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -79,6 +79,7 @@ mod npc_faction;
 #[cfg(test)]
 mod regional_field_acceptance;
 mod use_actions;
+mod vehicles;
 mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
@@ -146,6 +147,7 @@ struct RuntimeWorldContent<'a> {
     furniture: &'a FurnitureRegistry,
     regions: &'a DefaultRegionTerrainFurnitureRegistry,
     mapgen: &'a MapgenRegistry,
+    vehicles: &'a VehicleRegistry,
     overmap_terrain: &'a OvermapTerrainRegistry,
     overmap_specials: &'a OvermapSpecialRegistry,
     start_locations: &'a StartLocationRegistry,
@@ -387,6 +389,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &furniture,
         &item_groups,
     )?;
+    let vehicles = VehicleRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let overmap_terrain = OvermapTerrainRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -515,6 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             furniture: &furniture,
             regions: &regions,
             mapgen: &mapgen,
+            vehicles: &vehicles,
             overmap_terrain: &overmap_terrain,
             overmap_specials: &overmap_specials,
             start_locations: &start_locations,
@@ -979,6 +988,7 @@ fn open_world(
             .ok_or("pinned default content is missing sloc_field")?,
         RuntimeMapgenContent {
             mapgen,
+            vehicles: content.vehicles,
             overmap_terrain,
             regions,
             terrain,

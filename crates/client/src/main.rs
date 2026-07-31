@@ -28,7 +28,7 @@ use cdda_protocol::{
     MAX_CHARACTERS_PER_ACCOUNT, MAX_CHAT_BYTES, MAX_DATAGRAM_SIZE, MAX_REPORT_BYTES,
     MAX_REPORT_CHARACTERS, MIN_CHARACTER_CREATION_STAT, PROTOCOL_VERSION, PlayerReport,
     REQUIRED_DATAGRAM_SIZE, ReplicationSnapshotV1, ReportReason, ReportRejection, ReportResponse,
-    SkyPhase, WorldEvent, WorldEventKind, encode_client_datagram,
+    SkyPhase, VehicleId, WorldEvent, WorldEventKind, encode_client_datagram,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, endpoint::presets};
 
@@ -83,6 +83,16 @@ enum ClientAction {
     },
     TalkToNpc {
         target: cdda_protocol::NpcId,
+    },
+    BoardVehicle {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+    },
+    UnboardVehicle {
+        vehicle_id: VehicleId,
+        prototype_part_index: u16,
+        dx: i8,
+        dy: i8,
     },
     RespondInteraction {
         interaction_id: cdda_protocol::InteractionId,
@@ -328,6 +338,9 @@ struct ItemVisual(ItemId);
 
 #[derive(Component)]
 struct CreatureVisual(CreatureId);
+
+#[derive(Component)]
+struct VehicleVisual(VehicleId, u16);
 
 #[derive(Component)]
 struct TileVisual {
@@ -1026,6 +1039,24 @@ async fn run_game_session(
                     Some(ClientAction::TalkToNpc { target }) => {
                         Some(CommandKind::TalkToNpc { target })
                     }
+                    Some(ClientAction::BoardVehicle {
+                        vehicle_id,
+                        prototype_part_index,
+                    }) => Some(CommandKind::BoardVehicle {
+                        vehicle_id,
+                        prototype_part_index,
+                    }),
+                    Some(ClientAction::UnboardVehicle {
+                        vehicle_id,
+                        prototype_part_index,
+                        dx,
+                        dy,
+                    }) => Some(CommandKind::UnboardVehicle {
+                        vehicle_id,
+                        prototype_part_index,
+                        dx,
+                        dy,
+                    }),
                     Some(ClientAction::RespondInteraction {
                         interaction_id,
                         choice_id,
@@ -4175,6 +4206,26 @@ fn handle_movement_input(
     } else if keys.just_pressed(KeyCode::KeyR) && actor.wielded.is_some() {
         let _send_result = game.actions.try_send(ClientAction::Unwield);
     } else if keys.just_pressed(KeyCode::KeyK) {
+        if let Some((vehicle, tile)) = snapshot.vehicles.iter().find_map(|vehicle| {
+            vehicle
+                .tiles
+                .iter()
+                .find(|tile| tile.passenger == Some(actor.id))
+                .map(|tile| (vehicle, tile))
+        }) {
+            if let (Some(prototype_part_index), Some(direction)) = (
+                tile.boardable_prototype_part_index,
+                client_unboard_direction(snapshot, actor.position),
+            ) {
+                let _send_result = game.actions.try_send(ClientAction::UnboardVehicle {
+                    vehicle_id: vehicle.id,
+                    prototype_part_index,
+                    dx: direction.dx,
+                    dy: direction.dy,
+                });
+            }
+            return;
+        }
         let adjacent = snapshot
             .npcs
             .iter()
@@ -4188,8 +4239,87 @@ fn handle_movement_input(
             let _send_result = game
                 .actions
                 .try_send(ClientAction::TalkToNpc { target: npc.id });
+        } else if let Some((vehicle, _tile, prototype_part_index)) = snapshot
+            .vehicles
+            .iter()
+            .flat_map(|vehicle| {
+                vehicle.tiles.iter().filter_map(move |tile| {
+                    tile.boardable_prototype_part_index
+                        .filter(|_| tile.passenger.is_none())
+                        .map(|part_index| (vehicle, tile, part_index))
+                })
+            })
+            .filter(|(_, tile, _)| {
+                tile.position.z == actor.position.z
+                    && tile.position.x.abs_diff(actor.position.x) <= 1
+                    && tile.position.y.abs_diff(actor.position.y) <= 1
+                    && tile.position != actor.position
+            })
+            .min_by_key(|(vehicle, _tile, part_index)| (vehicle.id, *part_index))
+        {
+            let _send_result = game.actions.try_send(ClientAction::BoardVehicle {
+                vehicle_id: vehicle.id,
+                prototype_part_index,
+            });
         }
     }
+}
+
+fn client_unboard_direction(
+    snapshot: &ReplicationSnapshotV1,
+    from: cdda_protocol::WorldPosition,
+) -> Option<HorizontalDirection> {
+    [
+        HorizontalDirection { dx: 0, dy: -1 },
+        HorizontalDirection { dx: 1, dy: 0 },
+        HorizontalDirection { dx: 0, dy: 1 },
+        HorizontalDirection { dx: -1, dy: 0 },
+        HorizontalDirection { dx: 1, dy: -1 },
+        HorizontalDirection { dx: 1, dy: 1 },
+        HorizontalDirection { dx: -1, dy: 1 },
+        HorizontalDirection { dx: -1, dy: -1 },
+    ]
+    .into_iter()
+    .find(|direction| {
+        let Some(target) = from.checked_offset(direction.dx, direction.dy, 0) else {
+            return false;
+        };
+        let (coord, local) = target.chunk_and_local();
+        let passable = snapshot
+            .chunks
+            .iter()
+            .find(|chunk| chunk.coord == coord)
+            .and_then(|chunk| {
+                chunk.tiles.get(
+                    usize::from(local.y) * cdda_protocol::SUBMAP_SIZE as usize
+                        + usize::from(local.x),
+                )
+            })
+            .and_then(Option::as_ref)
+            .is_some_and(|tile| {
+                tile.currently_visible
+                    && tile.terrain.move_cost > 0
+                    && tile
+                        .furniture
+                        .as_ref()
+                        .is_none_or(|furniture| furniture.move_cost_mod >= 0)
+            });
+        passable
+            && !snapshot
+                .visible_actors
+                .iter()
+                .any(|actor| actor.hp > 0 && actor.position == target)
+            && !snapshot.npcs.iter().any(|npc| npc.position == target)
+            && !snapshot
+                .creatures
+                .iter()
+                .any(|creature| creature.hp > 0 && creature.position == target)
+            && !snapshot
+                .vehicles
+                .iter()
+                .flat_map(|vehicle| &vehicle.tiles)
+                .any(|tile| tile.position == target)
+    })
 }
 
 fn current_held_direction(keys: &ButtonInput<KeyCode>) -> Option<HorizontalDirection> {
@@ -4244,12 +4374,22 @@ fn poll_game_updates(
             Without<TileVisual>,
         ),
     >,
+    mut vehicle_visuals: Query<
+        (Entity, &VehicleVisual, &mut Transform, &mut Sprite),
+        (
+            Without<ActorVisual>,
+            Without<ItemVisual>,
+            Without<CreatureVisual>,
+            Without<TileVisual>,
+        ),
+    >,
     mut tile_visuals: Query<
         (&TileVisual, &mut Sprite),
         (
             Without<ActorVisual>,
             Without<ItemVisual>,
             Without<CreatureVisual>,
+            Without<VehicleVisual>,
         ),
     >,
     content_items: Option<Res<ContentItems>>,
@@ -4323,6 +4463,12 @@ fn poll_game_updates(
                     &snapshot,
                     controlled_actor,
                     &mut creature_visuals,
+                );
+                sync_vehicle_visuals(
+                    &mut commands,
+                    &snapshot,
+                    controlled_actor,
+                    &mut vehicle_visuals,
                 );
                 sync_terrain_visuals(
                     &snapshot,
@@ -4439,6 +4585,11 @@ fn render_status_text(
 
 fn event_message(event: &WorldEvent) -> String {
     match &event.kind {
+        WorldEventKind::VehicleSpawned { prototype_id, .. } => {
+            format!("A {prototype_id} vehicle entered the world.")
+        }
+        WorldEventKind::ActorBoardedVehicle { .. } => String::from("Boarded the vehicle."),
+        WorldEventKind::ActorUnboardedVehicle { .. } => String::from("Left the vehicle."),
         WorldEventKind::ActorMoved { .. } => String::from("Moved."),
         WorldEventKind::DamageApplied {
             body_part_id,
@@ -4818,6 +4969,14 @@ const fn command_rejection_message(reason: &CommandRejection) -> &'static str {
         CommandRejection::StaleInteraction => "that interaction is no longer current",
         CommandRejection::InvalidInteractionChoice => "that choice is not available",
         CommandRejection::NpcRefusedDialogue => "the NPC refuses to talk",
+        CommandRejection::VehicleMissing => "the vehicle is missing",
+        CommandRejection::VehiclePartMissing => "the vehicle part is missing",
+        CommandRejection::VehiclePartBroken => "the vehicle part is broken",
+        CommandRejection::VehiclePartNotBoardable => "that vehicle part cannot be boarded",
+        CommandRejection::VehiclePartOccupied => "that vehicle seat is occupied",
+        CommandRejection::ActorAlreadyBoarded => "your character is already aboard a vehicle",
+        CommandRejection::ActorNotBoarded => "your character is not aboard that vehicle",
+        CommandRejection::InvalidUnboardDestination => "there is nowhere safe to leave the vehicle",
         CommandRejection::ItemHasNoPower => "item has no usable battery charge",
         CommandRejection::PoweredToolActive => "turn the powered tool off first",
         CommandRejection::InvalidTerrainInteraction => "terrain cannot be changed",
@@ -5018,6 +5177,70 @@ fn sync_creature_visuals(
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the filter proves vehicle visuals are disjoint from other dynamic sprite queries"
+)]
+fn sync_vehicle_visuals(
+    commands: &mut Commands,
+    snapshot: &ReplicationSnapshotV1,
+    controlled_actor: ActorId,
+    visuals: &mut Query<
+        (Entity, &VehicleVisual, &mut Transform, &mut Sprite),
+        (
+            Without<ActorVisual>,
+            Without<ItemVisual>,
+            Without<CreatureVisual>,
+            Without<TileVisual>,
+        ),
+    >,
+) {
+    let Some((origin_x, origin_y)) = view_origin(snapshot, controlled_actor) else {
+        return;
+    };
+    for (entity, visual, _transform, _sprite) in visuals.iter_mut() {
+        if !snapshot.vehicles.iter().any(|vehicle| {
+            vehicle.id == visual.0
+                && vehicle
+                    .tiles
+                    .iter()
+                    .any(|tile| tile.prototype_part_index == visual.1)
+        }) {
+            commands.entity(entity).despawn();
+        }
+    }
+    for vehicle in &snapshot.vehicles {
+        for tile in &vehicle.tiles {
+            let x = ((tile.position.x - origin_x) as f32 - 5.5) * 36.0;
+            let y = (5.5 - (tile.position.y - origin_y) as f32) * 36.0;
+            let health = tile.hp as f32 / tile.maximum_hp as f32;
+            let color = if tile.passenger == Some(controlled_actor) {
+                Color::srgb(0.28, 0.78, 0.88)
+            } else if tile.open {
+                Color::srgb(0.62, 0.55, 0.28)
+            } else {
+                Color::srgb(0.32 + 0.28 * health, 0.33 + 0.25 * health, 0.36)
+            };
+            if let Some((_entity, _visual, mut transform, mut sprite)) =
+                visuals
+                    .iter_mut()
+                    .find(|(_entity, visual, _transform, _sprite)| {
+                        visual.0 == vehicle.id && visual.1 == tile.prototype_part_index
+                    })
+            {
+                transform.translation = Vec3::new(x, y, 0.82);
+                sprite.color = color;
+            } else {
+                commands.spawn((
+                    Sprite::from_color(color, Vec2::splat(30.0)),
+                    Transform::from_xyz(x, y, 0.82),
+                    VehicleVisual(vehicle.id, tile.prototype_part_index),
+                ));
+            }
+        }
+    }
+}
+
 fn view_origin(snapshot: &ReplicationSnapshotV1, controlled_actor: ActorId) -> Option<(i32, i32)> {
     let actor = &snapshot.controlled_actor;
     if actor.id != controlled_actor {
@@ -5044,6 +5267,7 @@ fn sync_terrain_visuals(
             Without<ActorVisual>,
             Without<ItemVisual>,
             Without<CreatureVisual>,
+            Without<VehicleVisual>,
         ),
     >,
 ) {
@@ -5298,6 +5522,36 @@ fn gameplay_status(
             )
         })
         .unwrap_or_else(|| String::from("none"));
+    let nearest_vehicle = snapshot
+        .vehicles
+        .iter()
+        .min_by_key(|vehicle| {
+            vehicle
+                .tiles
+                .iter()
+                .map(|tile| {
+                    tile.position.x.abs_diff(actor.position.x)
+                        + tile.position.y.abs_diff(actor.position.y)
+                        + tile.position.z.abs_diff(actor.position.z)
+                })
+                .min()
+                .unwrap_or(u32::MAX)
+        })
+        .map(|vehicle| {
+            let boarded = vehicle
+                .tiles
+                .iter()
+                .any(|tile| tile.passenger == Some(actor.id));
+            format!(
+                "{} at ({}, {}, {}){}",
+                vehicle.name,
+                vehicle.origin.x,
+                vehicle.origin.y,
+                vehicle.origin.z,
+                if boarded { " (aboard)" } else { "" },
+            )
+        })
+        .unwrap_or_else(|| String::from("none"));
     let current_observation = {
         let (chunk_coord, local) = actor.position.chunk_and_local();
         snapshot
@@ -5510,7 +5764,7 @@ fn gameplay_status(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; talk to adjacent NPC: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Missions: [{}]. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; interact/board/unboard: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Missions: [{}]. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}. Nearest vehicle: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5554,6 +5808,7 @@ fn gameplay_status(
         ground_here,
         nearest_hostile,
         nearest_npc,
+        nearest_vehicle,
     )
 }
 

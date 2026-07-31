@@ -86,6 +86,10 @@ Run only when the user explicitly requests a verification checkpoint.
   finish/fail, nested item turn-in, type/species kill-count, EOC ordering and
   active-mission condition traces; production admission; canonical fixtures;
   SQLite/replay recovery; and two-client dialogue assignment/completion.
+- Vehicle checkpoint: run pinned vehicle inheritance/group selection, mapgen
+  phase/RNG order, arbitrary-angle tileray mounts, initialization damage/state,
+  collision, canonical recovery/replay, visibility, and two-client
+  board/disconnect/unboard paths for protocol 131/schema 109.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,
   armor absorption, corrosion duration/intensity, intensity-level inherited
   non-environmental effects, reversed duration bounds, outside-vehicle chance,

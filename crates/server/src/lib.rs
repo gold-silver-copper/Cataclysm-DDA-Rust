@@ -32,8 +32,8 @@ use cdda_protocol::{
     PROTOCOL_VERSION, PlayerReport, PrivateCharacterInspection, REQUIRED_DATAGRAM_SIZE,
     ReplicationSnapshotV1, ReportId, ReportRejection, ReportResponse, ReportState, ReportSummary,
     ServerHello, SimTick, VisibleActorSnapshot, VisibleChunkSnapshot, VisibleCreatureSnapshot,
-    VisibleNpcSnapshotV1, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
-    decode_client_datagram, encode_control,
+    VisibleNpcSnapshotV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1, WorldEvent,
+    WorldEventKind, WorldPosition, WorldSnapshotV1, decode_client_datagram, encode_control,
 };
 use cdda_sim::{ActorSpawn, ReservedIdBlock, TickOutcome, WorldState};
 use iroh::{
@@ -4344,6 +4344,7 @@ fn interest_snapshot(
             max_hp: creature.max_hp,
         })
         .collect();
+    let vehicles = visible_vehicles(&snapshot, &visible)?;
     let ground_items = snapshot
         .ground_items
         .iter()
@@ -4502,9 +4503,163 @@ fn interest_snapshot(
         npcs,
         mission_definitions,
         creatures,
+        vehicles,
         ground_items,
         chunks,
     })
+}
+
+fn visible_vehicles(
+    snapshot: &WorldSnapshotV1,
+    visible: &impl Fn(WorldPosition) -> bool,
+) -> Result<Vec<VisibleVehicleSnapshotV1>, NetworkError> {
+    let Some(catalog) = snapshot.worldgen.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    for vehicle in &snapshot.vehicles {
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))
+            .ok_or_else(|| NetworkError::Simulation(String::from("vehicle prototype missing")))?;
+        let mut displayed = BTreeMap::<WorldPosition, (i16, VisibleVehicleTileV1)>::new();
+        let mut passengers = BTreeMap::new();
+        let mut boardable_parts = BTreeMap::new();
+        for (index, part) in vehicle.parts.iter().enumerate() {
+            if let Some(passenger) = part.passenger {
+                passengers.insert(part.position, passenger);
+            }
+            let prototype_part = prototype.parts.get(index).ok_or_else(|| {
+                NetworkError::Simulation(String::from("vehicle prototype part missing"))
+            })?;
+            let part_type = catalog
+                .vehicle_part_types
+                .get(usize::from(prototype_part.part_type_index))
+                .ok_or_else(|| {
+                    NetworkError::Simulation(String::from("vehicle part type missing"))
+                })?;
+            if part.hp > 0
+                && part_type
+                    .flags
+                    .binary_search_by(|flag| flag.as_str().cmp("BOARDABLE"))
+                    .is_ok()
+            {
+                boardable_parts
+                    .entry(part.position)
+                    .or_insert(part.prototype_part_index);
+            }
+        }
+        for (index, part) in vehicle.parts.iter().enumerate() {
+            if !visible(part.position) {
+                continue;
+            }
+            let prototype_part = prototype.parts.get(index).ok_or_else(|| {
+                NetworkError::Simulation(String::from("vehicle prototype part missing"))
+            })?;
+            let part_type = catalog
+                .vehicle_part_types
+                .get(usize::from(prototype_part.part_type_index))
+                .ok_or_else(|| {
+                    NetworkError::Simulation(String::from("vehicle part type missing"))
+                })?;
+            let z_order = vehicle_part_location_z_order(&part_type.location);
+            if z_order < 0
+                || displayed
+                    .get(&part.position)
+                    .is_some_and(|(current, _)| *current >= z_order)
+            {
+                continue;
+            }
+            let variant = part_type
+                .variants
+                .iter()
+                .find(|variant| variant.variant_id == prototype_part.variant_id)
+                .ok_or_else(|| {
+                    NetworkError::Simulation(String::from("vehicle part variant missing"))
+                })?;
+            let symbol = if part.open {
+                String::from("'")
+            } else {
+                vehicle_part_symbol(
+                    if part.hp == 0 {
+                        &variant.broken_symbols
+                    } else {
+                        &variant.symbols
+                    },
+                    vehicle.facing_degrees,
+                )?
+            };
+            displayed.insert(
+                part.position,
+                (
+                    z_order,
+                    VisibleVehicleTileV1 {
+                        prototype_part_index: part.prototype_part_index,
+                        position: part.position,
+                        name: part_type.name.clone(),
+                        symbol,
+                        hp: part.hp,
+                        maximum_hp: part_type.durability,
+                        open: part.open,
+                        boardable_prototype_part_index: boardable_parts
+                            .get(&part.position)
+                            .copied(),
+                        passenger: passengers.get(&part.position).copied(),
+                    },
+                ),
+            );
+        }
+        let tiles = displayed
+            .into_values()
+            .map(|(_, tile)| tile)
+            .collect::<Vec<_>>();
+        if !tiles.is_empty() {
+            output.push(VisibleVehicleSnapshotV1 {
+                id: vehicle.id,
+                prototype_id: prototype.prototype_id.clone(),
+                name: prototype.name.clone(),
+                origin: vehicle.origin,
+                facing_degrees: vehicle.facing_degrees,
+                tiles,
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn vehicle_part_location_z_order(location: &str) -> i16 {
+    match location {
+        "armor" => -2,
+        "roof" | "on_frame" | "axle" | "on_ceiling" | "on_controls" | "on_lockable_cargo"
+        | "on_seat" | "on_windshield" => -1,
+        "fuel_source" | "on_battery_mount" => 3,
+        "engine_block" => 4,
+        "structure" => 5,
+        "under" => 6,
+        "center" => 7,
+        "on_cargo" => 8,
+        "on_roof" => 9,
+        _ => -1,
+    }
+}
+
+fn vehicle_part_symbol(symbols: &str, facing_degrees: i16) -> Result<String, NetworkError> {
+    let symbols = symbols.chars().collect::<Vec<_>>();
+    let index = if symbols.len() == 1 {
+        0
+    } else if symbols.len() == 8 {
+        let display_degrees = (270_i16 - facing_degrees).rem_euclid(360);
+        usize::try_from((display_degrees + 22).rem_euclid(360) / 45)
+            .expect("normalized vehicle direction fits usize")
+    } else {
+        return Err(NetworkError::Simulation(String::from(
+            "vehicle directional symbol count is unsupported",
+        )));
+    };
+    symbols
+        .get(index)
+        .map(char::to_string)
+        .ok_or_else(|| NetworkError::Simulation(String::from("vehicle symbol missing")))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4876,7 +5031,15 @@ async fn simulation_submit_durable(
 
 fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
     match event.kind {
-        WorldEventKind::ActorMoved {
+        WorldEventKind::ActorBoardedVehicle {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::ActorUnboardedVehicle {
+            actor_id: event_actor,
+            ..
+        }
+        | WorldEventKind::ActorMoved {
             actor_id: event_actor,
             ..
         }
@@ -5123,7 +5286,8 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         }
         WorldEventKind::CreatureRangedAttackResolved { target, .. } => target == actor_id,
         WorldEventKind::CreatureTargetedActor { target, .. } => target == actor_id,
-        WorldEventKind::CreatureMoved { .. }
+        WorldEventKind::VehicleSpawned { .. }
+        | WorldEventKind::CreatureMoved { .. }
         | WorldEventKind::CreatureCorpseCreated { .. }
         | WorldEventKind::CreatureRevived { .. }
         | WorldEventKind::CreaturePolymorphed { .. }

@@ -17,6 +17,7 @@ mod rivers;
 mod roads;
 mod specials;
 mod use_actions;
+mod vehicles;
 
 #[cfg(test)]
 use fields::exponential_decay_threshold;
@@ -58,9 +59,9 @@ use cdda_protocol::{
     MissionId, MissionSnapshotV1, NaturalLightSnapshot, NpcId, NpcTemplateV1, PoweredToolStateV1,
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
     RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase,
-    SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason,
-    WearableArmorTypeV1, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
-    WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
+    SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId,
+    VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind, WorldPosition,
+    WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
     healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
     item_group_sources_are_valid, item_snapshot_is_compatible_with_spawn_rules,
     item_snapshots_can_combine_for_containment, item_transform_catalog_is_valid,
@@ -301,6 +302,13 @@ impl IdAllocator {
 
     pub fn allocate_npc(&mut self) -> Result<NpcId, SimError> {
         Ok(NpcId::new(self.world_namespace, self.allocate_counter()?))
+    }
+
+    pub fn allocate_vehicle(&mut self) -> Result<VehicleId, SimError> {
+        Ok(VehicleId::new(
+            self.world_namespace,
+            self.allocate_counter()?,
+        ))
     }
 
     pub fn allocate_mission(&mut self) -> Result<MissionId, SimError> {
@@ -4846,7 +4854,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV27");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV28");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4880,6 +4888,7 @@ pub struct WorldState {
     actors: BTreeMap<ActorId, Actor>,
     npcs: BTreeMap<NpcId, npc_dialogue::Npc>,
     creatures: BTreeMap<CreatureId, Creature>,
+    vehicles: BTreeMap<VehicleId, VehicleSnapshotV1>,
     ground_items: BTreeMap<ItemId, GroundItem>,
     chunks: BTreeMap<ChunkCoord, Chunk>,
     #[serde(skip)]
@@ -4919,6 +4928,7 @@ impl WorldState {
             actors: BTreeMap::new(),
             npcs: BTreeMap::new(),
             creatures: BTreeMap::new(),
+            vehicles: BTreeMap::new(),
             ground_items: BTreeMap::new(),
             chunks: BTreeMap::new(),
             memory_chunk_revisions: BTreeMap::new(),
@@ -7705,6 +7715,9 @@ impl WorldState {
                 self.actor_melee_action_cost(actor_id)
             }
             CommandKind::TalkToNpc { .. } => Ok(0),
+            CommandKind::BoardVehicle { .. } | CommandKind::UnboardVehicle { .. } => {
+                Ok(self.vehicle_board_action_cost())
+            }
             CommandKind::InsertPocketItem {
                 owner_item,
                 pocket_index,
@@ -7880,6 +7893,9 @@ impl WorldState {
         dy: i8,
         dz: i8,
     ) -> Result<i64, SimError> {
+        if self.actor_is_boarded(actor_id) {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        }
         let Some(axis_multiplier) = horizontal_step_multiplier(dx, dy, dz) else {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         };
@@ -7897,6 +7913,7 @@ impl WorldState {
         if self.actor_at(to).is_some()
             || self.creature_at(to).is_some()
             || self.npc_at(to).is_some()
+            || self.vehicle_blocks_actor_at(to)
         {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         }
@@ -7972,6 +7989,9 @@ impl WorldState {
         direction: HorizontalDirection,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        if self.actor_is_boarded(actor_id) {
+            return Ok(());
+        }
         let from = self
             .actors
             .get(&actor_id)
@@ -7987,6 +8007,7 @@ impl WorldState {
             || self.actor_at(to).is_some()
             || self.creature_at(to).is_some()
             || self.npc_at(to).is_some()
+            || self.vehicle_blocks_actor_at(to)
         {
             return Ok(());
         }
@@ -8017,6 +8038,30 @@ impl WorldState {
             CommandKind::TalkToNpc { target } => {
                 self.start_npc_dialogue(actor_id, sequence, target, events)
             }
+            CommandKind::BoardVehicle {
+                vehicle_id,
+                prototype_part_index,
+            } => self.apply_board_vehicle(
+                actor_id,
+                sequence,
+                vehicle_id,
+                prototype_part_index,
+                events,
+            ),
+            CommandKind::UnboardVehicle {
+                vehicle_id,
+                prototype_part_index,
+                dx,
+                dy,
+            } => self.apply_unboard_vehicle(
+                actor_id,
+                sequence,
+                vehicle_id,
+                prototype_part_index,
+                dx,
+                dy,
+                events,
+            ),
             CommandKind::ShootActor { target } => {
                 self.apply_ranged_attack(actor_id, sequence, RangedTarget::Actor(target), events)
             }
@@ -8219,6 +8264,14 @@ impl WorldState {
         dz: i8,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        if self.actor_is_boarded(actor_id) {
+            events.push(self.rejection(
+                actor_id,
+                sequence,
+                CommandRejection::ActorAlreadyBoarded,
+            )?);
+            return Ok(());
+        }
         if horizontal_step_multiplier(dx, dy, dz).is_none() {
             events.push(self.rejection(actor_id, sequence, CommandRejection::InvalidMovement)?);
             return Ok(());
@@ -8240,6 +8293,7 @@ impl WorldState {
             || self.actor_at(to).is_some()
             || self.creature_at(to).is_some()
             || self.npc_at(to).is_some()
+            || self.vehicle_blocks_actor_at(to)
         {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
@@ -9904,6 +9958,11 @@ impl WorldState {
             .map(|actor| actor.position)
             .chain(self.creatures.values().map(|creature| creature.position))
             .chain(self.npcs.values().map(|npc| npc.position))
+            .chain(
+                self.vehicles
+                    .values()
+                    .flat_map(|vehicle| vehicle.parts.iter().map(|part| part.position)),
+            )
             .collect::<BTreeSet<_>>();
         let Some(planned) = mapgen::plan_active_bubble(
             self.world_seed,
@@ -9923,6 +9982,7 @@ impl WorldState {
                 u64::try_from(planned.creatures.len()).map_err(|_| SimError::NumericOverflow)?,
             )
             .and_then(|count| count.checked_add(u64::try_from(planned.npcs.len()).ok()?))
+            .and_then(|count| count.checked_add(u64::try_from(planned.vehicles.len()).ok()?))
             .filter(|count| *count <= ID_RESERVATION_SIZE)
             .ok_or(SimError::IdReservationExhausted)?;
         if self.allocator.remaining() < required_ids {
@@ -9963,6 +10023,20 @@ impl WorldState {
         }
         for creature in planned.creatures {
             self.spawn_creature(creature)?;
+        }
+        for vehicle in planned.vehicles {
+            let id = self.allocator.allocate_vehicle()?;
+            let snapshot = VehicleSnapshotV1 {
+                id,
+                prototype_index: vehicle.prototype_index,
+                origin: vehicle.origin,
+                facing_degrees: vehicle.facing_degrees,
+                owner_faction_id: vehicle.owner_faction_id,
+                parts: vehicle.parts,
+            };
+            if self.vehicles.insert(id, snapshot).is_some() {
+                return Err(SimError::InvalidTerrain);
+            }
         }
         Ok(true)
     }
@@ -14377,6 +14451,7 @@ impl WorldState {
                 .map(npc_dialogue::Npc::snapshot)
                 .collect(),
             creatures: self.creatures.values().map(Creature::snapshot).collect(),
+            vehicles: self.vehicles.values().cloned().collect(),
             ground_items: self
                 .ground_items
                 .values()
@@ -14388,6 +14463,7 @@ impl WorldState {
 
     pub fn from_snapshot(snapshot: &WorldSnapshotV1) -> Result<Self, SimError> {
         if !snapshot.item_groups_are_valid()
+            || !snapshot.vehicles_are_valid()
             || !cdda_protocol::anatomy_definition_is_valid(&snapshot.actor_anatomy)
             || !cdda_protocol::wearable_armor_catalog_is_valid(&snapshot.wearable_armor_types)
             || !cdda_protocol::npc_dialogue_catalog_is_valid(
@@ -15081,6 +15157,15 @@ impl WorldState {
                 return Err(SimError::InvalidSnapshot);
             }
         }
+        let vehicles = snapshot
+            .vehicles
+            .iter()
+            .cloned()
+            .map(|vehicle| {
+                maximum_counter = maximum_counter.max(vehicle.id.counter());
+                (vehicle.id, vehicle)
+            })
+            .collect::<BTreeMap<_, _>>();
         if snapshot.allocator_high_water < maximum_counter
             || snapshot.allocator_next == 0
             || snapshot.allocator_next > snapshot.allocator_reserved_end.saturating_add(1)
@@ -15129,6 +15214,7 @@ impl WorldState {
             actors,
             npcs,
             creatures,
+            vehicles,
             ground_items,
             chunks,
             memory_chunk_revisions,
@@ -15142,7 +15228,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV106");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV107");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
