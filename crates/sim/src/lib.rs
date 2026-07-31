@@ -5079,6 +5079,13 @@ impl WorldState {
                         .eoc_ids
                         .iter()
                         .any(|eoc_id| !creature_eoc_ids.contains(eoc_id))
+                        || attack
+                            .gun_projectile_effects
+                            .iter()
+                            .flat_map(|effect| {
+                                effect.area_fields.iter().chain(&effect.trail_fields)
+                            })
+                            .any(|field| !self.field_types.contains_key(&field.field_type_id))
                 })
             })
             || !mapgen::catalog_fits_one_id_reservation(
@@ -14519,7 +14526,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV96");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV97");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

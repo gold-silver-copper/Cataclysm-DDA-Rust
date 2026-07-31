@@ -89,7 +89,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 120;
+pub const PROTOCOL_VERSION: u16 = 121;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3227,6 +3227,32 @@ pub struct WorldgenMonsterGunRangeV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterProjectileFieldEffectV1 {
+    pub field_type_id: String,
+    pub intensity_minimum: u8,
+    pub intensity_maximum: u8,
+    pub chance_percent: u8,
+    pub radius: u8,
+    pub check_passable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterProjectileOnHitEffectV1 {
+    pub effect_id: String,
+    pub duration_seconds: u64,
+    pub intensity: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorldgenMonsterProjectileEffectV1 {
+    pub effect_id: String,
+    pub trigger_chance_percent: u8,
+    pub area_fields: Vec<WorldgenMonsterProjectileFieldEffectV1>,
+    pub trail_fields: Vec<WorldgenMonsterProjectileFieldEffectV1>,
+    pub on_hit_effects: Vec<WorldgenMonsterProjectileOnHitEffectV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorldgenMonsterSpecialAttackV1 {
     pub attack_id: String,
     pub kind: WorldgenMonsterSpecialAttackKindV1,
@@ -3276,6 +3302,9 @@ pub struct WorldgenMonsterSpecialAttackV1 {
     pub gun_targeting_sound: String,
     pub gun_targeting_volume: u16,
     pub gun_laser_lock: bool,
+    /// ID-sorted data-driven projectile behavior whose complete definitions
+    /// are supported by the authoritative runtime.
+    pub gun_projectile_effects: Vec<WorldgenMonsterProjectileEffectV1>,
     pub gun_no_damage_scaling: bool,
     pub gun_blinds_eyes: bool,
     /// Retained even before vehicles exist so later vehicle admission cannot
@@ -5475,6 +5504,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.gun_targeting_sound.is_empty()
                                     && attack.gun_targeting_volume == 0
                                     && !attack.gun_laser_lock
+                                    && attack.gun_projectile_effects.is_empty()
                                     && !attack.gun_no_damage_scaling
                                     && !attack.gun_blinds_eyes
                                     && !attack.gun_target_moving_vehicles
@@ -5504,6 +5534,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.gun_targeting_sound.is_empty()
                                     && attack.gun_targeting_volume == 0
                                     && !attack.gun_laser_lock
+                                    && attack.gun_projectile_effects.is_empty()
                                     && !attack.gun_no_damage_scaling
                                     && !attack.gun_blinds_eyes
                                     && !attack.gun_target_moving_vehicles
@@ -5530,6 +5561,7 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && attack.gun_targeting_sound.is_empty()
                                     && attack.gun_targeting_volume == 0
                                     && !attack.gun_laser_lock
+                                    && attack.gun_projectile_effects.is_empty()
                                     && !attack.gun_no_damage_scaling
                                     && !attack.gun_blinds_eyes
                                     && !attack.gun_target_moving_vehicles
@@ -5558,7 +5590,12 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                     && !attack.dodgeable
                                     && attack.minimum_damage_multiplier_millionths == 0
                                     && attack.maximum_damage_multiplier_millionths == 0
-                                    && !attack.damage.is_empty()
+                                    && (attack.damage.iter().any(|unit| unit.amount_milli != 0)
+                                        || attack.gun_projectile_effects.iter().any(|effect| {
+                                            !effect.area_fields.is_empty()
+                                                || !effect.trail_fields.is_empty()
+                                                || !effect.on_hit_effects.is_empty()
+                                        }))
                                     && attack.effects.is_empty()
                                     && !attack.effects_require_damage
                                     && attack.infection_chance_millionths == 0
@@ -5587,7 +5624,11 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
                                         <= 1_000_000_000
                                     && attack.gun_targeting_sound.len() <= 512
                                     && !attack.gun_targeting_sound.chars().any(char::is_control)
-                                    && attack.gun_no_damage_scaling
+                                    && valid_worldgen_monster_projectile_effects(
+                                        &attack.gun_projectile_effects,
+                                    )
+                                    && (attack.damage.iter().all(|unit| unit.amount_milli == 0)
+                                        || attack.gun_no_damage_scaling)
                                     && attack.gun_ranges.windows(2).all(|ranges| {
                                         (ranges[0].minimum, ranges[0].maximum)
                                             < (ranges[1].minimum, ranges[1].maximum)
@@ -5679,6 +5720,40 @@ fn valid_worldgen_monster_catalog(catalog: &WorldgenCatalogV1) -> bool {
         edges.push(group_edges);
     }
     valid_worldgen_bounded_graph(&edges, MAX_WORLDGEN_MONSTER_GROUP_DEPTH)
+}
+
+fn valid_worldgen_monster_projectile_effects(
+    effects: &[WorldgenMonsterProjectileEffectV1],
+) -> bool {
+    effects.len() <= 64
+        && effects
+            .windows(2)
+            .all(|pair| pair[0].effect_id < pair[1].effect_id)
+        && effects.iter().all(|effect| {
+            valid_worldgen_id(&effect.effect_id)
+                && effect.trigger_chance_percent <= 100
+                && effect.area_fields.len() <= 64
+                && effect.trail_fields.len() <= 64
+                && effect.area_fields.iter().all(|field| {
+                    valid_worldgen_id(&field.field_type_id)
+                        && field.intensity_minimum <= field.intensity_maximum
+                        && field.chance_percent <= 100
+                        && field.radius <= 64
+                })
+                && effect.trail_fields.iter().all(|field| {
+                    valid_worldgen_id(&field.field_type_id)
+                        && field.intensity_minimum <= field.intensity_maximum
+                        && field.chance_percent <= 100
+                        && field.radius == 0
+                        && !field.check_passable
+                })
+                && effect.on_hit_effects.len() <= 64
+                && effect.on_hit_effects.iter().all(|on_hit| {
+                    valid_worldgen_id(&on_hit.effect_id)
+                        && (1..=1_000_000_000).contains(&on_hit.duration_seconds)
+                        && (1..=1_000_000).contains(&on_hit.intensity)
+                })
+        })
 }
 
 fn valid_worldgen_monster_damage(units: &[WorldgenMonsterMeleeDamageUnitV1]) -> bool {

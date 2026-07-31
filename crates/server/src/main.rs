@@ -9,15 +9,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use cdda_content::MapgenIdChoice;
 use cdda_content::{
-    AmmunitionRegistry, AnatomyRegistry, BashDamageProfileRegistry, BashFieldEffectDefinition,
-    CitySettingsRegistry, ConstructionRegistry, ContentManifest, DEFAULT_CITY_SETTINGS_ID,
-    DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID, DefaultRegionTerrainFurnitureRegistry,
-    DescriptionSnippetRegistry, EffectOnConditionRegistry, FieldTypeDefinition, FieldTypeRegistry,
-    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry,
-    MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry,
-    MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
-    RecipeRegistry, RiverSettingsRegistry, SkillRegistry, StartLocationRegistry, TerrainDefinition,
-    TerrainRegistry,
+    AmmunitionEffectRegistry, AmmunitionRegistry, AnatomyRegistry, BashDamageProfileRegistry,
+    BashFieldEffectDefinition, CitySettingsRegistry, ConstructionRegistry, ContentManifest,
+    DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID,
+    DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, EffectOnConditionRegistry,
+    FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition,
+    ItemGroupRegistry, ItemRegistry, MapgenRegistry, MaterialRegistry, ModCatalog,
+    MonsterDefinition, MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry,
+    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
+    SkillRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -119,6 +119,7 @@ struct OpenedWorld {
 struct RuntimeWorldContent<'a> {
     anatomy: &'a AnatomyRegistry,
     ammunition: &'a AmmunitionRegistry,
+    ammunition_effects: &'a AmmunitionEffectRegistry,
     snippets: &'a DescriptionSnippetRegistry,
     items: &'a ItemRegistry,
     eocs: &'a EffectOnConditionRegistry,
@@ -261,6 +262,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mod_catalog = ModCatalog::load(&content_manifest, content_root)?;
     let enabled_mods = mod_catalog.recommended_new_world()?;
     let ammunition = AmmunitionRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
+    let ammunition_effects = AmmunitionEffectRegistry::load_selected(
         &content_manifest,
         content_root,
         &mod_catalog,
@@ -450,6 +457,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &RuntimeWorldContent {
             anatomy: &anatomy,
             ammunition: &ammunition,
+            ammunition_effects: &ammunition_effects,
             snippets: &snippets,
             items: &items,
             eocs: &eocs,
@@ -913,11 +921,27 @@ fn open_world(
             furniture,
             item_groups: &item_group_catalog,
             items,
+            ammunition_effects: content.ammunition_effects,
+            fields,
             monsters,
             monster_groups,
             eoc_definitions: &eoc_catalog.0,
         },
     )?;
+    let projectile_field_type_ids = worldgen
+        .monster_prototypes
+        .iter()
+        .flat_map(|prototype| prototype.special_attacks.iter())
+        .flat_map(|attack| attack.gun_projectile_effects.iter())
+        .flat_map(|effect| effect.area_fields.iter().chain(&effect.trail_fields))
+        .map(|field| field.field_type_id.clone())
+        .collect::<BTreeSet<_>>();
+    for field_type_id in projectile_field_type_ids {
+        let definition = fields.get(&field_type_id).ok_or_else(|| {
+            format!("monster projectile references unknown field type {field_type_id}")
+        })?;
+        initial.register_field_type(runtime_field_type(definition)?)?;
+    }
     initial.register_item_group_catalog(item_group_catalog)?;
     for definition in terrain_bash_definitions {
         let dynamic_floor_result =
@@ -5367,6 +5391,8 @@ mod tests {
                 furniture: &furniture,
                 item_groups: &wall_catalog,
                 items: &items,
+                ammunition_effects: &AmmunitionEffectRegistry::default(),
+                fields: &fields,
                 monsters: &monsters,
                 monster_groups: &monster_groups,
                 eoc_definitions: &[],
@@ -5401,6 +5427,8 @@ mod tests {
                     furniture: &furniture,
                     item_groups: &wall_catalog,
                     items: &items,
+                    ammunition_effects: &AmmunitionEffectRegistry::default(),
+                    fields: &fields,
                     monsters: &monsters,
                     monster_groups: &monster_groups,
                     eoc_definitions: &[],

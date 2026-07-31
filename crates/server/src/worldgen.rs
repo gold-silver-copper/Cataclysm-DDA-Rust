@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
-    CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry, FurnitureRegistry, ItemRegistry,
-    MapgenCoordinateRange, MapgenIdChoice, MapgenRegistry, MonsterGroupRegistry,
-    MonsterGroupTarget, MonsterRegistry, MonsterSpecialAttackKind, OvermapSpecialDefinition,
-    OvermapSpecialRegistry, OvermapTerrainMatchType, OvermapTerrainRegistry,
-    RiverSettingsDefinition, StartLocationDefinition, StrictMapgenAreaItemPlacement,
-    StrictMapgenChunkChoice, StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
+    AmmunitionEffectRegistry, CitySettingsDefinition, DefaultRegionTerrainFurnitureRegistry,
+    FieldTypeRegistry, FurnitureRegistry, ItemRegistry, MapgenCoordinateRange, MapgenIdChoice,
+    MapgenRegistry, MonsterGroupRegistry, MonsterGroupTarget, MonsterRegistry,
+    MonsterSpecialAttackKind, OvermapSpecialDefinition, OvermapSpecialRegistry,
+    OvermapTerrainMatchType, OvermapTerrainRegistry, RiverSettingsDefinition,
+    StartLocationDefinition, StrictMapgenAreaItemPlacement, StrictMapgenChunkChoice,
+    StrictMapgenDefinition, StrictMapgenIndividualMonsterPlacement,
     StrictMapgenIndividualMonsterTarget, StrictMapgenMonsterPlacement, StrictMapgenNeighborFlags,
     StrictMapgenNeighborMatch, StrictMapgenNestedPlacement, StrictNestedMapgenDefinition,
     TerrainRegistry,
@@ -18,7 +19,9 @@ use cdda_protocol::{
     WorldgenIndividualMonsterPlacementV1, WorldgenIndividualMonsterTargetV1,
     WorldgenItemGroupPlacementV1, WorldgenMonsterAttackEffectV1, WorldgenMonsterGroupEntryV1,
     WorldgenMonsterGroupTargetV1, WorldgenMonsterGroupV1, WorldgenMonsterGunRangeV1,
-    WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1, WorldgenMonsterPrototypeV1,
+    WorldgenMonsterMeleeDamageUnitV1, WorldgenMonsterPlacementV1,
+    WorldgenMonsterProjectileEffectV1, WorldgenMonsterProjectileFieldEffectV1,
+    WorldgenMonsterProjectileOnHitEffectV1, WorldgenMonsterPrototypeV1,
     WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
     WorldgenNeighborConditionV1, WorldgenNestedChoiceV1, WorldgenNestedConditionsV1,
     WorldgenNestedGeneratorV1, WorldgenNestedPlacementV1, WorldgenNestedTemplateV1,
@@ -500,6 +503,8 @@ pub(super) struct RuntimeMapgenContent<'a> {
     pub furniture: &'a FurnitureRegistry,
     pub item_groups: &'a [ItemGroupDefinitionV1],
     pub items: &'a ItemRegistry,
+    pub ammunition_effects: &'a AmmunitionEffectRegistry,
+    pub fields: &'a FieldTypeRegistry,
     pub monsters: &'a MonsterRegistry,
     pub monster_groups: &'a MonsterGroupRegistry,
     pub eoc_definitions: &'a [EocDefinitionV1],
@@ -520,6 +525,7 @@ struct RuntimeMonsterGunProfile {
     targeting_sound: String,
     targeting_volume: u16,
     laser_lock: bool,
+    projectile_effects: Vec<WorldgenMonsterProjectileEffectV1>,
     no_damage_scaling: bool,
     blinds_eyes: bool,
     target_moving_vehicles: bool,
@@ -529,6 +535,8 @@ fn runtime_monster_gun_profile(
     attack: &cdda_content::MonsterSpecialAttackDefinition,
     items: &ItemRegistry,
     starting_ammunition: &BTreeMap<String, u32>,
+    ammunition_effects: &AmmunitionEffectRegistry,
+    fields: &FieldTypeRegistry,
 ) -> Result<Option<RuntimeMonsterGunProfile>, Box<dyn std::error::Error>> {
     if attack.kind != MonsterSpecialAttackKind::Gun {
         return Ok(None);
@@ -582,13 +590,13 @@ fn runtime_monster_gun_profile(
         )
         .cloned()
         .collect::<BTreeSet<_>>();
-    let projectile_effects_are_supported = projectile_effects.iter().all(|effect| {
-        matches!(
-            effect.as_str(),
-            "BLINDS_EYES" | "NO_DAMAGE_SCALING" | "NO_PENETRATE_OBSTACLES"
-        )
-    }) && projectile_effects.contains("NO_DAMAGE_SCALING")
-        && projectile_effects.contains("NO_PENETRATE_OBSTACLES");
+    let Some(projectile_effect_profiles) =
+        runtime_monster_projectile_effects(&projectile_effects, ammunition_effects, fields)
+    else {
+        return Ok(None);
+    };
+    let has_fixed_damage = projectile_effects.contains("NO_DAMAGE_SCALING");
+    let stops_at_obstacles = projectile_effects.contains("NO_PENETRATE_OBSTACLES");
     let ammunition_shape_is_supported = ammunition.is_none() == gun.ammo.is_empty();
     let combined_range = gun
         .range
@@ -610,15 +618,13 @@ fn runtime_monster_gun_profile(
         && !gun.gun_skill.is_empty()
         && combined_range > 0
         && combined_dispersion >= 0
-        && (!gun.ranged_damage.is_empty()
-            || ammunition.is_some_and(|ammunition| !ammunition.damage.is_empty()))
         && !gun
             .unsupported_fields
             .iter()
             .any(|field| field.starts_with("ranged_damage."))
         && !gun.unsupported_fields.contains("modes")
         && !gun.unsupported_fields.contains("energy_drain")
-        && projectile_effects_are_supported;
+        && stops_at_obstacles;
     if !gun_is_supported {
         return Ok(None);
     }
@@ -699,6 +705,14 @@ fn runtime_monster_gun_profile(
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     if damage.iter().all(|unit| unit.amount_milli == 0) {
+        if projectile_effect_profiles.iter().all(|effect| {
+            effect.area_fields.is_empty()
+                && effect.trail_fields.is_empty()
+                && effect.on_hit_effects.is_empty()
+        }) {
+            return Ok(None);
+        }
+    } else if !has_fixed_damage {
         return Ok(None);
     }
     let ranges = attack
@@ -723,10 +737,93 @@ fn runtime_monster_gun_profile(
         targeting_sound: attack.gun_targeting_sound.clone(),
         targeting_volume: u16::try_from(attack.gun_targeting_volume)?,
         laser_lock: attack.gun_laser_lock,
-        no_damage_scaling: true,
+        projectile_effects: projectile_effect_profiles,
+        no_damage_scaling: has_fixed_damage,
         blinds_eyes: projectile_effects.contains("BLINDS_EYES"),
         target_moving_vehicles: attack.gun_target_moving_vehicles,
     }))
+}
+
+fn runtime_monster_projectile_effects(
+    effect_ids: &BTreeSet<String>,
+    registry: &AmmunitionEffectRegistry,
+    fields: &FieldTypeRegistry,
+) -> Option<Vec<WorldgenMonsterProjectileEffectV1>> {
+    const SUPPORTED_HARDCODED: &[&str] =
+        &["BLINDS_EYES", "NO_DAMAGE_SCALING", "NO_PENETRATE_OBSTACLES"];
+    let mut profiles = Vec::new();
+    for effect_id in effect_ids {
+        if SUPPORTED_HARDCODED.contains(&effect_id.as_str()) {
+            continue;
+        }
+        let definition = registry.get(effect_id)?;
+        if !definition.unsupported_fields.is_empty()
+            || definition.area_fields.len() > 64
+            || definition.trail_fields.len() > 64
+            || definition.on_hit_effects.len() > 64
+            || definition.on_hit_effects.iter().any(|effect| {
+                effect.need_touch_skin
+                    || !(1..=1_000_000_000).contains(&effect.duration_seconds)
+                    || !(1..=1_000_000).contains(&effect.intensity)
+            })
+            || definition
+                .area_fields
+                .iter()
+                .any(|field| field.radius_z > 0)
+            || (definition.area_fields.is_empty()
+                && definition.trail_fields.is_empty()
+                && definition.on_hit_effects.is_empty())
+        {
+            return None;
+        }
+        for field in definition
+            .area_fields
+            .iter()
+            .chain(&definition.trail_fields)
+        {
+            let field_type = fields.get(&field.field_type_id)?;
+            if field_type.intensity_levels.is_empty() || field_type.intensity_levels.len() > 16 {
+                return None;
+            }
+        }
+        let field = |field: &cdda_content::AmmunitionFieldEffectDefinition, radius| {
+            WorldgenMonsterProjectileFieldEffectV1 {
+                field_type_id: field.field_type_id.clone(),
+                intensity_minimum: field.intensity_minimum,
+                intensity_maximum: field.intensity_maximum,
+                chance_percent: field.chance_percent,
+                radius,
+                check_passable: field.check_passable,
+            }
+        };
+        profiles.push(WorldgenMonsterProjectileEffectV1 {
+            effect_id: effect_id.clone(),
+            trigger_chance_percent: definition.trigger_chance_percent,
+            area_fields: definition
+                .area_fields
+                .iter()
+                .map(|definition| field(definition, definition.radius))
+                .collect(),
+            trail_fields: definition
+                .trail_fields
+                .iter()
+                .map(|definition| field(definition, 0))
+                .collect(),
+            on_hit_effects: definition
+                .on_hit_effects
+                .iter()
+                .map(|effect| WorldgenMonsterProjectileOnHitEffectV1 {
+                    effect_id: effect.effect_id.clone(),
+                    duration_seconds: effect.duration_seconds,
+                    intensity: effect.intensity,
+                })
+                .collect(),
+        });
+        if profiles.len() > 64 {
+            return None;
+        }
+    }
+    Some(profiles)
 }
 
 fn monster_firearm_sound_volume(
@@ -776,6 +873,8 @@ fn runtime_monster_catalog(
     groups: &MonsterGroupRegistry,
     monsters: &MonsterRegistry,
     items: &ItemRegistry,
+    ammunition_effects: &AmmunitionEffectRegistry,
+    fields: &FieldTypeRegistry,
     creature_eoc_ids: &BTreeSet<String>,
 ) -> Result<
     (
@@ -966,9 +1065,13 @@ fn runtime_monster_catalog(
                     && creature_eoc_context_is_supported(attack)
                     && attack.kind == MonsterSpecialAttackKind::Gun
             }) {
-                if let Some(profile) =
-                    runtime_monster_gun_profile(attack, items, &monster.starting_ammunition)?
-                {
+                if let Some(profile) = runtime_monster_gun_profile(
+                    attack,
+                    items,
+                    &monster.starting_ammunition,
+                    ammunition_effects,
+                    fields,
+                )? {
                     gun_profiles.insert(attack.id.clone(), profile);
                 } else {
                     deferred_behavior_fields
@@ -1092,6 +1195,9 @@ fn runtime_monster_catalog(
                         gun_targeting_volume: gun_profile
                             .map_or(0, |profile| profile.targeting_volume),
                         gun_laser_lock: gun_profile.is_some_and(|profile| profile.laser_lock),
+                        gun_projectile_effects: gun_profile
+                            .map(|profile| profile.projectile_effects.clone())
+                            .unwrap_or_default(),
                         gun_no_damage_scaling: gun_profile
                             .is_some_and(|profile| profile.no_damage_scaling),
                         gun_blinds_eyes: gun_profile.is_some_and(|profile| profile.blinds_eyes),
@@ -1408,6 +1514,8 @@ pub(super) fn runtime_mapgen_worldgen(
         furniture,
         item_groups,
         items,
+        ammunition_effects,
+        fields,
         monsters,
         monster_groups,
         eoc_definitions,
@@ -1566,6 +1674,8 @@ pub(super) fn runtime_mapgen_worldgen(
             monster_groups,
             monsters,
             items,
+            ammunition_effects,
+            fields,
             &cdda_protocol::creature_eoc_supported_ids(eoc_definitions),
         )?;
 
@@ -2653,6 +2763,8 @@ mod tests {
                 furniture: &furniture,
                 item_groups: &runtime_groups,
                 items: &items,
+                ammunition_effects: &AmmunitionEffectRegistry::default(),
+                fields: &FieldTypeRegistry::default(),
                 monsters: &monsters,
                 monster_groups: &monster_groups,
                 eoc_definitions: &[],

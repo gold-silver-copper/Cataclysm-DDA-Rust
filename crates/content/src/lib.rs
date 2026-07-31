@@ -1,5 +1,6 @@
 //! Pinned upstream content identity and provenance primitives.
 
+mod ammo_effect;
 mod anatomy;
 mod bash;
 mod city;
@@ -25,6 +26,10 @@ mod snippet;
 mod start_location;
 mod terrain;
 
+pub use ammo_effect::{
+    AmmunitionEffectDefinition, AmmunitionEffectRegistry, AmmunitionEffectRegistryError,
+    AmmunitionFieldEffectDefinition, AmmunitionOnHitEffectDefinition,
+};
 pub use anatomy::{
     ANATOMY_SCALE, AnatomyDefinition, AnatomyRegistry, AnatomyRegistryError, BodyPartDefinition,
     BodyPartStatHpModifiers, MAX_ANATOMY_DEFINITIONS, MAX_ANATOMY_PARTS, MAX_BODY_PART_DEFINITIONS,
@@ -512,6 +517,7 @@ fn definition_support(kind: &str) -> SupportStatus {
         kind,
         "MOD_INFO"
             | "ammunition_type"
+            | "ammo_effect"
             | "bash_damage_profile"
             | "construction"
             | "construction_group"
@@ -525,7 +531,8 @@ fn definition_support(kind: &str) -> SupportStatus {
 }
 
 fn field_support(kind: &str, field: &str) -> SupportStatus {
-    if (kind == "bash_damage_profile" && bash::field_is_implemented(field))
+    if (kind == "ammo_effect" && ammo_effect::field_is_implemented(field))
+        || (kind == "bash_damage_profile" && bash::field_is_implemented(field))
         || (kind == "construction" && construction::field_is_implemented(field))
         || (kind == "construction_group" && construction::group_field_is_implemented(field))
         || (kind == "ITEM" && item::field_is_implemented(field))

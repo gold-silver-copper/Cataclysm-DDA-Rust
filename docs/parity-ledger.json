@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 120,
-  "persistence_schema_version": 98,
+  "protocol_version": 121,
+  "persistence_schema_version": 99,
   "replay_format_version": 3,
   "active_milestone": "monsters",
   "completion_gate": [
@@ -476,7 +476,9 @@
         { "id": "special-attack-scheduler-melee-bite-and-leap-actors", "state": "implementation_complete_verification_deferred" },
         { "id": "monster-alpha-eoc-special-actors-melee-eoc-hooks-and-effect-intensity-math", "state": "implementation_complete_verification_deferred" },
         { "id": "ammo-free-single-shot-gun-actors", "state": "implementation_complete_verification_deferred" },
-        { "id": "ammo-fed-burst-targeting-spell-polymorph-and-target-context-eoc-special-actors", "state": "planned" }
+        { "id": "ammo-fed-single-shot-gun-actors-and-targeting-locks", "state": "implementation_complete_verification_deferred" },
+        { "id": "data-driven-projectile-trails-field-bursts-and-on-hit-effects", "state": "implementation_complete_verification_deferred" },
+        { "id": "burst-spell-polymorph-and-target-context-eoc-special-actors", "state": "planned" }
       ],
       "priority": 25,
       "depends_on": ["anatomy-combat", "eoc-use-actions", "mapgen-spawning", "simulation-monsters-module"],

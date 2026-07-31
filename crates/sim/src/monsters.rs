@@ -4,8 +4,8 @@ use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, BookStudyInterruptionReason, ConstructionInterruptionReason,
     CreatureId, CreatureSnapshot, CreatureSpecialAttackStateV1, DisassemblyInterruptionReason,
     SimTick, WorldEvent, WorldEventKind, WorldPosition, WorldgenCatalogV1,
-    WorldgenMonsterAttackEffectV1, WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1,
-    WorldgenMonsterSpecialAttackV1,
+    WorldgenMonsterAttackEffectV1, WorldgenMonsterProjectileFieldEffectV1,
+    WorldgenMonsterPrototypeV1, WorldgenMonsterSpecialAttackKindV1, WorldgenMonsterSpecialAttackV1,
 };
 use rand_core::Rng;
 
@@ -62,6 +62,32 @@ fn add_or_extend_whole_creature_effect(
         let expiration = current_tick.0.saturating_add(duration_ticks as u64);
         insert_whole_creature_effect(effects, effect_id, SimTick(expiration.min(u64::MAX - 1)));
     }
+}
+
+fn projectile_line(origin: WorldPosition, endpoint: WorldPosition) -> Vec<WorldPosition> {
+    if origin.z != endpoint.z || origin == endpoint {
+        return Vec::new();
+    }
+    let (mut x, mut y) = (origin.x, origin.y);
+    let dx = (i64::from(endpoint.x) - i64::from(x)).abs();
+    let step_x = if x < endpoint.x { 1 } else { -1 };
+    let dy = -(i64::from(endpoint.y) - i64::from(y)).abs();
+    let step_y = if y < endpoint.y { 1 } else { -1 };
+    let mut error = dx + dy;
+    let mut positions = Vec::new();
+    while x != endpoint.x || y != endpoint.y {
+        let doubled = error * 2;
+        if doubled >= dy {
+            error += dy;
+            x += step_x;
+        }
+        if doubled <= dx {
+            error += dx;
+            y += step_y;
+        }
+        positions.push(WorldPosition { x, y, z: origin.z });
+    }
+    positions
 }
 
 pub(super) fn special_state_matches_catalog(
@@ -717,7 +743,9 @@ impl WorldState {
                 sound_volume: profile.gun_sound_volume,
             })?,
         );
+        self.apply_creature_projectile_trails(origin, target_position, profile, &mut rng, events)?;
         if !hit {
+            self.apply_creature_projectile_area(target_position, profile, &mut rng, events)?;
             return Ok(());
         }
         let damage = profile
@@ -738,6 +766,7 @@ impl WorldState {
         if profile.gun_blinds_eyes {
             self.apply_creature_projectile_blindness(target, &outcome.body_part_id, &mut rng)?;
         }
+        self.apply_creature_projectile_on_hit_effects(target, &outcome.body_part_id, profile)?;
         events.push(self.make_event(WorldEventKind::ActorDamagedByCreature {
             source,
             target,
@@ -761,6 +790,139 @@ impl WorldState {
                 })?);
             }
         }
+        self.apply_creature_projectile_area(target_position, profile, &mut rng, events)?;
+        Ok(())
+    }
+
+    fn apply_creature_projectile_trails(
+        &mut self,
+        origin: WorldPosition,
+        endpoint: WorldPosition,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        rng: &mut impl Rng,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        for position in projectile_line(origin, endpoint) {
+            for effect in &profile.gun_projectile_effects {
+                for field in &effect.trail_fields {
+                    self.apply_creature_projectile_field(position, field, rng, events)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_creature_projectile_area(
+        &mut self,
+        endpoint: WorldPosition,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        rng: &mut impl Rng,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        for effect in &profile.gun_projectile_effects {
+            if rng.next_u32() % 100 >= u32::from(effect.trigger_chance_percent) {
+                continue;
+            }
+            for field in &effect.area_fields {
+                let radius = i32::from(field.radius);
+                for y in -radius..=radius {
+                    for x in -radius..=radius {
+                        if x * x + y * y > radius * radius {
+                            continue;
+                        }
+                        let offset_x = i8::try_from(x).map_err(|_| SimError::NumericOverflow)?;
+                        let offset_y = i8::try_from(y).map_err(|_| SimError::NumericOverflow)?;
+                        let Some(position) = endpoint.checked_offset(offset_x, offset_y, 0) else {
+                            continue;
+                        };
+                        self.apply_creature_projectile_field(position, field, rng, events)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_creature_projectile_field(
+        &mut self,
+        position: WorldPosition,
+        field: &WorldgenMonsterProjectileFieldEffectV1,
+        rng: &mut impl Rng,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if rng.next_u32() % 100 >= u32::from(field.chance_percent) {
+            return Ok(());
+        }
+        if field.check_passable && !self.is_passable(position) {
+            return Ok(());
+        }
+        let (chunk, _local) = position.chunk_and_local();
+        if !self.chunks.contains_key(&chunk) {
+            return Ok(());
+        }
+        let intensity = roll_inclusive_u32(
+            u32::from(field.intensity_minimum),
+            u32::from(field.intensity_maximum),
+            rng,
+        )?;
+        let intensity = u8::try_from(intensity).map_err(|_| SimError::NumericOverflow)?;
+        if intensity == 0 {
+            return Ok(());
+        }
+        let intensity = self.add_field(position, &field.field_type_id, intensity)?;
+        events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+            position,
+            field_type_id: field.field_type_id.clone(),
+            intensity,
+        })?);
+        Ok(())
+    }
+
+    fn apply_creature_projectile_on_hit_effects(
+        &mut self,
+        target: ActorId,
+        body_part_id: &str,
+        profile: &WorldgenMonsterSpecialAttackV1,
+    ) -> Result<(), SimError> {
+        let current_tick = self.tick;
+        let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
+        for projectile_effect in &profile.gun_projectile_effects {
+            for on_hit in &projectile_effect.on_hit_effects {
+                let duration_ticks = on_hit
+                    .duration_seconds
+                    .checked_mul(SimTick::HZ)
+                    .ok_or(SimError::NumericOverflow)?;
+                if let Some(effect) = actor.effects.iter_mut().find(|effect| {
+                    effect.effect_id == on_hit.effect_id
+                        && effect.body_part_id.as_deref() == Some(body_part_id)
+                }) {
+                    effect.intensity = on_hit.intensity;
+                    effect.expires_at_tick = SimTick(
+                        effect
+                            .expires_at_tick
+                            .0
+                            .max(current_tick.0)
+                            .saturating_add(duration_ticks)
+                            .min(u64::MAX - 1),
+                    );
+                } else if actor.effects.len() < 1_024 {
+                    actor.effects.push(ActorEffectSnapshotV1 {
+                        effect_id: on_hit.effect_id.clone(),
+                        body_part_id: Some(body_part_id.to_owned()),
+                        intensity: on_hit.intensity,
+                        expires_at_tick: SimTick(
+                            current_tick
+                                .0
+                                .saturating_add(duration_ticks)
+                                .min(u64::MAX - 1),
+                        ),
+                    });
+                }
+            }
+        }
+        actor.effects.sort_by(|left, right| {
+            (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+        });
         Ok(())
     }
 
