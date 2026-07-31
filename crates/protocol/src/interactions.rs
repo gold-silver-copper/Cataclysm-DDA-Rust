@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, SimTick,
+    ActorId, CommandSequence, EocEffectV1, InteractionId, ItemId, NpcId, SimTick,
     eoc_confirmation_branches_are_valid,
 };
 
@@ -36,6 +36,10 @@ pub enum InteractionContextV1 {
         accept_effects: Vec<EocEffectV1>,
         decline_effects: Vec<EocEffectV1>,
     },
+    NpcDialogue {
+        npc_id: NpcId,
+        topic_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +58,7 @@ pub enum InteractionCancellationReasonV1 {
     Expired,
     ClientCanceled,
     Invalidated,
+    Completed,
 }
 
 #[must_use]
@@ -64,7 +69,7 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
         && !interaction.prompt.is_empty()
         && interaction.prompt.len() <= MAX_INTERACTION_PROMPT_BYTES
         && !interaction.prompt.chars().any(char::is_control)
-        && (2..=MAX_INTERACTION_CHOICES).contains(&interaction.choices.len())
+        && (1..=MAX_INTERACTION_CHOICES).contains(&interaction.choices.len())
         && interaction.choices.iter().all(|choice| {
             valid_id(&choice.choice_id, MAX_INTERACTION_CHOICE_ID_BYTES)
                 && !choice.label.is_empty()
@@ -113,6 +118,11 @@ pub fn pending_interaction_is_valid(interaction: &PendingInteractionV1, actor_id
                             },
                         ]
                     && eoc_confirmation_branches_are_valid(accept_effects, decline_effects)
+            }
+            InteractionContextV1::NpcDialogue { npc_id, topic_id } => {
+                npc_id.counter() > 0
+                    && npc_id.world_namespace() == actor_id.world_namespace()
+                    && valid_id(topic_id, MAX_INTERACTION_CHOICE_ID_BYTES)
             }
         }
 }

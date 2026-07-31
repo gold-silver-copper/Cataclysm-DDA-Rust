@@ -9,6 +9,7 @@ mod interactions;
 mod items;
 mod mapgen;
 mod monsters;
+mod npc_dialogue;
 mod overmap;
 mod rivers;
 mod roads;
@@ -33,32 +34,32 @@ use cdda_protocol::{
     CraftActivitySnapshotV1, CraftConsumedItemV1, CraftItemPrototypeV1, CraftProficiencyV1,
     CraftRecipeV1, CraftSkillRequirementV1, CreatureCorpsePrototypeV1, CreatureCorpseSnapshotV1,
     CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
-    CreatureSpecialAttackStateV1, DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1,
-    DisassemblyInterruptionReason, DisassemblyRecipeV1, EocDefinitionV1, EocItemUseTypeV1, EventId,
-    FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot,
-    GroundItemSnapshot, HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource,
-    HeldMovementUpdateV1, HorizontalDirection, IntegralMagazinePocketPrototypeV1,
-    IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1, ItemGroupDefinitionV1,
-    ItemGroupSourceV1, ItemId, ItemSnapshot, ItemTransformTypeV1, LocalTileCoord,
-    MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES,
-    MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS,
-    MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS,
-    MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER,
-    MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES,
-    MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
+    CreatureSpecialAttackStateV1, DialogueTopicV1, DisassemblyActivitySnapshotV1,
+    DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason, DisassemblyRecipeV1,
+    EocDefinitionV1, EocItemUseTypeV1, EventId, FieldSnapshotV1, FieldTypeSnapshotV1,
+    FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot, HealingItemTypeV1,
+    HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1, HorizontalDirection,
+    IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1,
+    ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemSnapshot, ItemTransformTypeV1,
+    LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
+    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
+    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
+    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
+    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
+    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
     MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
     MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
     MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
     MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
     MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
     MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, NaturalLightSnapshot,
-    PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
-    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick,
-    SkillLevelSnapshot, SkyPhase, SleepReason, SmashItemTypeV1, TerrainBashTypeV1,
-    TerrainTileSnapshot, WakeReason, WearableArmorTypeV1, WorldEvent, WorldEventKind,
-    WorldPosition, WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves,
-    eoc_catalog_is_valid, healing_item_catalog_is_valid, item_group_catalog_is_valid,
-    item_group_source_max_outputs, item_group_sources_are_valid,
+    NpcId, NpcTemplateV1, PoweredToolStateV1, PoweredToolTransitionReason,
+    ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot,
+    SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase, SleepReason,
+    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, WakeReason, WearableArmorTypeV1,
+    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
+    adjusted_book_study_time_moves, eoc_catalog_is_valid, healing_item_catalog_is_valid,
+    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
     item_snapshot_is_compatible_with_spawn_rules, item_snapshots_can_combine_for_containment,
     item_transform_catalog_is_valid, worldgen_catalog_is_valid,
 };
@@ -293,6 +294,10 @@ impl IdAllocator {
             self.world_namespace,
             self.allocate_counter()?,
         ))
+    }
+
+    pub fn allocate_npc(&mut self) -> Result<NpcId, SimError> {
+        Ok(NpcId::new(self.world_namespace, self.allocate_counter()?))
     }
 
     #[must_use]
@@ -4812,7 +4817,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV26");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV27");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4838,7 +4843,10 @@ pub struct WorldState {
     eoc_item_use_types: BTreeMap<String, EocItemUseTypeV1>,
     item_transform_types: BTreeMap<String, ItemTransformTypeV1>,
     worldgen: Option<WorldgenCatalogV1>,
+    npc_templates: BTreeMap<String, NpcTemplateV1>,
+    dialogue_topics: BTreeMap<String, DialogueTopicV1>,
     actors: BTreeMap<ActorId, Actor>,
+    npcs: BTreeMap<NpcId, npc_dialogue::Npc>,
     creatures: BTreeMap<CreatureId, Creature>,
     ground_items: BTreeMap<ItemId, GroundItem>,
     chunks: BTreeMap<ChunkCoord, Chunk>,
@@ -4871,7 +4879,10 @@ impl WorldState {
             eoc_item_use_types: BTreeMap::new(),
             item_transform_types: BTreeMap::new(),
             worldgen: None,
+            npc_templates: BTreeMap::new(),
+            dialogue_topics: BTreeMap::new(),
             actors: BTreeMap::new(),
+            npcs: BTreeMap::new(),
             creatures: BTreeMap::new(),
             ground_items: BTreeMap::new(),
             chunks: BTreeMap::new(),
@@ -5707,6 +5718,7 @@ impl WorldState {
         if !self.is_passable(spawn.position)
             || self.actor_at(spawn.position).is_some()
             || self.creature_at(spawn.position).is_some()
+            || self.npc_at(spawn.position).is_some()
         {
             return Err(SimError::SpawnBlocked);
         }
@@ -5782,6 +5794,7 @@ impl WorldState {
         if !self.is_passable(position)
             || self.actor_at(position).is_some()
             || self.creature_at(position).is_some()
+            || self.npc_at(position).is_some()
         {
             return Err(SimError::SpawnBlocked);
         }
@@ -5837,6 +5850,10 @@ impl WorldState {
             },
         );
         self.refresh_actor_memory(id)?;
+        if let Err(error) = self.spawn_initial_npc_near(position) {
+            self.actors.remove(&id);
+            return Err(error);
+        }
         Ok(id)
     }
 
@@ -5865,6 +5882,7 @@ impl WorldState {
                         if self.is_passable(position)
                             && self.actor_at(position).is_none()
                             && self.creature_at(position).is_none()
+                            && self.npc_at(position).is_none()
                         {
                             return self
                                 .spawn_actor_with_base_stats(position, connected, base_stats);
@@ -5895,6 +5913,7 @@ impl WorldState {
                     if self.is_passable(position)
                         && self.actor_at(position).is_none()
                         && self.creature_at(position).is_none()
+                        && self.npc_at(position).is_none()
                     {
                         return self.spawn_actor_with_base_stats(position, connected, base_stats);
                     }
@@ -5910,7 +5929,14 @@ impl WorldState {
         self.actors
             .remove(&actor_id)
             .map(|_actor| ())
-            .ok_or(SimError::UnknownActor)
+            .ok_or(SimError::UnknownActor)?;
+        for npc in self.npcs.values_mut() {
+            npc.social.remove(&actor_id);
+        }
+        if self.actors.is_empty() && self.npcs.values().all(|npc| npc.social.is_empty()) {
+            self.npcs.clear();
+        }
+        Ok(())
     }
 
     /// Restores an actor at the deterministic point recorded by character
@@ -5941,7 +5967,8 @@ impl WorldState {
             || (actor.hp > 0
                 && (!self.is_passable(actor.position)
                     || self.actor_at(actor.position).is_some()
-                    || self.creature_at(actor.position).is_some()))
+                    || self.creature_at(actor.position).is_some()
+                    || self.npc_at(actor.position).is_some()))
         {
             return Err(SimError::InvalidActorRestore);
         }
@@ -6013,10 +6040,12 @@ impl WorldState {
                 return Err(SimError::InvalidActorRestore);
             }
         }
+        let restored_id = actor.id;
+        let restored_position = actor.position;
         self.actors.insert(
-            actor.id,
+            restored_id,
             Actor {
-                id: actor.id,
+                id: restored_id,
                 position: actor.position,
                 hp: actor.hp,
                 body_parts: actor.body_parts,
@@ -6058,6 +6087,10 @@ impl WorldState {
                 map_memory: map_memory_from_snapshot(actor.map_memory),
             },
         );
+        if let Err(error) = self.spawn_initial_npc_near(restored_position) {
+            self.actors.remove(&restored_id);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -7579,6 +7612,9 @@ impl WorldState {
             CommandKind::Attack { .. } | CommandKind::AttackCreature { .. } => {
                 self.actor_melee_action_cost(actor_id)
             }
+            CommandKind::TalkToNpc { target } => {
+                Ok(self.npc_dialogue_action_cost(actor_id, *target))
+            }
             CommandKind::InsertPocketItem {
                 owner_item,
                 pocket_index,
@@ -7768,7 +7804,10 @@ impl WorldState {
         if !self.ensure_active_bubble_generated(to)? {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         }
-        if self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+        if self.actor_at(to).is_some()
+            || self.creature_at(to).is_some()
+            || self.npc_at(to).is_some()
+        {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         }
         let Some(from_cost) = self.tile_movement_cost(from) else {
@@ -7854,7 +7893,11 @@ impl WorldState {
         if !self.ensure_active_bubble_generated(to)? {
             return Ok(());
         }
-        if !self.is_passable(to) || self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+        if !self.is_passable(to)
+            || self.actor_at(to).is_some()
+            || self.creature_at(to).is_some()
+            || self.npc_at(to).is_some()
+        {
             return Ok(());
         }
         self.actors
@@ -7880,6 +7923,9 @@ impl WorldState {
             CommandKind::Attack { target } => self.apply_attack(actor_id, sequence, target, events),
             CommandKind::AttackCreature { target } => {
                 self.apply_attack_creature(actor_id, sequence, target, events)
+            }
+            CommandKind::TalkToNpc { target } => {
+                self.start_npc_dialogue(actor_id, sequence, target, events)
             }
             CommandKind::ShootActor { target } => {
                 self.apply_ranged_attack(actor_id, sequence, RangedTarget::Actor(target), events)
@@ -8100,7 +8146,11 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
         }
-        if !self.is_passable(to) || self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+        if !self.is_passable(to)
+            || self.actor_at(to).is_some()
+            || self.creature_at(to).is_some()
+            || self.npc_at(to).is_some()
+        {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
         }
@@ -9482,7 +9532,11 @@ impl WorldState {
             )?);
             return Ok(());
         };
-        if !opening && (self.actor_at(position).is_some() || self.creature_at(position).is_some()) {
+        if !opening
+            && (self.actor_at(position).is_some()
+                || self.creature_at(position).is_some()
+                || self.npc_at(position).is_some())
+        {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
         }
@@ -10083,6 +10137,7 @@ impl WorldState {
                 if !self.is_passable(to)
                     || self.actor_at(to).is_some()
                     || self.creature_at(to).is_some()
+                    || self.npc_at(to).is_some()
                 {
                     continue;
                 }
@@ -11036,7 +11091,10 @@ impl WorldState {
             let Some(to) = creature_position.checked_offset(step_x, step_y, 0) else {
                 continue;
             };
-            if self.actor_at(to).is_some() || self.creature_at(to).is_some() {
+            if self.actor_at(to).is_some()
+                || self.creature_at(to).is_some()
+                || self.npc_at(to).is_some()
+            {
                 continue;
             }
             let (action, bad_choice) = if self.is_passable(to) {
@@ -12312,6 +12370,7 @@ impl WorldState {
                 || furniture.is_some()
                 || self.actor_at(target).is_some()
                 || self.creature_at(target).is_some()
+                || self.npc_at(target).is_some()
                 || self
                     .ground_items
                     .values()
@@ -13815,6 +13874,7 @@ impl WorldState {
         self.is_passable(position)
             && self.actor_at(position).is_none()
             && self.creature_at(position).is_none()
+            && self.npc_at(position).is_none()
     }
 
     fn advance_needs(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
@@ -14096,6 +14156,13 @@ impl WorldState {
             .map(|creature| creature.id)
     }
 
+    fn npc_at(&self, position: WorldPosition) -> Option<NpcId> {
+        self.npcs
+            .values()
+            .find(|npc| npc.position == position)
+            .map(|npc| npc.id)
+    }
+
     fn item_id_exists(&self, item_id: ItemId) -> bool {
         self.ground_items
             .values()
@@ -14185,7 +14252,14 @@ impl WorldState {
             eoc_item_use_types: self.eoc_item_use_types.values().cloned().collect(),
             item_transform_types: self.item_transform_types.values().cloned().collect(),
             worldgen: self.worldgen.clone(),
+            npc_templates: self.npc_templates.values().cloned().collect(),
+            dialogue_topics: self.dialogue_topics.values().cloned().collect(),
             actors: self.actors.values().map(Actor::snapshot).collect(),
+            npcs: self
+                .npcs
+                .values()
+                .map(npc_dialogue::Npc::snapshot)
+                .collect(),
             creatures: self.creatures.values().map(Creature::snapshot).collect(),
             ground_items: self
                 .ground_items
@@ -14200,6 +14274,10 @@ impl WorldState {
         if !snapshot.item_groups_are_valid()
             || !cdda_protocol::anatomy_definition_is_valid(&snapshot.actor_anatomy)
             || !cdda_protocol::wearable_armor_catalog_is_valid(&snapshot.wearable_armor_types)
+            || !cdda_protocol::npc_dialogue_catalog_is_valid(
+                &snapshot.npc_templates,
+                &snapshot.dialogue_topics,
+            )
         {
             return Err(SimError::InvalidSnapshot);
         }
@@ -14367,6 +14445,18 @@ impl WorldState {
             .cloned()
             .map(|profile| (profile.source_type_id.clone(), profile))
             .collect();
+        let npc_templates = snapshot
+            .npc_templates
+            .iter()
+            .cloned()
+            .map(|template| (template.template_id.clone(), template))
+            .collect::<BTreeMap<_, _>>();
+        let dialogue_topics = snapshot
+            .dialogue_topics
+            .iter()
+            .cloned()
+            .map(|topic| (topic.topic_id.clone(), topic))
+            .collect::<BTreeMap<_, _>>();
         let mut actors = BTreeMap::new();
         let mut occupied = BTreeSet::new();
         let mut item_ids = BTreeSet::new();
@@ -14643,6 +14733,68 @@ impl WorldState {
         }) {
             return Err(SimError::InvalidSnapshot);
         }
+        let mut npcs = BTreeMap::new();
+        for npc in &snapshot.npcs {
+            if !cdda_protocol::npc_snapshot_is_valid(
+                npc,
+                snapshot.world_namespace,
+                &snapshot.npc_templates,
+            ) || npc
+                .social
+                .iter()
+                .any(|social| !actors.contains_key(&social.actor_id))
+                || !occupied.insert(npc.position)
+                || !is_passable_in_chunks(&chunks, npc.position)
+                || npcs
+                    .insert(
+                        npc.id,
+                        npc_dialogue::Npc {
+                            id: npc.id,
+                            template_id: npc.template_id.clone(),
+                            name: npc.name.clone(),
+                            position: npc.position,
+                            social: npc
+                                .social
+                                .iter()
+                                .map(|social| (social.actor_id, social.opinion.clone()))
+                                .collect(),
+                        },
+                    )
+                    .is_some()
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            maximum_counter = maximum_counter.max(npc.id.counter());
+        }
+        if actors.values().any(|actor| {
+            actor
+                .pending_interaction
+                .as_ref()
+                .is_some_and(|interaction| {
+                    if let cdda_protocol::InteractionContextV1::NpcDialogue { npc_id, topic_id } =
+                        &interaction.context
+                    {
+                        let Some(npc) = npcs.get(npc_id) else {
+                            return true;
+                        };
+                        let Some(topic) = dialogue_topics.get(topic_id) else {
+                            return true;
+                        };
+                        interaction.prompt != format!("{}: {}", npc.name, topic.dynamic_line)
+                            || interaction.choices.len() != topic.responses.len()
+                            || interaction.choices.iter().zip(&topic.responses).any(
+                                |(choice, response)| {
+                                    choice.choice_id != response.response_id
+                                        || choice.label != response.text
+                                },
+                            )
+                    } else {
+                        false
+                    }
+                })
+        }) {
+            return Err(SimError::InvalidSnapshot);
+        }
         let mut creatures = BTreeMap::new();
         for creature_snapshot in &snapshot.creatures {
             if creature_snapshot.id.world_namespace() != snapshot.world_namespace
@@ -14735,7 +14887,10 @@ impl WorldState {
             eoc_item_use_types,
             item_transform_types,
             worldgen: snapshot.worldgen.clone(),
+            npc_templates,
+            dialogue_topics,
             actors,
+            npcs,
             creatures,
             ground_items,
             chunks,
@@ -14750,7 +14905,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV104");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV105");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -14799,6 +14954,7 @@ pub enum SimError {
     InvalidHeldMovement,
     InvalidItem,
     InvalidLocalCoordinate,
+    InvalidNpcDialogue,
     InvalidReservation,
     InvalidSnapshot,
     InvalidTerrain,
@@ -14809,6 +14965,7 @@ pub enum SimError {
     UnknownActor,
     UnknownCreature,
     UnknownItem,
+    UnknownNpc,
 }
 
 impl fmt::Display for SimError {
@@ -14831,6 +14988,7 @@ impl fmt::Display for SimError {
             Self::InvalidHeldMovement => formatter.write_str("invalid held movement state"),
             Self::InvalidItem => formatter.write_str("invalid item state"),
             Self::InvalidLocalCoordinate => formatter.write_str("invalid local tile coordinate"),
+            Self::InvalidNpcDialogue => formatter.write_str("invalid NPC dialogue state"),
             Self::InvalidReservation => formatter.write_str("invalid stable ID reservation"),
             Self::InvalidSnapshot => formatter.write_str("invalid canonical snapshot"),
             Self::InvalidTerrain => formatter.write_str("invalid terrain state"),
@@ -14841,6 +14999,7 @@ impl fmt::Display for SimError {
             Self::UnknownActor => formatter.write_str("unknown actor"),
             Self::UnknownCreature => formatter.write_str("unknown creature"),
             Self::UnknownItem => formatter.write_str("unknown item"),
+            Self::UnknownNpc => formatter.write_str("unknown NPC"),
         }
     }
 }

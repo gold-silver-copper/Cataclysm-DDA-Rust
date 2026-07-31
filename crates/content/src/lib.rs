@@ -16,6 +16,7 @@ mod mapgen;
 mod material;
 mod monster;
 mod monster_group;
+mod npc_dialogue;
 mod overmap_special;
 mod overmap_terrain;
 mod proficiency;
@@ -104,6 +105,10 @@ pub use monster_group::{
     MAX_MONSTER_GROUP_ENTRIES, MAX_MONSTER_GROUP_FREQUENCY, MAX_MONSTER_GROUP_PACK_SIZE,
     MAX_MONSTER_GROUPS, MonsterGroupDefinition, MonsterGroupEntry, MonsterGroupRegistry,
     MonsterGroupRegistryError, MonsterGroupTarget,
+};
+pub use npc_dialogue::{
+    DialogueOpinionDefinition, DialogueRegistry, DialogueRegistryError, DialogueResponseDefinition,
+    DialogueTopicDefinition, NpcTemplateDefinition,
 };
 pub use overmap_special::{
     MAX_OVERMAP_SPECIALS, OvermapLocationDefinition, OvermapSpecialConnectionDefinition,
@@ -528,6 +533,8 @@ fn definition_support(kind: &str) -> SupportStatus {
             | "construction_group"
             | "field_type"
             | "item_group"
+            | "npc"
+            | "talk_topic"
             | "SPELL"
     ) {
         SupportStatus::LoaderImplemented
@@ -545,6 +552,8 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "item_group" && item_group::field_is_implemented(field))
         || (kind == "MONSTER" && monster::field_is_implemented(field))
         || (kind == "field_type" && field::field_is_implemented(field))
+        || (kind == "npc" && npc_dialogue::npc_field_is_implemented(field))
+        || (kind == "talk_topic" && npc_dialogue::topic_field_is_implemented(field))
         || (kind == "terrain" && terrain::field_is_implemented(field))
         || (kind == "furniture" && furniture::field_is_implemented(field))
         || (kind == "proficiency" && proficiency::field_is_implemented(field))

@@ -32,8 +32,8 @@ use cdda_protocol::{
     PROTOCOL_VERSION, PlayerReport, PrivateCharacterInspection, REQUIRED_DATAGRAM_SIZE,
     ReplicationSnapshotV1, ReportId, ReportRejection, ReportResponse, ReportState, ReportSummary,
     ServerHello, SimTick, VisibleActorSnapshot, VisibleChunkSnapshot, VisibleCreatureSnapshot,
-    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, decode_client_datagram,
-    encode_control,
+    VisibleNpcSnapshotV1, WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1,
+    decode_client_datagram, encode_control,
 };
 use cdda_sim::{ActorSpawn, ReservedIdBlock, TickOutcome, WorldState};
 use iroh::{
@@ -4298,6 +4298,23 @@ fn interest_snapshot(
             sleeping: actor.sleeping,
         })
         .collect();
+    let npcs = snapshot
+        .npcs
+        .iter()
+        .filter(|npc| visible(npc.position))
+        .map(|npc| VisibleNpcSnapshotV1 {
+            id: npc.id,
+            template_id: npc.template_id.clone(),
+            name: npc.name.clone(),
+            position: npc.position,
+            opinion_of_controlled_actor: npc
+                .social
+                .iter()
+                .find(|social| social.actor_id == actor_id)
+                .map(|social| social.opinion.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
     let creatures = snapshot
         .creatures
         .iter()
@@ -4454,6 +4471,7 @@ fn interest_snapshot(
             || position_has_external_detail_light(&snapshot, origin, &light_sources),
         controlled_actor,
         visible_actors,
+        npcs,
         creatures,
         ground_items,
         chunks,

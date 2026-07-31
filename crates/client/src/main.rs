@@ -81,6 +81,9 @@ enum ClientAction {
     Activate {
         item_id: ItemId,
     },
+    TalkToNpc {
+        target: cdda_protocol::NpcId,
+    },
     RespondInteraction {
         interaction_id: cdda_protocol::InteractionId,
         choice_id: String,
@@ -1019,6 +1022,9 @@ async fn run_game_session(
                     }
                     Some(ClientAction::Activate { item_id }) => {
                         Some(CommandKind::Activate { item_id })
+                    }
+                    Some(ClientAction::TalkToNpc { target }) => {
+                        Some(CommandKind::TalkToNpc { target })
                     }
                     Some(ClientAction::RespondInteraction {
                         interaction_id,
@@ -2523,6 +2529,7 @@ fn construction_target_menu_entries(
             .visible_actors
             .iter()
             .any(|actor| actor.hp > 0 && actor.position == target)
+            || snapshot.npcs.iter().any(|npc| npc.position == target)
             || snapshot
                 .creatures
                 .iter()
@@ -4167,6 +4174,21 @@ fn handle_movement_input(
         let _send_result = game.actions.try_send(ClientAction::Wait);
     } else if keys.just_pressed(KeyCode::KeyR) && actor.wielded.is_some() {
         let _send_result = game.actions.try_send(ClientAction::Unwield);
+    } else if keys.just_pressed(KeyCode::KeyK) {
+        let adjacent = snapshot
+            .npcs
+            .iter()
+            .filter(|npc| {
+                npc.position.z == actor.position.z
+                    && npc.position.x.abs_diff(actor.position.x) <= 1
+                    && npc.position.y.abs_diff(actor.position.y) <= 1
+            })
+            .min_by_key(|npc| npc.id);
+        if let Some(npc) = adjacent {
+            let _send_result = game
+                .actions
+                .try_send(ClientAction::TalkToNpc { target: npc.id });
+        }
     }
 }
 
@@ -4551,6 +4573,7 @@ fn event_message(event: &WorldEvent) -> String {
             InteractionCancellationReasonV1::Invalidated => {
                 String::from("The interaction is no longer valid.")
             }
+            InteractionCancellationReasonV1::Completed => String::from("The conversation ended."),
         },
         WorldEventKind::ActorNeedsUpdated { .. } => String::from("Needs advanced."),
         WorldEventKind::ActorDiedFromNeeds { .. } => {
@@ -5229,6 +5252,29 @@ fn gameplay_status(
             format!("{name} ({}/{})", creature.hp.max(0), creature.max_hp)
         })
         .unwrap_or_else(|| String::from("none"));
+    let nearest_npc = snapshot
+        .npcs
+        .iter()
+        .min_by_key(|npc| {
+            npc.position.x.abs_diff(actor.position.x)
+                + npc.position.y.abs_diff(actor.position.y)
+                + npc.position.z.abs_diff(actor.position.z)
+        })
+        .map(|npc| {
+            format!(
+                "{} at ({}, {}, {}) (trust {}, fear {}, value {}, anger {}, owed {})",
+                npc.name,
+                npc.position.x,
+                npc.position.y,
+                npc.position.z,
+                npc.opinion_of_controlled_actor.trust,
+                npc.opinion_of_controlled_actor.fear,
+                npc.opinion_of_controlled_actor.value,
+                npc.opinion_of_controlled_actor.anger,
+                npc.opinion_of_controlled_actor.owed,
+            )
+        })
+        .unwrap_or_else(|| String::from("none"));
     let current_observation = {
         let (chunk_coord, local) = actor.position.chunk_and_local();
         snapshot
@@ -5413,7 +5459,7 @@ fn gameplay_status(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}.",
+        "Connected at tick {} — Year {}, {:?}, day {} {:02}:{:02}:{:02}. Sky: {:?}; moon phase {}; sight radius {}. Move: WASD/arrows/numpad (Home/PageUp/End/PageDown diagonals); wait: ./numpad 5; sleep/wake: Z; talk to adjacent NPC: K; open/close adjacent: O/L; smash adjacent: H; pick up: G; drop: Q; wield/unwield: E/R; wear/take off: W/D; reload: U; insert first fitting container item: I; remove first pocket item: Y; consume: C; craft/resume: B; construct/resume: M; read/resume: V; disassemble/resume: N; cancel activity: X; select melee target: F; select ranged target: T.\nHP: {}. Body parts: [{}]. Effects: [{}]. Stamina: {}/{}; dodges: {}. Stats: STR {} DEX {} INT {} PER {}. Stored kcal: {}. Thirst: {}. Sleepiness: {} ({}). Readiness: {}/{}; queued actions: {}. Craft: {}. Reading: {}. Disassembly: {}. Construction: {}. Learned recipes: {}. Skills: [{}]. Proficiencies: [{}]. Terrain: {}. Furniture: {}. Wielding: {}. Wearing: [{}]. Inventory: [{}]. Ground here: {} item(s). Nearest hostile: {}. Nearest NPC: {}.",
         snapshot.tick.0,
         snapshot.calendar.year,
         snapshot.calendar.season,
@@ -5455,6 +5501,7 @@ fn gameplay_status(
         inventory.join(", "),
         ground_here,
         nearest_hostile,
+        nearest_npc,
     )
 }
 
@@ -5805,6 +5852,7 @@ mod tests {
                 map_memory: Vec::new(),
             },
             visible_actors: Vec::new(),
+            npcs: Vec::new(),
             creatures: Vec::new(),
             ground_items: vec![
                 cdda_protocol::GroundItemSnapshot {
@@ -6312,6 +6360,7 @@ mod tests {
                 map_memory: Vec::new(),
             },
             visible_actors: Vec::new(),
+            npcs: Vec::new(),
             creatures: Vec::new(),
             ground_items: Vec::new(),
             chunks: Vec::new(),
@@ -7024,6 +7073,7 @@ mod tests {
                 connected: true,
                 sleeping: false,
             }],
+            npcs: Vec::new(),
             creatures: vec![creature(21, 5, 80), creature(20, 1, 80), creature(22, 1, 0)],
             ground_items: Vec::new(),
             chunks: Vec::new(),
@@ -7155,6 +7205,7 @@ mod tests {
                 map_memory: Vec::new(),
             },
             visible_actors: Vec::new(),
+            npcs: Vec::new(),
             creatures: Vec::new(),
             ground_items: Vec::new(),
             chunks: vec![cdda_protocol::VisibleChunkSnapshot {

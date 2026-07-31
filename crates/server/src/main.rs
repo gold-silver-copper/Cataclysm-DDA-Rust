@@ -12,13 +12,13 @@ use cdda_content::{
     AmmunitionEffectRegistry, AmmunitionRegistry, AnatomyRegistry, BashDamageProfileRegistry,
     BashFieldEffectDefinition, CitySettingsRegistry, ConstructionRegistry, ContentManifest,
     DEFAULT_CITY_SETTINGS_ID, DEFAULT_MANIFEST_PATH, DEFAULT_RIVER_SETTINGS_ID,
-    DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, EffectOnConditionRegistry,
-    EffectTypeRegistry, FieldTypeDefinition, FieldTypeRegistry, FurnitureDefinition,
-    FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry, MapgenRegistry,
-    MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry, MonsterRegistry,
-    OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry,
-    RiverSettingsRegistry, SkillRegistry, SpellRegistry, StartLocationRegistry, TerrainDefinition,
-    TerrainRegistry,
+    DefaultRegionTerrainFurnitureRegistry, DescriptionSnippetRegistry, DialogueRegistry,
+    EffectOnConditionRegistry, EffectTypeRegistry, FieldTypeDefinition, FieldTypeRegistry,
+    FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry, ItemRegistry,
+    MapgenRegistry, MaterialRegistry, ModCatalog, MonsterDefinition, MonsterGroupRegistry,
+    MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry, ProficiencyRegistry,
+    RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry, StartLocationRegistry,
+    TerrainDefinition, TerrainRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -144,6 +144,7 @@ struct RuntimeWorldContent<'a> {
     start_locations: &'a StartLocationRegistry,
     city_settings: &'a CitySettingsRegistry,
     river_settings: &'a RiverSettingsRegistry,
+    dialogue: &'a DialogueRegistry,
 }
 
 const ID_REFILL_THRESHOLD: u64 = 512;
@@ -425,6 +426,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mod_catalog,
         &enabled_mods,
     )?;
+    let dialogue = DialogueRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+    )?;
     let crafting = build_crafting_catalog(&recipes, &items, &materials, &proficiencies)?;
     let reading = build_reading_catalog(&items, &skills)?;
     let disassembly =
@@ -492,6 +499,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_locations: &start_locations,
             city_settings: &city_settings,
             river_settings: &river_settings,
+            dialogue: &dialogue,
         },
     )?;
     let persistence_host = PersistenceHost::start(store)?;
@@ -854,6 +862,8 @@ fn open_world(
     };
     let has_snapshot = store.latest_snapshot()?.is_some();
     let mut initial = WorldState::new(metadata.world_namespace, metadata.world_seed);
+    let (npc_templates, dialogue_topics) = runtime_npc_dialogue(content.dialogue)?;
+    initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
     initial.register_actor_anatomy(actor_anatomy)?;
     initial.register_wearable_armor_types(wearable_armor_types)?;
     for field_type_id in [
@@ -1677,6 +1687,124 @@ fn build_reading_catalog(
         }
     }
     Ok(ReadingCatalog::new(catalog))
+}
+
+fn runtime_npc_dialogue(
+    registry: &DialogueRegistry,
+) -> Result<
+    (
+        Vec<cdda_protocol::NpcTemplateV1>,
+        Vec<cdda_protocol::DialogueTopicV1>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let done = cdda_protocol::DialogueTopicV1 {
+        topic_id: String::from("TALK_DONE"),
+        dynamic_line: String::from("The conversation has reached its end."),
+        responses: vec![cdda_protocol::DialogueResponseV1 {
+            response_id: String::from("0"),
+            text: String::from("Goodbye."),
+            next_topic_id: String::from("TALK_DONE"),
+            opinion_delta: cdda_protocol::NpcOpinionV1::default(),
+        }],
+    };
+    let mut topics = registry
+        .topic_iter()
+        .filter(|(_, topic)| {
+            !topic.unsupported
+                && !topic.dynamic_line.is_empty()
+                && !contains_unresolved_dialogue_tag(&topic.dynamic_line)
+                && (1..=cdda_protocol::MAX_DIALOGUE_RESPONSES).contains(&topic.responses.len())
+                && topic.responses.iter().all(|response| {
+                    !contains_unresolved_dialogue_tag(&response.text)
+                        && cdda_protocol::opinion_is_valid(&cdda_protocol::NpcOpinionV1 {
+                            trust: response.opinion.trust,
+                            fear: response.opinion.fear,
+                            value: response.opinion.value,
+                            anger: response.opinion.anger,
+                            owed: response.opinion.owed,
+                        })
+                })
+        })
+        .map(|(topic_id, topic)| {
+            (
+                topic_id.to_owned(),
+                cdda_protocol::DialogueTopicV1 {
+                    topic_id: topic_id.to_owned(),
+                    dynamic_line: topic.dynamic_line.clone(),
+                    responses: topic
+                        .responses
+                        .iter()
+                        .enumerate()
+                        .map(|(index, response)| cdda_protocol::DialogueResponseV1 {
+                            response_id: index.to_string(),
+                            text: response.text.clone(),
+                            next_topic_id: response.next_topic_id.clone(),
+                            opinion_delta: cdda_protocol::NpcOpinionV1 {
+                                trust: response.opinion.trust,
+                                fear: response.opinion.fear,
+                                value: response.opinion.value,
+                                anger: response.opinion.anger,
+                                owed: response.opinion.owed,
+                            },
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    topics.insert(done.topic_id.clone(), done);
+    loop {
+        let ids = topics.keys().cloned().collect::<BTreeSet<_>>();
+        let rejected = topics
+            .iter()
+            .filter(|(topic_id, topic)| {
+                topic_id.as_str() != "TALK_DONE"
+                    && topic
+                        .responses
+                        .iter()
+                        .any(|response| !ids.contains(&response.next_topic_id))
+            })
+            .map(|(topic_id, _)| topic_id.clone())
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            break;
+        }
+        for topic_id in rejected {
+            topics.remove(&topic_id);
+        }
+    }
+    let templates = registry
+        .npc_iter()
+        .filter(|(_, template)| {
+            template.unsupported_fields.is_empty()
+                && topics.contains_key(&template.chat_topic_id)
+                && !contains_unresolved_dialogue_tag(&template.name)
+        })
+        .map(|(template_id, template)| cdda_protocol::NpcTemplateV1 {
+            template_id: template_id.to_owned(),
+            name: template.name.clone(),
+            gender: template.gender.clone(),
+            faction_id: template.faction_id.clone(),
+            class_id: template.class_id.clone(),
+            attitude: template.attitude,
+            mission: template.mission.clone(),
+            chat_topic_id: template.chat_topic_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let topics = topics.into_values().collect::<Vec<_>>();
+    if !templates
+        .iter()
+        .any(|template| template.template_id == "apis")
+        || !cdda_protocol::npc_dialogue_catalog_is_valid(&templates, &topics)
+    {
+        return Err("pinned content has no closed supported NPC dialogue family".into());
+    }
+    Ok((templates, topics))
+}
+
+fn contains_unresolved_dialogue_tag(text: &str) -> bool {
+    text.contains('<') || text.contains('>') || text.chars().any(char::is_control)
 }
 
 fn build_construction_catalog(

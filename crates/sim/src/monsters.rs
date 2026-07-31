@@ -758,7 +758,11 @@ impl WorldState {
                         profile.spell_targets_hostile
                             && self.actors.get(&actor_id).is_some_and(|actor| actor.hp > 0)
                     }
-                    None => self.creature_at(position).is_none() && profile.spell_targets_ground,
+                    None => {
+                        self.creature_at(position).is_none()
+                            && self.npc_at(position).is_none()
+                            && profile.spell_targets_ground
+                    }
                 };
                 if valid {
                     area.push(position);
@@ -993,6 +997,7 @@ impl WorldState {
                     && self.is_passable(position)
                     && self.actor_at(position).is_none()
                     && self.creature_at(position).is_none()
+                    && self.npc_at(position).is_none()
                 {
                     candidates.push(position);
                 }
@@ -1661,6 +1666,7 @@ impl WorldState {
                 if !self.is_passable(candidate)
                     || self.actor_at(candidate).is_some()
                     || self.creature_at(candidate).is_some()
+                    || self.npc_at(candidate).is_some()
                     || !self.has_clear_shot(origin, candidate)
                     || !self.creature_can_see_position(source, candidate, &light_sources)?
                     || (!profile.leap_ignore_destination_danger

@@ -233,6 +233,9 @@ impl WorldState {
                         .ok_or(SimError::NumericOverflow)
                 }),
             InteractionContextV1::EocConfirmation { .. } => Ok(0),
+            InteractionContextV1::NpcDialogue { npc_id, .. } => {
+                Ok(self.npc_dialogue_action_cost(actor_id, *npc_id))
+            }
         }
     }
 
@@ -335,6 +338,16 @@ impl WorldState {
                     return self.invalidate_interaction(actor_id, sequence, interaction_id, events);
                 }
             }
+            InteractionContextV1::NpcDialogue { npc_id, topic_id } => self
+                .apply_npc_dialogue_response(
+                    actor_id,
+                    sequence,
+                    interaction_id,
+                    *npc_id,
+                    topic_id,
+                    &choice_id,
+                    events,
+                )?,
         }
         Ok(())
     }
@@ -450,6 +463,7 @@ impl WorldState {
                     )?
                 }
                 InteractionContextV1::MedicalBodyPart { .. } => false,
+                InteractionContextV1::NpcDialogue { .. } => false,
             };
             if !resolved {
                 events.push(self.make_event(WorldEventKind::InteractionCanceled {
@@ -462,7 +476,7 @@ impl WorldState {
         Ok(())
     }
 
-    fn invalidate_interaction(
+    pub(super) fn invalidate_interaction(
         &mut self,
         actor_id: ActorId,
         sequence: CommandSequence,

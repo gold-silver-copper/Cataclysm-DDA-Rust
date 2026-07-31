@@ -11,6 +11,7 @@ mod astronomy_table;
 mod eocs;
 mod interactions;
 mod item_groups;
+mod npc_dialogue;
 mod use_actions;
 
 pub use anatomy::{
@@ -40,6 +41,12 @@ pub use interactions::{
     MAX_INTERACTION_CHOICE_ID_BYTES, MAX_INTERACTION_CHOICE_LABEL_BYTES, MAX_INTERACTION_CHOICES,
     MAX_INTERACTION_LIFETIME_TICKS, MAX_INTERACTION_PROMPT_BYTES, PendingInteractionV1,
     pending_interaction_is_valid,
+};
+pub use npc_dialogue::{
+    DialogueResponseV1, DialogueTopicV1, MAX_DIALOGUE_ID_BYTES, MAX_DIALOGUE_RESPONSES,
+    MAX_DIALOGUE_TEXT_BYTES, MAX_NPC_NAME_BYTES, MAX_NPC_OPINION_ABS, MAX_NPC_TEMPLATES,
+    NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1, VisibleNpcSnapshotV1,
+    npc_dialogue_catalog_is_valid, npc_snapshot_is_valid, opinion_is_valid,
 };
 
 pub use item_groups::{
@@ -91,7 +98,7 @@ pub use use_actions::{
     item_transform_catalog_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 128;
+pub const PROTOCOL_VERSION: u16 = 129;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -288,6 +295,7 @@ stable_id!(WorldId);
 stable_id!(AccountId);
 stable_id!(ActorId);
 stable_id!(CreatureId);
+stable_id!(NpcId);
 stable_id!(ItemId);
 stable_id!(InteractionId);
 stable_id!(VehicleId);
@@ -1693,6 +1701,9 @@ pub enum CommandKind {
     },
     AttackCreature {
         target: CreatureId,
+    },
+    TalkToNpc {
+        target: NpcId,
     },
     ShootActor {
         target: ActorId,
@@ -3924,7 +3935,10 @@ pub struct WorldSnapshotV1 {
     /// Generated four-submap cells live in `chunks`; the catalog is retained
     /// so recovery never rereads mutable external content.
     pub worldgen: Option<WorldgenCatalogV1>,
+    pub npc_templates: Vec<NpcTemplateV1>,
+    pub dialogue_topics: Vec<DialogueTopicV1>,
     pub actors: Vec<ActorSnapshot>,
+    pub npcs: Vec<NpcSnapshotV1>,
     pub creatures: Vec<CreatureSnapshot>,
     pub ground_items: Vec<GroundItemSnapshot>,
     pub chunks: Vec<ChunkSnapshot>,
@@ -3961,6 +3975,7 @@ pub struct ReplicationSnapshotV1 {
     pub detail_vision_available: bool,
     pub controlled_actor: ActorSnapshot,
     pub visible_actors: Vec<VisibleActorSnapshot>,
+    pub npcs: Vec<VisibleNpcSnapshotV1>,
     pub creatures: Vec<VisibleCreatureSnapshot>,
     pub ground_items: Vec<GroundItemSnapshot>,
     pub chunks: Vec<VisibleChunkSnapshot>,
@@ -4441,6 +4456,9 @@ fn valid_client_command(command: &ClientCommand) -> bool {
         }
         CommandKind::Activate { item_id } => {
             item_id.counter() > 0 && item_id.world_namespace() == command.actor_id.world_namespace()
+        }
+        CommandKind::TalkToNpc { target } => {
+            target.counter() > 0 && target.world_namespace() == command.actor_id.world_namespace()
         }
         CommandKind::RespondInteraction {
             interaction_id,
@@ -8020,6 +8038,7 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
             &snapshot.controlled_actor.inactive_recurring_eocs,
         )
         && snapshot.visible_actors.len() <= 65_536
+        && snapshot.npcs.len() <= 65_536
         && snapshot.creatures.len() <= 65_536
         && snapshot.ground_items.len() <= 65_536
         && snapshot.chunks.len() <= 16_384
@@ -8144,6 +8163,17 @@ fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
             .ground_items
             .iter()
             .all(|item| valid_item_snapshot(&item.item))
+        && snapshot.npcs.iter().all(|npc| {
+            npc.id.counter() > 0
+                && npc.id.world_namespace() == namespace
+                && !npc.name.is_empty()
+                && npc.name.len() <= MAX_NPC_NAME_BYTES
+                && !npc.name.chars().any(char::is_control)
+                && !npc.template_id.is_empty()
+                && npc.template_id.len() <= MAX_DIALOGUE_ID_BYTES
+                && !npc.template_id.chars().any(char::is_control)
+                && opinion_is_valid(&npc.opinion_of_controlled_actor)
+        })
         && snapshot.creatures.iter().all(|creature| {
             creature.id.counter() > 0
                 && creature.id.world_namespace() == namespace
