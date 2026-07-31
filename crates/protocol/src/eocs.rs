@@ -28,6 +28,16 @@ pub struct ScheduledEocV1 {
     pub eoc_id: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum EocEventTriggerV1 {
+    ActorMoved,
+    ActorEnteredOvermapTile,
+    ActorTookDamage,
+    ActorDied,
+    ActorKilledCreature,
+    CreatureTookDamage,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EocStringValueV1 {
     Literal(String),
@@ -184,6 +194,7 @@ pub struct EocDefinitionV1 {
     pub false_effects: Vec<EocEffectV1>,
     pub recurrence: Option<EocDelayV1>,
     pub deactivate_condition: Option<EocConditionV1>,
+    pub event_trigger: Option<EocEventTriggerV1>,
 }
 
 impl EocDefinitionV1 {
@@ -247,7 +258,7 @@ pub fn eoc_catalog_is_valid(
     }
     let activation_ids = definitions
         .iter()
-        .filter(|definition| definition.recurrence.is_none())
+        .filter(|definition| definition.recurrence.is_none() && definition.event_trigger.is_none())
         .map(|definition| definition.eoc_id.as_str())
         .collect::<BTreeSet<_>>();
     item_use_types.iter().all(|item| {
@@ -263,10 +274,11 @@ pub fn eoc_catalog_is_valid(
 
 fn valid_eoc_tree(definition: &EocDefinitionV1) -> bool {
     let mut nodes = 0;
-    definition
-        .condition
-        .as_ref()
-        .is_none_or(|condition| valid_condition(condition, 0, &mut nodes))
+    !(definition.recurrence.is_some() && definition.event_trigger.is_some())
+        && definition
+            .condition
+            .as_ref()
+            .is_none_or(|condition| valid_condition(condition, 0, &mut nodes))
         && definition.recurrence.as_ref().is_none_or(|recurrence| {
             recurrence.minimum_turns > 0 && recurrence.maximum_turns >= recurrence.minimum_turns
         })
@@ -274,7 +286,9 @@ fn valid_eoc_tree(definition: &EocDefinitionV1) -> bool {
             .deactivate_condition
             .as_ref()
             .is_none_or(|condition| {
-                definition.recurrence.is_some() && valid_condition(condition, 0, &mut nodes)
+                definition.recurrence.is_some()
+                    && definition.event_trigger.is_none()
+                    && valid_condition(condition, 0, &mut nodes)
             })
         && valid_effects(&definition.effects, 0, &mut nodes)
         && valid_effects(&definition.false_effects, 0, &mut nodes)

@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, EocActorStatV1,
-    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocItemUseTypeV1,
+    EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1, EocItemUseTypeV1,
     EocMathAssignmentOperationV1, EocMathExpressionV1, EocStringValueV1, ItemId,
     MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, ScheduledEocV1,
-    SimTick, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
+    SimTick, WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -21,6 +21,7 @@ const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
 const MAX_EOC_OPERATIONS_PER_COMMAND: usize = 16_384;
 const MAX_SCHEDULED_EOC_ACTIVATIONS_PER_TICK: usize = 256;
 const MAX_RECURRING_EOC_REACTIVATION_CHECKS_PER_TICK: usize = 256;
+const MAX_EVENT_EOC_ACTIVATIONS_PER_TICK: usize = 256;
 
 impl WorldState {
     pub fn register_eoc_catalog(
@@ -260,6 +261,137 @@ impl WorldState {
                 events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
             }
         }
+        Ok(())
+    }
+
+    pub(super) fn advance_event_eocs(
+        &mut self,
+        source_event_cursor: &mut usize,
+        activation_count: &mut usize,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let source_event_end = events.len();
+        if *activation_count >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK {
+            *source_event_cursor = source_event_end;
+            return Ok(());
+        }
+        let mut activations = Vec::new();
+        for event in events
+            .iter()
+            .skip(*source_event_cursor)
+            .take(source_event_end.saturating_sub(*source_event_cursor))
+        {
+            let mut triggers = Vec::with_capacity(2);
+            match &event.kind {
+                WorldEventKind::ActorMoved { actor_id, from, to } => {
+                    triggers.push((*actor_id, EocEventTriggerV1::ActorMoved));
+                    let omt_width = WORLDGEN_OMT_SIZE as i32;
+                    if from.x.div_euclid(omt_width) != to.x.div_euclid(omt_width)
+                        || from.y.div_euclid(omt_width) != to.y.div_euclid(omt_width)
+                        || from.z != to.z
+                    {
+                        triggers.push((*actor_id, EocEventTriggerV1::ActorEnteredOvermapTile));
+                    }
+                }
+                WorldEventKind::DamageApplied { target, .. }
+                | WorldEventKind::ActorDamagedByCreature { target, .. } => {
+                    triggers.push((*target, EocEventTriggerV1::ActorTookDamage));
+                }
+                WorldEventKind::ActorDamagedByEffect { actor_id, .. } => {
+                    triggers.push((*actor_id, EocEventTriggerV1::ActorTookDamage));
+                }
+                WorldEventKind::ActorDied { actor_id, .. }
+                | WorldEventKind::ActorKilledByCreature { actor_id, .. }
+                | WorldEventKind::ActorDiedFromNeeds { actor_id }
+                | WorldEventKind::ActorDiedFromEffect { actor_id, .. } => {
+                    triggers.push((*actor_id, EocEventTriggerV1::ActorDied));
+                }
+                WorldEventKind::CreatureDied { killer, .. } => {
+                    triggers.push((*killer, EocEventTriggerV1::ActorKilledCreature));
+                }
+                WorldEventKind::CreatureDamaged { source, .. } => {
+                    triggers.push((*source, EocEventTriggerV1::CreatureTookDamage));
+                }
+                _ => {}
+            }
+            for (actor_id, trigger) in triggers {
+                for definition in self
+                    .eoc_definitions
+                    .values()
+                    .filter(|definition| definition.event_trigger == Some(trigger))
+                {
+                    if activation_count.saturating_add(activations.len())
+                        >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK
+                    {
+                        break;
+                    }
+                    activations.push((
+                        actor_id,
+                        event.id,
+                        definition.eoc_id.clone(),
+                        activations.len() as u64,
+                    ));
+                }
+                if activation_count.saturating_add(activations.len())
+                    >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK
+                {
+                    break;
+                }
+            }
+            if activation_count.saturating_add(activations.len())
+                >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK
+            {
+                break;
+            }
+        }
+
+        for (actor_id, event_id, eoc_id, activation_sequence) in activations {
+            *activation_count = activation_count.saturating_add(1);
+            let Some(actor) = self.actors.get(&actor_id) else {
+                continue;
+            };
+            let mut execution = EocExecution {
+                actor: eoc_actor_context(actor),
+                effects: actor.effects.clone(),
+                variables: actor.eoc_variables.clone(),
+                next_schedule_sequence: actor.next_eoc_schedule_sequence,
+                scheduled_eocs: actor.scheduled_eocs.clone(),
+                inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
+                messages: Vec::new(),
+                activations: 0,
+                operations: 0,
+                tick: self.tick,
+                rng: self.named_rng(
+                    b"event-eoc-activation",
+                    &[actor_id.as_u128(), event_id.as_u128()],
+                    activation_sequence,
+                ),
+            };
+            if execute_eoc(&self.eoc_definitions, &eoc_id, &mut execution, 0).is_err()
+                || execution.effects.len() > 1_024
+            {
+                continue;
+            }
+            execution.effects.sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
+            execution
+                .scheduled_eocs
+                .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+            let actor = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            actor.effects = execution.effects;
+            actor.eoc_variables = execution.variables;
+            actor.next_eoc_schedule_sequence = execution.next_schedule_sequence;
+            actor.scheduled_eocs = execution.scheduled_eocs;
+            actor.inactive_recurring_eocs = execution.inactive_recurring_eocs;
+            for text in execution.messages {
+                events.push(self.make_event(WorldEventKind::EocMessage { actor_id, text })?);
+            }
+        }
+        *source_event_cursor = events.len();
         Ok(())
     }
 

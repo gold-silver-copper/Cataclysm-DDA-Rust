@@ -44,7 +44,7 @@ pub use construction::{
 pub use eoc::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EffectOnConditionRegistryError,
     EocActorStatDefinition, EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,
-    EocStringValueDefinition, MAX_EOC_TREE_DEPTH,
+    EocEventTriggerDefinition, EocStringValueDefinition, MAX_EOC_TREE_DEPTH,
 };
 pub use eoc_math::{
     EocMathAssignmentDefinition, EocMathAssignmentOperationDefinition, EocMathExpressionDefinition,

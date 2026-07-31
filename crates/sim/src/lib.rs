@@ -5908,6 +5908,8 @@ impl WorldState {
         }
         self.tick = self.tick.next();
         let mut events = Vec::with_capacity(commands.len());
+        let mut event_eoc_cursor = 0;
+        let mut event_eoc_activations = 0;
         self.expire_interactions(&mut events)?;
         self.advance_actor_combat_resources();
         for input in held_movement {
@@ -5916,21 +5918,56 @@ impl WorldState {
         for command in commands {
             self.admit_command(command, &mut events)?;
         }
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.advance_actor_effects(&mut events)?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.advance_scheduled_eocs(&mut events)?;
         let actor_sound_start = events.len();
         self.advance_actor_actions(&mut events)?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.advance_powered_tools(&mut events)?;
         self.advance_item_temperatures()?;
         self.advance_fields(&mut events)?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.advance_creature_corpses(&mut events)?;
         self.advance_natural_healing()?;
         self.advance_needs(&mut events)?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.advance_disconnected_autopilot(&mut events)?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.advance_creature_hearing(&events[actor_sound_start..])?;
         let creature_sound_start = events.len();
         self.advance_creatures(&mut events)?;
         self.advance_creature_hearing(&events[creature_sound_start..])?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
         self.refresh_terrain_memory(&events)?;
         let canonical_hash = self.canonical_hash()?;
         Ok(TickOutcome {
@@ -14411,7 +14448,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV89");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV90");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

@@ -41,8 +41,10 @@ Run only when the user explicitly requests a verification checkpoint.
   effect-set/intensity predicates, bounded integer actor-variable math parsing,
   assignments, missing/invalid variable reads, safe-integer overflow, expression
   depth/node limits, comparisons, boolean short-circuiting, and base-stat reads,
+  bounded event-EOC dispatch for movement/OMT entry, damage, death, kills, and
+  creature damage, including deterministic ordering and activation caps,
   two-client item activation, and generic medical-choice request, reconnect,
-  expiry, stale-response, protocol 113/schema 91, CanonicalStateV89,
+  expiry, stale-response, protocol 114/schema 92, CanonicalStateV90,
   canonical-event-V19, and
   recovery coverage.
 - Environment field-contact checkpoint: run pinned limb-category, acid damage,

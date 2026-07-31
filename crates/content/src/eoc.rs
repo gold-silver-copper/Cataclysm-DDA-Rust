@@ -27,6 +27,16 @@ pub struct EocDelayDefinition {
     pub maximum_turns: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EocEventTriggerDefinition {
+    ActorMoved,
+    ActorEnteredOvermapTile,
+    ActorTookDamage,
+    ActorDied,
+    ActorKilledCreature,
+    CreatureTookDamage,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EocConditionDefinition {
     Constant(bool),
@@ -141,6 +151,7 @@ pub struct EffectOnConditionDefinition {
     pub false_effects: Vec<EocEffectDefinition>,
     pub recurrence: Option<EocDelayDefinition>,
     pub deactivate_condition: Option<EocConditionDefinition>,
+    pub event_trigger: Option<EocEventTriggerDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
 }
@@ -319,6 +330,7 @@ fn parse_definition(
         false_effects: Vec::new(),
         recurrence: None,
         deactivate_condition: None,
+        event_trigger: None,
         unsupported_fields: BTreeSet::new(),
         source: source.to_owned(),
     });
@@ -365,6 +377,15 @@ fn parse_definition(
             &mut definition.unsupported_fields,
         );
     }
+    if let Some(value) = object.get("required_event") {
+        definition.unsupported_fields.remove("required_event");
+        definition.event_trigger = value.as_str().and_then(parse_event_trigger);
+        if definition.event_trigger.is_none() {
+            definition
+                .unsupported_fields
+                .insert(String::from("required_event"));
+        }
+    }
 
     const TOP_LEVEL_FIELDS: &[&str] = &[
         "type",
@@ -391,8 +412,19 @@ fn parse_definition(
             Some("ACTIVATION") if !object.contains_key("recurrence") => {
                 definition.recurrence = None;
                 definition.deactivate_condition = None;
+                definition.event_trigger = None;
             }
-            Some("RECURRING") if definition.recurrence.is_some() => {}
+            Some("RECURRING") if definition.recurrence.is_some() => {
+                definition.event_trigger = None;
+            }
+            Some("EVENT")
+                if definition.event_trigger.is_some()
+                    && !object.contains_key("recurrence")
+                    && !object.contains_key("deactivate_condition") =>
+            {
+                definition.recurrence = None;
+                definition.deactivate_condition = None;
+            }
             _ => {
                 definition
                     .unsupported_fields
@@ -414,20 +446,43 @@ fn parse_definition(
             .unsupported_fields
             .insert(String::from("deactivate_condition"));
     }
-    if object.contains_key("required_event") {
+    if object.contains_key("required_event")
+        && object.get("eoc_type").and_then(Value::as_str) != Some("EVENT")
+        && base.is_none_or(|base| base.event_trigger.is_none())
+    {
         definition
             .unsupported_fields
-            .insert(String::from("required_event"));
+            .insert(String::from("eoc_type"));
     }
     for field in ["global", "run_for_npcs"] {
-        if object
-            .get(field)
-            .is_some_and(|value| value.as_bool() != Some(false))
-        {
+        if object.get(field).is_some_and(|value| {
+            value
+                .as_bool()
+                .is_none_or(|enabled| enabled && definition.event_trigger.is_none())
+        }) {
             definition.unsupported_fields.insert(field.to_owned());
         }
     }
+    if object.get("run_for_npcs").and_then(Value::as_bool) == Some(true)
+        && object.get("global").and_then(Value::as_bool) != Some(true)
+    {
+        definition
+            .unsupported_fields
+            .insert(String::from("run_for_npcs"));
+    }
     Ok(definition)
+}
+
+fn parse_event_trigger(value: &str) -> Option<EocEventTriggerDefinition> {
+    Some(match value {
+        "avatar_moves" => EocEventTriggerDefinition::ActorMoved,
+        "avatar_enters_omt" => EocEventTriggerDefinition::ActorEnteredOvermapTile,
+        "character_takes_damage" => EocEventTriggerDefinition::ActorTookDamage,
+        "character_dies" => EocEventTriggerDefinition::ActorDied,
+        "character_kills_monster" => EocEventTriggerDefinition::ActorKilledCreature,
+        "monster_takes_damage" => EocEventTriggerDefinition::CreatureTookDamage,
+        _ => return None,
+    })
 }
 
 fn parse_condition(

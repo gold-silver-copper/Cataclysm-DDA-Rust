@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_content::{
     EffectOnConditionDefinition, EffectOnConditionRegistry, EocActorStatDefinition,
-    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition,
+    EocConditionDefinition, EocDelayDefinition, EocEffectDefinition, EocEventTriggerDefinition,
     EocMathAssignmentOperationDefinition, EocMathExpressionDefinition, EocStringValueDefinition,
     ItemRegistry, ProficiencyRegistry, RecipeRegistry,
 };
 use cdda_protocol::{
     AnatomyDefinitionV1, EocActorStatV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1,
-    EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathExpressionV1, EocStringValueV1,
-    eoc_catalog_is_valid,
+    EocEventTriggerV1, EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathExpressionV1,
+    EocStringValueV1, eoc_catalog_is_valid,
 };
 
 pub(super) fn runtime_eoc_catalog(
@@ -87,9 +87,9 @@ pub(super) fn runtime_eoc_catalog(
                 || !action.deferred_fields.is_empty()
                 || action.eoc_ids.is_empty()
                 || action.eoc_ids.iter().any(|id| {
-                    definitions
-                        .get(id)
-                        .is_none_or(|definition| definition.recurrence.is_some())
+                    definitions.get(id).is_none_or(|definition| {
+                        definition.recurrence.is_some() || definition.event_trigger.is_some()
+                    })
                 })
             {
                 return None;
@@ -289,6 +289,18 @@ fn runtime_eoc_definition(definition: &EffectOnConditionDefinition) -> EocDefini
             .deactivate_condition
             .as_ref()
             .map(runtime_condition),
+        event_trigger: definition.event_trigger.map(|trigger| match trigger {
+            EocEventTriggerDefinition::ActorMoved => EocEventTriggerV1::ActorMoved,
+            EocEventTriggerDefinition::ActorEnteredOvermapTile => {
+                EocEventTriggerV1::ActorEnteredOvermapTile
+            }
+            EocEventTriggerDefinition::ActorTookDamage => EocEventTriggerV1::ActorTookDamage,
+            EocEventTriggerDefinition::ActorDied => EocEventTriggerV1::ActorDied,
+            EocEventTriggerDefinition::ActorKilledCreature => {
+                EocEventTriggerV1::ActorKilledCreature
+            }
+            EocEventTriggerDefinition::CreatureTookDamage => EocEventTriggerV1::CreatureTookDamage,
+        }),
     }
 }
 
