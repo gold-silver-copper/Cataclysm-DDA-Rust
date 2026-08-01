@@ -2,7 +2,7 @@
 
 use cdda_content::{FactionRegistry, FactionRelationFlagsDefinition};
 use cdda_protocol::{
-    FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,
+    ActorId, FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,
     FactionTemplateV1, NpcSnapshotV1, PLAYER_FACTION_ID, WorldSnapshotV1, faction_catalog_is_valid,
 };
 
@@ -60,6 +60,7 @@ pub(crate) fn runtime_npc_factions(
 pub(crate) fn visible_npc_faction(
     snapshot: &WorldSnapshotV1,
     npc: &NpcSnapshotV1,
+    controlled_actor_id: ActorId,
 ) -> (String, bool) {
     let faction_name = snapshot
         .faction_templates
@@ -72,7 +73,21 @@ pub(crate) fn visible_npc_faction(
         .iter()
         .find(|faction| faction.faction_id == npc.faction_id)
         .is_some_and(|faction| faction.relation_to(PLAYER_FACTION_ID).kill_on_sight);
-    (faction_name, npc.attitude == 10 || faction_hostile)
+    let actor_hostile = snapshot
+        .actors
+        .iter()
+        .find(|actor| actor.id == controlled_actor_id)
+        .and_then(|actor| {
+            actor
+                .faction_standings
+                .iter()
+                .find(|standing| standing.faction_id == npc.faction_id)
+        })
+        .is_some_and(|standing| standing.likes_u < -10);
+    (
+        faction_name,
+        npc.attitude == 10 || faction_hostile || actor_hostile,
+    )
 }
 
 const fn runtime_relation_flags(flags: FactionRelationFlagsDefinition) -> FactionRelationFlagsV1 {

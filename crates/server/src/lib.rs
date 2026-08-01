@@ -4398,7 +4398,7 @@ fn interest_snapshot(
         .filter(|npc| visible(npc.position))
         .map(|npc| {
             let (faction_name, hostile_to_controlled_actor) =
-                npc_faction::visible_npc_faction(&snapshot, npc);
+                npc_faction::visible_npc_faction(&snapshot, npc, actor_id);
             let maximum_hp = {
                 let mut body_parts = npc.body_parts.clone();
                 for part in &mut body_parts {

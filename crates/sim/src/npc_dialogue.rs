@@ -704,6 +704,26 @@ impl WorldState {
         npc_id: NpcId,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        let mut transaction = self.clone();
+        let mut staged_events = Vec::new();
+        transaction.start_npc_dialogue_transaction(
+            actor_id,
+            sequence,
+            npc_id,
+            &mut staged_events,
+        )?;
+        *self = transaction;
+        events.append(&mut staged_events);
+        Ok(())
+    }
+
+    fn start_npc_dialogue_transaction(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        npc_id: NpcId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
         let actor_position = self
             .actors
             .get(&actor_id)
@@ -753,6 +773,35 @@ impl WorldState {
     }
 
     pub(super) fn apply_npc_dialogue_response(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        interaction_id: InteractionId,
+        npc_id: NpcId,
+        topic_stack: &[String],
+        selected_mission_id: Option<cdda_protocol::MissionId>,
+        choice_id: &str,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let mut transaction = self.clone();
+        let mut staged_events = Vec::new();
+        transaction.apply_npc_dialogue_response_transaction(
+            actor_id,
+            sequence,
+            interaction_id,
+            npc_id,
+            topic_stack,
+            selected_mission_id,
+            choice_id,
+            &mut staged_events,
+        )?;
+        *self = transaction;
+        events.append(&mut staged_events);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_npc_dialogue_response_transaction(
         &mut self,
         actor_id: ActorId,
         sequence: CommandSequence,
@@ -1099,7 +1148,7 @@ impl WorldState {
                     }
                 }
                 "TALK_MISSION_LIST_ASSIGNED" => {
-                    let assigned = actor
+                    let mut assigned = actor
                         .missions
                         .values()
                         .filter(|mission| {
@@ -1107,6 +1156,8 @@ impl WorldState {
                                 && mission.status == cdda_protocol::MissionStatusV1::InProgress
                         })
                         .collect::<Vec<_>>();
+                    assigned
+                        .sort_by_key(|mission| (mission.assignment_sequence, mission.mission_id));
                     dynamic_line = match assigned.len() {
                         0 => String::from("You're not working on anything for me now."),
                         1 => String::from("What about it?"),
