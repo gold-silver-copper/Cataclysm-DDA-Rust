@@ -4804,6 +4804,18 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::NpcKilledByEffect { effect_id, .. } => {
             format!("An NPC died from {effect_id}.")
         }
+        WorldEventKind::NpcMoved { .. } => String::from("An NPC moved."),
+        WorldEventKind::ActorDamagedByNpc {
+            body_part_id,
+            amount,
+            remaining_part_hp,
+            remaining_hp,
+            ..
+        } => format!(
+            "An NPC hit your {body_part_id} for {amount}; {remaining_part_hp} part HP and {remaining_hp} vital HP remain."
+        ),
+        WorldEventKind::NpcMissedActor { .. } => String::from("An NPC missed you."),
+        WorldEventKind::ActorKilledByNpc { .. } => String::from("An NPC killed your character."),
         WorldEventKind::MissionAssigned {
             mission_type_id, ..
         } => format!("Mission assigned: {mission_type_id}."),

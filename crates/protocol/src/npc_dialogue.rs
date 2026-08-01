@@ -468,7 +468,9 @@ pub fn npc_snapshot_is_valid_for_template(
             .proficiencies
             .iter()
             .all(|proficiency| valid_id(&proficiency.proficiency_id))
-        && (npc.attitude == template.attitude || (template.attitude == 1 && npc.attitude == 0))
+        && (npc.attitude == template.attitude
+            || (template.attitude == 1 && npc.attitude == 0)
+            || (template.attitude == 11 && matches!(npc.attitude, 0 | 17)))
         && npc
             .social
             .windows(2)
@@ -517,6 +519,13 @@ fn personality_is_valid(personality: &NpcPersonalityV1) -> bool {
 #[must_use]
 pub const fn npc_template_attitude_is_supported(attitude: i32) -> bool {
     matches!(attitude, 0 | 1 | 3 | 5 | 6 | 8 | 9 | 10 | 11 | 13)
+}
+
+/// Attitudes whose ordinary turn behavior is represented by the authoritative
+/// multiplayer NPC scheduler.
+#[must_use]
+pub const fn npc_template_runtime_ai_is_supported(attitude: i32) -> bool {
+    matches!(attitude, 0 | 1 | 3 | 6 | 10 | 11)
 }
 
 /// The pinned non-forced dialogue entry rejects hostile and fleeing template attitudes.

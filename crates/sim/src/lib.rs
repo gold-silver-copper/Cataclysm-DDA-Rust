@@ -12,6 +12,7 @@ mod missions;
 mod monsters;
 mod npc_dialogue;
 mod npc_faction;
+mod npcs;
 mod overmap;
 mod rivers;
 mod roads;
@@ -6400,6 +6401,12 @@ impl WorldState {
         let creature_sound_start = events.len();
         self.advance_creatures(&mut events)?;
         self.advance_creature_hearing(&events[creature_sound_start..])?;
+        self.advance_event_eocs(
+            &mut event_eoc_cursor,
+            &mut event_eoc_activations,
+            &mut events,
+        )?;
+        self.advance_npcs(&mut events)?;
         self.advance_event_eocs(
             &mut event_eoc_cursor,
             &mut event_eoc_activations,

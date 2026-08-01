@@ -275,6 +275,9 @@ impl WorldState {
             .collect::<BTreeSet<_>>();
         if !npc_class_catalog_is_valid(&classes)
             || !npc_dialogue_catalog_is_valid(&templates, &topics)
+            || templates.iter().any(|template| {
+                !cdda_protocol::npc_template_runtime_ai_is_supported(template.attitude)
+            })
             || templates
                 .iter()
                 .any(|template| !class_ids.contains(template.class_id.as_str()))

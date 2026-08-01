@@ -5340,6 +5340,11 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         WorldEventKind::ActorDamagedByCreature { target, .. }
         | WorldEventKind::ActorKilledByCreature {
             actor_id: target, ..
+        }
+        | WorldEventKind::ActorDamagedByNpc { target, .. }
+        | WorldEventKind::NpcMissedActor { target, .. }
+        | WorldEventKind::ActorKilledByNpc {
+            actor_id: target, ..
         } => target == actor_id,
         WorldEventKind::CreatureMissedActor {
             target,
@@ -5360,6 +5365,7 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::CreatureSummoned { .. }
         | WorldEventKind::CreatureBashed { .. }
         | WorldEventKind::CreatureOpenedTerrain { .. }
+        | WorldEventKind::NpcMoved { .. }
         | WorldEventKind::NpcDamagedByEffect { .. }
         | WorldEventKind::NpcKilledByEffect { .. }
         | WorldEventKind::FieldIntensityChanged { .. } => false,

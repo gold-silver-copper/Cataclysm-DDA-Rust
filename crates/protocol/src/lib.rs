@@ -63,7 +63,8 @@ pub use npc_dialogue::{
     NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1, VisibleNpcSnapshotV1,
     npc_class_catalog_is_valid, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
     npc_snapshot_is_valid_for_template, npc_template_attitude_is_supported,
-    npc_template_attitude_will_talk, opinion_delta_cannot_trigger_hostility, opinion_is_valid,
+    npc_template_attitude_will_talk, npc_template_runtime_ai_is_supported,
+    opinion_delta_cannot_trigger_hostility, opinion_is_valid,
 };
 pub use npc_faction::{
     FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,
@@ -2147,6 +2148,27 @@ pub enum WorldEventKind {
     NpcKilledByEffect {
         npc_id: NpcId,
         effect_id: String,
+    },
+    NpcMoved {
+        npc_id: NpcId,
+        from: WorldPosition,
+        to: WorldPosition,
+    },
+    ActorDamagedByNpc {
+        source: NpcId,
+        target: ActorId,
+        body_part_id: String,
+        amount: u16,
+        remaining_part_hp: i32,
+        remaining_hp: i32,
+    },
+    NpcMissedActor {
+        source: NpcId,
+        target: ActorId,
+    },
+    ActorKilledByNpc {
+        actor_id: ActorId,
+        killer: NpcId,
     },
     MissionAssigned {
         actor_id: ActorId,

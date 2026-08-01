@@ -2067,6 +2067,7 @@ fn runtime_npc_dialogue(
                         | "TALK_MISSION_REWARD"
                 )
                 && cdda_protocol::npc_template_attitude_is_supported(template.attitude)
+                && cdda_protocol::npc_template_runtime_ai_is_supported(template.attitude)
                 && template
                     .name_unique
                     .as_ref()

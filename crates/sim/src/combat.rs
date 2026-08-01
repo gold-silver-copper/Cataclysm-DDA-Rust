@@ -144,6 +144,135 @@ pub(super) fn melee_stamina_cost(weight_milligrams: u64, melee_skill: u8) -> u32
 }
 
 impl WorldState {
+    pub(super) fn npc_melee_damage(&self, source: NpcId) -> Result<u16, SimError> {
+        let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
+        let Some(item) = npc.wielded.and_then(|item_id| npc.inventory.get(&item_id)) else {
+            return Ok(super::UNARMED_DAMAGE);
+        };
+        let milli = item
+            .melee_damage_milli
+            .values()
+            .try_fold(0_i64, |total, damage| {
+                total
+                    .checked_add(i64::from(*damage))
+                    .ok_or(SimError::NumericOverflow)
+            })?;
+        let rounded = milli.checked_add(500).ok_or(SimError::NumericOverflow)? / 1_000;
+        u16::try_from(rounded.max(1)).map_err(|_| SimError::NumericOverflow)
+    }
+
+    fn npc_bash_strength(&self, source: NpcId) -> Result<Option<u64>, SimError> {
+        let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
+        let Some(weapon) = npc.wielded.and_then(|item_id| npc.inventory.get(&item_id)) else {
+            return Ok(None);
+        };
+        let Some(profile) = self.smash_item_types.get(&weapon.type_id) else {
+            return Ok(None);
+        };
+        if weapon.damage > 1
+            || weapon.ranged_weapon.is_some()
+            || weapon.magazine_capacity != 0
+            || !weapon.integral_magazines.is_empty()
+            || !weapon.magazine_wells.is_empty()
+            || weapon.residual_energy_millijoules != 0
+            || weapon.powered_tool.is_some()
+            || !weapon.ammunition_type.is_empty()
+            || weapon
+                .melee_damage_milli
+                .iter()
+                .any(|(damage_type, damage)| damage_type != "bash" && *damage > 0)
+        {
+            return Ok(None);
+        }
+        let expected_bash_milli = i32::from(profile.bash_damage)
+            .checked_mul(1_000)
+            .ok_or(SimError::NumericOverflow)?;
+        if weapon.melee_damage_milli.get("bash").copied() != Some(expected_bash_milli) {
+            return Ok(None);
+        }
+        Ok(Some(u64::from(profile.bash_damage)))
+    }
+
+    fn npc_melee_accuracy(&self, source: NpcId) -> Result<Option<(i64, u8)>, SimError> {
+        let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
+        let melee_skill = npc_skill_level(npc, "melee");
+        match npc.wielded {
+            None => Ok(Some((
+                pinned_unarmed_melee_accuracy_quarters(npc_effective_dexterity(npc), melee_skill),
+                4,
+            ))),
+            Some(item_id) => {
+                if self.npc_bash_strength(source)?.is_none() {
+                    return Ok(None);
+                }
+                let weapon = npc.inventory.get(&item_id).ok_or(SimError::UnknownItem)?;
+                let profile = self
+                    .smash_item_types
+                    .get(&weapon.type_id)
+                    .ok_or(SimError::InvalidItem)?;
+                Ok(Some((
+                    pinned_bash_weapon_melee_accuracy_twelfths(
+                        npc_effective_dexterity(npc),
+                        npc_skill_level(npc, "bashing"),
+                        melee_skill,
+                        profile.melee_to_hit,
+                        profile.bash_damage,
+                    ),
+                    12,
+                )))
+            }
+        }
+    }
+
+    pub(super) fn charge_npc_melee_stamina(&mut self, source: NpcId) -> Result<(), SimError> {
+        let cost = {
+            let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
+            let weight = npc
+                .wielded
+                .map(|item_id| {
+                    let item = npc
+                        .inventory
+                        .get(&item_id)
+                        .ok_or(SimError::UnknownItem)?
+                        .snapshot();
+                    cdda_protocol::item_snapshot_containment_weight_milligrams(&item)
+                        .ok_or(SimError::NumericOverflow)
+                })
+                .transpose()?
+                .unwrap_or(0);
+            melee_stamina_cost(weight, npc_skill_level(npc, "melee"))
+        };
+        let npc = self
+            .npcs
+            .get_mut(&source)
+            .ok_or(SimError::InvalidNpcDialogue)?;
+        npc.stamina = npc.stamina.saturating_sub(cost);
+        Ok(())
+    }
+
+    pub(super) fn npc_actor_hit_spread(
+        &self,
+        source: NpcId,
+        target: ActorId,
+        turn_sequence: u64,
+    ) -> Result<Option<(i64, bool)>, SimError> {
+        let Some((accuracy_numerator, accuracy_denominator)) = self.npc_melee_accuracy(source)?
+        else {
+            return Ok(None);
+        };
+        let mut rng = self.named_rng(
+            b"npc-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let hit = pinned_melee_hit_roll(accuracy_numerator, accuracy_denominator, &mut rng)?;
+        let (dodge, dodge_attempted) = self.actor_dodge_roll(target)?;
+        Ok(Some((
+            hit.checked_sub(dodge).ok_or(SimError::NumericOverflow)?,
+            dodge_attempted,
+        )))
+    }
+
     pub(super) fn damage_npc(
         &mut self,
         target: NpcId,

@@ -508,8 +508,9 @@
         { "id": "leased-dialogue-and-mission-lifecycle", "state": "implementation_complete_verification_deferred" },
         { "id": "find-item-owned-world-source-turn-in", "state": "review_fixes_in_progress" },
         { "id": "mission-phase-eoc-callbacks", "state": "implementation_complete_review_pending" },
-        { "id": "npc-class-generation-and-ordinary-ai", "state": "implementation_in_progress" },
+        { "id": "npc-class-generation-and-ordinary-ai", "state": "implementation_complete_review_pending" },
         { "id": "npc-class-generation-canonical-vulnerability-and-client-combat", "state": "implementation_complete_review_pending" },
+        { "id": "npc-attitude-scheduling-pathing-and-survivor-combat", "state": "implementation_complete_review_pending" },
         { "id": "dialogue-effects-missions-and-faction-closure", "state": "planned" }
       ],
       "priority": 26,
