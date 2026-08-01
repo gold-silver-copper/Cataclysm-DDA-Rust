@@ -6,19 +6,20 @@ use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, CommandRejection, CommandSequence, CreatureId, EocActorStatV1,
     EocActorValueV1, EocConditionV1, EocDefinitionV1, EocDelayV1, EocEffectV1, EocEventTriggerV1,
     EocItemUseTypeV1, EocMathAssignmentOperationV1, EocMathAssignmentTargetV1, EocMathExpressionV1,
-    EocStringValueV1, InteractionId, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
-    MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, MissionDefinitionV1, NpcId, ScheduledEocV1,
-    SimTick, WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
-    eoc_condition_is_valid, eoc_effects_are_valid, eoc_effects_contain_confirmation,
-    eoc_effects_require_target_context,
+    EocStringValueV1, EventId, InteractionId, ItemId, MAX_ACTOR_BASE_STAT,
+    MAX_ACTOR_SCHEDULED_EOCS, MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, MissionDefinitionV1,
+    NpcId, ScheduledEocV1, SimTick, WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind,
+    eoc_catalog_is_valid, eoc_condition_is_valid, eoc_effects_are_valid,
+    eoc_effects_contain_confirmation, eoc_effects_require_target_context,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
 
 use crate::{
-    SLEEPINESS_MAX, SimError, WorldState, inclusive_rng_u64,
+    SLEEPINESS_MAX, SimError, WorldState,
     items::{InventoryTypeSummary, summarize_inventory_by_type},
     missions::{MissionItemState, MissionOperation, MissionOperationTarget},
+    use_actions::unbiased_inclusive_u64,
 };
 
 const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
@@ -67,6 +68,10 @@ impl WorldState {
             || definitions
                 .iter()
                 .any(|definition| !eoc_body_parts_are_valid(definition, &self.actor_anatomy))
+            || definitions.iter().any(|definition| {
+                !raw_effect_applications_are_absent(&definition.effects)
+                    || !raw_effect_applications_are_absent(&definition.false_effects)
+            })
             || !mission_phase_eoc_closure_is_valid(
                 self.mission_definitions.values(),
                 definitions.iter(),
@@ -525,6 +530,7 @@ impl WorldState {
         if !eoc_effects_are_valid(effects)
             || eoc_effects_contain_confirmation(effects)
             || !effects_body_parts_are_valid(effects, &valid_part)
+            || !raw_effect_applications_are_absent(effects)
             || !dialogue_target_effect_closure_is_supported(&self.eoc_definitions, effects)
         {
             return Ok(false);
@@ -972,24 +978,35 @@ impl WorldState {
                     .scheduled_eocs
                     .iter()
                     .filter(|entry| entry.due_tick <= self.tick)
-                    .map(|entry| (*actor_id, entry.due_tick, entry.sequence))
+                    .enumerate()
+                    .map(|(actor_ordinal, entry)| {
+                        (actor_ordinal, *actor_id, entry.due_tick, entry.sequence)
+                    })
             })
             .collect::<Vec<_>>();
-        due.sort_by_key(|(actor_id, due_tick, sequence)| (*due_tick, *actor_id, *sequence));
+        due.sort_by_key(|(actor_ordinal, actor_id, due_tick, sequence)| {
+            (*actor_ordinal, *due_tick, *actor_id, *sequence)
+        });
         due.truncate(MAX_SCHEDULED_EOC_ACTIVATIONS_PER_TICK);
 
-        for (actor_id, _due_tick, sequence) in due {
+        for (_actor_ordinal, actor_id, _due_tick, sequence) in due {
             let rng = self.named_rng(b"scheduled-eoc-activation", &[actor_id.as_u128()], sequence);
             let (entry, mut execution) = {
-                let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
-                let index = actor
+                let entry = self
+                    .actors
+                    .get(&actor_id)
+                    .ok_or(SimError::UnknownActor)?
                     .scheduled_eocs
                     .iter()
-                    .position(|entry| entry.sequence == sequence)
+                    .find(|entry| entry.sequence == sequence)
+                    .cloned()
                     .ok_or(SimError::InvalidItem)?;
-                let entry = actor.scheduled_eocs[index].clone();
-                let mut scheduled_eocs = actor.scheduled_eocs.clone();
-                scheduled_eocs.remove(index);
+                self.actors
+                    .get_mut(&actor_id)
+                    .ok_or(SimError::UnknownActor)?
+                    .scheduled_eocs
+                    .retain(|entry| entry.sequence != sequence);
+                let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
                 let execution = EocExecution {
                     actor: eoc_actor_context(self, actor),
                     effects: actor.effects.clone(),
@@ -997,7 +1014,7 @@ impl WorldState {
                     target_effects: None,
                     target_variables: None,
                     next_schedule_sequence: actor.next_eoc_schedule_sequence,
-                    scheduled_eocs,
+                    scheduled_eocs: actor.scheduled_eocs.clone(),
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
                     outputs: Vec::new(),
                     mission_operations: Vec::new(),
@@ -1074,12 +1091,8 @@ impl WorldState {
         activation_count: &mut usize,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        self.drain_pending_event_eocs(activation_count, events)?;
         let source_event_end = events.len();
-        if *activation_count >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK {
-            *source_event_cursor = source_event_end;
-            return Ok(());
-        }
-        let mut activations = Vec::new();
         for event in events
             .iter()
             .skip(*source_event_cursor)
@@ -1118,40 +1131,43 @@ impl WorldState {
                 }
                 _ => {}
             }
+            let mut activation_sequence = 0_u64;
             for (actor_id, trigger) in triggers {
-                for definition in self
+                let eoc_ids = self
                     .eoc_definitions
                     .values()
                     .filter(|definition| definition.event_trigger == Some(trigger))
-                {
-                    if activation_count.saturating_add(activations.len())
-                        >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK
-                    {
-                        break;
-                    }
-                    activations.push((
-                        actor_id,
-                        event.id,
-                        definition.eoc_id.clone(),
-                        activations.len() as u64,
-                    ));
+                    .map(|definition| definition.eoc_id.clone())
+                    .collect::<Vec<_>>();
+                for eoc_id in eoc_ids {
+                    self.pending_event_eoc_activations
+                        .push_back(PendingEventEocActivation {
+                            actor_id,
+                            event_id: event.id,
+                            eoc_id,
+                            activation_sequence,
+                        });
+                    activation_sequence = activation_sequence
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
                 }
-                if activation_count.saturating_add(activations.len())
-                    >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK
-                {
-                    break;
-                }
-            }
-            if activation_count.saturating_add(activations.len())
-                >= MAX_EVENT_EOC_ACTIVATIONS_PER_TICK
-            {
-                break;
             }
         }
+        *source_event_cursor = source_event_end;
+        self.drain_pending_event_eocs(activation_count, events)
+    }
 
-        for (actor_id, event_id, eoc_id, activation_sequence) in activations {
+    fn drain_pending_event_eocs(
+        &mut self,
+        activation_count: &mut usize,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        while *activation_count < MAX_EVENT_EOC_ACTIVATIONS_PER_TICK {
+            let Some(activation) = self.pending_event_eoc_activations.pop_front() else {
+                break;
+            };
             *activation_count = activation_count.saturating_add(1);
-            let Some(actor) = self.actors.get(&actor_id) else {
+            let Some(actor) = self.actors.get(&activation.actor_id) else {
                 continue;
             };
             let mut execution = EocExecution {
@@ -1172,14 +1188,14 @@ impl WorldState {
                 tick: self.tick,
                 rng: self.named_rng(
                     b"event-eoc-activation",
-                    &[actor_id.as_u128(), event_id.as_u128()],
-                    activation_sequence,
+                    &[activation.actor_id.as_u128(), activation.event_id.as_u128()],
+                    activation.activation_sequence,
                 ),
             };
             if execute_eoc(
                 &self.eoc_definitions,
                 &self.mission_definitions,
-                &eoc_id,
+                &activation.eoc_id,
                 &mut execution,
                 0,
             )
@@ -1194,9 +1210,8 @@ impl WorldState {
             execution
                 .scheduled_eocs
                 .sort_by_key(|entry| (entry.due_tick, entry.sequence));
-            self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
+            self.commit_eoc_execution_state(activation.actor_id, &mut execution, events)?;
         }
-        *source_event_cursor = events.len();
         Ok(())
     }
 
@@ -1345,6 +1360,14 @@ struct EocExecution {
     operations: usize,
     tick: SimTick,
     rng: ChaCha8Rng,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PendingEventEocActivation {
+    actor_id: ActorId,
+    event_id: EventId,
+    eoc_id: String,
+    activation_sequence: u64,
 }
 
 struct EocConfirmationRequest {
@@ -1992,7 +2015,9 @@ fn execute_effects(
                 body_part_id,
             } => execution.effects.retain(|effect| {
                 !effect_ids.iter().any(|id| id == &effect.effect_id)
-                    || effect.body_part_id != *body_part_id
+                    || body_part_id.as_ref().is_some_and(|body_part_id| {
+                        effect.body_part_id.as_ref() != Some(body_part_id)
+                    })
             }),
             EocEffectV1::SetActorVariable {
                 variable_id,
@@ -2043,7 +2068,9 @@ fn execute_effects(
                 .ok_or(SimError::InvalidItem)?
                 .retain(|effect| {
                     !effect_ids.iter().any(|id| id == &effect.effect_id)
-                        || effect.body_part_id != *body_part_id
+                        || body_part_id.as_ref().is_some_and(|body_part_id| {
+                            effect.body_part_id.as_ref() != Some(body_part_id)
+                        })
                 }),
             EocEffectV1::SetTargetVariable {
                 variable_id,
@@ -2236,11 +2263,15 @@ fn schedule_eoc(
     if execution.scheduled_eocs.len() >= MAX_ACTOR_SCHEDULED_EOCS {
         return Err(SimError::InvalidItem);
     }
-    let delay_turns = inclusive_rng_u64(
-        &mut execution.rng,
-        u64::from(delay.minimum_turns),
-        u64::from(delay.maximum_turns),
-    );
+    let delay_turns = if delay.minimum_turns == delay.maximum_turns {
+        u64::from(delay.minimum_turns)
+    } else {
+        unbiased_inclusive_u64(
+            &mut execution.rng,
+            u64::from(delay.minimum_turns),
+            u64::from(delay.maximum_turns),
+        )
+    };
     let delay_ticks = delay_turns
         .checked_mul(SimTick::HZ)
         .ok_or(SimError::NumericOverflow)?;
@@ -2320,6 +2351,26 @@ fn dialogue_target_effect_closure_is_supported(
     }
 
     visit_effects(catalog, effects, &mut BTreeSet::new(), &mut BTreeSet::new())
+}
+
+fn raw_effect_applications_are_absent(effects: &[EocEffectV1]) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectV1::AddEffect { .. } | EocEffectV1::AddTargetEffect { .. } => false,
+        EocEffectV1::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        }
+        | EocEffectV1::Confirmation {
+            accept_effects: then_effects,
+            decline_effects: else_effects,
+            ..
+        } => {
+            raw_effect_applications_are_absent(then_effects)
+                && raw_effect_applications_are_absent(else_effects)
+        }
+        _ => true,
+    })
 }
 
 fn unbiased_eoc_choice(rng: &mut ChaCha8Rng, choices: usize) -> Result<usize, SimError> {

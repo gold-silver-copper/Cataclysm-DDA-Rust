@@ -409,14 +409,19 @@ impl WorldState {
         let Some(item) = actor.inventory.get(&item_id) else {
             return Ok(None);
         };
-        self.item_transform_types
-            .get(&item.type_id)
-            .map(|profile| {
-                i64::from(profile.move_cost_moves)
-                    .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
-                    .ok_or(SimError::NumericOverflow)
-            })
-            .transpose()
+        let Some(profile) = self.item_transform_types.get(&item.type_id) else {
+            return Ok(None);
+        };
+        let required = i32::try_from(profile.required_charges)
+            .map_err(|_| SimError::InvalidItem)?
+            .max(i32::try_from(profile.consumed_charges).map_err(|_| SimError::InvalidItem)?);
+        if item.available_tool_charges() < required {
+            return Ok(Some(0));
+        }
+        i64::from(profile.move_cost_moves)
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+            .map(Some)
+            .ok_or(SimError::NumericOverflow)
     }
 
     pub(super) fn apply_item_transform(
@@ -541,7 +546,11 @@ fn deployment_is_friendly(
             .ok_or(SimError::NumericOverflow)?)
 }
 
-fn unbiased_inclusive_u64(rng: &mut rand_chacha::ChaCha8Rng, minimum: u64, maximum: u64) -> u64 {
+pub(super) fn unbiased_inclusive_u64(
+    rng: &mut rand_chacha::ChaCha8Rng,
+    minimum: u64,
+    maximum: u64,
+) -> u64 {
     if minimum >= maximum {
         return minimum;
     }

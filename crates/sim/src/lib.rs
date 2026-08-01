@@ -5035,6 +5035,8 @@ pub struct WorldState {
     memory_sight_radius: u16,
     #[serde(skip)]
     pending_mapgen_events: Vec<WorldEventKind>,
+    #[serde(skip)]
+    pending_event_eoc_activations: VecDeque<eocs::PendingEventEocActivation>,
 }
 
 impl WorldState {
@@ -5078,6 +5080,7 @@ impl WorldState {
             memory_chunk_revisions: BTreeMap::new(),
             memory_sight_radius: NaturalLightSnapshot::at_tick(SimTick(0)).sight_radius,
             pending_mapgen_events: Vec::new(),
+            pending_event_eoc_activations: VecDeque::new(),
         }
     }
 
@@ -16209,6 +16212,7 @@ impl WorldState {
             memory_chunk_revisions,
             memory_sight_radius: NaturalLightSnapshot::at_tick(snapshot.tick).sight_radius,
             pending_mapgen_events,
+            pending_event_eoc_activations: VecDeque::new(),
         };
         if !world.recovered_npc_interactions_are_exact()? {
             return Err(SimError::InvalidSnapshot);

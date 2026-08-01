@@ -526,9 +526,10 @@ fn parse_definition(
     }
     for field in ["global", "run_for_npcs"] {
         if object.get(field).is_some_and(|value| {
-            value
-                .as_bool()
-                .is_none_or(|enabled| enabled && definition.event_trigger.is_none())
+            value.as_bool().is_none_or(|enabled| {
+                definition.event_trigger.is_some()
+                    || (enabled && definition.event_trigger.is_none())
+            })
         }) {
             definition.unsupported_fields.insert(field.to_owned());
         }
