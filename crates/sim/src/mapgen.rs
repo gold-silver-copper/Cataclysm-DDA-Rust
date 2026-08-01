@@ -111,6 +111,27 @@ pub(super) fn catalog_npc_placements_are_supported(
     })
 }
 
+pub(super) fn catalog_vehicle_placement_factions_are_known(
+    catalog: &WorldgenCatalogV1,
+    factions: &std::collections::BTreeMap<String, cdda_protocol::FactionStateV1>,
+) -> bool {
+    let placement_is_known = |placement: &WorldgenVehiclePlacementV1| {
+        placement.faction_id.is_empty() || factions.contains_key(&placement.faction_id)
+    };
+    catalog.omt_generators.iter().all(|generator| {
+        generator
+            .templates
+            .iter()
+            .all(|template| template.vehicle_placements.iter().all(&placement_is_known))
+            && generator.nested_generators.iter().all(|nested| {
+                nested
+                    .templates
+                    .iter()
+                    .all(|template| template.vehicle_placements.iter().all(&placement_is_known))
+            })
+    })
+}
+
 pub(super) struct PlannedBubble {
     pub chunks: Vec<Chunk>,
     pub items: Vec<(WorldPosition, PlannedItemSpawn)>,

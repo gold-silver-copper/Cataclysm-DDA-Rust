@@ -766,6 +766,7 @@ impl WorldState {
             &mission_type_id,
             Some(mission_id),
             success,
+            false,
             &mut execution,
             0,
         )?;
@@ -1275,6 +1276,7 @@ struct EocActorContext {
     mission_worn: Vec<ItemId>,
     mission_wielded: Option<ItemId>,
     mission_vehicles: BTreeMap<cdda_protocol::VehicleId, cdda_protocol::VehicleSnapshotV1>,
+    mission_worldgen: Option<cdda_protocol::WorldgenCatalogV1>,
     mission_source_positions: Vec<cdda_protocol::WorldPosition>,
     worn_item_types: BTreeSet<String>,
     has_weapon: bool,
@@ -1298,6 +1300,7 @@ fn eoc_actor_context(world: &WorldState, actor: &crate::Actor) -> EocActorContex
         mission_worn: actor.worn.clone(),
         mission_wielded: actor.wielded,
         mission_vehicles: world.vehicles.clone(),
+        mission_worldgen: world.worldgen.clone(),
         mission_source_positions: world.mission_turn_in_source_positions(actor.position),
         worn_item_types: actor
             .worn
@@ -1812,6 +1815,7 @@ fn queue_mission_finish(
     mission_type_id: &str,
     mission_id: Option<cdda_protocol::MissionId>,
     success: bool,
+    allow_partial_item_turn_in: bool,
     execution: &mut EocExecution,
     depth: usize,
 ) -> Result<(), SimError> {
@@ -1835,11 +1839,15 @@ fn queue_mission_finish(
     };
     execution.actor.active_mission_types.remove(index);
     if success {
-        crate::missions::consume_mission_items_from_inventory(
+        crate::mission_items::consume_mission_items_from_preview(
             &mut execution.actor.mission_inventory,
             &mut execution.actor.mission_worn,
             &mut execution.actor.mission_wielded,
+            &mut execution.actor.mission_vehicles,
+            execution.actor.mission_worldgen.as_ref(),
+            &execution.actor.mission_source_positions,
             &definition.goal,
+            !allow_partial_item_turn_in,
         )?;
         refresh_eoc_item_context(&mut execution.actor);
     }
@@ -1848,6 +1856,7 @@ fn queue_mission_finish(
         mission_type_id: mission_type_id.to_owned(),
         mission_id,
         success,
+        allow_partial_item_turn_in,
     });
     // Pinned completion/failure removes the mission from the active list and
     // publishes its terminal state before running the corresponding callback.
@@ -2110,6 +2119,7 @@ fn execute_effects(
                     mission_catalog,
                     mission_type_id,
                     None,
+                    *success,
                     *success,
                     execution,
                     depth,

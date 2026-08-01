@@ -18,6 +18,7 @@ pub(super) enum MissionOperation {
         mission_type_id: String,
         mission_id: Option<MissionId>,
         success: bool,
+        allow_partial_item_turn_in: bool,
     },
 }
 
@@ -164,6 +165,7 @@ impl WorldState {
                     mission_type_id,
                     mission_id,
                     success,
+                    allow_partial_item_turn_in,
                 } => {
                     let definition = self
                         .mission_definitions
@@ -197,6 +199,7 @@ impl WorldState {
                             ground_items.get_or_insert_with(|| self.ground_items.clone()),
                             vehicles.get_or_insert_with(|| self.vehicles.clone()),
                             &definition.goal,
+                            allow_partial_item_turn_in,
                         )?;
                     }
                     let mission = actor
@@ -337,6 +340,9 @@ impl WorldState {
     ) -> Result<u64, SimError> {
         let mut found = 0_u64;
         for item in actor.inventory.values() {
+            if !mission_item_is_available_to_player(&item.owner_faction_id) {
+                continue;
+            }
             found = found
                 .checked_add(crate::mission_items::item_instance_quantity(
                     item,
@@ -355,9 +361,11 @@ impl WorldState {
         // Ground stacks therefore remain fail-closed instead of being treated
         // as accessible. Pinned vehicle cargo bypasses `accessible_items`.
         for position in visible {
-            let Some(cargo) =
-                crate::mission_items::selected_vehicle_cargo(&self.vehicles, position)
-            else {
+            let Some(cargo) = crate::mission_items::selected_vehicle_cargo(
+                &self.vehicles,
+                self.worldgen.as_ref(),
+                position,
+            ) else {
                 continue;
             };
             for item in cargo {
@@ -423,7 +431,7 @@ impl WorldState {
                     if next.x.abs_diff(origin.x) > 6
                         || next.y.abs_diff(origin.y) > 6
                         || reachable.contains(&next)
-                        || !matches!(self.tile_movement_cost(next), Some(1..=100))
+                        || !matches!(self.mission_tile_movement_cost(next), Some(1..=100))
                     {
                         continue;
                     }
@@ -434,6 +442,64 @@ impl WorldState {
             frontier = next_frontier;
         }
         reachable
+    }
+
+    fn mission_tile_movement_cost(&self, position: WorldPosition) -> Option<i64> {
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self.chunks.get(&coord)?;
+        // `NO_FLOOR` and per-intensity field move cost are not canonical yet.
+        // FLAT is the retained positive floor proof; an active field is
+        // therefore conservatively non-traversable instead of inventing zero
+        // move cost for a potentially blocking upstream field.
+        if !chunk.tile(local)?.flat || !chunk.fields(local)?.is_empty() {
+            return None;
+        }
+        self.tile_movement_cost(position)?;
+
+        let Some(vehicle) = self
+            .vehicles
+            .values()
+            .find(|vehicle| vehicle.parts.iter().any(|part| part.position == position))
+        else {
+            return self.tile_movement_cost(position);
+        };
+        let catalog = self.worldgen.as_ref()?;
+        let prototype = catalog
+            .vehicle_prototypes
+            .get(usize::from(vehicle.prototype_index))?;
+        let has_flag = |part: &cdda_protocol::VehiclePartSnapshotV1, wanted: &str| {
+            prototype
+                .parts
+                .get(usize::from(part.prototype_part_index))
+                .and_then(|prototype_part| {
+                    catalog
+                        .vehicle_part_types
+                        .get(usize::from(prototype_part.part_type_index))
+                })
+                .is_some_and(|part_type| {
+                    part_type
+                        .flags
+                        .binary_search_by(|flag| flag.as_str().cmp(wanted))
+                        .is_ok()
+                })
+        };
+        if vehicle
+            .parts
+            .iter()
+            .find(|part| part.position == position && part.hp > 0 && has_flag(part, "OBSTACLE"))
+            .is_some_and(|part| !(has_flag(part, "OPENABLE") && part.open))
+        {
+            return None;
+        }
+        if vehicle
+            .parts
+            .iter()
+            .any(|part| part.position == position && part.hp > 0 && has_flag(part, "AISLE"))
+        {
+            Some(2)
+        } else {
+            Some(8)
+        }
     }
 
     pub(super) fn mission_turn_in_source_positions(
@@ -458,6 +524,7 @@ impl WorldState {
         _ground_items: &mut BTreeMap<cdda_protocol::ItemId, crate::GroundItem>,
         vehicles: &mut BTreeMap<cdda_protocol::VehicleId, VehicleSnapshotV1>,
         goal: &MissionGoalV1,
+        allow_partial: bool,
     ) -> Result<(), SimError> {
         let MissionGoalV1::FindItem {
             item_type_id,
@@ -473,10 +540,12 @@ impl WorldState {
             &mut actor.worn,
             &mut actor.wielded,
             vehicles,
+            self.worldgen.as_ref(),
             &source_positions,
             item_type_id,
             *count_by_charges,
             *count,
+            !allow_partial,
         )
     }
 

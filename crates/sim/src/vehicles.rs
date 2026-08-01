@@ -668,10 +668,11 @@ impl WorldState {
             .vehicle_part_types
             .get(usize::from(prototype_part.part_type_index))
             .ok_or(SimError::InvalidTerrain)?;
-        if part_type
-            .flags
-            .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
-            .is_err()
+        if part.hp == 0
+            || part_type
+                .flags
+                .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+                .is_err()
         {
             events.push(self.rejection(
                 actor_id,
@@ -699,6 +700,15 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::ItemMissing)?);
             return Ok(());
         };
+        if !part.cargo[cargo_index].owner_faction_id.is_empty()
+            && part.cargo[cargo_index].owner_faction_id != cdda_protocol::PLAYER_FACTION_ID
+        {
+            // Multiplayer adaptation shared with ordinary ground pickup:
+            // witness and theft-consequence state is not represented, so a
+            // foreign root cannot cross the authoritative inventory boundary.
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ItemNotOwned)?);
+            return Ok(());
+        }
         let position = part.position;
         let snapshot = self
             .vehicles

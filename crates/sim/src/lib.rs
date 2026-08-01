@@ -5387,6 +5387,7 @@ impl WorldState {
                 ACTIVE_BUBBLE_RADIUS_SUBMAPS,
             )
             || !mapgen::catalog_npc_placements_are_supported(&catalog, &self.npc_templates)
+            || !mapgen::catalog_vehicle_placement_factions_are_known(&catalog, &self.factions)
             || !mapgen::catalog_initial_bubble_is_admissible(
                 &catalog,
                 ChunkCoord { x: 0, y: 0, z: 0 },
@@ -15282,6 +15283,7 @@ impl WorldState {
         }
         if snapshot.worldgen.as_ref().is_some_and(|catalog| {
             !mapgen::catalog_npc_placements_are_supported(catalog, &npc_templates)
+                || !mapgen::catalog_vehicle_placement_factions_are_known(catalog, &factions)
         }) {
             return Err(SimError::InvalidTerrain);
         }
