@@ -20,11 +20,11 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 117;
+pub const SCHEMA_VERSION: i64 = 118;
 /// Old Postcard snapshots and journals cannot be decoded after Protocol 140
 /// added canonical vehicle steering and tileray state.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 117;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 118;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -6746,14 +6746,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         let cell = cdda_protocol::WorldgenCellV1 {
             terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
@@ -7864,14 +7867,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for y in [0, 2] {
             chunk
@@ -7888,6 +7894,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 5,
                     floor_bedding_warmth: 1_000,
+                    flags: Vec::new(),
                 }),
             )
             .expect("bed should install");
@@ -8177,14 +8184,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         let mut damaged_door = floor.clone();
         damaged_door.terrain_id = String::from("t_door_b");
@@ -8216,14 +8226,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for x in 0..cdda_protocol::SUBMAP_SIZE as u8 {
             for y in [0, 2] {
@@ -8354,14 +8367,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         world
             .register_terrain_bash_type(TerrainBashTypeV1 {
@@ -8390,14 +8406,17 @@ mod tests {
             move_cost: 0,
             transparent: true,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for y in 0..=10 {
             chunk
@@ -8590,6 +8609,7 @@ mod tests {
                     blocks_door: true,
                     comfort: 0,
                     floor_bedding_warmth: 0,
+                    flags: Vec::new(),
                 }),
             )
             .expect("dresser should install");
@@ -8705,14 +8725,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         world
             .register_terrain_bash_type(TerrainBashTypeV1 {
@@ -8752,14 +8775,17 @@ mod tests {
                     move_cost: 0,
                     transparent: false,
                     flat: false,
+                    flags: Vec::new(),
                     open: String::new(),
                     open_move_cost: None,
                     open_transparent: None,
                     open_flat: None,
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 },
             )
             .expect("actor door should install");
@@ -9188,14 +9214,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for x in 0..cdda_protocol::SUBMAP_SIZE as u8 {
             for y in [0, 2] {
@@ -9212,14 +9241,17 @@ mod tests {
                     move_cost: 0,
                     transparent: true,
                     flat: false,
+                    flags: Vec::new(),
                     open: String::from("t_door_o"),
                     open_move_cost: Some(2),
                     open_transparent: Some(true),
                     open_flat: Some(true),
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 },
             )
             .expect("closed door should install");
@@ -9372,6 +9404,8 @@ mod tests {
                 priority: 0,
                 half_life_seconds: 2 * 24 * 60 * 60,
                 linear_half_life: false,
+                gas_spread_percent: 0,
+                outdoor_age_speedup_seconds: 0,
                 contact_damage: None,
                 is_splattering: true,
                 display_field: true,
@@ -9625,14 +9659,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for (x, y) in [(0, 0), (1, 0), (2, 0), (0, 1), (0, 2), (1, 2), (2, 2)] {
             chunk
@@ -10304,6 +10341,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 5,
                     floor_bedding_warmth: 1_000,
+                    flags: Vec::new(),
                 }),
             )
             .expect("bed should install");
@@ -10642,14 +10680,17 @@ mod tests {
                     move_cost: 2,
                     transparent: true,
                     flat: true,
+                    flags: Vec::new(),
                     open: String::new(),
                     open_move_cost: None,
                     open_transparent: None,
                     open_flat: None,
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 },
             ),
         };

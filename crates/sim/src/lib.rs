@@ -394,14 +394,17 @@ impl Chunk {
                     move_cost: 2,
                     transparent: true,
                     flat: true,
+                    flags: Vec::new(),
                     open: String::new(),
                     open_move_cost: None,
                     open_transparent: None,
                     open_flat: None,
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 };
                 (SUBMAP_SIZE * SUBMAP_SIZE) as usize
             ],
@@ -525,6 +528,10 @@ impl Chunk {
             .map(Vec::as_slice)
     }
 
+    fn fields_mut(&mut self, local: LocalTileCoord) -> Option<&mut Vec<FieldSnapshotV1>> {
+        tile_index(local).and_then(|index| self.fields.get_mut(index))
+    }
+
     fn map_damage(&self, local: LocalTileCoord) -> Option<u16> {
         tile_index(local).and_then(|index| self.map_damage.get(index).copied())
     }
@@ -570,7 +577,17 @@ impl Chunk {
 }
 
 fn validate_furniture_tile(furniture: &FurnitureTileSnapshot) -> Result<(), SimError> {
-    validate_item_type_id(&furniture.furniture_id).map_err(|_| SimError::InvalidFurniture)
+    validate_item_type_id(&furniture.furniture_id).map_err(|_| SimError::InvalidFurniture)?;
+    if furniture.flags.len() > 256
+        || furniture
+            .flags
+            .iter()
+            .any(|flag| validate_item_type_id(flag).is_err())
+        || furniture.flags.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(SimError::InvalidFurniture);
+    }
+    Ok(())
 }
 
 fn validate_field_type(field_type: &FieldTypeSnapshotV1) -> Result<(), SimError> {
@@ -679,28 +696,41 @@ fn anatomy_has_limb_type(anatomy: &AnatomyDefinitionV1, limb_type_id: &str) -> b
 
 fn validate_terrain_tile(tile: &TerrainTileSnapshot) -> Result<(), SimError> {
     validate_item_type_id(&tile.terrain_id)?;
-    let invalid_target =
-        |target: &str, move_cost: Option<i32>, transparent: Option<bool>, flat: Option<bool>| {
-            target.len() > MAX_ITEM_TYPE_ID_BYTES
-                || target.chars().any(char::is_control)
-                || match (target.is_empty(), move_cost, transparent, flat) {
-                    (true, None, None, None) => false,
-                    (false, Some(cost), Some(_), Some(_)) => cost < -1,
-                    _ => true,
+    let valid_flags = |flags: &[String]| {
+        flags.len() <= 256
+            && flags.iter().all(|flag| validate_item_type_id(flag).is_ok())
+            && flags.windows(2).all(|pair| pair[0] < pair[1])
+    };
+    let invalid_target = |target: &str,
+                          move_cost: Option<i32>,
+                          transparent: Option<bool>,
+                          flat: Option<bool>,
+                          flags: Option<&[String]>| {
+        target.len() > MAX_ITEM_TYPE_ID_BYTES
+            || target.chars().any(char::is_control)
+            || match (target.is_empty(), move_cost, transparent, flat, flags) {
+                (true, None, None, None, None) => false,
+                (false, Some(cost), Some(_), Some(_), Some(flags)) => {
+                    cost < -1 || !valid_flags(flags)
                 }
-        };
+                _ => true,
+            }
+    };
     if tile.move_cost < -1
+        || !valid_flags(&tile.flags)
         || invalid_target(
             &tile.open,
             tile.open_move_cost,
             tile.open_transparent,
             tile.open_flat,
+            tile.open_flags.as_deref(),
         )
         || invalid_target(
             &tile.close,
             tile.close_move_cost,
             tile.close_transparent,
             tile.close_flat,
+            tile.close_flags.as_deref(),
         )
     {
         return Err(SimError::InvalidTerrain);
@@ -10089,9 +10119,12 @@ impl WorldState {
     ) -> Option<(String, String, TerrainTileSnapshot)> {
         let (coord, local) = position.chunk_and_local();
         let tile = self.chunks.get(&coord)?.tile(local)?;
-        let (Some(move_cost), Some(transparent), Some(flat)) =
-            (tile.open_move_cost, tile.open_transparent, tile.open_flat)
-        else {
+        let (Some(move_cost), Some(transparent), Some(flat), Some(flags)) = (
+            tile.open_move_cost,
+            tile.open_transparent,
+            tile.open_flat,
+            tile.open_flags.clone(),
+        ) else {
             return None;
         };
         if tile.open.is_empty() {
@@ -10107,14 +10140,17 @@ impl WorldState {
                 move_cost,
                 transparent,
                 flat,
+                flags,
                 open: String::new(),
                 open_move_cost: None,
                 open_transparent: None,
                 open_flat: None,
+                open_flags: None,
                 close: from,
                 close_move_cost: Some(tile.move_cost),
                 close_transparent: Some(tile.transparent),
                 close_flat: Some(tile.flat),
+                close_flags: Some(tile.flags.clone()),
             },
         ))
     }
@@ -10198,12 +10234,13 @@ impl WorldState {
             )?);
             return Ok(());
         };
-        let (target, target_cost, target_transparent, target_flat) = if opening {
+        let (target, target_cost, target_transparent, target_flat, target_flags) = if opening {
             (
                 &tile.open,
                 tile.open_move_cost,
                 tile.open_transparent,
                 tile.open_flat,
+                tile.open_flags.as_ref(),
             )
         } else {
             (
@@ -10211,10 +10248,11 @@ impl WorldState {
                 tile.close_move_cost,
                 tile.close_transparent,
                 tile.close_flat,
+                tile.close_flags.as_ref(),
             )
         };
-        let (Some(target_cost), Some(target_transparent), Some(target_flat)) =
-            (target_cost, target_transparent, target_flat)
+        let (Some(target_cost), Some(target_transparent), Some(target_flat), Some(target_flags)) =
+            (target_cost, target_transparent, target_flat, target_flags)
         else {
             events.push(self.rejection(
                 actor_id,
@@ -10231,14 +10269,17 @@ impl WorldState {
                 move_cost: target_cost,
                 transparent: target_transparent,
                 flat: target_flat,
+                flags: target_flags.clone(),
                 open: String::new(),
                 open_move_cost: None,
                 open_transparent: None,
                 open_flat: None,
+                open_flags: None,
                 close: from.clone(),
                 close_move_cost: Some(tile.move_cost),
                 close_transparent: Some(tile.transparent),
                 close_flat: Some(tile.flat),
+                close_flags: Some(tile.flags.clone()),
             }
         } else {
             TerrainTileSnapshot {
@@ -10246,14 +10287,17 @@ impl WorldState {
                 move_cost: target_cost,
                 transparent: target_transparent,
                 flat: target_flat,
+                flags: target_flags.clone(),
                 open: from.clone(),
                 open_move_cost: Some(tile.move_cost),
                 open_transparent: Some(tile.transparent),
                 open_flat: Some(tile.flat),
+                open_flags: Some(tile.flags.clone()),
                 close: String::new(),
                 close_move_cost: None,
                 close_transparent: None,
                 close_flat: None,
+                close_flags: None,
             }
         };
         self.chunks
@@ -16406,7 +16450,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV115");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV116");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -16527,6 +16571,7 @@ mod tests {
             blocks_door: false,
             comfort: 0,
             floor_bedding_warmth: 0,
+            flags: Vec::new(),
         }
     }
 
@@ -16536,14 +16581,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         }
     }
 
@@ -16697,6 +16745,8 @@ mod tests {
             priority: 0,
             half_life_seconds,
             linear_half_life,
+            gas_spread_percent: 0,
+            outdoor_age_speedup_seconds: 0,
             contact_damage: None,
             is_splattering: true,
             display_field: true,
@@ -19980,14 +20030,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         world
             .chunks
@@ -20044,6 +20097,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 5,
                     floor_bedding_warmth: 1_000,
+                    flags: Vec::new(),
                 }),
             )
             .expect("bed should install");
@@ -20296,14 +20350,17 @@ mod tests {
                     move_cost: 0,
                     transparent: false,
                     flat: false,
+                    flags: Vec::new(),
                     open: String::new(),
                     open_move_cost: None,
                     open_transparent: None,
                     open_flat: None,
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 },
             )
             .expect("wall should install");
@@ -20447,14 +20504,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         world
             .actors
@@ -22940,6 +23000,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 5,
                     floor_bedding_warmth: 1_000,
+                    flags: Vec::new(),
                 }),
             )
             .expect("bed should install");
@@ -23030,6 +23091,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 5,
                     floor_bedding_warmth: 1_000,
+                    flags: Vec::new(),
                 }),
             )
             .expect("bed should install");
@@ -23155,6 +23217,7 @@ mod tests {
             blocks_door: false,
             comfort: 5,
             floor_bedding_warmth: 1_000,
+            flags: Vec::new(),
         };
         chunk
             .set_furniture(LocalTileCoord { x: 3, y: 1 }, Some(bed.clone()))
@@ -23172,6 +23235,7 @@ mod tests {
             blocks_door: false,
             comfort: 1,
             floor_bedding_warmth: -1_500,
+            flags: Vec::new(),
         };
         let chunk = world.chunks.get_mut(&coord).expect("chunk exists");
         chunk
@@ -23226,14 +23290,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         world
             .chunks
@@ -23249,14 +23316,17 @@ mod tests {
             move_cost: 0,
             transparent: true,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         world
             .chunks
@@ -25481,14 +25551,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for y in 0..cdda_protocol::SUBMAP_SIZE as u8 {
             chunk
@@ -25839,14 +25912,17 @@ mod tests {
             move_cost: 0,
             transparent: true,
             flat: false,
+            flags: Vec::new(),
             open: String::from("t_door_o"),
             open_move_cost: Some(2),
             open_transparent: Some(true),
             open_flat: Some(true),
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         chunk
             .set_terrain(LocalTileCoord { x: 4, y: 1 }, closed_door.clone())
@@ -26352,14 +26428,17 @@ mod tests {
                     move_cost: 0,
                     transparent: false,
                     flat: false,
+                    flags: Vec::new(),
                     open: String::new(),
                     open_move_cost: None,
                     open_transparent: None,
                     open_flat: None,
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 },
             )
             .expect("wall should be valid");
@@ -30987,6 +31066,7 @@ mod tests {
             blocks_door: false,
             comfort: 5,
             floor_bedding_warmth: 1_000,
+            flags: Vec::new(),
         };
         for local in [LocalTileCoord { x: 1, y: 1 }, LocalTileCoord { x: 3, y: 1 }] {
             chunk
@@ -31197,14 +31277,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for (x, y) in [(0, 0), (1, 0), (0, 2), (1, 2), (2, 2)] {
             world
@@ -31381,14 +31464,17 @@ mod tests {
             move_cost: 0,
             transparent: false,
             flat: false,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         for (x, y) in [(0, 0), (1, 0), (2, 0), (0, 1), (0, 2), (1, 2), (2, 2)] {
             world
@@ -31585,14 +31671,17 @@ mod tests {
                     move_cost: 0,
                     transparent: false,
                     flat: false,
+                    flags: Vec::new(),
                     open: String::from("t_door_o"),
                     open_move_cost: Some(2),
                     open_transparent: Some(true),
                     open_flat: Some(true),
+                    open_flags: None,
                     close: String::new(),
                     close_move_cost: None,
                     close_transparent: None,
                     close_flat: None,
+                    close_flags: None,
                 },
             )
             .expect("door should be valid");
@@ -31710,14 +31799,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         let mut world = WorldState::new(19, [13; 32]);
         world
@@ -31825,6 +31917,7 @@ mod tests {
             blocks_door: false,
             comfort: 0,
             floor_bedding_warmth: 0,
+            flags: Vec::new(),
         }];
         catalog.overmap.identities = vec![
             cdda_protocol::WorldgenOmtIdentityV1 {

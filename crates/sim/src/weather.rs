@@ -22,6 +22,52 @@ const SIMPLEX_NOISE_RANDOM_SEED_LIMIT: u32 = 32_768;
 const MAX_WEATHER_TRANSITIONS_PER_ADVANCE: usize = 4_096;
 
 impl WorldState {
+    pub(super) fn terrain_or_furniture_has_flag(
+        &self,
+        position: WorldPosition,
+        flag: &str,
+    ) -> Option<bool> {
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self.chunks.get(&coord)?;
+        let terrain = chunk.tile(local)?;
+        Some(
+            terrain
+                .flags
+                .binary_search_by(|candidate| candidate.as_str().cmp(flag))
+                .is_ok()
+                || chunk.furniture(local).is_some_and(|furniture| {
+                    furniture
+                        .flags
+                        .binary_search_by(|candidate| candidate.as_str().cmp(flag))
+                        .is_ok()
+                }),
+        )
+    }
+
+    /// Pinned outside-cache topology: underground positions are sheltered;
+    /// otherwise an `INDOORS` terrain or furniture tile shelters itself and
+    /// all eight horizontal neighbors.
+    pub(super) fn position_is_outside(&self, position: WorldPosition) -> bool {
+        if position.z < 0 {
+            return false;
+        }
+        for dy in -1_i8..=1 {
+            for dx in -1_i8..=1 {
+                let Some(neighbor) = position.checked_offset(dx, dy, 0) else {
+                    return false;
+                };
+                let Some(indoors) = self.terrain_or_furniture_has_flag(neighbor, "INDOORS") else {
+                    // Unmaterialized topology is not proof of exposure.
+                    return false;
+                };
+                if indoors {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn advance_weather_environment(
         &mut self,
         events: &mut Vec<WorldEvent>,
@@ -116,11 +162,9 @@ impl WorldState {
             return Ok(());
         };
         let mut candidates = Vec::new();
-        // Canonical exposure boundary: carried inventory is protected except
-        // for the wielded item; surface ground items are exposed. A future
-        // roof/shelter family can refine this server-owned predicate.
         for (actor_id, actor) in &self.actors {
-            if actor.position.z < 0 {
+            let inside_vehicle = self.actor_vehicle_context(*actor_id).1;
+            if inside_vehicle || !self.position_is_outside(actor.position) {
                 continue;
             }
             if let Some(item_id) = actor.wielded
@@ -133,8 +177,9 @@ impl WorldState {
             }
         }
         candidates.extend(self.ground_items.values().filter_map(|ground| {
-            (ground.position.z >= 0 && ground.item.is_active_and_water_extinguishable())
-                .then_some((None, ground.item.id))
+            (self.position_is_outside(ground.position)
+                && ground.item.is_active_and_water_extinguishable())
+            .then_some((None, ground.item.id))
         }));
         for (actor_id, item_id) in candidates {
             let mut rng = self.named_rng(

@@ -152,7 +152,7 @@ pub use weather::{
     weather_state_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 140;
+pub const PROTOCOL_VERSION: u16 = 141;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -3280,6 +3280,10 @@ pub struct FieldTypeSnapshotV1 {
     pub priority: i32,
     pub half_life_seconds: u64,
     pub linear_half_life: bool,
+    /// Nonzero only for a finalized gas field with the pinned spread
+    /// processor. Values above 100 are intentional upstream behavior.
+    pub gas_spread_percent: u16,
+    pub outdoor_age_speedup_seconds: u64,
     pub contact_damage: Option<FieldContactDamageV1>,
     pub is_splattering: bool,
     pub display_field: bool,
@@ -3328,14 +3332,19 @@ pub struct TerrainTileSnapshot {
     pub move_cost: i32,
     pub transparent: bool,
     pub flat: bool,
+    /// Finalized, sorted upstream terrain flags used by generalized
+    /// environmental topology and future terrain processors.
+    pub flags: Vec<String>,
     pub open: String,
     pub open_move_cost: Option<i32>,
     pub open_transparent: Option<bool>,
     pub open_flat: Option<bool>,
+    pub open_flags: Option<Vec<String>>,
     pub close: String,
     pub close_move_cost: Option<i32>,
     pub close_transparent: Option<bool>,
     pub close_flat: Option<bool>,
+    pub close_flags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3346,6 +3355,9 @@ pub struct FurnitureTileSnapshot {
     pub blocks_door: bool,
     pub comfort: i32,
     pub floor_bedding_warmth: i32,
+    /// Finalized, sorted upstream furniture flags used by environmental
+    /// topology and future furniture processors.
+    pub flags: Vec<String>,
 }
 
 /// A weighted prototype reference used by a regional terrain table. A
@@ -8738,9 +8750,30 @@ fn valid_chat_text(text: &str) -> bool {
 }
 
 fn valid_terrain_tile(tile: &TerrainTileSnapshot) -> bool {
+    let valid_flags = |flags: &[String]| {
+        flags.len() <= 256
+            && flags.iter().all(|flag| {
+                !flag.is_empty()
+                    && flag.len() <= 128
+                    && flag.chars().all(|character| !character.is_control())
+            })
+            && flags.windows(2).all(|pair| pair[0] < pair[1])
+    };
+    let valid_transform = |target: &str,
+                           move_cost: Option<i32>,
+                           transparent: Option<bool>,
+                           flat: Option<bool>,
+                           flags: Option<&[String]>| {
+        match (target.is_empty(), move_cost, transparent, flat, flags) {
+            (true, None, None, None, None) => true,
+            (false, Some(-1..), Some(_), Some(_), Some(flags)) => valid_flags(flags),
+            _ => false,
+        }
+    };
     !tile.terrain_id.is_empty()
         && tile.terrain_id.len() <= 512
         && tile.move_cost >= -1
+        && valid_flags(&tile.flags)
         && [
             tile.terrain_id.as_str(),
             tile.open.as_str(),
@@ -8748,23 +8781,19 @@ fn valid_terrain_tile(tile: &TerrainTileSnapshot) -> bool {
         ]
         .into_iter()
         .all(|value| value.len() <= 512 && value.chars().all(|character| !character.is_control()))
-        && matches!(
-            (
-                tile.open.is_empty(),
-                tile.open_move_cost,
-                tile.open_transparent,
-                tile.open_flat
-            ),
-            (true, None, None, None) | (false, Some(-1..), Some(_), Some(_))
+        && valid_transform(
+            &tile.open,
+            tile.open_move_cost,
+            tile.open_transparent,
+            tile.open_flat,
+            tile.open_flags.as_deref(),
         )
-        && matches!(
-            (
-                tile.close.is_empty(),
-                tile.close_move_cost,
-                tile.close_transparent,
-                tile.close_flat
-            ),
-            (true, None, None, None) | (false, Some(-1..), Some(_), Some(_))
+        && valid_transform(
+            &tile.close,
+            tile.close_move_cost,
+            tile.close_transparent,
+            tile.close_flat,
+            tile.close_flags.as_deref(),
         )
 }
 
@@ -8775,6 +8804,13 @@ fn valid_furniture_tile(furniture: &FurnitureTileSnapshot) -> bool {
             .furniture_id
             .chars()
             .all(|character| !character.is_control())
+        && furniture.flags.len() <= 256
+        && furniture.flags.iter().all(|flag| {
+            !flag.is_empty()
+                && flag.len() <= 128
+                && flag.chars().all(|character| !character.is_control())
+        })
+        && furniture.flags.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn valid_replication_snapshot(snapshot: &ReplicationSnapshotV1) -> bool {
@@ -9296,6 +9332,7 @@ mod tests {
                 blocks_door: false,
                 comfort: 0,
                 floor_bedding_warmth: 0,
+                flags: Vec::new(),
             }),
         }
     }
@@ -9480,14 +9517,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         }
     }
 
@@ -9587,6 +9627,7 @@ mod tests {
                 blocks_door: false,
                 comfort: 1,
                 floor_bedding_warmth: 0,
+                flags: Vec::new(),
             }],
             monster_prototypes: Vec::new(),
             monster_groups: Vec::new(),

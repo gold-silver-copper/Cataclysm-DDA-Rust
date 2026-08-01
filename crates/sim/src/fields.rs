@@ -2,8 +2,8 @@
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, BookStudyInterruptionReason, ConstructionInterruptionReason,
-    DisassemblyInterruptionReason, FieldContactDamageV1, FieldContactEffectV1, SimTick, WakeReason,
-    WorldEvent, WorldEventKind,
+    DisassemblyInterruptionReason, FieldContactDamageV1, FieldContactEffectV1, SimTick,
+    WEATHER_SCALE, WakeReason, WorldEvent, WorldEventKind, WorldPosition,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -26,15 +26,22 @@ impl WorldState {
                     (
                         position,
                         field.field_type_id.clone(),
-                        field.intensity,
                         field.display_sequence,
-                        field.age_seconds,
                     )
                 }));
             }
         }
-        for (position, field_type_id, previous_intensity, display_sequence, previous_age) in fields
-        {
+        for (position, field_type_id, display_sequence) in fields {
+            let Some(current) = self.fields_at(position).and_then(|fields| {
+                fields
+                    .binary_search_by(|field| field.field_type_id.cmp(&field_type_id))
+                    .ok()
+                    .and_then(|index| fields.get(index))
+                    .cloned()
+            }) else {
+                continue;
+            };
+            let previous_intensity = current.intensity;
             let field_type = self
                 .field_types
                 .get(&field_type_id)
@@ -68,7 +75,18 @@ impl WorldState {
                     events,
                 )?;
             }
-            let age_seconds = previous_age
+            self.advance_gas_field(position, &field_type_id, &field_type, events)?;
+            let Some(current) = self.fields_at(position).and_then(|fields| {
+                fields
+                    .binary_search_by(|field| field.field_type_id.cmp(&field_type_id))
+                    .ok()
+                    .and_then(|index| fields.get(index))
+                    .cloned()
+            }) else {
+                continue;
+            };
+            let age_seconds = current
+                .age_seconds
                 .checked_add(1)
                 .ok_or(SimError::NumericOverflow)?;
             let decay_active = age_seconds > 0;
@@ -107,9 +125,7 @@ impl WorldState {
                 continue;
             }
             let reductions = u8::from(decays) + u8::from(decreases_on_contact);
-            let intensity = tile_fields[field_index]
-                .intensity
-                .saturating_sub(reductions);
+            let intensity = current.intensity.saturating_sub(reductions);
             if intensity == 0 {
                 tile_fields.remove(field_index);
             } else {
@@ -126,6 +142,286 @@ impl WorldState {
                 intensity,
             })?);
         }
+        Ok(())
+    }
+
+    fn advance_gas_field(
+        &mut self,
+        position: WorldPosition,
+        field_type_id: &str,
+        field_type: &cdda_protocol::FieldTypeSnapshotV1,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if field_type.gas_spread_percent == 0 {
+            return Ok(());
+        }
+        let current = self
+            .fields_at(position)
+            .and_then(|fields| {
+                fields
+                    .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+                    .ok()
+                    .and_then(|index| fields.get(index))
+            })
+            .cloned()
+            .ok_or(SimError::InvalidField)?;
+        // Pinned processing skips newborn fields for their first turn.
+        if current.age_seconds == 0 {
+            return Ok(());
+        }
+        let outside = self.position_is_outside(position);
+        if outside && field_type.outdoor_age_speedup_seconds != 0 {
+            let speedup = i64::try_from(field_type.outdoor_age_speedup_seconds)
+                .map_err(|_| SimError::NumericOverflow)?;
+            let next_age = current
+                .age_seconds
+                .checked_add(speedup)
+                .ok_or(SimError::NumericOverflow)?;
+            self.set_field_age(position, field_type_id, next_age)?;
+        }
+        if current.intensity <= 1 {
+            return Ok(());
+        }
+        let windpower = if outside {
+            self.weather_state
+                .as_ref()
+                .map(|state| state.windpower_millionths / WEATHER_SCALE)
+                .unwrap_or(0)
+                .max(0)
+        } else {
+            0
+        };
+        let mut rng = self.named_rng(
+            b"field-gas-spread",
+            &[u128::from(current.display_sequence)],
+            self.tick.0,
+        );
+        let spread_endpoint = 100_i64
+            .checked_sub(windpower)
+            .ok_or(SimError::NumericOverflow)?;
+        let spread_minimum = spread_endpoint.min(1);
+        let spread_width = spread_endpoint
+            .max(1)
+            .checked_sub(spread_minimum)
+            .and_then(|width| width.checked_add(1))
+            .and_then(|width| u64::try_from(width).ok())
+            .ok_or(SimError::NumericOverflow)?;
+        let spread_roll = spread_minimum
+            .checked_add(
+                i64::try_from(u64::from(rng.next_u32()) % spread_width)
+                    .map_err(|_| SimError::NumericOverflow)?,
+            )
+            .ok_or(SimError::NumericOverflow)?;
+        if spread_roll > i64::from(field_type.gas_spread_percent) {
+            return Ok(());
+        }
+
+        let down = position.checked_offset(0, 0, -1);
+        if self
+            .terrain_or_furniture_has_flag(position, "NO_FLOOR")
+            .unwrap_or(false)
+            && down.is_some_and(|target| {
+                self.gas_can_spread_to(target, field_type_id, current.intensity)
+            })
+        {
+            return self.spread_gas_unit(
+                position,
+                down.ok_or(SimError::NumericOverflow)?,
+                field_type_id,
+                events,
+            );
+        }
+
+        const NEIGHBORS: [(i8, i8); 8] = [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let end = usize::try_from(rng.next_u32() % 8).map_err(|_| SimError::NumericOverflow)?;
+        let mut candidates = Vec::new();
+        for count in 0..NEIGHBORS.len() {
+            let index = (end + 1 + count) % NEIGHBORS.len();
+            let (dx, dy) = NEIGHBORS[index];
+            if let Some(target) = position.checked_offset(dx, dy, 0)
+                && self.gas_can_spread_to(target, field_type_id, current.intensity)
+            {
+                candidates.push((index, target));
+            }
+        }
+        let horizontal_selected = !candidates.is_empty()
+            && (candidates.len() == 1
+                || rng.next_u32()
+                    % u32::try_from(candidates.len()).map_err(|_| SimError::NumericOverflow)?
+                    == 0);
+        if horizontal_selected {
+            if outside && windpower >= 5 {
+                let blocked = gas_upwind_neighbor_indexes(
+                    self.weather_state
+                        .as_ref()
+                        .map_or(0, |state| state.wind_direction_degrees),
+                );
+                let wind_denominator =
+                    u32::try_from(windpower.max(2)).map_err(|_| SimError::NumericOverflow)?;
+                candidates.retain(|(index, _)| {
+                    !blocked.contains(index) || rng.next_u32() % wind_denominator == 0
+                });
+            }
+            if !candidates.is_empty() {
+                let index = usize::try_from(
+                    rng.next_u32()
+                        % u32::try_from(candidates.len()).map_err(|_| SimError::NumericOverflow)?,
+                )
+                .map_err(|_| SimError::NumericOverflow)?;
+                return self.spread_gas_unit(position, candidates[index].1, field_type_id, events);
+            }
+            return Ok(());
+        }
+        let up = position.checked_offset(0, 0, 1);
+        if up.is_some_and(|target| {
+            self.terrain_or_furniture_has_flag(target, "NO_FLOOR")
+                .unwrap_or(false)
+                && self.gas_can_spread_to(target, field_type_id, current.intensity)
+        }) {
+            self.spread_gas_unit(
+                position,
+                up.ok_or(SimError::NumericOverflow)?,
+                field_type_id,
+                events,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn gas_can_spread_to(
+        &self,
+        position: WorldPosition,
+        field_type_id: &str,
+        source_intensity: u8,
+    ) -> bool {
+        let (coord, local) = position.chunk_and_local();
+        let Some(chunk) = self.chunks.get(&coord) else {
+            return false;
+        };
+        let Some(terrain) = chunk.tile(local) else {
+            return false;
+        };
+        let target_is_weaker = chunk.fields(local).is_some_and(|fields| {
+            fields
+                .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+                .map_or(true, |index| fields[index].intensity < source_intensity)
+        });
+        target_is_weaker
+            && (chunk.is_passable(local)
+                || terrain
+                    .flags
+                    .binary_search_by(|flag| flag.as_str().cmp("PERMEABLE"))
+                    .is_ok()
+                || chunk.furniture(local).is_some_and(|furniture| {
+                    furniture
+                        .flags
+                        .binary_search_by(|flag| flag.as_str().cmp("PERMEABLE"))
+                        .is_ok()
+                }))
+    }
+
+    fn set_field_age(
+        &mut self,
+        position: WorldPosition,
+        field_type_id: &str,
+        age_seconds: i64,
+    ) -> Result<(), SimError> {
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self.chunks.get_mut(&coord).ok_or(SimError::InvalidField)?;
+        let fields = chunk.fields_mut(local).ok_or(SimError::InvalidField)?;
+        let index = fields
+            .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+            .map_err(|_| SimError::InvalidField)?;
+        fields[index].age_seconds = age_seconds;
+        Ok(())
+    }
+
+    fn spread_gas_unit(
+        &mut self,
+        source: WorldPosition,
+        target: WorldPosition,
+        field_type_id: &str,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let source_field = self
+            .fields_at(source)
+            .and_then(|fields| {
+                fields
+                    .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+                    .ok()
+                    .and_then(|index| fields.get(index))
+            })
+            .cloned()
+            .ok_or(SimError::InvalidField)?;
+        if source_field.intensity <= 1 {
+            return Ok(());
+        }
+        let age_fraction = source_field.age_seconds / i64::from(source_field.intensity);
+        let target_existed = self.fields_at(target).is_some_and(|fields| {
+            fields
+                .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+                .is_ok()
+        });
+        let target_intensity = self.add_field_with_age(
+            target,
+            field_type_id,
+            1,
+            if target_existed { 0 } else { age_fraction },
+        )?;
+        if target_existed {
+            let target_age = self
+                .fields_at(target)
+                .and_then(|fields| {
+                    fields
+                        .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+                        .ok()
+                        .and_then(|index| fields.get(index))
+                })
+                .map(|field| field.age_seconds)
+                .ok_or(SimError::InvalidField)?;
+            self.set_field_age(
+                target,
+                field_type_id,
+                target_age
+                    .checked_add(age_fraction)
+                    .ok_or(SimError::NumericOverflow)?,
+            )?;
+        }
+        let source_intensity = source_field.intensity - 1;
+        let (coord, local) = source.chunk_and_local();
+        let chunk = self.chunks.get_mut(&coord).ok_or(SimError::InvalidField)?;
+        let fields = chunk.fields_mut(local).ok_or(SimError::InvalidField)?;
+        let index = fields
+            .binary_search_by(|field| field.field_type_id.as_str().cmp(field_type_id))
+            .map_err(|_| SimError::InvalidField)?;
+        fields[index].intensity = source_intensity;
+        fields[index].age_seconds = source_field
+            .age_seconds
+            .checked_sub(age_fraction)
+            .ok_or(SimError::NumericOverflow)?;
+        chunk.revision = chunk
+            .revision
+            .checked_add(1)
+            .ok_or(SimError::NumericOverflow)?;
+        events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+            position: source,
+            field_type_id: field_type_id.to_owned(),
+            intensity: source_intensity,
+        })?);
+        events.push(self.make_event(WorldEventKind::FieldIntensityChanged {
+            position: target,
+            field_type_id: field_type_id.to_owned(),
+            intensity: target_intensity,
+        })?);
         Ok(())
     }
 
@@ -369,6 +665,20 @@ impl WorldState {
             }
         }
         Ok(())
+    }
+}
+
+fn gas_upwind_neighbor_indexes(wind_direction_degrees: i16) -> [usize; 3] {
+    match wind_direction_degrees.rem_euclid(360) {
+        330..=359 => [4, 2, 7],
+        301..=329 => [7, 4, 6],
+        240..=300 => [6, 5, 7],
+        211..=239 => [5, 3, 6],
+        150..=210 => [3, 0, 5],
+        121..=149 => [0, 1, 3],
+        60..=120 => [1, 0, 2],
+        31..=59 => [2, 4, 1],
+        _ => [4, 2, 7],
     }
 }
 

@@ -4185,14 +4185,17 @@ fn rust_item_group_tool_charge_case_with_replacement(
         move_cost: 2,
         transparent: true,
         flat: true,
+        flags: Vec::new(),
         open: String::new(),
         open_move_cost: None,
         open_transparent: None,
         open_flat: None,
+        open_flags: None,
         close: String::new(),
         close_move_cost: None,
         close_transparent: None,
         close_flat: None,
+        close_flags: None,
     };
     let mut cells = vec![
         WorldgenCellV1 {
@@ -4712,14 +4715,17 @@ fn rust_static_template_snapshot(
         move_cost: 2,
         transparent: true,
         flat: true,
+        flags: Vec::new(),
         open: String::new(),
         open_move_cost: None,
         open_transparent: None,
         open_flat: None,
+        open_flags: None,
         close: String::new(),
         close_move_cost: None,
         close_transparent: None,
         close_flat: None,
+        close_flags: None,
     };
     let marker = TerrainTileSnapshot {
         terrain_id: String::from("t_floor"),
@@ -4777,6 +4783,7 @@ fn rust_static_template_snapshot(
             blocks_door: false,
             comfort: 0,
             floor_bedding_warmth: 0,
+            flags: Vec::new(),
         }],
         monster_prototypes: Vec::new(),
         monster_groups: Vec::new(),

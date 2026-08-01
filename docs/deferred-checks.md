@@ -2,7 +2,7 @@
 
 Run only when the user explicitly requests a verification checkpoint.
 
-Current affected contract: `P140/S117/R4/CS115/CE32`.
+Current affected contract: `P141/S118/R4/CS116/CE32`.
 
 - `MAPGEN-REGIONAL`: deferred
 - `OVERMAP-RIVER-BRIDGE`: deferred

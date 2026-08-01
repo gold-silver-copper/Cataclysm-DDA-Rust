@@ -5774,6 +5774,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 0,
                     floor_bedding_warmth: 0,
+                    flags: Vec::new(),
                 },
             ),
         }
@@ -6475,6 +6476,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 0,
                     floor_bedding_warmth: 0,
+                    flags: Vec::new(),
                 }),
             )
             .expect("opaque furniture should be valid");
@@ -6485,6 +6487,7 @@ mod tests {
             blocks_door: false,
             comfort: 5,
             floor_bedding_warmth: 1_000,
+            flags: Vec::new(),
         };
         center
             .set_furniture(LocalTileCoord { x: 1, y: 2 }, Some(visible_bed.clone()))
@@ -6499,6 +6502,7 @@ mod tests {
                     blocks_door: false,
                     comfort: 0,
                     floor_bedding_warmth: 0,
+                    flags: Vec::new(),
                 }),
             )
             .expect("unsupported bash furniture should be valid");
@@ -6520,14 +6524,17 @@ mod tests {
                         move_cost: 2,
                         transparent: true,
                         flat: true,
+                        flags: Vec::new(),
                         open: String::new(),
                         open_move_cost: None,
                         open_transparent: None,
                         open_flat: None,
+                        open_flags: None,
                         close: String::new(),
                         close_move_cost: None,
                         close_transparent: None,
                         close_flat: None,
+                        close_flags: None,
                     }
                 },
                 drop_source: None,
@@ -6577,6 +6584,8 @@ mod tests {
                 priority: 0,
                 half_life_seconds: 172_800,
                 linear_half_life: false,
+                gas_spread_percent: 0,
+                outdoor_age_speedup_seconds: 0,
                 contact_damage: None,
                 is_splattering: true,
                 display_field: true,
@@ -6830,14 +6839,17 @@ mod tests {
                 move_cost: 2,
                 transparent: true,
                 flat: true,
+                flags: Vec::new(),
                 open: String::new(),
                 open_move_cost: None,
                 open_transparent: None,
                 open_flat: None,
+                open_flags: None,
                 close: String::new(),
                 close_move_cost: None,
                 close_transparent: None,
                 close_flat: None,
+                close_flags: None,
             },
             furniture: Some(cdda_protocol::FurnitureTileSnapshot {
                 furniture_id: String::from("f_remembered_bed"),
@@ -6846,6 +6858,7 @@ mod tests {
                 blocks_door: false,
                 comfort: 5,
                 floor_bedding_warmth: 1_000,
+                flags: Vec::new(),
             }),
         });
         let remembered =

@@ -15,6 +15,9 @@ const IMPLEMENTED_FIELDS: &[&str] = &[
     "priority",
     "half_life",
     "linear_half_life",
+    "phase",
+    "percent_spread",
+    "outdoor_age_speedup",
     "has_acid",
     "is_splattering",
     "display_field",
@@ -130,6 +133,12 @@ pub struct FieldTypeDefinition {
     pub priority: i32,
     pub half_life_seconds: u64,
     pub linear_half_life: bool,
+    /// Finalized upstream phase. Only `gas` currently enables the generalized
+    /// spread processor; retaining the exact value keeps other phase-specific
+    /// processors fail-closed.
+    pub phase: String,
+    pub percent_spread: u16,
+    pub outdoor_age_speedup_seconds: u64,
     pub has_acid: bool,
     pub is_splattering: bool,
     pub display_field: bool,
@@ -381,6 +390,31 @@ fn apply_fields(
     }
     if let Some(value) = optional_bool(object, "linear_half_life", source)? {
         field.linear_half_life = value;
+    }
+    if let Some(value) = object.get("phase") {
+        field.phase = match value.as_str() {
+            Some("null" | "solid" | "liquid" | "gas" | "plasma") => value
+                .as_str()
+                .ok_or_else(|| invalid(source, "phase"))?
+                .to_owned(),
+            _ => return Err(invalid(source, "phase")),
+        };
+    }
+    if let Some(value) = object.get("percent_spread") {
+        field.percent_spread = u16::try_from(
+            value
+                .as_u64()
+                .ok_or_else(|| invalid(source, "percent_spread"))?,
+        )
+        .map_err(|_| invalid(source, "percent_spread"))?;
+    }
+    if let Some(value) = object.get("outdoor_age_speedup") {
+        field.outdoor_age_speedup_seconds = parse_duration_seconds(
+            value
+                .as_str()
+                .ok_or_else(|| invalid(source, "outdoor_age_speedup"))?,
+            source,
+        )?;
     }
     if let Some(value) = optional_bool(object, "has_acid", source)? {
         field.has_acid = value;

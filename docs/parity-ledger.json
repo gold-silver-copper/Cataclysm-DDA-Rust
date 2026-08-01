@@ -525,7 +525,11 @@
     {
       "id": "vehicles",
       "title": "Ordinary vehicle simulation",
-      "state": "planned",
+      "state": "implementation_in_progress",
+      "submilestones": [
+        { "id": "static-vehicles-boarding-cargo-and-manual-controls", "state": "implementation_complete_review_pending" },
+        { "id": "powered-propulsion-collision-damage-and-repair", "state": "planned" }
+      ],
       "priority": 27,
       "depends_on": ["item-containment", "overmap-roads", "anatomy-combat"],
       "upstream_sources": ["../Cataclysm-DDA/src/vehicle.cpp", "../Cataclysm-DDA/src/veh_type.cpp"],
@@ -543,7 +547,9 @@
         { "id": "persistent-field-decay-and-typed-contact-damage", "state": "implementation_complete_verification_deferred" },
         { "id": "intensity-specific-contact-effects-and-consume-on-contact", "state": "implementation_complete_verification_deferred" },
         { "id": "field-effect-type-stat-speed-and-limb-score-modifiers", "state": "implementation_complete_verification_deferred" },
-        { "id": "weather-exposure-spread-agriculture-and-catch-up", "state": "planned" }
+        { "id": "weather-and-terrain-shelter-exposure", "state": "implementation_complete_verification_deferred" },
+        { "id": "generalized-gas-spread-and-outdoor-dissipation", "state": "implementation_complete_review_pending" },
+        { "id": "agriculture-and-inactive-region-catch-up", "state": "planned" }
       ],
       "priority": 28,
       "depends_on": ["regional-terrain-base", "anatomy-combat", "eoc-use-actions"],

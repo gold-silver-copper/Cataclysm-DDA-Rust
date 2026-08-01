@@ -3051,7 +3051,7 @@ fn terrain_tile(
     definition: &TerrainDefinition,
     registry: &TerrainRegistry,
 ) -> Result<TerrainTileSnapshot, Box<dyn std::error::Error>> {
-    type TransformBehavior = Option<(i32, bool, bool)>;
+    type TransformBehavior = Option<(i32, bool, bool, Vec<String>)>;
     let transform = |target: &str| -> Result<TransformBehavior, Box<dyn std::error::Error>> {
         if target.is_empty() {
             Ok(None)
@@ -3063,6 +3063,7 @@ fn terrain_tile(
                 target.move_cost,
                 target.flags.contains("TRANSPARENT"),
                 target.flags.contains("FLAT"),
+                target.flags.iter().cloned().collect(),
             )))
         }
     };
@@ -3088,14 +3089,17 @@ fn terrain_tile(
         move_cost: definition.move_cost,
         transparent: definition.flags.contains("TRANSPARENT"),
         flat: definition.flags.contains("FLAT"),
+        flags: definition.flags.iter().cloned().collect(),
         open: open_id.to_owned(),
-        open_move_cost: open.map(|transform| transform.0),
-        open_transparent: open.map(|transform| transform.1),
-        open_flat: open.map(|transform| transform.2),
+        open_move_cost: open.as_ref().map(|transform| transform.0),
+        open_transparent: open.as_ref().map(|transform| transform.1),
+        open_flat: open.as_ref().map(|transform| transform.2),
+        open_flags: open.as_ref().map(|transform| transform.3.clone()),
         close: close_id.to_owned(),
-        close_move_cost: close.map(|transform| transform.0),
-        close_transparent: close.map(|transform| transform.1),
-        close_flat: close.map(|transform| transform.2),
+        close_move_cost: close.as_ref().map(|transform| transform.0),
+        close_transparent: close.as_ref().map(|transform| transform.1),
+        close_flat: close.as_ref().map(|transform| transform.2),
+        close_flags: close.as_ref().map(|transform| transform.3.clone()),
     })
 }
 
@@ -3560,6 +3564,10 @@ fn runtime_field_type(
         priority: definition.priority,
         half_life_seconds: definition.half_life_seconds,
         linear_half_life: definition.linear_half_life,
+        gas_spread_percent: (definition.phase == "gas")
+            .then_some(definition.percent_spread)
+            .unwrap_or(0),
+        outdoor_age_speedup_seconds: definition.outdoor_age_speedup_seconds,
         contact_damage: definition
             .has_acid
             .then(|| cdda_protocol::FieldContactDamageV1 {
@@ -3665,6 +3673,7 @@ fn furniture_tile(definition: &FurnitureDefinition) -> FurnitureTileSnapshot {
         blocks_door: definition.flags.contains("BLOCKSDOOR"),
         comfort: definition.comfort,
         floor_bedding_warmth: definition.floor_bedding_warmth,
+        flags: definition.flags.iter().cloned().collect(),
     }
 }
 

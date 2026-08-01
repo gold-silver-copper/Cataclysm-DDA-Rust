@@ -1269,14 +1269,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         let cell = |prototype_index| cdda_protocol::WorldgenCellV1 {
             terrain: vec![vec![cdda_protocol::WorldgenWeightedTerrainTargetV1 {
@@ -1928,14 +1931,17 @@ mod tests {
             move_cost: 2,
             transparent: true,
             flat: true,
+            flags: Vec::new(),
             open: String::new(),
             open_move_cost: None,
             open_transparent: None,
             open_flat: None,
+            open_flags: None,
             close: String::new(),
             close_move_cost: None,
             close_transparent: None,
             close_flat: None,
+            close_flags: None,
         };
         let mut wall = floor.clone();
         wall.terrain_id = String::from("t_wall");
