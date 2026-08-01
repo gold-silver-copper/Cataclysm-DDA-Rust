@@ -323,7 +323,7 @@ impl WorldState {
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
             apply_actor_effect_applications(
-                actor,
+                &mut actor.effects,
                 vec![anatomy::ActorEffectApplication {
                     effect_id: contact.status_effect_id.clone(),
                     body_part_id: Some(body_part_id),

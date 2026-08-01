@@ -20,11 +20,12 @@ use cdda_sim::{ID_RESERVATION_SIZE, ReservedIdBlock, SimError, WorldState, canon
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 114;
-/// Old Postcard snapshots and journals cannot be decoded after Protocol 137
-/// added canonical recursive item ownership for mission source selection.
+pub const SCHEMA_VERSION: i64 = 115;
+/// Old Postcard snapshots and journals cannot be decoded after Protocol 138
+/// added canonical NPC classes, generated actor state, combat commands, and
+/// authoritative NPC combat events.
 /// Metadata-only databases may still migrate.
-pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 114;
+pub const MIN_RECOVERABLE_SCHEMA_VERSION: i64 = 115;
 const MAX_SNAPSHOT_DECODED: u64 = 32 * 1024 * 1024;
 // A newly created character retains the same bounded 60-tile terrain memory
 // that enters canonical snapshots. Production regional terrain exceeds the
@@ -35,7 +36,7 @@ const PRE_MIGRATION_MANIFEST_FILE: &str = "manifest.postcard";
 const PRE_MIGRATION_DATABASE_FILE: &str = "world.db";
 const PRE_MIGRATION_IDENTITY_FILE: &str = "server-identity.key";
 const MAX_PRE_MIGRATION_MANIFEST_BYTES: u64 = 64 * 1024;
-pub const REPLAY_FORMAT_VERSION: u16 = 3;
+pub const REPLAY_FORMAT_VERSION: u16 = 4;
 pub const SNAPSHOT_OBJECT_FORMAT_VERSION: u16 = 1;
 pub const SECURITY_AUDIT_FORMAT_VERSION: u16 = 1;
 pub const ENROLLMENT_LIFETIME_SECONDS: i64 = 10 * 60;

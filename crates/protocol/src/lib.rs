@@ -58,9 +58,10 @@ pub use missions::{
 pub use npc_dialogue::{
     DialogueResponseV1, DialogueTopicV1, MAX_DIALOGUE_ID_BYTES, MAX_DIALOGUE_RESPONSES,
     MAX_DIALOGUE_TEXT_BYTES, MAX_DIALOGUE_TOPIC_STACK, MAX_NPC_MISSION_OFFERS, MAX_NPC_NAME_BYTES,
-    MAX_NPC_OPINION_ABS, MAX_NPC_TEMPLATES, MAX_NPCS, NPC_BUILTIN_MISSION_TOPICS,
-    NpcMissionOfferV1, NpcOpinionV1, NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1,
-    VisibleNpcSnapshotV1, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
+    MAX_NPC_OPINION_ABS, MAX_NPC_TEMPLATES, MAX_NPCS, NPC_BUILTIN_MISSION_TOPICS, NpcClassSkillV1,
+    NpcClassV1, NpcDistributionV1, NpcMissionOfferV1, NpcOpinionV1, NpcPersonalityV1,
+    NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1, VisibleNpcSnapshotV1,
+    npc_class_catalog_is_valid, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
     npc_snapshot_is_valid_for_template, npc_template_attitude_is_supported,
     npc_template_attitude_will_talk, opinion_delta_cannot_trigger_hostility, opinion_is_valid,
 };
@@ -140,7 +141,7 @@ pub use vehicles::{
     worldgen_vehicle_placement_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 137;
+pub const PROTOCOL_VERSION: u16 = 138;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1748,6 +1749,9 @@ pub enum CommandKind {
     AttackCreature {
         target: CreatureId,
     },
+    AttackNpc {
+        target: NpcId,
+    },
     TalkToNpc {
         target: NpcId,
     },
@@ -1781,6 +1785,9 @@ pub enum CommandKind {
     },
     ShootCreature {
         target: CreatureId,
+    },
+    ShootNpc {
+        target: NpcId,
     },
     Reload {
         ammunition_item: ItemId,
@@ -2112,6 +2119,34 @@ pub enum WorldEventKind {
     CreatureDied {
         creature_id: CreatureId,
         killer: ActorId,
+    },
+    NpcDamaged {
+        source: ActorId,
+        target: NpcId,
+        body_part_id: String,
+        amount: u16,
+        remaining_part_hp: i32,
+        remaining_hp: i32,
+    },
+    ActorMissedNpc {
+        source: ActorId,
+        target: NpcId,
+    },
+    NpcDied {
+        npc_id: NpcId,
+        killer: ActorId,
+    },
+    NpcDamagedByEffect {
+        npc_id: NpcId,
+        effect_id: String,
+        body_part_id: String,
+        amount: u16,
+        remaining_part_hp: i32,
+        remaining_hp: i32,
+    },
+    NpcKilledByEffect {
+        npc_id: NpcId,
+        effect_id: String,
     },
     MissionAssigned {
         actor_id: ActorId,
@@ -2543,6 +2578,7 @@ pub enum WorldEventKind {
 pub enum RangedTarget {
     Actor(ActorId),
     Creature(CreatureId),
+    Npc(NpcId),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -4213,6 +4249,7 @@ pub struct WorldSnapshotV1 {
     /// Immutable admitted faction defaults and their mutable canonical state.
     pub faction_templates: Vec<FactionTemplateV1>,
     pub factions: Vec<FactionStateV1>,
+    pub npc_classes: Vec<NpcClassV1>,
     pub npc_templates: Vec<NpcTemplateV1>,
     pub dialogue_topics: Vec<DialogueTopicV1>,
     pub mission_definitions: Vec<MissionDefinitionV1>,
@@ -4741,7 +4778,9 @@ fn valid_client_command(command: &ClientCommand) -> bool {
         CommandKind::Activate { item_id } => {
             item_id.counter() > 0 && item_id.world_namespace() == command.actor_id.world_namespace()
         }
-        CommandKind::TalkToNpc { target } => {
+        CommandKind::TalkToNpc { target }
+        | CommandKind::AttackNpc { target }
+        | CommandKind::ShootNpc { target } => {
             target.counter() > 0 && target.world_namespace() == command.actor_id.world_namespace()
         }
         CommandKind::BoardVehicle { vehicle_id, .. } => {

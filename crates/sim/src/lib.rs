@@ -57,7 +57,7 @@ use cdda_protocol::{
     MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
     MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
     MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1, MissionId,
-    MissionSnapshotV1, NaturalLightSnapshot, NpcId, NpcTemplateV1, PoweredToolStateV1,
+    MissionSnapshotV1, NaturalLightSnapshot, NpcClassV1, NpcId, NpcTemplateV1, PoweredToolStateV1,
     PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
     RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SkyPhase,
     SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId,
@@ -2852,7 +2852,7 @@ fn runtime_armor_is_supported(armor: &WearableArmorTypeV1) -> bool {
 }
 
 fn apply_actor_effect_applications(
-    actor: &mut Actor,
+    effects: &mut Vec<ActorEffectSnapshotV1>,
     applications: Vec<anatomy::ActorEffectApplication>,
     current_tick: SimTick,
 ) -> Result<(), SimError> {
@@ -2864,8 +2864,7 @@ fn apply_actor_effect_applications(
             .checked_mul(SimTick::HZ)
             .ok_or(SimError::NumericOverflow)?;
         let key = (&application.effect_id, &application.body_part_id);
-        if let Some(existing) = actor
-            .effects
+        if let Some(existing) = effects
             .iter_mut()
             .find(|effect| (&effect.effect_id, &effect.body_part_id) == key)
         {
@@ -2885,7 +2884,7 @@ fn apply_actor_effect_applications(
                     .ok_or(SimError::NumericOverflow)?,
             );
         } else {
-            actor.effects.push(ActorEffectSnapshotV1 {
+            effects.push(ActorEffectSnapshotV1 {
                 effect_id: application.effect_id,
                 body_part_id: application.body_part_id,
                 intensity: application.intensity.min(application.max_intensity),
@@ -2899,7 +2898,7 @@ fn apply_actor_effect_applications(
             });
         }
     }
-    actor.effects.sort_by(|left, right| {
+    effects.sort_by(|left, right| {
         (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
     });
     Ok(())
@@ -4914,7 +4913,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV30");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV31");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -4943,6 +4942,7 @@ pub struct WorldState {
     worldgen: Option<WorldgenCatalogV1>,
     faction_templates: BTreeMap<String, FactionTemplateV1>,
     factions: BTreeMap<String, FactionStateV1>,
+    npc_classes: BTreeMap<String, NpcClassV1>,
     npc_templates: BTreeMap<String, NpcTemplateV1>,
     dialogue_topics: BTreeMap<String, DialogueTopicV1>,
     mission_definitions: BTreeMap<String, MissionDefinitionV1>,
@@ -4984,6 +4984,7 @@ impl WorldState {
             worldgen: None,
             faction_templates: BTreeMap::new(),
             factions: BTreeMap::new(),
+            npc_classes: BTreeMap::new(),
             npc_templates: BTreeMap::new(),
             dialogue_topics: BTreeMap::new(),
             mission_definitions: BTreeMap::new(),
@@ -6438,6 +6439,23 @@ impl WorldState {
                 0
             };
         }
+        for npc in self.npcs.values_mut() {
+            let winded = npc
+                .effects
+                .iter()
+                .any(|effect| effect.effect_id == "winded" && effect.expires_at_tick > self.tick);
+            let regen = if winded {
+                combat::WINDED_STAMINA_REGEN_PER_SECOND
+            } else {
+                combat::BASE_STAMINA_REGEN_PER_SECOND
+            };
+            npc.stamina = npc.stamina.saturating_add(regen).min(npc.maximum_stamina);
+            npc.dodge_attempts_remaining = if npc.hp > 0 {
+                combat::ORDINARY_DODGE_ATTEMPTS
+            } else {
+                0
+            };
+        }
     }
 
     /// Item-owned traversal coordinator. Temperature arithmetic and recursive
@@ -6461,6 +6479,11 @@ impl WorldState {
                 for consumed in &mut activity.consumed_items {
                     process_item_snapshot_temperature(&mut consumed.item, current_tick)?;
                 }
+            }
+        }
+        for npc in self.npcs.values_mut() {
+            for item in npc.inventory.values_mut() {
+                item.process_temperature(current_tick)?;
             }
         }
         let mut rotten_ground_items = Vec::new();
@@ -6502,6 +6525,10 @@ impl WorldState {
         for creature in self.creatures.values_mut() {
             creature
                 .effects
+                .retain(|effect| effect.expires_at_tick > self.tick);
+        }
+        for npc in self.npcs.values_mut() {
+            npc.effects
                 .retain(|effect| effect.expires_at_tick > self.tick);
         }
         if !self.tick.0.is_multiple_of(5 * SimTick::HZ) {
@@ -6585,6 +6612,66 @@ impl WorldState {
                         actor_id,
                         effect_id: effect.effect_id,
                     })?);
+                }
+            }
+        }
+        let npc_ids = self.npcs.keys().copied().collect::<Vec<_>>();
+        for npc_id in npc_ids {
+            let bleeding = self
+                .npcs
+                .get(&npc_id)
+                .ok_or(SimError::UnknownNpc)?
+                .effects
+                .iter()
+                .filter(|effect| effect.effect_id == "bleed")
+                .cloned()
+                .collect::<Vec<_>>();
+            for effect in bleeding {
+                if self.npcs.get(&npc_id).is_none_or(|npc| npc.hp <= 0) {
+                    break;
+                }
+                let selected = effect
+                    .body_part_id
+                    .as_ref()
+                    .and_then(|body_part_id| {
+                        self.actor_anatomy
+                            .parts
+                            .iter()
+                            .position(|part| part.body_part_id == *body_part_id)
+                    })
+                    .or_else(|| self.actor_anatomy.parts.iter().position(|part| part.vital))
+                    .ok_or(SimError::InvalidActorAnatomy)?;
+                let amount = u16::try_from(effect.intensity.min(u32::from(u16::MAX)))
+                    .map_err(|_| SimError::NumericOverflow)?;
+                let outcome = {
+                    let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
+                    let outcome = anatomy::apply_damage_to_part(
+                        &self.actor_anatomy,
+                        &mut npc.body_parts,
+                        selected,
+                        amount,
+                    )?;
+                    npc.hp = outcome.remaining_hp;
+                    if npc.hp <= 0 {
+                        npc.dodge_attempts_remaining = 0;
+                        npc.action_points = 0;
+                    }
+                    outcome
+                };
+                events.push(self.make_event(WorldEventKind::NpcDamagedByEffect {
+                    npc_id,
+                    effect_id: effect.effect_id.clone(),
+                    body_part_id: outcome.body_part_id,
+                    amount: outcome.amount,
+                    remaining_part_hp: outcome.remaining_part_hp,
+                    remaining_hp: outcome.remaining_hp,
+                })?);
+                if outcome.remaining_hp <= 0 {
+                    events.push(self.make_event(WorldEventKind::NpcKilledByEffect {
+                        npc_id,
+                        effect_id: effect.effect_id,
+                    })?);
+                    self.cancel_dialogues_with_npc(npc_id, events)?;
                 }
             }
         }
@@ -8149,6 +8236,9 @@ impl WorldState {
             CommandKind::AttackCreature { target } => {
                 self.apply_attack_creature(actor_id, sequence, target, events)
             }
+            CommandKind::AttackNpc { target } => {
+                self.apply_attack_npc(actor_id, sequence, target, events)
+            }
             CommandKind::TalkToNpc { target } => {
                 self.start_npc_dialogue(actor_id, sequence, target, events)
             }
@@ -8217,6 +8307,9 @@ impl WorldState {
             }
             CommandKind::ShootCreature { target } => {
                 self.apply_ranged_attack(actor_id, sequence, RangedTarget::Creature(target), events)
+            }
+            CommandKind::ShootNpc { target } => {
+                self.apply_ranged_attack(actor_id, sequence, RangedTarget::Npc(target), events)
             }
             CommandKind::Reload {
                 ammunition_item,
@@ -8530,6 +8623,73 @@ impl WorldState {
         Ok(())
     }
 
+    fn apply_attack_npc(
+        &mut self,
+        source: ActorId,
+        sequence: CommandSequence,
+        target: NpcId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let source_position = self
+            .actors
+            .get(&source)
+            .ok_or(SimError::UnknownActor)?
+            .position;
+        let Some(npc) = self.npcs.get(&target) else {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        };
+        if npc.hp <= 0 {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
+            return Ok(());
+        }
+        if !horizontally_adjacent(source_position, npc.position) {
+            events.push(self.rejection(source, sequence, CommandRejection::TargetOutOfRange)?);
+            return Ok(());
+        }
+        let Some((spread, dodge_attempted)) =
+            self.actor_npc_hit_spread(source, target, sequence.0)?
+        else {
+            events.push(self.rejection(source, sequence, CommandRejection::WeaponNotMelee)?);
+            return Ok(());
+        };
+        self.charge_actor_melee_stamina(source)?;
+        if dodge_attempted {
+            self.consume_npc_dodge_attempt(target)?;
+        }
+        if spread < 0 {
+            events.push(self.make_event(WorldEventKind::ActorMissedNpc { source, target })?);
+            return Ok(());
+        }
+        let damage = self.melee_damage(source)?;
+        let mut rng = self.named_session_rng(
+            b"actor-melee-body-part",
+            &[source.as_u128(), target.as_u128()],
+            sequence.0,
+        );
+        let outcome = self.damage_npc(target, "bash", damage, &mut rng)?;
+        events.push(self.make_event(WorldEventKind::NpcDamaged {
+            source,
+            target,
+            body_part_id: outcome.body_part_id,
+            amount: outcome.amount,
+            remaining_part_hp: outcome.remaining_part_hp,
+            remaining_hp: outcome.remaining_hp,
+        })?);
+        if outcome.remaining_hp <= 0 {
+            if let Some(npc) = self.npcs.get_mut(&target) {
+                npc.dodge_attempts_remaining = 0;
+                npc.action_points = 0;
+            }
+            events.push(self.make_event(WorldEventKind::NpcDied {
+                npc_id: target,
+                killer: source,
+            })?);
+            self.cancel_dialogues_with_npc(target, events)?;
+        }
+        Ok(())
+    }
+
     fn apply_ranged_attack(
         &mut self,
         source: ActorId,
@@ -8565,6 +8725,11 @@ impl WorldState {
                 .get(&target_id)
                 .filter(|creature| creature.hp > 0)
                 .map(|creature| creature.position),
+            RangedTarget::Npc(target_id) => self
+                .npcs
+                .get(&target_id)
+                .filter(|npc| npc.hp > 0)
+                .map(|npc| npc.position),
         };
         let Some(target_position) = target_position else {
             events.push(self.rejection(source, sequence, CommandRejection::TargetMissing)?);
@@ -8584,6 +8749,7 @@ impl WorldState {
         let target_id = match target {
             RangedTarget::Actor(id) => id.as_u128(),
             RangedTarget::Creature(id) => id.as_u128(),
+            RangedTarget::Npc(id) => id.as_u128(),
         };
         let mut rng = self.named_rng(
             b"actor-ranged-hit",
@@ -8715,6 +8881,29 @@ impl WorldState {
                     })?);
                     self.record_actor_creature_kill(source, &creature_type_id)?;
                     self.finish_creature_death(target_id, remaining_hp, events)?;
+                }
+            }
+            RangedTarget::Npc(target_id) => {
+                let outcome =
+                    self.damage_npc(target_id, "bullet", ranged_weapon.damage, &mut rng)?;
+                events.push(self.make_event(WorldEventKind::NpcDamaged {
+                    source,
+                    target: target_id,
+                    body_part_id: outcome.body_part_id,
+                    amount: outcome.amount,
+                    remaining_part_hp: outcome.remaining_part_hp,
+                    remaining_hp: outcome.remaining_hp,
+                })?);
+                if outcome.remaining_hp <= 0 {
+                    if let Some(npc) = self.npcs.get_mut(&target_id) {
+                        npc.dodge_attempts_remaining = 0;
+                        npc.action_points = 0;
+                    }
+                    events.push(self.make_event(WorldEventKind::NpcDied {
+                        npc_id: target_id,
+                        killer: source,
+                    })?);
+                    self.cancel_dialogues_with_npc(target_id, events)?;
                 }
             }
         }
@@ -10178,9 +10367,10 @@ impl WorldState {
             }
         }
         for npc in planned.npcs {
-            self.spawn_npc(
+            self.spawn_npc_with_gender(
                 &npc.template_id,
                 npc.generated_name.as_deref(),
+                npc.generated_gender.as_deref(),
                 npc.position,
             )?;
         }
@@ -14670,7 +14860,7 @@ impl WorldState {
     fn npc_at(&self, position: WorldPosition) -> Option<NpcId> {
         self.npcs
             .values()
-            .find(|npc| npc.position == position)
+            .find(|npc| npc.hp > 0 && npc.position == position)
             .map(|npc| npc.id)
     }
 
@@ -14703,6 +14893,11 @@ impl WorldState {
                                 .iter()
                                 .any(|item| item_snapshot_contains_id(&item.item, item_id))
                         })
+            })
+            || self.npcs.values().any(|npc| {
+                npc.inventory
+                    .values()
+                    .any(|item| item_snapshot_contains_id(&item.snapshot(), item_id))
             })
             || self.vehicles.values().any(|vehicle| {
                 vehicle.parts.iter().any(|part| {
@@ -14773,6 +14968,7 @@ impl WorldState {
             worldgen: self.worldgen.clone(),
             faction_templates: self.faction_templates.values().cloned().collect(),
             factions: self.factions.values().cloned().collect(),
+            npc_classes: self.npc_classes.values().cloned().collect(),
             npc_templates: self.npc_templates.values().cloned().collect(),
             dialogue_topics: self.dialogue_topics.values().cloned().collect(),
             mission_definitions: self.mission_definitions.values().cloned().collect(),
@@ -14802,6 +14998,7 @@ impl WorldState {
                 &snapshot.npc_templates,
                 &snapshot.dialogue_topics,
             )
+            || !cdda_protocol::npc_class_catalog_is_valid(&snapshot.npc_classes)
             || !cdda_protocol::faction_catalog_is_valid(
                 &snapshot.faction_templates,
                 &snapshot.factions,
@@ -15053,6 +15250,18 @@ impl WorldState {
             .cloned()
             .map(|template| (template.template_id.clone(), template))
             .collect::<BTreeMap<_, _>>();
+        let npc_classes = snapshot
+            .npc_classes
+            .iter()
+            .cloned()
+            .map(|class| (class.class_id.clone(), class))
+            .collect::<BTreeMap<_, _>>();
+        if npc_templates
+            .values()
+            .any(|template| !npc_classes.contains_key(&template.class_id))
+        {
+            return Err(SimError::InvalidSnapshot);
+        }
         if snapshot.worldgen.as_ref().is_some_and(|catalog| {
             !mapgen::catalog_npc_placements_are_supported(catalog, &npc_templates)
         }) {
@@ -15467,31 +15676,99 @@ impl WorldState {
                     .social
                     .iter()
                     .any(|social| !actors.contains_key(&social.actor_id))
-                || !occupied.insert(npc.position)
+                || (npc.hp > 0 && !occupied.insert(npc.position))
                 || !is_passable_in_chunks(&chunks, npc.position)
-                || npcs
-                    .insert(
-                        npc.id,
-                        npc_dialogue::Npc {
-                            id: npc.id,
-                            template_id: npc.template_id.clone(),
-                            name: npc.name.clone(),
-                            faction_id: npc.faction_id.clone(),
-                            attitude: npc.attitude,
-                            position: npc.position,
-                            social: npc
-                                .social
-                                .iter()
-                                .map(|social| (social.actor_id, social.opinion.clone()))
-                                .collect(),
-                            mission_offers: npc
-                                .mission_offers
-                                .iter()
-                                .map(|offer| (offer.mission_id, offer.mission_type_id.clone()))
-                                .collect(),
-                        },
-                    )
+                || !anatomy::actor_anatomy_state_is_valid(
+                    &snapshot.actor_anatomy,
+                    &npc.body_parts,
+                    npc.hp,
+                )
+                || !cdda_protocol::actor_effects_are_valid(
+                    &snapshot.actor_anatomy,
+                    &npc.effects,
+                    snapshot.tick,
+                )
+            {
+                return Err(SimError::InvalidSnapshot);
+            }
+            let mut inventory = BTreeMap::new();
+            for item in &npc.inventory {
+                if !item_owners_are_known(item, &factions)
+                    || !item_temperature_timestamps_are_valid(item, snapshot.tick)
+                {
+                    return Err(SimError::InvalidSnapshot);
+                }
+                validate_creature_corpse_context(item, snapshot.tick, &field_types)?;
+                register_stable_item_ids(
+                    item,
+                    snapshot.world_namespace,
+                    &mut item_ids,
+                    &mut stable_counters,
+                    &mut maximum_counter,
+                )?;
+                if inventory
+                    .insert(item.id, ItemInstance::from_snapshot(item)?)
                     .is_some()
+                {
+                    return Err(SimError::InvalidSnapshot);
+                }
+            }
+            if npcs
+                .insert(
+                    npc.id,
+                    npc_dialogue::Npc {
+                        id: npc.id,
+                        template_id: npc.template_id.clone(),
+                        name: npc.name.clone(),
+                        faction_id: npc.faction_id.clone(),
+                        attitude: npc.attitude,
+                        position: npc.position,
+                        class_id: npc.class_id.clone(),
+                        profession: npc.profession.clone(),
+                        gender: npc.gender.clone(),
+                        hp: npc.hp,
+                        body_parts: npc.body_parts.clone(),
+                        effects: npc.effects.clone(),
+                        base_strength: npc.base_strength,
+                        base_dexterity: npc.base_dexterity,
+                        base_intelligence: npc.base_intelligence,
+                        base_perception: npc.base_perception,
+                        personality: npc.personality.clone(),
+                        age_years: npc.age_years,
+                        height_centimeters: npc.height_centimeters,
+                        stamina: npc.stamina,
+                        maximum_stamina: npc.maximum_stamina,
+                        dodge_attempts_remaining: npc.dodge_attempts_remaining,
+                        speed: npc.speed,
+                        action_points: npc.action_points,
+                        inventory,
+                        wielded: npc.wielded,
+                        worn: npc.worn.clone(),
+                        skills: npc
+                            .skills
+                            .iter()
+                            .cloned()
+                            .map(|skill| (skill.skill_id.clone(), skill))
+                            .collect(),
+                        proficiencies: npc
+                            .proficiencies
+                            .iter()
+                            .cloned()
+                            .map(|proficiency| (proficiency.proficiency_id.clone(), proficiency))
+                            .collect(),
+                        social: npc
+                            .social
+                            .iter()
+                            .map(|social| (social.actor_id, social.opinion.clone()))
+                            .collect(),
+                        mission_offers: npc
+                            .mission_offers
+                            .iter()
+                            .map(|offer| (offer.mission_id, offer.mission_type_id.clone()))
+                            .collect(),
+                    },
+                )
+                .is_some()
             {
                 return Err(SimError::InvalidSnapshot);
             }
@@ -15631,6 +15908,7 @@ impl WorldState {
             worldgen: snapshot.worldgen.clone(),
             faction_templates,
             factions,
+            npc_classes,
             npc_templates,
             dialogue_topics,
             mission_definitions,
@@ -15655,7 +15933,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV111");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV113");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

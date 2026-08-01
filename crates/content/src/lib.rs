@@ -17,6 +17,7 @@ mod material;
 mod mission;
 mod monster;
 mod monster_group;
+mod npc_class;
 mod npc_dialogue;
 mod npc_faction;
 mod overmap_special;
@@ -113,9 +114,13 @@ pub use monster_group::{
     MAX_MONSTER_GROUPS, MonsterGroupDefinition, MonsterGroupEntry, MonsterGroupRegistry,
     MonsterGroupRegistryError, MonsterGroupTarget,
 };
+pub use npc_class::{
+    MAX_NPC_CLASS_DISTRIBUTION_DEPTH, MAX_NPC_CLASS_DISTRIBUTION_NODES, NpcClassDefinition,
+    NpcClassDistributionDefinition, NpcClassRegistry, NpcClassRegistryError,
+};
 pub use npc_dialogue::{
     DialogueOpinionDefinition, DialogueRegistry, DialogueRegistryError, DialogueResponseDefinition,
-    DialogueTopicDefinition, NpcTemplateDefinition,
+    DialogueTopicDefinition, NpcPersonalityDefinition, NpcTemplateDefinition,
 };
 pub use npc_faction::{
     FactionDefinition, FactionFoodSupplyDefinition, FactionRegistry, FactionRegistryError,
@@ -556,6 +561,7 @@ fn definition_support(kind: &str) -> SupportStatus {
             | "item_group"
             | "mission_definition"
             | "npc"
+            | "npc_class"
             | "talk_topic"
             | "SPELL"
     ) {
@@ -577,6 +583,7 @@ fn field_support(kind: &str, field: &str) -> SupportStatus {
         || (kind == "field_type" && field::field_is_implemented(field))
         || (kind == "faction" && npc_faction::field_is_implemented(field))
         || (kind == "npc" && npc_dialogue::npc_field_is_implemented(field))
+        || (kind == "npc_class" && npc_class::field_is_implemented(field))
         || (kind == "talk_topic" && npc_dialogue::topic_field_is_implemented(field))
         || (kind == "terrain" && terrain::field_is_implemented(field))
         || (kind == "furniture" && furniture::field_is_implemented(field))

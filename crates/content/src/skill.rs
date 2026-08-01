@@ -38,6 +38,8 @@ pub struct SkillDefinition {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillRegistry {
     skills: BTreeMap<String, SkillDefinition>,
+    load_order: Vec<String>,
+    skill_list_order: Vec<String>,
 }
 
 impl SkillRegistry {
@@ -51,10 +53,22 @@ impl SkillRegistry {
             .selected_json_files(manifest, enabled)
             .map_err(SkillRegistryError::Catalog)?;
         let mut skills = BTreeMap::new();
+        let mut load_order = Vec::new();
+        let mut skill_list_order = Vec::new();
         for file in files {
-            load_file(content_root.as_ref(), &file, &mut skills)?;
+            load_file(
+                content_root.as_ref(),
+                &file,
+                &mut skills,
+                &mut load_order,
+                &mut skill_list_order,
+            )?;
         }
-        Ok(Self { skills })
+        Ok(Self {
+            skills,
+            load_order,
+            skill_list_order,
+        })
     }
 
     #[must_use]
@@ -77,12 +91,38 @@ impl SkillRegistry {
             .iter()
             .map(|(id, definition)| (id.as_str(), definition))
     }
+
+    #[must_use]
+    pub fn load_order_ids(&self) -> &[String] {
+        &self.load_order
+    }
+
+    pub fn iter_load_order(&self) -> impl ExactSizeIterator<Item = (&str, &SkillDefinition)> {
+        self.load_order.iter().map(|id| {
+            let definition = &self.skills[id];
+            (id.as_str(), definition)
+        })
+    }
+
+    #[must_use]
+    pub fn skill_list_order_ids(&self) -> &[String] {
+        &self.skill_list_order
+    }
+
+    pub fn iter_skill_list_order(&self) -> impl ExactSizeIterator<Item = (&str, &SkillDefinition)> {
+        self.skill_list_order.iter().map(|id| {
+            let definition = &self.skills[id];
+            (id.as_str(), definition)
+        })
+    }
 }
 
 fn load_file(
     root: &Path,
     file: &SelectedContentFile,
     skills: &mut BTreeMap<String, SkillDefinition>,
+    load_order: &mut Vec<String>,
+    skill_list_order: &mut Vec<String>,
 ) -> Result<(), SkillRegistryError> {
     let bytes = fs::read(root.join(&file.destination))
         .map_err(|error| SkillRegistryError::Io(file.destination.clone(), error))?;
@@ -91,10 +131,10 @@ fn load_file(
     match value {
         Value::Array(values) => {
             for value in values {
-                load_value(file, value, skills)?;
+                load_value(file, value, skills, load_order, skill_list_order)?;
             }
         }
-        value => load_value(file, value, skills)?,
+        value => load_value(file, value, skills, load_order, skill_list_order)?,
     }
     Ok(())
 }
@@ -103,6 +143,8 @@ fn load_value(
     file: &SelectedContentFile,
     value: Value,
     skills: &mut BTreeMap<String, SkillDefinition>,
+    load_order: &mut Vec<String>,
+    skill_list_order: &mut Vec<String>,
 ) -> Result<(), SkillRegistryError> {
     if value.get("type").and_then(Value::as_str) != Some("skill") {
         return Ok(());
@@ -159,8 +201,13 @@ fn load_value(
         unsupported_fields,
         source: file.upstream_path.clone(),
     };
-    // CDDA's generic factory permits a later selected definition to replace an
-    // earlier one with the same stable string ID.
+    if !skills.contains_key(id) {
+        load_order.push(id.to_owned());
+    }
+    skill_list_order.retain(|loaded| loaded != id);
+    if !definition.tags.contains("contextual_skill") {
+        skill_list_order.push(id.to_owned());
+    }
     skills.insert(id.to_owned(), definition);
     Ok(())
 }

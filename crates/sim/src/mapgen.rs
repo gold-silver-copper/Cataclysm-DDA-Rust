@@ -123,6 +123,7 @@ pub(super) struct PlannedBubble {
 pub(super) struct PlannedNpcSpawn {
     pub template_id: String,
     pub generated_name: Option<String>,
+    pub generated_gender: Option<String>,
     pub position: WorldPosition,
 }
 
@@ -478,7 +479,7 @@ fn plan_omt_cell(
         });
     }
     let mut npcs = Vec::with_capacity(plan.npcs.len());
-    for (index, template_id, generated_name) in plan.npcs {
+    for (index, template_id, generated_name, generated_gender) in plan.npcs {
         if terrain[index].move_cost <= 0
             || furniture[index]
                 .as_ref()
@@ -493,6 +494,7 @@ fn plan_omt_cell(
         npcs.push(PlannedNpcSpawn {
             template_id,
             generated_name,
+            generated_gender,
             position,
         });
     }
@@ -584,7 +586,7 @@ struct OmtMapgenPlan {
     nested_expansions: usize,
     monster_placements: Vec<PlannedMonsterPlacement>,
     individual_monster_placements: Vec<PlannedIndividualMonsterPlacement>,
-    npcs: Vec<(usize, String, Option<String>)>,
+    npcs: Vec<(usize, String, Option<String>, Option<String>)>,
     monsters: Vec<(usize, u16)>,
     vehicles: Vec<PlannedMapgenVehicle>,
 }
@@ -1077,7 +1079,7 @@ fn rotate_mapgen_plan(plan: &mut OmtMapgenPlan, rotation: u8) -> Result<(), SimE
         }
         request.candidates.sort_unstable();
     }
-    for (index, _, _) in &mut plan.npcs {
+    for (index, _, _, _) in &mut plan.npcs {
         let (target_x, target_y) =
             rotate_tile_xy(*index % OMT_TILE_WIDTH, *index / OMT_TILE_WIDTH, rotation)?;
         *index = target_y * OMT_TILE_WIDTH + target_x;
@@ -1271,21 +1273,36 @@ fn plan_npc_placement(
         if plan.npcs.len() >= MAX_PLANNED_NPCS_PER_OMT {
             return Err(SimError::InvalidNpcDialogue);
         }
-        let generated_name = match placement.generated_name_category_ids.as_slice() {
-            [] => None,
-            [category_id] => Some(expand_npc_name(catalog, category_id, rng)?),
-            [male_category_id, female_category_id] => {
-                let category_id = if inclusive_rng_u64(rng, 0, 1) == 0 {
-                    male_category_id
-                } else {
-                    female_category_id
-                };
-                Some(expand_npc_name(catalog, category_id, rng)?)
-            }
-            _ => return Err(SimError::InvalidNpcDialogue),
-        };
-        plan.npcs
-            .push((index, placement.template_id.clone(), generated_name));
+        let (generated_name, generated_gender) =
+            match placement.generated_name_category_ids.as_slice() {
+                [] => (None, None),
+                [category_id] => (
+                    Some(expand_npc_name(catalog, category_id, rng)?),
+                    match category_id.as_str() {
+                        "<male_full_name>" => Some(String::from("male")),
+                        "<female_full_name>" => Some(String::from("female")),
+                        _ => return Err(SimError::InvalidNpcDialogue),
+                    },
+                ),
+                [male_category_id, female_category_id] => {
+                    let (category_id, gender) = if inclusive_rng_u64(rng, 0, 1) == 0 {
+                        (male_category_id, "male")
+                    } else {
+                        (female_category_id, "female")
+                    };
+                    (
+                        Some(expand_npc_name(catalog, category_id, rng)?),
+                        Some(gender.to_owned()),
+                    )
+                }
+                _ => return Err(SimError::InvalidNpcDialogue),
+            };
+        plan.npcs.push((
+            index,
+            placement.template_id.clone(),
+            generated_name,
+            generated_gender,
+        ));
     }
     Ok(())
 }

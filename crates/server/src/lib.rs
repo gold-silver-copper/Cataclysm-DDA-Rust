@@ -33,7 +33,8 @@ use cdda_protocol::{
     ReplicationSnapshotV1, ReportId, ReportRejection, ReportResponse, ReportState, ReportSummary,
     ServerHello, SimTick, VisibleActorSnapshot, VisibleChunkSnapshot, VisibleCreatureSnapshot,
     VisibleNpcSnapshotV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1, WorldEvent,
-    WorldEventKind, WorldPosition, WorldSnapshotV1, decode_client_datagram, encode_control,
+    WorldEventKind, WorldPosition, WorldSnapshotV1, actor_body_part_summary_hp,
+    decode_client_datagram, encode_control,
 };
 use cdda_sim::{ActorSpawn, ReservedIdBlock, TickOutcome, WorldState};
 use iroh::{
@@ -4314,6 +4315,13 @@ fn interest_snapshot(
         .map(|npc| {
             let (faction_name, hostile_to_controlled_actor) =
                 npc_faction::visible_npc_faction(&snapshot, npc);
+            let maximum_hp = {
+                let mut body_parts = npc.body_parts.clone();
+                for part in &mut body_parts {
+                    part.current_hp = part.maximum_hp;
+                }
+                actor_body_part_summary_hp(&snapshot.actor_anatomy, &body_parts).unwrap_or_default()
+            };
             VisibleNpcSnapshotV1 {
                 id: npc.id,
                 template_id: npc.template_id.clone(),
@@ -4322,6 +4330,9 @@ fn interest_snapshot(
                 faction_name,
                 hostile_to_controlled_actor,
                 position: npc.position,
+                hp: npc.hp,
+                maximum_hp,
+                profession: npc.profession.clone(),
                 opinion_of_controlled_actor: (dialogue_npc_id == Some(npc.id)).then(|| {
                     npc.social
                         .iter()
@@ -5322,7 +5333,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         } => source == actor_id || target == actor_id,
         WorldEventKind::CreatureDamaged { source, .. }
         | WorldEventKind::ActorMissedCreature { source, .. }
-        | WorldEventKind::CreatureDied { killer: source, .. } => source == actor_id,
+        | WorldEventKind::CreatureDied { killer: source, .. }
+        | WorldEventKind::NpcDamaged { source, .. }
+        | WorldEventKind::ActorMissedNpc { source, .. }
+        | WorldEventKind::NpcDied { killer: source, .. } => source == actor_id,
         WorldEventKind::ActorDamagedByCreature { target, .. }
         | WorldEventKind::ActorKilledByCreature {
             actor_id: target, ..
@@ -5346,6 +5360,8 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::CreatureSummoned { .. }
         | WorldEventKind::CreatureBashed { .. }
         | WorldEventKind::CreatureOpenedTerrain { .. }
+        | WorldEventKind::NpcDamagedByEffect { .. }
+        | WorldEventKind::NpcKilledByEffect { .. }
         | WorldEventKind::FieldIntensityChanged { .. } => false,
     }
 }

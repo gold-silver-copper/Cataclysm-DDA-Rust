@@ -22,6 +22,13 @@ const NPC_FIELDS: &[&str] = &[
     "mission",
     "mission_offered",
     "chat",
+    "age",
+    "height",
+    "str",
+    "dex",
+    "int",
+    "per",
+    "personality",
 ];
 const TOPIC_FIELDS: &[&str] = &[
     "type",
@@ -81,8 +88,23 @@ pub struct NpcTemplateDefinition {
     pub mission: String,
     pub mission_offered: Vec<String>,
     pub chat_topic_id: String,
+    pub age_years: Option<u16>,
+    pub height_centimeters: Option<u16>,
+    pub base_strength: Option<u16>,
+    pub base_dexterity: Option<u16>,
+    pub base_intelligence: Option<u16>,
+    pub base_perception: Option<u16>,
+    pub personality: Option<NpcPersonalityDefinition>,
     pub unsupported_fields: BTreeSet<String>,
     pub source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NpcPersonalityDefinition {
+    pub aggression: i8,
+    pub bravery: i8,
+    pub collector: i8,
+    pub altruism: i8,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -192,6 +214,16 @@ fn load_npc(
             .transpose()?
             .unwrap_or_default(),
         chat_topic_id: required_string(object.get("chat"), file, "chat")?,
+        age_years: optional_u16(object.get("age"), file, "age")?,
+        height_centimeters: optional_u16(object.get("height"), file, "height")?,
+        base_strength: optional_u16(object.get("str"), file, "str")?,
+        base_dexterity: optional_u16(object.get("dex"), file, "dex")?,
+        base_intelligence: optional_u16(object.get("int"), file, "int")?,
+        base_perception: optional_u16(object.get("per"), file, "per")?,
+        personality: object
+            .get("personality")
+            .map(|value| npc_personality(value, file))
+            .transpose()?,
         unsupported_fields: unsupported_fields(object, NPC_FIELDS),
         source: file.upstream_path.clone(),
     };
@@ -523,6 +555,50 @@ fn integer(
         .as_i64()
         .and_then(|value| i32::try_from(value).ok())
         .ok_or_else(|| invalid(file, field))
+}
+
+fn optional_u16(
+    value: Option<&Value>,
+    file: &SelectedContentFile,
+    field: &str,
+) -> Result<Option<u16>, DialogueRegistryError> {
+    value
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| invalid(file, field))
+        })
+        .transpose()
+}
+
+fn npc_personality(
+    value: &Value,
+    file: &SelectedContentFile,
+) -> Result<NpcPersonalityDefinition, DialogueRegistryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid(file, "personality"))?;
+    if object
+        .keys()
+        .any(|field| !["aggression", "bravery", "collector", "altruism"].contains(&field.as_str()))
+    {
+        return Err(invalid(file, "personality"));
+    }
+    let field = |name| -> Result<i8, DialogueRegistryError> {
+        object
+            .get(name)
+            .and_then(Value::as_i64)
+            .and_then(|value| i8::try_from(value).ok())
+            .ok_or_else(|| invalid(file, name))
+    };
+    Ok(NpcPersonalityDefinition {
+        aggression: field("aggression")?,
+        bravery: field("bravery")?,
+        collector: field("collector")?,
+        altruism: field("altruism")?,
+    })
 }
 
 fn unsupported_fields(object: &Map<String, Value>, supported: &[&str]) -> BTreeSet<String> {

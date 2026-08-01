@@ -99,6 +99,11 @@ Run only when the user explicitly requests a verification checkpoint.
   pickup/crafting/vehicle cargo, visible completion sources, pinned reachable
   map-before-inventory consumption order, container spill, hostile ownership,
   protocol 137/schema 114 recovery, replay, and two-client dialogue completion.
+- NPC actor-generation checkpoint: run pinned NPC-class distribution, global
+  skill-order, base-stat/personality/age/height, template-override, dodge,
+  armor, effect, resource, death, protocol-138/schema-115/replay-4 recovery,
+  canonical-state-V113/event-V31, production admission, and two-client combat
+  traces.
 - Vehicle checkpoint: run pinned vehicle inheritance/group selection, mapgen
   phase/RNG order, arbitrary-angle tileray mounts, initialization damage/state,
   collision, cargo capacity/spawning/rot/corpse recovery, contiguous openable

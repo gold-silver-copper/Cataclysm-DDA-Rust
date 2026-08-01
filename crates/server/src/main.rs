@@ -16,9 +16,10 @@ use cdda_content::{
     EffectOnConditionRegistry, EffectTypeRegistry, FactionRegistry, FieldTypeDefinition,
     FieldTypeRegistry, FurnitureDefinition, FurnitureRegistry, ItemDefinition, ItemGroupRegistry,
     ItemRegistry, MapgenRegistry, MaterialRegistry, MissionRegistry, ModCatalog, MonsterDefinition,
-    MonsterGroupRegistry, MonsterRegistry, OvermapSpecialRegistry, OvermapTerrainRegistry,
-    ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry, SkillRegistry, SpellRegistry,
-    StartLocationRegistry, TerrainDefinition, TerrainRegistry, VehicleRegistry,
+    MonsterGroupRegistry, MonsterRegistry, NpcClassRegistry, OvermapSpecialRegistry,
+    OvermapTerrainRegistry, ProficiencyRegistry, RecipeRegistry, RiverSettingsRegistry,
+    SkillRegistry, SpellRegistry, StartLocationRegistry, TerrainDefinition, TerrainRegistry,
+    VehicleRegistry,
 };
 #[cfg(test)]
 use cdda_content::{
@@ -75,6 +76,7 @@ mod anatomy;
 mod eocs;
 mod item_groups;
 mod missions;
+mod npc_classes;
 mod npc_faction;
 #[cfg(test)]
 mod regional_field_acceptance;
@@ -100,6 +102,7 @@ use item_groups::{
     runtime_item_group_item,
 };
 use missions::runtime_mission_catalog;
+use npc_classes::runtime_npc_classes;
 use npc_faction::runtime_npc_factions;
 use use_actions::{runtime_item_place_monster_types, runtime_item_transform_types};
 use worldgen::{
@@ -155,6 +158,8 @@ struct RuntimeWorldContent<'a> {
     river_settings: &'a RiverSettingsRegistry,
     factions: &'a FactionRegistry,
     dialogue: &'a DialogueRegistry,
+    npc_classes: &'a NpcClassRegistry,
+    skills: &'a SkillRegistry,
     missions: &'a MissionRegistry,
 }
 
@@ -428,6 +433,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let skills =
         SkillRegistry::load_selected(&content_manifest, content_root, &mod_catalog, &enabled_mods)?;
+    let npc_classes = NpcClassRegistry::load_selected(
+        &content_manifest,
+        content_root,
+        &mod_catalog,
+        &enabled_mods,
+        &skills,
+    )?;
     let proficiencies = ProficiencyRegistry::load_selected(
         &content_manifest,
         content_root,
@@ -531,6 +543,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             river_settings: &river_settings,
             factions: &factions,
             dialogue: &dialogue,
+            npc_classes: &npc_classes,
+            skills: &skills,
             missions: &missions,
         },
     )?;
@@ -855,6 +869,7 @@ fn open_world(
         monsters: content.monsters,
     };
     let actor_anatomy = runtime_actor_anatomy(content.anatomy)?;
+    let npc_classes = runtime_npc_classes(content.npc_classes, content.skills)?;
     let wearable_armor_types = runtime_wearable_armor_types(content.items, content.materials)?;
     let items = content.items;
     let eocs = content.eocs;
@@ -909,6 +924,7 @@ fn open_world(
     let (faction_templates, factions) = runtime_npc_factions(content.factions)?;
     let (npc_templates, _preliminary_dialogue_topics) = runtime_npc_dialogue(
         content.dialogue,
+        &npc_classes,
         &faction_templates,
         &eoc_catalog.0,
         &actor_anatomy,
@@ -1096,6 +1112,7 @@ fn open_world(
     }
     let (npc_templates, dialogue_topics) = runtime_npc_dialogue(
         content.dialogue,
+        &npc_classes,
         &faction_templates,
         &eoc_catalog.0,
         &actor_anatomy,
@@ -1106,7 +1123,7 @@ fn open_world(
         &npc_offer_mission_ids,
     )?;
     initial.register_mission_catalog(mission_catalog)?;
-    initial.register_npc_dialogue_catalog(npc_templates, dialogue_topics)?;
+    initial.register_npc_dialogue_catalog(npc_classes, npc_templates, dialogue_topics)?;
     let projectile_field_type_ids = worldgen
         .monster_prototypes
         .iter()
@@ -1847,6 +1864,7 @@ fn build_reading_catalog(
 
 fn runtime_npc_dialogue(
     registry: &DialogueRegistry,
+    npc_classes: &[cdda_protocol::NpcClassV1],
     factions: &[cdda_protocol::FactionTemplateV1],
     eoc_definitions: &[cdda_protocol::EocDefinitionV1],
     anatomy: &cdda_protocol::AnatomyDefinitionV1,
@@ -2026,16 +2044,15 @@ fn runtime_npc_dialogue(
         .iter()
         .map(|faction| faction.faction_id.as_str())
         .collect::<BTreeSet<_>>();
+    let class_ids = npc_classes
+        .iter()
+        .map(|class| class.class_id.as_str())
+        .collect::<BTreeSet<_>>();
     let templates = registry
         .npc_iter()
         .filter(|(_, template)| {
             template.unsupported_fields.is_empty()
-                // Pinned class randomization owns body, stats, equipment,
-                // skills, combat state, and RNG order.  Until that kernel is
-                // represented, class/suffix templates must not enter runtime
-                // as static invulnerable blockers.
-                && template.class_id.is_empty()
-                && template.name_suffix.is_none()
+                && class_ids.contains(template.class_id.as_str())
                 && (template.chat_topic_id == "TALK_DONE"
                     || topics.contains_key(&template.chat_topic_id))
                 && !matches!(
@@ -2078,6 +2095,20 @@ fn runtime_npc_dialogue(
             mission: template.mission.clone(),
             mission_offered: template.mission_offered.clone(),
             chat_topic_id: template.chat_topic_id.clone(),
+            base_strength: template.base_strength,
+            base_dexterity: template.base_dexterity,
+            base_intelligence: template.base_intelligence,
+            base_perception: template.base_perception,
+            personality: template.personality.as_ref().map(|personality| {
+                cdda_protocol::NpcPersonalityV1 {
+                    aggression: personality.aggression,
+                    bravery: personality.bravery,
+                    collector: personality.collector,
+                    altruism: personality.altruism,
+                }
+            }),
+            age_years: template.age_years,
+            height_centimeters: template.height_centimeters,
         })
         .collect::<Vec<_>>();
     let topics = topics.into_values().collect::<Vec<_>>();

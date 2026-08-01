@@ -3,15 +3,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cdda_protocol::{
-    ActorId, CommandRejection, CommandSequence, DialogueTopicV1, InteractionCancellationReasonV1,
-    InteractionChoiceV1, InteractionContextV1, InteractionId, MAX_DIALOGUE_TOPIC_STACK,
-    MAX_NPC_NAME_BYTES, NO_FACTION_ID, NpcId, NpcMissionOfferV1, NpcOpinionV1, NpcSnapshotV1,
-    NpcSocialStateV1, NpcTemplateV1, PendingInteractionV1, SimTick, WorldEvent, WorldEventKind,
-    WorldPosition, npc_dialogue_catalog_is_valid,
+    ActorBodyPartSnapshotV1, ActorEffectSnapshotV1, ActorId, CharacterCreationStatsV1,
+    CommandRejection, CommandSequence, DialogueTopicV1, InteractionCancellationReasonV1,
+    InteractionChoiceV1, InteractionContextV1, InteractionId, MAX_ACTOR_BASE_STAT,
+    MAX_DIALOGUE_TOPIC_STACK, MAX_NPC_NAME_BYTES, NO_FACTION_ID, NpcClassV1, NpcDistributionV1,
+    NpcId, NpcMissionOfferV1, NpcOpinionV1, NpcPersonalityV1, NpcSnapshotV1, NpcSocialStateV1,
+    NpcTemplateV1, PendingInteractionV1, ProficiencyLevelSnapshot, SimTick, SkillLevelSnapshot,
+    WorldEvent, WorldEventKind, WorldPosition, npc_class_catalog_is_valid,
+    npc_dialogue_catalog_is_valid,
 };
+use rand_core::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::{SimError, WorldState};
+use crate::{ItemInstance, SimError, WorldState};
 
 const DIALOGUE_LIFETIME_TICKS: u64 = 5 * 60 * SimTick::HZ;
 pub(super) const DIALOGUE_FALLBACK_CHOICE_ID: &str = "__fallback_done";
@@ -28,6 +32,10 @@ const BUILTIN_MISSION_CLEAR: &str = "__builtin_mission_clear";
 const BUILTIN_MISSION_DONE: &str = "__builtin_mission_done";
 const BUILTIN_MISSION_OFFER_PREFIX: &str = "__builtin_mission_offer/";
 const BUILTIN_MISSION_ASSIGNED_PREFIX: &str = "__builtin_mission_assigned/";
+const NPC_RANDOM_AGE_MIN: i32 = 18;
+const NPC_RANDOM_AGE_MAX: i32 = 55;
+const NPC_MIN_HEIGHT_CENTIMETERS: i32 = 145;
+const NPC_MAX_HEIGHT_CENTIMETERS: i32 = 200;
 
 struct NpcTopicPresentation {
     prompt: String,
@@ -39,6 +47,93 @@ struct BuiltinMissionTransition {
     selected_mission_id: Option<cdda_protocol::MissionId>,
 }
 
+fn npc_roll_inclusive(rng: &mut impl Rng, first: i32, second: i32) -> Result<i32, SimError> {
+    let minimum = i64::from(first.min(second));
+    let maximum = i64::from(first.max(second));
+    let width = u64::try_from(maximum - minimum)
+        .map_err(|_| SimError::NumericOverflow)?
+        .checked_add(1)
+        .ok_or(SimError::NumericOverflow)?;
+    let offset = i64::try_from(rng.next_u64() % width).map_err(|_| SimError::NumericOverflow)?;
+    i32::try_from(minimum + offset).map_err(|_| SimError::NumericOverflow)
+}
+
+fn evaluate_npc_distribution(
+    distribution: &NpcDistributionV1,
+    rng: &mut impl Rng,
+) -> Result<f32, SimError> {
+    match distribution {
+        NpcDistributionV1::Constant { value_bits } => Ok(f32::from_bits(*value_bits)),
+        NpcDistributionV1::OneIn { denominator_bits } => {
+            let denominator = f64::from(f32::from_bits(*denominator_bits));
+            let sample = f64::from(rng.next_u32()) / f64::from(u32::MAX);
+            Ok(if sample <= 1.0 / denominator {
+                1.0
+            } else {
+                0.0
+            })
+        }
+        NpcDistributionV1::Range { first, second } => {
+            Ok(npc_roll_inclusive(rng, *first, *second)? as f32)
+        }
+        NpcDistributionV1::Dice { count, sides } => {
+            let mut total = 0_i32;
+            for _ in 0..*count {
+                total = total
+                    .checked_add(npc_roll_inclusive(rng, 1, *sides)?)
+                    .ok_or(SimError::NumericOverflow)?;
+            }
+            Ok(total as f32)
+        }
+        NpcDistributionV1::Sum(children) => {
+            let mut values = children.iter();
+            let mut total =
+                evaluate_npc_distribution(values.next().ok_or(SimError::InvalidNpcDialogue)?, rng)?;
+            for child in values {
+                total += evaluate_npc_distribution(child, rng)?;
+            }
+            Ok(total)
+        }
+        NpcDistributionV1::Multiply(children) => {
+            let mut values = children.iter();
+            let mut total =
+                evaluate_npc_distribution(values.next().ok_or(SimError::InvalidNpcDialogue)?, rng)?;
+            for child in values {
+                total *= evaluate_npc_distribution(child, rng)?;
+            }
+            Ok(total)
+        }
+    }
+}
+
+fn roll_npc_distribution_i32(
+    distribution: &NpcDistributionV1,
+    rng: &mut impl Rng,
+) -> Result<i32, SimError> {
+    let value = evaluate_npc_distribution(distribution, rng)?;
+    if !value.is_finite() || value < i32::MIN as f32 || value > i32::MAX as f32 {
+        return Err(SimError::NumericOverflow);
+    }
+    Ok(value as i32)
+}
+
+fn npc_standard_normal_q32(rng: &mut impl Rng) -> i128 {
+    let sum = (0..12).fold(0_i128, |total, _| total + i128::from(rng.next_u32()));
+    sum - 6 * i128::from(u32::MAX)
+}
+
+fn round_q32(value: i128) -> Result<i32, SimError> {
+    const SCALE: i128 = 1_i128 << 32;
+    let rounded = if value >= 0 {
+        value.checked_add(SCALE / 2)
+    } else {
+        value.checked_sub(SCALE / 2)
+    }
+    .and_then(|value| value.checked_div(SCALE))
+    .ok_or(SimError::NumericOverflow)?;
+    i32::try_from(rounded).map_err(|_| SimError::NumericOverflow)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct Npc {
     pub(super) id: NpcId,
@@ -47,6 +142,29 @@ pub(super) struct Npc {
     pub(super) faction_id: String,
     pub(super) attitude: i32,
     pub(super) position: WorldPosition,
+    pub(super) class_id: String,
+    pub(super) profession: String,
+    pub(super) gender: String,
+    pub(super) hp: i32,
+    pub(super) body_parts: Vec<ActorBodyPartSnapshotV1>,
+    pub(super) effects: Vec<ActorEffectSnapshotV1>,
+    pub(super) base_strength: u16,
+    pub(super) base_dexterity: u16,
+    pub(super) base_intelligence: u16,
+    pub(super) base_perception: u16,
+    pub(super) personality: NpcPersonalityV1,
+    pub(super) age_years: u16,
+    pub(super) height_centimeters: u16,
+    pub(super) stamina: u32,
+    pub(super) maximum_stamina: u32,
+    pub(super) dodge_attempts_remaining: u8,
+    pub(super) speed: u16,
+    pub(super) action_points: i64,
+    pub(super) inventory: BTreeMap<cdda_protocol::ItemId, ItemInstance>,
+    pub(super) wielded: Option<cdda_protocol::ItemId>,
+    pub(super) worn: Vec<cdda_protocol::ItemId>,
+    pub(super) skills: BTreeMap<String, SkillLevelSnapshot>,
+    pub(super) proficiencies: BTreeMap<String, ProficiencyLevelSnapshot>,
     pub(super) social: BTreeMap<ActorId, NpcOpinionV1>,
     pub(super) mission_offers: BTreeMap<cdda_protocol::MissionId, String>,
 }
@@ -60,6 +178,33 @@ impl Npc {
             faction_id: self.faction_id.clone(),
             attitude: self.attitude,
             position: self.position,
+            class_id: self.class_id.clone(),
+            profession: self.profession.clone(),
+            gender: self.gender.clone(),
+            hp: self.hp,
+            body_parts: self.body_parts.clone(),
+            effects: self.effects.clone(),
+            base_strength: self.base_strength,
+            base_dexterity: self.base_dexterity,
+            base_intelligence: self.base_intelligence,
+            base_perception: self.base_perception,
+            personality: self.personality.clone(),
+            age_years: self.age_years,
+            height_centimeters: self.height_centimeters,
+            stamina: self.stamina,
+            maximum_stamina: self.maximum_stamina,
+            dodge_attempts_remaining: self.dodge_attempts_remaining,
+            speed: self.speed,
+            action_points: self.action_points,
+            inventory: self
+                .inventory
+                .values()
+                .map(ItemInstance::snapshot)
+                .collect(),
+            wielded: self.wielded,
+            worn: self.worn.clone(),
+            skills: self.skills.values().cloned().collect(),
+            proficiencies: self.proficiencies.values().cloned().collect(),
             social: self
                 .social
                 .iter()
@@ -81,8 +226,41 @@ impl Npc {
 }
 
 impl WorldState {
+    pub(super) fn cancel_dialogues_with_npc(
+        &mut self,
+        npc_id: NpcId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let pending = self
+            .actors
+            .iter()
+            .filter_map(|(actor_id, actor)| {
+                actor.pending_interaction.as_ref().and_then(|interaction| {
+                    matches!(
+                        interaction.context,
+                        InteractionContextV1::NpcDialogue { npc_id: target, .. } if target == npc_id
+                    )
+                    .then_some((*actor_id, interaction.interaction_id))
+                })
+            })
+            .collect::<Vec<_>>();
+        for (actor_id, interaction_id) in pending {
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .pending_interaction = None;
+            events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                actor_id,
+                interaction_id,
+                reason: InteractionCancellationReasonV1::Invalidated,
+            })?);
+        }
+        Ok(())
+    }
+
     pub fn register_npc_dialogue_catalog(
         &mut self,
+        classes: Vec<NpcClassV1>,
         templates: Vec<NpcTemplateV1>,
         topics: Vec<DialogueTopicV1>,
     ) -> Result<(), SimError> {
@@ -91,7 +269,15 @@ impl WorldState {
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
-        if !npc_dialogue_catalog_is_valid(&templates, &topics)
+        let class_ids = classes
+            .iter()
+            .map(|class| class.class_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if !npc_class_catalog_is_valid(&classes)
+            || !npc_dialogue_catalog_is_valid(&templates, &topics)
+            || templates
+                .iter()
+                .any(|template| !class_ids.contains(template.class_id.as_str()))
             || templates.iter().any(|template| {
                 !template.faction_id.is_empty()
                     && template.faction_id != NO_FACTION_ID
@@ -99,6 +285,7 @@ impl WorldState {
             })
             || !self.npc_templates.is_empty()
             || !self.dialogue_topics.is_empty()
+            || !self.npc_classes.is_empty()
             || !self.npcs.is_empty()
             || !crate::eocs::mission_references_are_valid_for_ids(
                 self.eoc_definitions.values(),
@@ -115,6 +302,10 @@ impl WorldState {
         {
             return Err(SimError::InvalidNpcDialogue);
         }
+        self.npc_classes = classes
+            .into_iter()
+            .map(|class| (class.class_id.clone(), class))
+            .collect();
         self.npc_templates = templates
             .into_iter()
             .map(|template| (template.template_id.clone(), template))
@@ -130,6 +321,16 @@ impl WorldState {
         &mut self,
         template_id: &str,
         generated_name: Option<&str>,
+        position: WorldPosition,
+    ) -> Result<NpcId, SimError> {
+        self.spawn_npc_with_gender(template_id, generated_name, None, position)
+    }
+
+    pub(super) fn spawn_npc_with_gender(
+        &mut self,
+        template_id: &str,
+        generated_name: Option<&str>,
+        generated_gender: Option<&str>,
         position: WorldPosition,
     ) -> Result<NpcId, SimError> {
         let template = self
@@ -164,6 +365,146 @@ impl WorldState {
             return Err(SimError::IdReservationExhausted);
         }
         let id = self.allocator.allocate_npc()?;
+        let class = self
+            .npc_classes
+            .get(&template.class_id)
+            .cloned()
+            .ok_or(SimError::InvalidNpcDialogue)?;
+        let mut rng = self.named_rng(b"npc-randomize", &[id.as_u128()], 0);
+        let mut personality = NpcPersonalityV1 {
+            aggression: i8::try_from(npc_roll_inclusive(&mut rng, -10, 10)?)
+                .map_err(|_| SimError::NumericOverflow)?,
+            bravery: i8::try_from(npc_roll_inclusive(&mut rng, -3, 10)?)
+                .map_err(|_| SimError::NumericOverflow)?,
+            collector: i8::try_from(npc_roll_inclusive(&mut rng, -1, 10)?)
+                .map_err(|_| SimError::NumericOverflow)?,
+            altruism: 0,
+        };
+        let altruism = round_q32(
+            npc_standard_normal_q32(&mut rng)
+                .checked_mul(3)
+                .ok_or(SimError::NumericOverflow)?,
+        )?
+        .clamp(-10, 10);
+        personality.altruism = i8::try_from(altruism).map_err(|_| SimError::NumericOverflow)?;
+        // Pinned randomize always consumes the base gender draw before a
+        // template override is applied by load_npc_template.
+        let random_gender = if npc_roll_inclusive(&mut rng, 0, 1)? == 0 {
+            "male"
+        } else {
+            "female"
+        };
+        const Q32: i128 = 1_i128 << 32;
+        let height_q32 = (16_835_i128 * Q32 / 100)
+            .checked_add(
+                npc_standard_normal_q32(&mut rng)
+                    .checked_mul(1_550)
+                    .and_then(|value| value.checked_div(100))
+                    .ok_or(SimError::NumericOverflow)?,
+            )
+            .ok_or(SimError::NumericOverflow)?;
+        let random_height =
+            round_q32(height_q32)?.clamp(NPC_MIN_HEIGHT_CENTIMETERS, NPC_MAX_HEIGHT_CENTIMETERS);
+        let random_age = npc_roll_inclusive(&mut rng, NPC_RANDOM_AGE_MIN, NPC_RANDOM_AGE_MAX)?;
+        let mut roll_base_stat = || -> Result<i32, SimError> {
+            let mut value = 0_i32;
+            for _ in 0..4 {
+                value = value
+                    .checked_add(npc_roll_inclusive(&mut rng, 1, 3)?)
+                    .ok_or(SimError::NumericOverflow)?;
+            }
+            Ok(value)
+        };
+        let mut strength =
+            i32::from(template.base_strength.unwrap_or(
+                u16::try_from(roll_base_stat()?).map_err(|_| SimError::NumericOverflow)?,
+            ));
+        let mut dexterity =
+            i32::from(template.base_dexterity.unwrap_or(
+                u16::try_from(roll_base_stat()?).map_err(|_| SimError::NumericOverflow)?,
+            ));
+        let mut intelligence =
+            i32::from(template.base_intelligence.unwrap_or(
+                u16::try_from(roll_base_stat()?).map_err(|_| SimError::NumericOverflow)?,
+            ));
+        let mut perception =
+            i32::from(template.base_perception.unwrap_or(
+                u16::try_from(roll_base_stat()?).map_err(|_| SimError::NumericOverflow)?,
+            ));
+        if let Some(fixed) = template.personality.clone() {
+            personality = fixed;
+        }
+        strength = strength
+            .checked_add(roll_npc_distribution_i32(&class.bonus_strength, &mut rng)?)
+            .ok_or(SimError::NumericOverflow)?;
+        dexterity = dexterity
+            .checked_add(roll_npc_distribution_i32(&class.bonus_dexterity, &mut rng)?)
+            .ok_or(SimError::NumericOverflow)?;
+        intelligence = intelligence
+            .checked_add(roll_npc_distribution_i32(
+                &class.bonus_intelligence,
+                &mut rng,
+            )?)
+            .ok_or(SimError::NumericOverflow)?;
+        perception = perception
+            .checked_add(roll_npc_distribution_i32(
+                &class.bonus_perception,
+                &mut rng,
+            )?)
+            .ok_or(SimError::NumericOverflow)?;
+        let mut add_personality =
+            |current: i8, distribution: &NpcDistributionV1| -> Result<i8, SimError> {
+                let value = i32::from(current)
+                    .checked_add(roll_npc_distribution_i32(distribution, &mut rng)?)
+                    .ok_or(SimError::NumericOverflow)?
+                    .clamp(-10, 10);
+                i8::try_from(value).map_err(|_| SimError::NumericOverflow)
+            };
+        personality.aggression = add_personality(personality.aggression, &class.bonus_aggression)?;
+        personality.bravery = add_personality(personality.bravery, &class.bonus_bravery)?;
+        personality.collector = add_personality(personality.collector, &class.bonus_collector)?;
+        personality.altruism = add_personality(personality.altruism, &class.bonus_altruism)?;
+        let stats = CharacterCreationStatsV1 {
+            strength: u16::try_from(strength).map_err(|_| SimError::InvalidNpcDialogue)?,
+            dexterity: u16::try_from(dexterity).map_err(|_| SimError::InvalidNpcDialogue)?,
+            intelligence: u16::try_from(intelligence).map_err(|_| SimError::InvalidNpcDialogue)?,
+            perception: u16::try_from(perception).map_err(|_| SimError::InvalidNpcDialogue)?,
+        };
+        if !stats.is_valid()
+            || [
+                stats.strength,
+                stats.dexterity,
+                stats.intelligence,
+                stats.perception,
+            ]
+            .into_iter()
+            .any(|value| value > MAX_ACTOR_BASE_STAT)
+        {
+            return Err(SimError::InvalidNpcDialogue);
+        }
+        let body_parts = crate::anatomy::initial_body_parts(&self.actor_anatomy, stats)?;
+        let hp = cdda_protocol::actor_body_part_summary_hp(&self.actor_anatomy, &body_parts)
+            .ok_or(SimError::InvalidActorAnatomy)?;
+        let mut skills = BTreeMap::new();
+        for skill in &class.skills {
+            let level = roll_npc_distribution_i32(&skill.distribution, &mut rng)?.max(0);
+            let level = u8::try_from(level)
+                .map_err(|_| SimError::InvalidNpcDialogue)?
+                .min(cdda_protocol::MAX_SKILL_LEVEL);
+            if level > 0 {
+                skills.insert(
+                    skill.skill_id.clone(),
+                    SkillLevelSnapshot {
+                        skill_id: skill.skill_id.clone(),
+                        practical_level: level,
+                        practical_experience: 0,
+                        theoretical_level: level,
+                        theoretical_experience: 0,
+                        last_practiced: self.tick,
+                    },
+                );
+            }
+        }
         let mut mission_offers = BTreeMap::new();
         for mission_type_id in &template.mission_offered {
             if !self.mission_definitions.contains_key(mission_type_id) {
@@ -181,6 +522,36 @@ impl WorldState {
                 faction_id: template.faction_id,
                 attitude: template.attitude,
                 position,
+                class_id: class.class_id,
+                profession: template.name_suffix.unwrap_or(class.name),
+                gender: template
+                    .gender
+                    .or_else(|| generated_gender.map(str::to_owned))
+                    .unwrap_or_else(|| random_gender.to_owned()),
+                hp,
+                body_parts,
+                effects: Vec::new(),
+                base_strength: stats.strength,
+                base_dexterity: stats.dexterity,
+                base_intelligence: stats.intelligence,
+                base_perception: stats.perception,
+                personality,
+                age_years: template
+                    .age_years
+                    .unwrap_or(u16::try_from(random_age).map_err(|_| SimError::NumericOverflow)?),
+                height_centimeters: template.height_centimeters.unwrap_or(
+                    u16::try_from(random_height).map_err(|_| SimError::NumericOverflow)?,
+                ),
+                stamina: crate::DEFAULT_ACTOR_MAXIMUM_STAMINA,
+                maximum_stamina: crate::DEFAULT_ACTOR_MAXIMUM_STAMINA,
+                dodge_attempts_remaining: crate::combat::ORDINARY_DODGE_ATTEMPTS,
+                speed: crate::DEFAULT_ACTOR_SPEED,
+                action_points: i64::from(crate::ACTOR_ACTION_THRESHOLD),
+                inventory: BTreeMap::new(),
+                wielded: None,
+                worn: Vec::new(),
+                skills,
+                proficiencies: BTreeMap::new(),
                 social: BTreeMap::new(),
                 mission_offers,
             },
@@ -204,7 +575,7 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::TargetMissing)?);
             return Ok(());
         };
-        if !adjacent(actor_position, npc.position) {
+        if npc.hp <= 0 || !adjacent(actor_position, npc.position) {
             events.push(self.rejection(actor_id, sequence, CommandRejection::TargetMissing)?);
             return Ok(());
         }

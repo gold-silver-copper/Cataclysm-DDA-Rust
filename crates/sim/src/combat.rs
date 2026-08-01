@@ -1,6 +1,6 @@
 //! Deterministic character combat-resource arithmetic.
 
-use cdda_protocol::{ActorId, CreatureId};
+use cdda_protocol::{ActorId, CreatureId, NpcId};
 use rand_core::Rng;
 
 use super::{
@@ -16,6 +16,31 @@ pub(super) const ORDINARY_DODGE_ATTEMPTS: u8 = 1;
 pub(super) const MAXIMUM_STAMINA_LIMIT: u32 = 1_000_000;
 
 const DAMAGE_MULTIPLIER_SCALE: i128 = 1_000_000;
+
+fn npc_skill_level(npc: &super::npc_dialogue::Npc, skill_id: &str) -> u8 {
+    npc.skills
+        .get(skill_id)
+        .map_or(0, |skill| skill.practical_level)
+}
+
+fn npc_effective_dexterity(npc: &super::npc_dialogue::Npc) -> u16 {
+    let value = npc
+        .effects
+        .iter()
+        .fold(i64::from(npc.base_dexterity), |value, effect| {
+            value.saturating_add(i64::from(effect.modifiers.dexterity))
+        });
+    u16::try_from(value.clamp(0, i64::from(cdda_protocol::MAX_CHARACTER_CREATION_STAT)))
+        .expect("clamped NPC dexterity fits u16")
+}
+
+fn npc_effective_speed(npc: &super::npc_dialogue::Npc) -> u32 {
+    let bonus = npc.effects.iter().fold(0_i64, |value, effect| {
+        value.saturating_add(i64::from(effect.modifiers.speed))
+    });
+    let base = i64::from(npc.speed);
+    u32::try_from(base.saturating_add(bonus.max(-(base.saturating_mul(3) / 4)))).unwrap_or(u32::MAX)
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct ActorDamageUnit {
@@ -119,6 +144,136 @@ pub(super) fn melee_stamina_cost(weight_milligrams: u64, melee_skill: u8) -> u32
 }
 
 impl WorldState {
+    pub(super) fn damage_npc(
+        &mut self,
+        target: NpcId,
+        damage_type: &str,
+        damage: u16,
+        rng: &mut impl Rng,
+    ) -> Result<anatomy::ActorDamageOutcome, SimError> {
+        let selected = anatomy::select_body_part_index(&self.actor_anatomy, rng)?;
+        let body_part_id = self
+            .actor_anatomy
+            .parts
+            .get(selected)
+            .ok_or(SimError::InvalidActorAnatomy)?
+            .body_part_id
+            .as_str();
+        let npc = self.npcs.get(&target).ok_or(SimError::InvalidNpcDialogue)?;
+        let mut remaining_milli = i128::from(damage) * 1_000;
+        for item_id in npc.worn.iter().rev() {
+            let item = npc.inventory.get(item_id).ok_or(SimError::InvalidArmor)?;
+            let armor = self
+                .wearable_armor_types
+                .get(&item.type_id)
+                .filter(|armor| runtime_armor_is_supported(armor))
+                .ok_or(SimError::InvalidArmor)?;
+            for portion in armor.portions.iter().filter(|portion| {
+                portion
+                    .covers
+                    .binary_search_by(|covered| covered.as_str().cmp(body_part_id))
+                    .is_ok()
+            }) {
+                if rng.next_u32() % 100 >= u32::from(portion.coverage_percent) {
+                    continue;
+                }
+                for material in &portion.materials {
+                    if rng.next_u32() % 100 >= u32::from(material.covered_by_material_percent) {
+                        continue;
+                    }
+                    let protection_milli = i128::from(
+                        material
+                            .protection_milli
+                            .get(damage_type)
+                            .copied()
+                            .unwrap_or_default(),
+                    );
+                    remaining_milli = (remaining_milli - protection_milli).max(0);
+                }
+            }
+        }
+        let dealt =
+            u16::try_from(remaining_milli / 1_000).map_err(|_| SimError::NumericOverflow)?;
+        let npc = self
+            .npcs
+            .get_mut(&target)
+            .ok_or(SimError::InvalidNpcDialogue)?;
+        let outcome = anatomy::apply_damage_to_part(
+            &self.actor_anatomy,
+            &mut npc.body_parts,
+            selected,
+            dealt,
+        )?;
+        let applications = anatomy::on_hit_effects(
+            &self.actor_anatomy,
+            &npc.body_parts,
+            selected,
+            damage_type,
+            dealt,
+            rng,
+        )?;
+        apply_actor_effect_applications(&mut npc.effects, applications, self.tick)?;
+        npc.hp = outcome.remaining_hp;
+        Ok(outcome)
+    }
+
+    pub(super) fn actor_npc_hit_spread(
+        &self,
+        source: ActorId,
+        target: NpcId,
+        rng_sequence: u64,
+    ) -> Result<Option<(i64, bool)>, SimError> {
+        let Some((accuracy_numerator, accuracy_denominator)) = self.actor_melee_accuracy(source)?
+        else {
+            return Ok(None);
+        };
+        let npc = self.npcs.get(&target).ok_or(SimError::InvalidNpcDialogue)?;
+        let disabling = npc.effects.iter().any(|effect| {
+            effect.expires_at_tick > self.tick
+                && matches!(
+                    effect.effect_id.as_str(),
+                    "winded" | "downed" | "fearparalyze" | "narcosis"
+                )
+        });
+        let dodge_attempted = npc.hp > 0
+            && npc.dodge_attempts_remaining > 0
+            && !disabling
+            && can_dodge_at_stamina(npc.stamina, npc.maximum_stamina);
+        let dodge = if dodge_attempted {
+            dodge_roll(
+                npc_effective_dexterity(npc),
+                npc_skill_level(npc, "dodge"),
+                npc_effective_speed(npc),
+                npc.stamina,
+                npc.maximum_stamina,
+            )
+        } else {
+            0
+        };
+        let mut rng = self.named_session_rng(
+            b"actor-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            rng_sequence,
+        );
+        let hit = pinned_melee_hit_roll(accuracy_numerator, accuracy_denominator, &mut rng)?;
+        Ok(Some((
+            hit.checked_sub(dodge).ok_or(SimError::NumericOverflow)?,
+            dodge_attempted,
+        )))
+    }
+
+    pub(super) fn consume_npc_dodge_attempt(&mut self, target: NpcId) -> Result<(), SimError> {
+        let npc = self
+            .npcs
+            .get_mut(&target)
+            .ok_or(SimError::InvalidNpcDialogue)?;
+        npc.dodge_attempts_remaining = npc.dodge_attempts_remaining.saturating_sub(1);
+        npc.stamina = npc
+            .stamina
+            .saturating_sub(dodge_stamina_cost(npc_skill_level(npc, "dodge")));
+        Ok(())
+    }
+
     pub(super) fn damage_actor(
         &mut self,
         target: ActorId,
@@ -294,7 +449,7 @@ impl WorldState {
                 dealt,
                 rng,
             )?;
-            apply_actor_effect_applications(actor, applications, self.tick)?;
+            apply_actor_effect_applications(&mut actor.effects, applications, self.tick)?;
         }
         actor.hp = outcome.remaining_hp;
         let was_sleeping = actor.sleeping;

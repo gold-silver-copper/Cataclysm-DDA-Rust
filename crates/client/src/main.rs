@@ -157,11 +157,17 @@ enum ClientAction {
     AttackCreature {
         target: CreatureId,
     },
+    AttackNpc {
+        target: cdda_protocol::NpcId,
+    },
     ShootActor {
         target: ActorId,
     },
     ShootCreature {
         target: CreatureId,
+    },
+    ShootNpc {
+        target: cdda_protocol::NpcId,
     },
     Reload {
         ammunition_item: ItemId,
@@ -307,6 +313,7 @@ enum TargetMenuAction {
 enum TargetChoice {
     Actor(ActorId),
     Creature(CreatureId),
+    Npc(cdda_protocol::NpcId),
 }
 
 #[derive(Clone)]
@@ -1163,11 +1170,17 @@ async fn run_game_session(
                     Some(ClientAction::AttackCreature { target }) => {
                         Some(CommandKind::AttackCreature { target })
                     }
+                    Some(ClientAction::AttackNpc { target }) => {
+                        Some(CommandKind::AttackNpc { target })
+                    }
                     Some(ClientAction::ShootActor { target }) => {
                         Some(CommandKind::ShootActor { target })
                     }
                     Some(ClientAction::ShootCreature { target }) => {
                         Some(CommandKind::ShootCreature { target })
+                    }
+                    Some(ClientAction::ShootNpc { target }) => {
+                        Some(CommandKind::ShootNpc { target })
                     }
                     Some(ClientAction::Reload {
                         ammunition_item,
@@ -3947,6 +3960,29 @@ fn target_menu_entries(
                     )
                 }),
         )
+        .chain(
+            snapshot
+                .npcs
+                .iter()
+                .filter(|target| target.hp > 0 && in_range(target.position))
+                .map(|target| {
+                    (
+                        distance(target.position),
+                        2_u8,
+                        target.id.as_u128(),
+                        TargetMenuEntry {
+                            target: TargetChoice::Npc(target.id),
+                            label: format!(
+                                "{} — {} HP, distance {} [{}]",
+                                target.name,
+                                target.hp,
+                                distance(target.position),
+                                target.id
+                            ),
+                        },
+                    )
+                }),
+        )
         .collect::<Vec<_>>();
     entries.sort_by_key(|(distance, kind, stable_id, _)| (*distance, *kind, *stable_id));
     entries.into_iter().map(|(_, _, _, entry)| entry).collect()
@@ -3967,6 +4003,8 @@ const fn client_action_for_target_menu(
         (TargetMenuAction::Shoot, TargetChoice::Creature(target)) => {
             ClientAction::ShootCreature { target }
         }
+        (TargetMenuAction::Melee, TargetChoice::Npc(target)) => ClientAction::AttackNpc { target },
+        (TargetMenuAction::Shoot, TargetChoice::Npc(target)) => ClientAction::ShootNpc { target },
     }
 }
 
@@ -4749,6 +4787,23 @@ fn event_message(event: &WorldEvent) -> String {
         } => format!("Hit a creature for {amount}; {remaining_hp} HP remains."),
         WorldEventKind::ActorMissedCreature { .. } => String::from("Missed the creature."),
         WorldEventKind::CreatureDied { .. } => String::from("The creature died."),
+        WorldEventKind::NpcDamaged {
+            body_part_id,
+            amount,
+            remaining_part_hp,
+            remaining_hp,
+            ..
+        } => format!(
+            "Hit the NPC's {body_part_id} for {amount}; {remaining_part_hp} part HP and {remaining_hp} vital HP remain."
+        ),
+        WorldEventKind::ActorMissedNpc { .. } => String::from("Missed the NPC."),
+        WorldEventKind::NpcDied { .. } => String::from("The NPC died."),
+        WorldEventKind::NpcDamagedByEffect {
+            effect_id, amount, ..
+        } => format!("An NPC took {amount} damage from {effect_id}."),
+        WorldEventKind::NpcKilledByEffect { effect_id, .. } => {
+            format!("An NPC died from {effect_id}.")
+        }
         WorldEventKind::MissionAssigned {
             mission_type_id, ..
         } => format!("Mission assigned: {mission_type_id}."),

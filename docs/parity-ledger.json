@@ -1,9 +1,9 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 137,
-  "persistence_schema_version": 114,
-  "replay_format_version": 3,
+  "protocol_version": 138,
+  "persistence_schema_version": 115,
+  "replay_format_version": 4,
   "active_milestone": "npcs-social",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
@@ -508,7 +508,8 @@
         { "id": "leased-dialogue-and-mission-lifecycle", "state": "implementation_complete_verification_deferred" },
         { "id": "find-item-owned-world-source-turn-in", "state": "review_fixes_in_progress" },
         { "id": "mission-phase-eoc-callbacks", "state": "implementation_complete_review_pending" },
-        { "id": "npc-class-generation-and-ordinary-ai", "state": "planned" },
+        { "id": "npc-class-generation-and-ordinary-ai", "state": "implementation_in_progress" },
+        { "id": "npc-class-generation-canonical-vulnerability-and-client-combat", "state": "implementation_complete_review_pending" },
         { "id": "dialogue-effects-missions-and-faction-closure", "state": "planned" }
       ],
       "priority": 26,
