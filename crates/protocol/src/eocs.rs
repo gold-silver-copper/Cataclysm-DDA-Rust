@@ -198,6 +198,15 @@ pub enum EocEffectV1 {
     RemoveTargetVariable {
         variable_id: String,
     },
+    ChangeTargetFaction {
+        faction_id: String,
+    },
+    AddTargetFactionReputation {
+        delta: i32,
+    },
+    AddTargetFactionTrust {
+        delta: i32,
+    },
     MathAssignment {
         target: EocMathAssignmentTargetV1,
         operation: EocMathAssignmentOperationV1,
@@ -254,6 +263,9 @@ impl EocEffectV1 {
             | Self::RemoveTargetEffects { .. }
             | Self::SetTargetVariable { .. }
             | Self::RemoveTargetVariable { .. }
+            | Self::ChangeTargetFaction { .. }
+            | Self::AddTargetFactionReputation { .. }
+            | Self::AddTargetFactionTrust { .. }
             | Self::MathAssignment { .. }
             | Self::AssignMission { .. }
             | Self::FinishMission { .. } => {}
@@ -517,7 +529,10 @@ fn effects_require_target_context(effects: &[EocEffectV1]) -> bool {
         EocEffectV1::AddTargetEffect { .. }
         | EocEffectV1::RemoveTargetEffects { .. }
         | EocEffectV1::SetTargetVariable { .. }
-        | EocEffectV1::RemoveTargetVariable { .. } => true,
+        | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. } => true,
         EocEffectV1::Conditional {
             condition,
             then_effects,
@@ -573,6 +588,9 @@ pub fn eoc_effects_contain_confirmation(effects: &[EocEffectV1]) -> bool {
         | EocEffectV1::RemoveTargetEffects { .. }
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. }
         | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. }
         | EocEffectV1::AssignMission { .. }
@@ -702,7 +720,10 @@ fn creature_spell_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
         EocEffectV1::Message { .. }
         | EocEffectV1::Confirmation { .. }
         | EocEffectV1::AssignMission { .. }
-        | EocEffectV1::FinishMission { .. } => false,
+        | EocEffectV1::FinishMission { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. } => false,
         EocEffectV1::AddEffect { .. }
         | EocEffectV1::RemoveEffects { .. }
         | EocEffectV1::SetActorVariable { .. }
@@ -770,7 +791,10 @@ fn creature_eoc_effects_are_supported(effects: &[EocEffectV1]) -> bool {
         EocEffectV1::Message { .. }
         | EocEffectV1::Confirmation { .. }
         | EocEffectV1::AssignMission { .. }
-        | EocEffectV1::FinishMission { .. } => false,
+        | EocEffectV1::FinishMission { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. } => false,
     })
 }
 
@@ -882,6 +906,9 @@ fn valid_effects(effects: &[EocEffectV1], depth: usize, nodes: &mut usize) -> bo
             }
             EocEffectV1::RemoveActorVariable { variable_id }
             | EocEffectV1::RemoveTargetVariable { variable_id } => valid_id(variable_id),
+            EocEffectV1::ChangeTargetFaction { faction_id } => valid_id(faction_id),
+            EocEffectV1::AddTargetFactionReputation { .. }
+            | EocEffectV1::AddTargetFactionTrust { .. } => true,
             EocEffectV1::MathAssignment { target, value, .. } => {
                 valid_math_assignment_target(target)
                     && valid_math_expression_tree(value, depth + 1, nodes)

@@ -316,6 +316,9 @@ pub(super) fn effects_references_are_supported(
         | EocEffectDefinition::RemoveTargetEffects { .. }
         | EocEffectDefinition::SetTargetVariable { .. }
         | EocEffectDefinition::RemoveTargetVariable { .. }
+        | EocEffectDefinition::ChangeTargetFaction { .. }
+        | EocEffectDefinition::AddTargetFactionReputation { .. }
+        | EocEffectDefinition::AddTargetFactionTrust { .. }
         | EocEffectDefinition::MathAssignment(_)
         | EocEffectDefinition::RunEocs { .. } => true,
     })
@@ -355,6 +358,7 @@ pub(super) fn runtime_actor_only_eoc_ids(definitions: &[EocDefinitionV1]) -> BTr
 pub(super) fn runtime_dialogue_eoc_ids(
     definitions: &[EocDefinitionV1],
     actor_only_ids: &BTreeSet<String>,
+    faction_ids: &BTreeSet<&str>,
 ) -> BTreeSet<String> {
     let mut available = definitions
         .iter()
@@ -363,6 +367,8 @@ pub(super) fn runtime_dialogue_eoc_ids(
                 && definition.event_trigger.is_none()
                 && !cdda_protocol::eoc_effects_contain_confirmation(&definition.effects)
                 && !cdda_protocol::eoc_effects_contain_confirmation(&definition.false_effects)
+                && dialogue_faction_references_are_supported(&definition.effects, faction_ids)
+                && dialogue_faction_references_are_supported(&definition.false_effects, faction_ids)
         })
         .map(|definition| (definition.eoc_id.as_str(), definition))
         .collect::<BTreeMap<_, _>>();
@@ -391,6 +397,45 @@ pub(super) fn runtime_dialogue_eoc_ids(
         }
     }
     available.keys().map(|id| (*id).to_owned()).collect()
+}
+
+pub(super) fn dialogue_faction_references_are_supported(
+    effects: &[EocEffectV1],
+    faction_ids: &BTreeSet<&str>,
+) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectV1::ChangeTargetFaction { faction_id } => {
+            faction_ids.contains(faction_id.as_str())
+        }
+        EocEffectV1::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        }
+        | EocEffectV1::Confirmation {
+            accept_effects: then_effects,
+            decline_effects: else_effects,
+            ..
+        } => {
+            dialogue_faction_references_are_supported(then_effects, faction_ids)
+                && dialogue_faction_references_are_supported(else_effects, faction_ids)
+        }
+        EocEffectV1::Message { .. }
+        | EocEffectV1::AddEffect { .. }
+        | EocEffectV1::RemoveEffects { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::AddTargetEffect { .. }
+        | EocEffectV1::RemoveTargetEffects { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. }
+        | EocEffectV1::MathAssignment { .. }
+        | EocEffectV1::RunEocs { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => true,
+    })
 }
 
 pub(super) fn dialogue_effect_references_are_available(
@@ -430,6 +475,9 @@ pub(super) fn dialogue_effect_references_are_available(
         | EocEffectV1::RemoveTargetEffects { .. }
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. }
         | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::AssignMission { .. }
         | EocEffectV1::FinishMission { .. } => true,
@@ -522,6 +570,9 @@ fn runtime_effect_body_parts_are_supported(
         | EocEffectV1::RemoveActorVariable { .. }
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. }
         | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. }
         | EocEffectV1::AssignMission { .. }
@@ -847,6 +898,17 @@ pub(super) fn runtime_effect(effect: &EocEffectDefinition) -> EocEffectV1 {
             EocEffectV1::RemoveTargetVariable {
                 variable_id: variable_id.clone(),
             }
+        }
+        EocEffectDefinition::ChangeTargetFaction { faction_id } => {
+            EocEffectV1::ChangeTargetFaction {
+                faction_id: faction_id.clone(),
+            }
+        }
+        EocEffectDefinition::AddTargetFactionReputation { delta } => {
+            EocEffectV1::AddTargetFactionReputation { delta: *delta }
+        }
+        EocEffectDefinition::AddTargetFactionTrust { delta } => {
+            EocEffectV1::AddTargetFactionTrust { delta: *delta }
         }
         EocEffectDefinition::MathAssignment(assignment) => EocEffectV1::MathAssignment {
             target: match &assignment.target {

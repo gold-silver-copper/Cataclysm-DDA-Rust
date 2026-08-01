@@ -583,6 +583,57 @@ impl WorldState {
         execution
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        let mut target_faction_id = self
+            .npcs
+            .get(&npc_id)
+            .ok_or(SimError::UnknownNpc)?
+            .faction_id
+            .clone();
+        let mut factions = self.factions.clone();
+        let mut retained_outputs = Vec::with_capacity(execution.outputs.len());
+        for output in std::mem::take(&mut execution.outputs) {
+            match output {
+                EocOutput::ChangeTargetFaction(faction_id) => {
+                    if !factions.contains_key(&faction_id) {
+                        return Ok(false);
+                    }
+                    target_faction_id = faction_id;
+                }
+                EocOutput::AddTargetFactionReputation(delta) => {
+                    let Some(template) = self.faction_templates.get(&target_faction_id) else {
+                        return Ok(false);
+                    };
+                    if !template.lone_wolf_faction {
+                        let Some(faction) = factions.get_mut(&target_faction_id) else {
+                            return Ok(false);
+                        };
+                        let Some(likes_u) = faction.likes_u.checked_add(delta) else {
+                            return Ok(false);
+                        };
+                        let Some(respects_u) = faction.respects_u.checked_add(delta) else {
+                            return Ok(false);
+                        };
+                        let Some(trusts_u) = faction.trusts_u.checked_add(delta) else {
+                            return Ok(false);
+                        };
+                        faction.likes_u = likes_u;
+                        faction.respects_u = respects_u;
+                        faction.trusts_u = trusts_u;
+                    }
+                }
+                EocOutput::AddTargetFactionTrust(delta) => {
+                    let Some(faction) = factions.get_mut(&target_faction_id) else {
+                        return Ok(false);
+                    };
+                    let Some(trusts_u) = faction.trusts_u.checked_add(delta) else {
+                        return Ok(false);
+                    };
+                    faction.trusts_u = trusts_u;
+                }
+                output => retained_outputs.push(output),
+            }
+        }
+        execution.outputs = retained_outputs;
         execution
             .target_effects
             .as_mut()
@@ -602,6 +653,8 @@ impl WorldState {
         let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
         npc.effects = target_effects;
         npc.eoc_variables = target_variables;
+        npc.faction_id = target_faction_id;
+        self.factions = factions;
         Ok(true)
     }
 
@@ -762,6 +815,9 @@ impl WorldState {
                         self.emit_mission_lifecycle_event(actor_id, lifecycle_event, events)?;
                     }
                 }
+                EocOutput::ChangeTargetFaction(_)
+                | EocOutput::AddTargetFactionReputation(_)
+                | EocOutput::AddTargetFactionTrust(_) => return Err(SimError::InvalidItem),
             }
         }
         if lifecycle.iter().any(Option::is_some) {
@@ -1207,6 +1263,9 @@ struct EocConfirmationRequest {
 enum EocOutput {
     Message(String),
     MissionLifecycle(usize),
+    ChangeTargetFaction(String),
+    AddTargetFactionReputation(i32),
+    AddTargetFactionTrust(i32),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1924,6 +1983,30 @@ fn execute_effects(
                     .ok_or(SimError::InvalidItem)?
                     .remove(variable_id);
             }
+            EocEffectV1::ChangeTargetFaction { faction_id } => {
+                if execution.target_variables.is_none() {
+                    return Err(SimError::InvalidItem);
+                }
+                execution
+                    .outputs
+                    .push(EocOutput::ChangeTargetFaction(faction_id.clone()));
+            }
+            EocEffectV1::AddTargetFactionReputation { delta } => {
+                if execution.target_variables.is_none() {
+                    return Err(SimError::InvalidItem);
+                }
+                execution
+                    .outputs
+                    .push(EocOutput::AddTargetFactionReputation(*delta));
+            }
+            EocEffectV1::AddTargetFactionTrust { delta } => {
+                if execution.target_variables.is_none() {
+                    return Err(SimError::InvalidItem);
+                }
+                execution
+                    .outputs
+                    .push(EocOutput::AddTargetFactionTrust(*delta));
+            }
             EocEffectV1::MathAssignment {
                 target,
                 operation,
@@ -2454,6 +2537,9 @@ fn effects_body_parts_are_valid(
         | EocEffectV1::RemoveActorVariable { .. }
         | EocEffectV1::SetTargetVariable { .. }
         | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::ChangeTargetFaction { .. }
+        | EocEffectV1::AddTargetFactionReputation { .. }
+        | EocEffectV1::AddTargetFactionTrust { .. }
         | EocEffectV1::MathAssignment { .. }
         | EocEffectV1::RunEocs { .. }
         | EocEffectV1::AssignMission { .. }

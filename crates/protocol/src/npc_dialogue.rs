@@ -408,7 +408,7 @@ pub fn npc_snapshot_is_valid_for_template(
             .name_unique
             .as_ref()
             .is_none_or(|name| npc.name == *name)
-        && npc.faction_id == template.faction_id
+        && optional_id_is_valid(&npc.faction_id)
         && npc.class_id == template.class_id
         && valid_text(&npc.profession, MAX_NPC_NAME_BYTES)
         && matches!(npc.gender.as_str(), "male" | "female")

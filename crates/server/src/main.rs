@@ -86,9 +86,10 @@ mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
 use eocs::{
-    dialogue_effect_references_are_available, runtime_actor_only_eoc_ids, runtime_condition,
-    runtime_dialogue_condition_is_supported, runtime_dialogue_effects_are_supported,
-    runtime_dialogue_eoc_ids, runtime_effect, runtime_eoc_catalog,
+    dialogue_effect_references_are_available, dialogue_faction_references_are_supported,
+    runtime_actor_only_eoc_ids, runtime_condition, runtime_dialogue_condition_is_supported,
+    runtime_dialogue_effects_are_supported, runtime_dialogue_eoc_ids, runtime_effect,
+    runtime_eoc_catalog,
 };
 use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
@@ -1881,8 +1882,12 @@ fn runtime_npc_dialogue(
     ),
     Box<dyn std::error::Error>,
 > {
+    let faction_ids = factions
+        .iter()
+        .map(|faction| faction.faction_id.as_str())
+        .collect::<BTreeSet<_>>();
     let actor_only_eocs = runtime_actor_only_eoc_ids(eoc_definitions);
-    let dialogue_eocs = runtime_dialogue_eoc_ids(eoc_definitions, &actor_only_eocs);
+    let dialogue_eocs = runtime_dialogue_eoc_ids(eoc_definitions, &actor_only_eocs, &faction_ids);
     let mut topics = registry
         .topic_iter()
         .filter(|(topic_id, topic)| {
@@ -1921,6 +1926,7 @@ fn runtime_npc_dialogue(
                                 .map(runtime_effect)
                                 .collect::<Vec<_>>();
                             !cdda_protocol::eoc_effects_contain_confirmation(&effects)
+                                && dialogue_faction_references_are_supported(&effects, &faction_ids)
                                 && dialogue_effect_references_are_available(
                                     &effects,
                                     &dialogue_eocs,
@@ -2007,10 +2013,6 @@ fn runtime_npc_dialogue(
                 replace_built_in_responses: false,
             });
     }
-    let faction_ids = factions
-        .iter()
-        .map(|faction| faction.faction_id.as_str())
-        .collect::<BTreeSet<_>>();
     let class_ids = npc_classes
         .iter()
         .map(|class| class.class_id.as_str())

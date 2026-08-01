@@ -142,6 +142,15 @@ pub enum EocEffectDefinition {
     RemoveTargetVariable {
         variable_id: String,
     },
+    ChangeTargetFaction {
+        faction_id: String,
+    },
+    AddTargetFactionReputation {
+        delta: i32,
+    },
+    AddTargetFactionTrust {
+        delta: i32,
+    },
     MathAssignment(EocMathAssignmentDefinition),
     Confirmation {
         prompt: String,
@@ -194,6 +203,9 @@ impl EocEffectDefinition {
             | Self::RemoveTargetEffects { .. }
             | Self::SetTargetVariable { .. }
             | Self::RemoveTargetVariable { .. }
+            | Self::ChangeTargetFaction { .. }
+            | Self::AddTargetFactionReputation { .. }
+            | Self::AddTargetFactionTrust { .. }
             | Self::MathAssignment(_)
             | Self::AssignMission { .. }
             | Self::FinishMission { .. } => {}
@@ -914,6 +926,39 @@ fn parse_effects(
             }
             effects.push(EocEffectDefinition::AssignMission {
                 mission_type_id: mission_type_id.to_owned(),
+            });
+            continue;
+        }
+        if let Some(faction) = object.get("npc_change_faction") {
+            let Some(faction_id) = faction.as_str().filter(|id| valid_id(id)) else {
+                unsupported.insert(format!("{item_path}.npc_change_faction"));
+                continue;
+            };
+            if object.len() != 1 {
+                unsupported.insert(item_path);
+                continue;
+            }
+            effects.push(EocEffectDefinition::ChangeTargetFaction {
+                faction_id: faction_id.to_owned(),
+            });
+            continue;
+        }
+        if let Some((field, effect)) = ["u_faction_rep", "u_add_faction_trust"]
+            .into_iter()
+            .find_map(|field| object.get(field).map(|effect| (field, effect)))
+        {
+            let Some(delta) = effect.as_i64().and_then(|value| i32::try_from(value).ok()) else {
+                unsupported.insert(format!("{item_path}.{field}"));
+                continue;
+            };
+            if object.len() != 1 {
+                unsupported.insert(item_path);
+                continue;
+            }
+            effects.push(if field == "u_faction_rep" {
+                EocEffectDefinition::AddTargetFactionReputation { delta }
+            } else {
+                EocEffectDefinition::AddTargetFactionTrust { delta }
             });
             continue;
         }
