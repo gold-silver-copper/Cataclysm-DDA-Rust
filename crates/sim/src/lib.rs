@@ -11453,6 +11453,9 @@ impl WorldState {
                 }
                 WorldEventKind::CreatureOpenedTerrain {
                     position, volume, ..
+                }
+                | WorldEventKind::NpcOpenedTerrain {
+                    position, volume, ..
                 } if *volume > 0 => Some((*position, *volume, false)),
                 _ => None,
             };

@@ -375,7 +375,7 @@ impl WorldState {
             {
                 continue;
             }
-            let Some(cost) = self.loaded_movement_action_cost(from, next, dx, dy)? else {
+            let Some(cost) = self.npc_step_action_cost(npc_id, from, next, dx, dy)? else {
                 continue;
             };
             let distance = u64::from(next.x.abs_diff(threat.x))
@@ -419,8 +419,13 @@ impl WorldState {
             .map_err(|_| SimError::NumericOverflow)?;
         let dy = i8::try_from(i64::from(to.y) - i64::from(from.y))
             .map_err(|_| SimError::NumericOverflow)?;
-        let Some(cost) = self.loaded_movement_action_cost(from, to, dx, dy)? else {
-            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        let cost = match self.loaded_movement_action_cost(from, to, dx, dy)? {
+            Some(cost) => cost,
+            None if self.projected_open_terrain(to).is_some() => {
+                self.perform_npc_open_terrain(npc_id, to, events)?;
+                return self.npc_door_action_cost(npc_id);
+            }
+            None => return Ok(i64::from(ACTOR_ACTION_THRESHOLD)),
         };
         self.npcs
             .get_mut(&npc_id)
@@ -428,6 +433,57 @@ impl WorldState {
             .position = to;
         events.push(self.make_event(WorldEventKind::NpcMoved { npc_id, from, to })?);
         Ok(cost)
+    }
+
+    fn npc_step_action_cost(
+        &self,
+        npc_id: NpcId,
+        from: WorldPosition,
+        to: WorldPosition,
+        dx: i8,
+        dy: i8,
+    ) -> Result<Option<i64>, SimError> {
+        if let Some(cost) = self.loaded_movement_action_cost(from, to, dx, dy)? {
+            return Ok(Some(cost));
+        }
+        self.projected_open_terrain(to)
+            .map(|_| self.npc_door_action_cost(npc_id))
+            .transpose()
+    }
+
+    fn npc_door_action_cost(&self, npc_id: NpcId) -> Result<i64, SimError> {
+        i64::from(super::combat::npc_effective_speed(
+            self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?,
+        ))
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+        .ok_or(SimError::NumericOverflow)
+    }
+
+    fn perform_npc_open_terrain(
+        &mut self,
+        npc_id: NpcId,
+        position: WorldPosition,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let (from, to, transformed) = self
+            .projected_open_terrain(position)
+            .ok_or(SimError::InvalidTerrain)?;
+        let (coord, local) = position.chunk_and_local();
+        let chunk = self
+            .chunks
+            .get_mut(&coord)
+            .ok_or(SimError::InvalidTerrain)?;
+        chunk.set_terrain(local, transformed)?;
+        chunk.set_map_damage(local, 0)?;
+        events.push(self.make_event(WorldEventKind::NpcOpenedTerrain {
+            npc_id,
+            position,
+            from,
+            to,
+            sound: String::from("swish"),
+            volume: 6,
+        })?);
+        Ok(())
     }
 
     fn npc_route_step(
@@ -539,9 +595,25 @@ impl WorldState {
         {
             return Ok(None);
         }
-        self.tile_movement_cost(position)
-            .map(|cost| u32::try_from(cost).map_err(|_| SimError::NumericOverflow))
-            .transpose()
+        if let Some(cost) = self.tile_movement_cost(position) {
+            return u32::try_from(cost)
+                .map(Some)
+                .map_err(|_| SimError::NumericOverflow);
+        }
+        if self
+            .projected_open_terrain(position)
+            .is_some_and(|(_, _, opened)| {
+                opened.move_cost > 0
+                    && self
+                        .chunks
+                        .get(&position.chunk_and_local().0)
+                        .and_then(|chunk| chunk.furniture(position.chunk_and_local().1))
+                        .is_none_or(|furniture| furniture.move_cost_mod >= 0)
+            })
+        {
+            return Ok(Some(4));
+        }
+        Ok(None)
     }
 
     fn npc_hp_percentage(&self, npc_id: NpcId) -> Result<i32, SimError> {

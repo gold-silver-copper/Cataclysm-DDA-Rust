@@ -2256,6 +2256,14 @@ pub enum WorldEventKind {
         sound: String,
         volume: u16,
     },
+    NpcOpenedTerrain {
+        npc_id: NpcId,
+        position: WorldPosition,
+        from: String,
+        to: String,
+        sound: String,
+        volume: u16,
+    },
     FieldIntensityChanged {
         position: WorldPosition,
         field_type_id: String,

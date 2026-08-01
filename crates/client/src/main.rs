@@ -4873,6 +4873,9 @@ fn event_message(event: &WorldEvent) -> String {
         WorldEventKind::CreatureOpenedTerrain { from, to, .. } => {
             format!("A creature opened {from} into {to}.")
         }
+        WorldEventKind::NpcOpenedTerrain { from, to, .. } => {
+            format!("An NPC opened {from} into {to}.")
+        }
         WorldEventKind::FieldIntensityChanged {
             field_type_id,
             intensity,

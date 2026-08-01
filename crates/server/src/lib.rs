@@ -3811,11 +3811,12 @@ pub async fn handle_game_connection_with_sessions(
                         }
                     };
                     let actor_id = selected_actor.ok_or(NetworkError::ServerBusy)?;
-                    let visible_effect_npcs = if batch.events.iter().any(|event| {
+                    let visible_event_npcs = if batch.events.iter().any(|event| {
                         matches!(
                             &event.kind,
                             WorldEventKind::NpcDamagedByEffect { .. }
                                 | WorldEventKind::NpcKilledByEffect { .. }
+                                | WorldEventKind::NpcOpenedTerrain { .. }
                         )
                     }) {
                         Some(
@@ -3833,8 +3834,8 @@ pub async fn handle_game_connection_with_sessions(
                         .into_iter()
                         .filter(|event| {
                             event_involves_actor(event, actor_id)
-                                || npc_effect_event_target(event).is_some_and(|npc_id| {
-                                    visible_effect_npcs
+                                || npc_event_target(event).is_some_and(|npc_id| {
+                                    visible_event_npcs
                                         .as_ref()
                                         .is_some_and(|visible| visible.contains(&npc_id))
                                 })
@@ -5463,6 +5464,7 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
         | WorldEventKind::CreatureSummoned { .. }
         | WorldEventKind::CreatureBashed { .. }
         | WorldEventKind::CreatureOpenedTerrain { .. }
+        | WorldEventKind::NpcOpenedTerrain { .. }
         | WorldEventKind::NpcMoved { .. }
         | WorldEventKind::NpcDamagedByEffect { .. }
         | WorldEventKind::NpcKilledByEffect { .. }
@@ -5470,10 +5472,11 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
     }
 }
 
-fn npc_effect_event_target(event: &WorldEvent) -> Option<cdda_protocol::NpcId> {
+fn npc_event_target(event: &WorldEvent) -> Option<cdda_protocol::NpcId> {
     match &event.kind {
         WorldEventKind::NpcDamagedByEffect { npc_id, .. }
-        | WorldEventKind::NpcKilledByEffect { npc_id, .. } => Some(*npc_id),
+        | WorldEventKind::NpcKilledByEffect { npc_id, .. }
+        | WorldEventKind::NpcOpenedTerrain { npc_id, .. } => Some(*npc_id),
         _ => None,
     }
 }
