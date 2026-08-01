@@ -851,6 +851,34 @@ impl WorldState {
         execution: &mut EocExecution,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
+        if execution.outputs.iter().any(|output| {
+            matches!(
+                output,
+                EocOutput::ChangeTargetFaction(_)
+                    | EocOutput::AddTargetFactionReputation(_)
+                    | EocOutput::AddTargetFactionTrust(_)
+            )
+        }) {
+            return Err(SimError::InvalidItem);
+        }
+        let output_event_count =
+            u64::try_from(execution.outputs.len()).map_err(|_| SimError::NumericOverflow)?;
+        self.next_event_counter
+            .checked_add(output_event_count)
+            .ok_or(SimError::NumericOverflow)?;
+        let operation_count = execution.mission_operations.len();
+        let mut referenced_operations = BTreeSet::new();
+        for output in &execution.outputs {
+            if let EocOutput::MissionLifecycle(operation_index) = output
+                && (*operation_index >= operation_count
+                    || !referenced_operations.insert(*operation_index))
+            {
+                return Err(SimError::InvalidMission);
+            }
+        }
+        if referenced_operations.len() != operation_count {
+            return Err(SimError::InvalidMission);
+        }
         let mut lifecycle = self.commit_mission_operations(
             actor_id,
             std::mem::take(&mut execution.mission_operations),
@@ -881,7 +909,9 @@ impl WorldState {
                 }
                 EocOutput::ChangeTargetFaction(_)
                 | EocOutput::AddTargetFactionReputation(_)
-                | EocOutput::AddTargetFactionTrust(_) => return Err(SimError::InvalidItem),
+                | EocOutput::AddTargetFactionTrust(_) => {
+                    unreachable!("preflight rejected target output")
+                }
             }
         }
         if lifecycle.iter().any(Option::is_some) {
@@ -2493,6 +2523,7 @@ pub(super) fn mission_start_self_finish_is_absent<'a>(
             &eoc_by_id,
             &mut BTreeSet::from([definition.mission_type_id.as_str()]),
             &mut BTreeSet::new(),
+            0,
         )
     })
 }
@@ -2554,6 +2585,7 @@ pub(super) fn mission_phase_eoc_closure_is_valid<'a>(
                 &available,
                 &mut BTreeSet::from([definition.mission_type_id.as_str()]),
                 &mut BTreeSet::new(),
+                0,
             )
     })
 }
@@ -2565,7 +2597,11 @@ fn synchronous_effects_can_finish_mission<'a>(
     eoc_by_id: &BTreeMap<&'a str, &'a EocDefinitionV1>,
     visiting_missions: &mut BTreeSet<&'a str>,
     visiting_eocs: &mut BTreeSet<&'a str>,
+    depth: usize,
 ) -> bool {
+    if depth >= cdda_protocol::MAX_EOC_TREE_DEPTH {
+        return true;
+    }
     effects.iter().any(|effect| match effect {
         EocEffectV1::FinishMission {
             mission_type_id, ..
@@ -2583,6 +2619,7 @@ fn synchronous_effects_can_finish_mission<'a>(
                     eoc_by_id,
                     visiting_missions,
                     visiting_eocs,
+                    depth + 1,
                 );
                 visiting_missions.remove(definition.mission_type_id.as_str());
                 found
@@ -2600,6 +2637,7 @@ fn synchronous_effects_can_finish_mission<'a>(
                         eoc_by_id,
                         visiting_missions,
                         visiting_eocs,
+                        depth + 1,
                     ) || synchronous_effects_can_finish_mission(
                         &definition.false_effects,
                         target_mission_type_id,
@@ -2607,6 +2645,7 @@ fn synchronous_effects_can_finish_mission<'a>(
                         eoc_by_id,
                         visiting_missions,
                         visiting_eocs,
+                        depth + 1,
                     );
                     visiting_eocs.remove(definition.eoc_id.as_str());
                     found
@@ -2630,6 +2669,7 @@ fn synchronous_effects_can_finish_mission<'a>(
                 eoc_by_id,
                 visiting_missions,
                 visiting_eocs,
+                depth + 1,
             ) || synchronous_effects_can_finish_mission(
                 else_effects,
                 target_mission_type_id,
@@ -2637,6 +2677,7 @@ fn synchronous_effects_can_finish_mission<'a>(
                 eoc_by_id,
                 visiting_missions,
                 visiting_eocs,
+                depth + 1,
             )
         }
         _ => false,

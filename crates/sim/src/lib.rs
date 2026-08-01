@@ -16222,7 +16222,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV116");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV117");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }

@@ -152,7 +152,7 @@ pub use weather::{
     weather_state_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 141;
+pub const PROTOCOL_VERSION: u16 = 142;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";

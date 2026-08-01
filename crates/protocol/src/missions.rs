@@ -59,6 +59,10 @@ pub struct MissionSnapshotV1 {
     pub mission_id: MissionId,
     pub mission_type_id: String,
     pub origin_npc_id: Option<NpcId>,
+    /// Stable actor-local assignment order. Mission IDs may be allocated when
+    /// an NPC offer is created, so their counters do not encode acceptance
+    /// order.
+    pub assignment_sequence: u64,
     pub assigned_at_tick: SimTick,
     pub finished_at_tick: Option<SimTick>,
     pub status: MissionStatusV1,
@@ -129,6 +133,7 @@ pub fn mission_snapshot_is_valid_for_definition(
     mission.mission_type_id == definition.mission_type_id
         && mission.mission_id.counter() > 0
         && mission.mission_id.world_namespace() == world_namespace
+        && mission.assignment_sequence > 0
         && mission.origin_npc_id.is_none_or(|npc_id| {
             npc_id.counter() > 0 && npc_id.world_namespace() == world_namespace
         })
@@ -166,6 +171,12 @@ pub fn actor_missions_are_valid(
         && missions
             .iter()
             .map(|mission| mission.mission_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == missions.len()
+        && missions
+            .iter()
+            .map(|mission| mission.assignment_sequence)
             .collect::<BTreeSet<_>>()
             .len()
             == missions.len()

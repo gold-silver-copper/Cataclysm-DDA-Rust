@@ -132,6 +132,14 @@ impl WorldState {
                         return Err(SimError::InvalidMission);
                     }
                     prune_finished_mission_history(&mut actor)?;
+                    let assignment_sequence = actor
+                        .missions
+                        .values()
+                        .map(|mission| mission.assignment_sequence)
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(SimError::NumericOverflow)?;
                     let kill_count_to_reach = match &definition.goal {
                         MissionGoalV1::KillMonsterType { count, .. }
                         | MissionGoalV1::KillMonsterSpecies { count, .. } => Some(
@@ -167,6 +175,7 @@ impl WorldState {
                             mission_id,
                             mission_type_id: mission_type_id.clone(),
                             origin_npc_id,
+                            assignment_sequence,
                             assigned_at_tick: self.tick,
                             finished_at_tick: None,
                             status: MissionStatusV1::InProgress,
@@ -550,7 +559,7 @@ impl WorldState {
             .values()
             .filter(|mission| mission.status == MissionStatusV1::InProgress)
             .collect::<Vec<_>>();
-        missions.sort_by_key(|mission| (mission.assigned_at_tick, mission.mission_id));
+        missions.sort_by_key(|mission| (mission.assignment_sequence, mission.mission_id));
         missions
             .into_iter()
             .map(|mission| {
@@ -628,6 +637,12 @@ pub(super) fn actor_missions_are_valid(
         && missions
             .windows(2)
             .all(|pair| pair[0].mission_id < pair[1].mission_id)
+        && missions
+            .iter()
+            .map(|mission| mission.assignment_sequence)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == missions.len()
         && missions.iter().all(|mission| {
             definitions
                 .get(&mission.mission_type_id)
