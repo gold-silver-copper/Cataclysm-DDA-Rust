@@ -24,6 +24,7 @@ pub const MAX_NPC_OPINION_ABS: i32 = 1_000_000_000;
 pub const MAX_NPC_CLASSES: usize = 4_096;
 pub const MAX_NPC_CLASS_SKILLS: usize = 1_024;
 pub const MAX_NPC_DISTRIBUTION_NODES: usize = 1_024;
+pub const NPC_STAMINA: u32 = 10_000;
 pub const NPC_PERSONALITY_MIN: i8 = -10;
 pub const NPC_PERSONALITY_MAX: i8 = 10;
 pub const NPC_BUILTIN_MISSION_TOPICS: [&str; 10] = [
@@ -650,8 +651,8 @@ pub fn npc_snapshot_is_valid_for_template(
         && template
             .height_centimeters
             .is_none_or(|height| npc.height_centimeters == height)
-        && npc.maximum_stamina > 0
-        && npc.stamina <= npc.maximum_stamina
+        && npc.stamina == NPC_STAMINA
+        && npc.maximum_stamina == NPC_STAMINA
         && npc.dodge_attempts_remaining <= 1
         && npc.speed > 0
         && npc.action_points >= super::MIN_ACTION_POINTS

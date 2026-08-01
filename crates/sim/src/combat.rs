@@ -11,6 +11,7 @@ use super::{
 };
 
 pub(super) const DEFAULT_MAXIMUM_STAMINA: u32 = 8_500;
+pub(super) const NPC_STAMINA: u32 = cdda_protocol::NPC_STAMINA;
 pub(super) const BASE_STAMINA_REGEN_PER_SECOND: u32 = 20;
 pub(super) const WINDED_STAMINA_REGEN_PER_SECOND: u32 = 2;
 pub(super) const ORDINARY_DODGE_ATTEMPTS: u8 = 1;
@@ -250,29 +251,10 @@ impl WorldState {
     }
 
     pub(super) fn charge_npc_melee_stamina(&mut self, source: NpcId) -> Result<(), SimError> {
-        let cost = {
-            let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
-            let weight = npc
-                .wielded
-                .map(|item_id| {
-                    let item = npc
-                        .inventory
-                        .get(&item_id)
-                        .ok_or(SimError::UnknownItem)?
-                        .snapshot();
-                    cdda_protocol::item_snapshot_containment_weight_milligrams(&item)
-                        .ok_or(SimError::NumericOverflow)
-                })
-                .transpose()?
-                .unwrap_or(0);
-            melee_stamina_cost(weight, npc_skill_level(npc, "melee"))
-        };
-        let npc = self
-            .npcs
-            .get_mut(&source)
-            .ok_or(SimError::InvalidNpcDialogue)?;
-        npc.stamina = npc.stamina.saturating_sub(cost);
-        Ok(())
+        self.npcs
+            .contains_key(&source)
+            .then_some(())
+            .ok_or(SimError::InvalidNpcDialogue)
     }
 
     pub(super) fn npc_actor_hit_spread(
@@ -306,6 +288,30 @@ impl WorldState {
         rng: &mut impl Rng,
     ) -> Result<anatomy::ActorDamageOutcome, SimError> {
         let selected = anatomy::select_body_part_index(&self.actor_anatomy, rng)?;
+        self.damage_npc_at(target, selected, damage_type, damage, rng)
+    }
+
+    pub(super) fn damage_npc_for_hit(
+        &mut self,
+        target: NpcId,
+        damage_type: &str,
+        damage: u16,
+        hit_spread: i32,
+        rng: &mut impl Rng,
+    ) -> Result<anatomy::ActorDamageOutcome, SimError> {
+        let selected =
+            anatomy::select_body_part_index_for_hit(&self.actor_anatomy, hit_spread, rng)?;
+        self.damage_npc_at(target, selected, damage_type, damage, rng)
+    }
+
+    fn damage_npc_at(
+        &mut self,
+        target: NpcId,
+        selected: usize,
+        damage_type: &str,
+        damage: u16,
+        rng: &mut impl Rng,
+    ) -> Result<anatomy::ActorDamageOutcome, SimError> {
         let body_part_id = self
             .actor_anatomy
             .parts
@@ -315,6 +321,7 @@ impl WorldState {
             .as_str();
         let npc = self.npcs.get(&target).ok_or(SimError::InvalidNpcDialogue)?;
         let mut remaining_milli = i128::from(damage) * 1_000;
+        let coverage_ticket = rng.next_u32() % 100;
         for item_id in npc.worn.iter().rev() {
             let item = npc.inventory.get(item_id).ok_or(SimError::InvalidArmor)?;
             let armor = self
@@ -322,28 +329,29 @@ impl WorldState {
                 .get(&item.type_id)
                 .filter(|armor| runtime_armor_is_supported(armor))
                 .ok_or(SimError::InvalidArmor)?;
-            for portion in armor.portions.iter().filter(|portion| {
+            let Some(portion) = armor.portions.iter().find(|portion| {
                 portion
                     .covers
                     .binary_search_by(|covered| covered.as_str().cmp(body_part_id))
                     .is_ok()
-            }) {
-                if rng.next_u32() % 100 >= u32::from(portion.coverage_percent) {
+            }) else {
+                continue;
+            };
+            if coverage_ticket >= u32::from(portion.coverage_percent) {
+                continue;
+            }
+            for material in &portion.materials {
+                if rng.next_u32() % 100 >= u32::from(material.covered_by_material_percent) {
                     continue;
                 }
-                for material in &portion.materials {
-                    if rng.next_u32() % 100 >= u32::from(material.covered_by_material_percent) {
-                        continue;
-                    }
-                    let protection_milli = i128::from(
-                        material
-                            .protection_milli
-                            .get(damage_type)
-                            .copied()
-                            .unwrap_or_default(),
-                    );
-                    remaining_milli = (remaining_milli - protection_milli).max(0);
-                }
+                let protection_milli = i128::from(
+                    material
+                        .protection_milli
+                        .get(damage_type)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+                remaining_milli = (remaining_milli - protection_milli).max(0);
             }
         }
         let dealt =
@@ -392,14 +400,14 @@ impl WorldState {
         let dodge_attempted = npc.hp > 0
             && npc.dodge_attempts_remaining > 0
             && !disabling
-            && can_dodge_at_stamina(npc.stamina, npc.maximum_stamina);
+            && can_dodge_at_stamina(NPC_STAMINA, NPC_STAMINA);
         let dodge = if dodge_attempted {
             dodge_roll(
                 npc_effective_dexterity(npc),
                 npc_skill_level(npc, "dodge"),
                 npc_effective_speed(npc),
-                npc.stamina,
-                npc.maximum_stamina,
+                NPC_STAMINA,
+                NPC_STAMINA,
             )
         } else {
             0
@@ -422,9 +430,6 @@ impl WorldState {
             .get_mut(&target)
             .ok_or(SimError::InvalidNpcDialogue)?;
         npc.dodge_attempts_remaining = npc.dodge_attempts_remaining.saturating_sub(1);
-        npc.stamina = npc
-            .stamina
-            .saturating_sub(dodge_stamina_cost(npc_skill_level(npc, "dodge")));
         Ok(())
     }
 
@@ -438,6 +443,23 @@ impl WorldState {
         self.damage_actor_components(
             target,
             &[ActorDamageUnit::ordinary(damage_type, damage)],
+            rng,
+        )
+        .map(|(outcome, was_sleeping, _)| (outcome, was_sleeping))
+    }
+
+    pub(super) fn damage_actor_for_hit(
+        &mut self,
+        target: ActorId,
+        damage_type: &str,
+        damage: u16,
+        hit_spread: i32,
+        rng: &mut impl Rng,
+    ) -> Result<(anatomy::ActorDamageOutcome, bool), SimError> {
+        self.damage_actor_components_for_hit(
+            target,
+            &[ActorDamageUnit::ordinary(damage_type, damage)],
+            hit_spread,
             rng,
         )
         .map(|(outcome, was_sleeping, _)| (outcome, was_sleeping))
@@ -515,6 +537,7 @@ impl WorldState {
             }
             let mut remaining_milli = i128::from(unit.amount_milli).max(0);
             let mut penetration_milli = i128::from(unit.armor_penetration_milli);
+            let coverage_ticket = rng.next_u32() % 100;
             for item_id in actor.worn.iter().rev() {
                 let item = actor.inventory.get(item_id).ok_or(SimError::InvalidArmor)?;
                 let armor = self
@@ -522,36 +545,37 @@ impl WorldState {
                     .get(&item.type_id)
                     .filter(|armor| runtime_armor_is_supported(armor))
                     .ok_or(SimError::InvalidArmor)?;
-                for portion in armor.portions.iter().filter(|portion| {
+                let Some(portion) = armor.portions.iter().find(|portion| {
                     portion
                         .covers
                         .binary_search_by(|covered| covered.as_str().cmp(body_part_id))
                         .is_ok()
-                }) {
-                    if rng.next_u32() % 100 >= u32::from(portion.coverage_percent) {
+                }) else {
+                    continue;
+                };
+                if coverage_ticket >= u32::from(portion.coverage_percent) {
+                    continue;
+                }
+                for material in &portion.materials {
+                    if rng.next_u32() % 100 >= u32::from(material.covered_by_material_percent) {
                         continue;
                     }
-                    for material in &portion.materials {
-                        if rng.next_u32() % 100 >= u32::from(material.covered_by_material_percent) {
-                            continue;
-                        }
-                        let protection_milli = i128::from(
-                            material
-                                .protection_milli
-                                .get(&unit.damage_type_id)
-                                .copied()
-                                .unwrap_or_default(),
-                        );
-                        let effective = multiply_damage_multiplier(
-                            multiply_damage_multiplier(
-                                (protection_milli - penetration_milli).max(0),
-                                unit.armor_multiplier_millionths,
-                            )?,
-                            unit.constant_armor_multiplier_millionths,
-                        )?;
-                        remaining_milli = (remaining_milli - effective).max(0);
-                        penetration_milli = (penetration_milli - protection_milli).max(0);
-                    }
+                    let protection_milli = i128::from(
+                        material
+                            .protection_milli
+                            .get(&unit.damage_type_id)
+                            .copied()
+                            .unwrap_or_default(),
+                    );
+                    let effective = multiply_damage_multiplier(
+                        multiply_damage_multiplier(
+                            (protection_milli - penetration_milli).max(0),
+                            unit.armor_multiplier_millionths,
+                        )?,
+                        unit.constant_armor_multiplier_millionths,
+                    )?;
+                    remaining_milli = (remaining_milli - effective).max(0);
+                    penetration_milli = (penetration_milli - protection_milli).max(0);
                 }
             }
             let multiplier_denominator = DAMAGE_MULTIPLIER_SCALE

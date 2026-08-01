@@ -198,8 +198,8 @@ pub(super) fn on_hit_effects(
     let damage_ratio_millionths = if prototype.main_part_id == prototype.body_part_id {
         i64::from(amount)
             .checked_mul(100)
-            .and_then(|value| value.checked_mul(cdda_protocol::ANATOMY_SCALE))
             .and_then(|value| value.checked_div(i64::from(state.maximum_hp)))
+            .and_then(|value| value.checked_mul(cdda_protocol::ANATOMY_SCALE))
             .ok_or(SimError::NumericOverflow)?
     } else {
         i64::from(amount)
@@ -229,17 +229,9 @@ pub(super) fn on_hit_effects(
             rng,
         )?
         .max(effect.chance_percent);
-        if chance < 100 && rng.next_u32() % 100 >= u32::try_from(chance).unwrap_or_default() {
+        if rng.next_u32() % 100 >= u32::try_from(chance).unwrap_or_default() {
             continue;
         }
-        let intensity = roll_scaled_value(
-            effect.intensity,
-            effect.intensity_damage_scaling_millionths,
-            scaling_millionths,
-            rng,
-        )?
-        .max(effect.intensity)
-        .min(effect.max_intensity);
         let duration = roll_scaled_value(
             effect.duration_turns,
             effect.duration_damage_scaling_millionths,
@@ -248,6 +240,14 @@ pub(super) fn on_hit_effects(
         )?
         .max(effect.duration_turns)
         .min(effect.max_duration_turns);
+        let intensity = roll_scaled_value(
+            effect.intensity,
+            effect.intensity_damage_scaling_millionths,
+            scaling_millionths,
+            rng,
+        )?
+        .max(effect.intensity)
+        .min(effect.max_intensity);
         if intensity <= 0 || duration <= 0 {
             continue;
         }
@@ -382,8 +382,15 @@ impl WorldState {
             &[actor_id.as_u128(), item_id.as_u128()],
             sequence,
         );
-        let clean_bite = rng.next_u32() % 1_000_000 < healing.bite_chance_millionths;
-        let clean_infection = rng.next_u32() % 1_000_000 < healing.infect_chance_millionths;
+        let has_bite = actor.effects.iter().any(|effect| {
+            effect.effect_id == "bite" && effect.body_part_id.as_deref() == Some(&part_id)
+        });
+        let has_infection = actor.effects.iter().any(|effect| {
+            effect.effect_id == "infected" && effect.body_part_id.as_deref() == Some(&part_id)
+        });
+        let clean_bite = has_bite && rng.next_u32() % 1_000_000 < healing.bite_chance_millionths;
+        let clean_infection =
+            has_infection && rng.next_u32() % 1_000_000 < healing.infect_chance_millionths;
         let actor = self
             .actors
             .get_mut(&actor_id)
@@ -400,10 +407,21 @@ impl WorldState {
         let healed_hp = part.current_hp.saturating_sub(previous_hp);
         if healing.bleed > 0 {
             let stop_level = u32::from(healing.bleed) * u32::from(first_aid) / 2;
-            actor.effects.retain(|effect| {
-                !(effect.effect_id == "bleed"
+            let reduction_ticks = u64::from(stop_level)
+                .checked_mul(60 * SimTick::HZ)
+                .ok_or(SimError::NumericOverflow)?;
+            for effect in actor.effects.iter_mut().filter(|effect| {
+                effect.effect_id == "bleed"
                     && effect.body_part_id.as_deref() == Some(&part_id)
-                    && stop_level.saturating_mul(3) > effect.intensity)
+                    && stop_level.saturating_mul(3) > effect.intensity
+            }) {
+                effect.expires_at_tick =
+                    SimTick(effect.expires_at_tick.0.saturating_sub(reduction_ticks));
+            }
+            actor.effects.retain(|effect| {
+                effect.effect_id != "bleed"
+                    || effect.body_part_id.as_deref() != Some(&part_id)
+                    || effect.expires_at_tick > self.tick
             });
         }
         if clean_bite {
@@ -531,25 +549,18 @@ impl WorldState {
                     .map(|(index, _)| index)
                     .collect::<Vec<_>>()
             };
-            let healed = candidates
-                .into_iter()
-                .filter(|index| {
-                    let mut rng = self.named_rng(
-                        b"natural-healing",
-                        &[actor_id.as_u128(), *index as u128],
-                        interval,
-                    );
-                    rng.next_u32() % 100 < 3
-                })
-                .collect::<Vec<_>>();
-            if healed.is_empty() {
+            if candidates.is_empty() {
+                continue;
+            }
+            let mut rng = self.named_rng(b"natural-healing", &[actor_id.as_u128()], interval);
+            if rng.next_u32() % 100 >= 3 {
                 continue;
             }
             let actor = self
                 .actors
                 .get_mut(&actor_id)
                 .ok_or(SimError::UnknownActor)?;
-            for index in healed {
+            for index in candidates {
                 let part = actor
                     .body_parts
                     .get_mut(index)

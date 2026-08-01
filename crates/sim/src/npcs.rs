@@ -678,7 +678,9 @@ impl WorldState {
             &[source.as_u128(), target.as_u128()],
             turn_sequence,
         );
-        let (outcome, was_sleeping) = self.damage_actor(target, "bash", damage, &mut rng)?;
+        let hit_spread = i32::try_from(spread).map_err(|_| SimError::NumericOverflow)?;
+        let (outcome, was_sleeping) =
+            self.damage_actor_for_hit(target, "bash", damage, hit_spread, &mut rng)?;
         events.push(self.make_event(WorldEventKind::ActorDamagedByNpc {
             source,
             target,

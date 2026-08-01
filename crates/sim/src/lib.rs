@@ -6592,16 +6592,6 @@ impl WorldState {
             };
         }
         for npc in self.npcs.values_mut() {
-            let winded = npc
-                .effects
-                .iter()
-                .any(|effect| effect.effect_id == "winded" && effect.expires_at_tick > self.tick);
-            let regen = if winded {
-                combat::WINDED_STAMINA_REGEN_PER_SECOND
-            } else {
-                combat::BASE_STAMINA_REGEN_PER_SECOND
-            };
-            npc.stamina = npc.stamina.saturating_add(regen).min(npc.maximum_stamina);
             npc.dodge_attempts_remaining = if npc.hp > 0 {
                 combat::ORDINARY_DODGE_ATTEMPTS
             } else {
@@ -6683,7 +6673,7 @@ impl WorldState {
         Ok(())
     }
 
-    fn advance_actor_effects(&mut self, events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
+    fn advance_actor_effects(&mut self, _events: &mut Vec<WorldEvent>) -> Result<(), SimError> {
         for actor in self.actors.values_mut() {
             actor
                 .effects
@@ -6698,150 +6688,9 @@ impl WorldState {
             npc.effects
                 .retain(|effect| effect.expires_at_tick > self.tick);
         }
-        if !self.tick.0.is_multiple_of(5 * SimTick::HZ) {
-            return Ok(());
-        }
-        let actor_ids = self.actors.keys().copied().collect::<Vec<_>>();
-        for actor_id in actor_ids {
-            let bleeding = self
-                .actors
-                .get(&actor_id)
-                .ok_or(SimError::UnknownActor)?
-                .effects
-                .iter()
-                .filter(|effect| effect.effect_id == "bleed")
-                .cloned()
-                .collect::<Vec<_>>();
-            for effect in bleeding {
-                if self.actors.get(&actor_id).is_none_or(|actor| actor.hp <= 0) {
-                    break;
-                }
-                let selected = effect
-                    .body_part_id
-                    .as_ref()
-                    .and_then(|body_part_id| {
-                        self.actor_anatomy
-                            .parts
-                            .iter()
-                            .position(|part| part.body_part_id == *body_part_id)
-                    })
-                    .or_else(|| self.actor_anatomy.parts.iter().position(|part| part.vital))
-                    .ok_or(SimError::InvalidActorAnatomy)?;
-                let amount = u16::try_from(effect.intensity.min(u32::from(u16::MAX)))
-                    .map_err(|_| SimError::NumericOverflow)?;
-                let (outcome, was_sleeping) = {
-                    let actor = self
-                        .actors
-                        .get_mut(&actor_id)
-                        .ok_or(SimError::UnknownActor)?;
-                    let outcome = anatomy::apply_damage_to_part(
-                        &self.actor_anatomy,
-                        &mut actor.body_parts,
-                        selected,
-                        amount,
-                    )?;
-                    let was_sleeping = actor.sleeping;
-                    actor.hp = outcome.remaining_hp;
-                    if actor.hp <= 0 {
-                        actor.sleeping = false;
-                        actor.sleep_intervals = 0;
-                        actor.dodge_attempts_remaining = 0;
-                        actor.held_movement = None;
-                        actor.queued_actions.clear();
-                    }
-                    (outcome, was_sleeping)
-                };
-                events.push(self.make_event(WorldEventKind::ActorDamagedByEffect {
-                    actor_id,
-                    effect_id: effect.effect_id.clone(),
-                    body_part_id: outcome.body_part_id,
-                    amount: outcome.amount,
-                    remaining_part_hp: outcome.remaining_part_hp,
-                    remaining_hp: outcome.remaining_hp,
-                })?);
-                self.interrupt_craft(actor_id, events)?;
-                self.interrupt_book_study(actor_id, BookStudyInterruptionReason::Damage, events)?;
-                self.interrupt_disassembly(
-                    actor_id,
-                    DisassemblyInterruptionReason::Damage,
-                    events,
-                )?;
-                self.interrupt_construction(
-                    actor_id,
-                    ConstructionInterruptionReason::Damage,
-                    events,
-                )?;
-                if was_sleeping && outcome.remaining_hp > 0 {
-                    self.wake_actor(actor_id, WakeReason::Damage, events)?;
-                }
-                if outcome.remaining_hp <= 0 {
-                    events.push(self.make_event(WorldEventKind::ActorDiedFromEffect {
-                        actor_id,
-                        effect_id: effect.effect_id,
-                    })?);
-                }
-            }
-        }
-        let npc_ids = self.npcs.keys().copied().collect::<Vec<_>>();
-        for npc_id in npc_ids {
-            let bleeding = self
-                .npcs
-                .get(&npc_id)
-                .ok_or(SimError::UnknownNpc)?
-                .effects
-                .iter()
-                .filter(|effect| effect.effect_id == "bleed")
-                .cloned()
-                .collect::<Vec<_>>();
-            for effect in bleeding {
-                if self.npcs.get(&npc_id).is_none_or(|npc| npc.hp <= 0) {
-                    break;
-                }
-                let selected = effect
-                    .body_part_id
-                    .as_ref()
-                    .and_then(|body_part_id| {
-                        self.actor_anatomy
-                            .parts
-                            .iter()
-                            .position(|part| part.body_part_id == *body_part_id)
-                    })
-                    .or_else(|| self.actor_anatomy.parts.iter().position(|part| part.vital))
-                    .ok_or(SimError::InvalidActorAnatomy)?;
-                let amount = u16::try_from(effect.intensity.min(u32::from(u16::MAX)))
-                    .map_err(|_| SimError::NumericOverflow)?;
-                let outcome = {
-                    let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
-                    let outcome = anatomy::apply_damage_to_part(
-                        &self.actor_anatomy,
-                        &mut npc.body_parts,
-                        selected,
-                        amount,
-                    )?;
-                    npc.hp = outcome.remaining_hp;
-                    if npc.hp <= 0 {
-                        npc.dodge_attempts_remaining = 0;
-                        npc.action_points = 0;
-                    }
-                    outcome
-                };
-                events.push(self.make_event(WorldEventKind::NpcDamagedByEffect {
-                    npc_id,
-                    effect_id: effect.effect_id.clone(),
-                    body_part_id: outcome.body_part_id,
-                    amount: outcome.amount,
-                    remaining_part_hp: outcome.remaining_part_hp,
-                    remaining_hp: outcome.remaining_hp,
-                })?);
-                if outcome.remaining_hp <= 0 {
-                    self.finish_npc_death(npc_id, events)?;
-                    events.push(self.make_event(WorldEventKind::NpcKilledByEffect {
-                        npc_id,
-                        effect_id: effect.effect_id,
-                    })?);
-                }
-            }
-        }
+        // Character bleeding is retained as treatment-visible state, but it
+        // cannot deal direct HP damage until canonical blood physiology is an
+        // authoritative subsystem. Creature effect processing is unchanged.
         Ok(())
     }
 
@@ -8772,7 +8621,9 @@ impl WorldState {
             &[source.as_u128(), target.as_u128()],
             sequence.0,
         );
-        let (outcome, was_sleeping) = self.damage_actor(target, "bash", damage, &mut rng)?;
+        let hit_spread = i32::try_from(spread).map_err(|_| SimError::NumericOverflow)?;
+        let (outcome, was_sleeping) =
+            self.damage_actor_for_hit(target, "bash", damage, hit_spread, &mut rng)?;
         events.push(self.make_event(WorldEventKind::DamageApplied {
             source,
             target,
@@ -8844,7 +8695,8 @@ impl WorldState {
             &[source.as_u128(), target.as_u128()],
             sequence.0,
         );
-        let outcome = self.damage_npc(target, "bash", damage, &mut rng)?;
+        let hit_spread = i32::try_from(spread).map_err(|_| SimError::NumericOverflow)?;
+        let outcome = self.damage_npc_for_hit(target, "bash", damage, hit_spread, &mut rng)?;
         events.push(self.make_event(WorldEventKind::NpcDamaged {
             source,
             target,
@@ -16185,8 +16037,8 @@ impl WorldState {
                         personality: npc.personality.clone(),
                         age_years: npc.age_years,
                         height_centimeters: npc.height_centimeters,
-                        stamina: npc.stamina,
-                        maximum_stamina: npc.maximum_stamina,
+                        stamina: combat::NPC_STAMINA,
+                        maximum_stamina: combat::NPC_STAMINA,
                         dodge_attempts_remaining: npc.dodge_attempts_remaining,
                         speed: npc.speed,
                         action_points: npc.action_points,
