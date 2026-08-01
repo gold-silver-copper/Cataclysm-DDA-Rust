@@ -2,8 +2,8 @@
 
 use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, BookStudyInterruptionReason, ConstructionInterruptionReason,
-    DisassemblyInterruptionReason, FieldContactDamageV1, FieldContactEffectV1, SimTick,
-    WEATHER_SCALE, WakeReason, WorldEvent, WorldEventKind, WorldPosition,
+    DisassemblyInterruptionReason, FieldContactDamageV1, FieldContactEffectV1, SimTick, WakeReason,
+    WorldEvent, WorldEventKind, WorldPosition,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -182,15 +182,7 @@ impl WorldState {
         if current.intensity <= 1 {
             return Ok(());
         }
-        let windpower = if outside {
-            self.weather_state
-                .as_ref()
-                .map(|state| state.windpower_millionths / WEATHER_SCALE)
-                .unwrap_or(0)
-                .max(0)
-        } else {
-            0
-        };
+        let windpower = self.local_windpower(position);
         let mut rng = self.named_rng(
             b"field-gas-spread",
             &[u128::from(current.display_sequence)],

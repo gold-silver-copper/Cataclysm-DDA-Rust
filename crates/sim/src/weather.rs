@@ -68,6 +68,49 @@ impl WorldState {
         true
     }
 
+    /// Pinned `get_local_windpower`: shelter removes wind, forest overmap
+    /// terrain halves it, elevation increases it, and the first upwind
+    /// `BLOCK_WIND` tile reduces it to one tenth.
+    pub(super) fn local_windpower(&self, position: WorldPosition) -> i64 {
+        if !self.position_is_outside(position) {
+            return 0;
+        }
+        let Some(state) = self.weather_state.as_ref() else {
+            return 0;
+        };
+        let mut windpower = (state.windpower_millionths / WEATHER_SCALE).max(0);
+        let Some(catalog) = self.worldgen.as_ref() else {
+            return 0;
+        };
+        let omt_size = cdda_protocol::WORLDGEN_OMT_SIZE as i32;
+        let omt = cdda_protocol::ChunkCoord {
+            x: position.x.div_euclid(omt_size),
+            y: position.y.div_euclid(omt_size),
+            z: position.z,
+        };
+        let Some(identity) = cdda_protocol::worldgen_omt_identity_at(catalog, omt) else {
+            return 0;
+        };
+        if matches!(identity.type_id.as_str(), "forest" | "forest_water") {
+            windpower /= 2;
+        }
+        if position.z > 0 {
+            windpower =
+                windpower.saturating_add(i64::from(position.z).saturating_mul(windpower.min(5)));
+        }
+        let (dx, dy) = wind_blocker_offset(state.wind_direction_degrees);
+        let Some(blocker) = position.checked_offset(dx, dy, 0) else {
+            return 0;
+        };
+        if self
+            .terrain_or_furniture_has_flag(blocker, "BLOCK_WIND")
+            .is_none_or(|blocked| blocked)
+        {
+            windpower /= 10;
+        }
+        windpower
+    }
+
     pub(super) fn advance_weather_environment(
         &mut self,
         events: &mut Vec<WorldEvent>,
@@ -215,6 +258,20 @@ impl WorldState {
             })?);
         }
         Ok(())
+    }
+}
+
+fn wind_blocker_offset(direction_degrees: i16) -> (i8, i8) {
+    match direction_degrees.rem_euclid(360) {
+        330..=359 => (0, -1),
+        301..=329 => (-1, -1),
+        240..=300 => (-1, 0),
+        211..=239 => (-1, 1),
+        150..=210 => (0, 1),
+        121..=149 => (1, 1),
+        60..=120 => (1, 0),
+        31..=59 => (1, -1),
+        _ => (0, -1),
     }
 }
 
