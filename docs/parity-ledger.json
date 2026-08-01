@@ -1,8 +1,8 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 138,
-  "persistence_schema_version": 115,
+  "protocol_version": 139,
+  "persistence_schema_version": 116,
   "replay_format_version": 4,
   "active_milestone": "npcs-social",
   "completion_gate": [

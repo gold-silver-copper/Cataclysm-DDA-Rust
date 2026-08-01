@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const PLAYER_FACTION_ID: &str = "your_followers";
 pub const NO_FACTION_ID: &str = "no_faction";
 pub const MAX_FACTION_TEMPLATES: usize = 4_096;
+pub const MAX_ACTOR_FACTION_STANDINGS: usize = MAX_FACTION_TEMPLATES;
 pub const MAX_FACTION_RELATIONS: usize = 4_096;
 pub const MAX_FACTION_FOOD_SUPPLY_ENTRIES: usize = 4_096;
 pub const MAX_FACTION_ID_BYTES: usize = 512;
@@ -73,6 +74,44 @@ pub struct FactionStateV1 {
     /// `None` is upstream's default "ask" state.
     pub steal_persist: Option<bool>,
     pub relations: Vec<FactionRelationshipV1>,
+}
+
+/// One player's standing with an NPC faction. Upstream stores these values on
+/// the faction because it has one avatar; multiplayer keeps the same values
+/// and formulas per authoritative actor.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActorFactionStandingV1 {
+    pub faction_id: String,
+    pub likes_u: i32,
+    pub respects_u: i32,
+    pub trusts_u: i32,
+}
+
+impl ActorFactionStandingV1 {
+    #[must_use]
+    pub fn from_faction(state: &FactionStateV1) -> Self {
+        Self {
+            faction_id: state.faction_id.clone(),
+            likes_u: state.likes_u,
+            respects_u: state.respects_u,
+            trusts_u: state.trusts_u,
+        }
+    }
+}
+
+#[must_use]
+pub fn actor_faction_standings_are_valid(
+    standings: &[ActorFactionStandingV1],
+    faction_ids: &BTreeSet<&str>,
+) -> bool {
+    standings.len() == faction_ids.len()
+        && standings.len() <= MAX_ACTOR_FACTION_STANDINGS
+        && standings
+            .windows(2)
+            .all(|pair| pair[0].faction_id < pair[1].faction_id)
+        && standings
+            .iter()
+            .all(|standing| faction_ids.contains(standing.faction_id.as_str()))
 }
 
 impl FactionStateV1 {

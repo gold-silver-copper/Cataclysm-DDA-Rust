@@ -525,6 +525,7 @@ impl WorldState {
         if !eoc_effects_are_valid(effects)
             || eoc_effects_contain_confirmation(effects)
             || !effects_body_parts_are_valid(effects, &valid_part)
+            || !dialogue_target_effect_closure_is_supported(&self.eoc_definitions, effects)
         {
             return Ok(false);
         }
@@ -589,12 +590,17 @@ impl WorldState {
             .ok_or(SimError::UnknownNpc)?
             .faction_id
             .clone();
-        let mut factions = self.factions.clone();
+        let mut faction_standings = self
+            .actors
+            .get(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .faction_standings
+            .clone();
         let mut retained_outputs = Vec::with_capacity(execution.outputs.len());
         for output in std::mem::take(&mut execution.outputs) {
             match output {
                 EocOutput::ChangeTargetFaction(faction_id) => {
-                    if !factions.contains_key(&faction_id) {
+                    if !self.factions.contains_key(&faction_id) {
                         return Ok(false);
                     }
                     target_faction_id = faction_id;
@@ -604,31 +610,31 @@ impl WorldState {
                         return Ok(false);
                     };
                     if !template.lone_wolf_faction {
-                        let Some(faction) = factions.get_mut(&target_faction_id) else {
+                        let Some(standing) = faction_standings.get_mut(&target_faction_id) else {
                             return Ok(false);
                         };
-                        let Some(likes_u) = faction.likes_u.checked_add(delta) else {
+                        let Some(likes_u) = standing.likes_u.checked_add(delta) else {
                             return Ok(false);
                         };
-                        let Some(respects_u) = faction.respects_u.checked_add(delta) else {
+                        let Some(respects_u) = standing.respects_u.checked_add(delta) else {
                             return Ok(false);
                         };
-                        let Some(trusts_u) = faction.trusts_u.checked_add(delta) else {
+                        let Some(trusts_u) = standing.trusts_u.checked_add(delta) else {
                             return Ok(false);
                         };
-                        faction.likes_u = likes_u;
-                        faction.respects_u = respects_u;
-                        faction.trusts_u = trusts_u;
+                        standing.likes_u = likes_u;
+                        standing.respects_u = respects_u;
+                        standing.trusts_u = trusts_u;
                     }
                 }
                 EocOutput::AddTargetFactionTrust(delta) => {
-                    let Some(faction) = factions.get_mut(&target_faction_id) else {
+                    let Some(standing) = faction_standings.get_mut(&target_faction_id) else {
                         return Ok(false);
                     };
-                    let Some(trusts_u) = faction.trusts_u.checked_add(delta) else {
+                    let Some(trusts_u) = standing.trusts_u.checked_add(delta) else {
                         return Ok(false);
                     };
-                    faction.trusts_u = trusts_u;
+                    standing.trusts_u = trusts_u;
                 }
                 output => retained_outputs.push(output),
             }
@@ -649,12 +655,69 @@ impl WorldState {
             .target_variables
             .take()
             .ok_or(SimError::InvalidNpcDialogue)?;
-        self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
-        let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
-        npc.effects = target_effects;
-        npc.eoc_variables = target_variables;
-        npc.faction_id = target_faction_id;
-        self.factions = factions;
+        let actor_before = self
+            .actors
+            .get(&actor_id)
+            .cloned()
+            .ok_or(SimError::UnknownActor)?;
+        let allocator_before = self.allocator.clone();
+        let vehicles_before = execution
+            .mission_operations
+            .iter()
+            .any(|operation| {
+                matches!(
+                    operation,
+                    MissionOperation::Finish {
+                        item_state_after: Some(_),
+                        ..
+                    }
+                )
+            })
+            .then(|| self.vehicles.clone());
+        let mut touched_npc_ids = std::collections::BTreeSet::from([npc_id]);
+        touched_npc_ids.extend(execution.mission_operations.iter().filter_map(|operation| {
+            match operation {
+                MissionOperation::Assign { origin_npc_id, .. } => *origin_npc_id,
+                MissionOperation::Finish { .. } => None,
+            }
+        }));
+        let npcs_before = touched_npc_ids
+            .iter()
+            .map(|id| (*id, self.npcs.get(id).cloned()))
+            .collect::<Vec<_>>();
+        let next_event_counter_before = self.next_event_counter;
+        let events_before = events.len();
+        let committed = (|| {
+            self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .faction_standings = faction_standings;
+            let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
+            npc.effects = target_effects;
+            npc.eoc_variables = target_variables;
+            if npc.faction_id != target_faction_id {
+                npc.set_faction(target_faction_id);
+            }
+            Ok(())
+        })();
+        if let Err(error) = committed {
+            self.actors.insert(actor_id, actor_before);
+            self.allocator = allocator_before;
+            if let Some(vehicles) = vehicles_before {
+                self.vehicles = vehicles;
+            }
+            for (id, npc) in npcs_before {
+                if let Some(npc) = npc {
+                    self.npcs.insert(id, npc);
+                } else {
+                    self.npcs.remove(&id);
+                }
+            }
+            self.next_event_counter = next_event_counter_before;
+            events.truncate(events_before);
+            return Err(error);
+        }
         Ok(true)
     }
 
@@ -1387,9 +1450,7 @@ fn evaluate_condition(
         } => effects.iter().any(|effect| {
             effect.effect_id == *effect_id
                 && effect.intensity >= *minimum_intensity
-                && body_part_id
-                    .as_ref()
-                    .is_none_or(|body_part_id| effect.body_part_id.as_ref() == Some(body_part_id))
+                && effect.body_part_id == *body_part_id
         }),
         EocConditionV1::HasAnyEffect {
             effect_ids,
@@ -1398,9 +1459,7 @@ fn evaluate_condition(
         } => effects.iter().any(|effect| {
             effect_ids.contains(&effect.effect_id)
                 && effect.intensity >= *minimum_intensity
-                && body_part_id
-                    .as_ref()
-                    .is_none_or(|body_part_id| effect.body_part_id.as_ref() == Some(body_part_id))
+                && effect.body_part_id == *body_part_id
         }),
         EocConditionV1::TargetHasEffect {
             effect_id,
@@ -1412,9 +1471,7 @@ fn evaluate_condition(
             .any(|effect| {
                 effect.effect_id == *effect_id
                     && effect.intensity >= *minimum_intensity
-                    && body_part_id.as_ref().is_none_or(|body_part_id| {
-                        effect.body_part_id.as_ref() == Some(body_part_id)
-                    })
+                    && effect.body_part_id == *body_part_id
             }),
         EocConditionV1::TargetHasAnyEffect {
             effect_ids,
@@ -1426,9 +1483,7 @@ fn evaluate_condition(
             .any(|effect| {
                 effect_ids.contains(&effect.effect_id)
                     && effect.intensity >= *minimum_intensity
-                    && body_part_id.as_ref().is_none_or(|body_part_id| {
-                        effect.body_part_id.as_ref() == Some(body_part_id)
-                    })
+                    && effect.body_part_id == *body_part_id
             }),
         EocConditionV1::CompareString(values) => {
             let mut seen = BTreeSet::new();
@@ -1907,9 +1962,7 @@ fn execute_effects(
                 body_part_id,
             } => execution.effects.retain(|effect| {
                 !effect_ids.iter().any(|id| id == &effect.effect_id)
-                    || body_part_id
-                        .as_ref()
-                        .is_some_and(|part| effect.body_part_id.as_ref() != Some(part))
+                    || effect.body_part_id != *body_part_id
             }),
             EocEffectV1::SetActorVariable {
                 variable_id,
@@ -1920,9 +1973,7 @@ fn execute_effects(
                 {
                     return Err(SimError::InvalidItem);
                 }
-                let index = usize::try_from(execution.rng.next_u32())
-                    .map_err(|_| SimError::NumericOverflow)?
-                    % possible_values.len();
+                let index = unbiased_eoc_choice(&mut execution.rng, possible_values.len())?;
                 execution
                     .variables
                     .insert(variable_id.clone(), possible_values[index].clone());
@@ -1962,9 +2013,7 @@ fn execute_effects(
                 .ok_or(SimError::InvalidItem)?
                 .retain(|effect| {
                     !effect_ids.iter().any(|id| id == &effect.effect_id)
-                        || body_part_id
-                            .as_ref()
-                            .is_some_and(|part| effect.body_part_id.as_ref() != Some(part))
+                        || effect.body_part_id != *body_part_id
                 }),
             EocEffectV1::SetTargetVariable {
                 variable_id,
@@ -1979,9 +2028,7 @@ fn execute_effects(
                 {
                     return Err(SimError::InvalidItem);
                 }
-                let index = usize::try_from(execution.rng.next_u32())
-                    .map_err(|_| SimError::NumericOverflow)?
-                    % possible_values.len();
+                let index = unbiased_eoc_choice(&mut execution.rng, possible_values.len())?;
                 target_variables.insert(variable_id.clone(), possible_values[index].clone());
             }
             EocEffectV1::RemoveTargetVariable { variable_id } => {
@@ -2195,6 +2242,68 @@ fn refresh_eoc_item_context(actor: &mut EocActorContext) {
         .map(|item| item.type_id.clone())
         .collect();
     actor.has_weapon = actor.mission_items.wielded.is_some();
+}
+
+fn dialogue_target_effect_closure_is_supported(
+    catalog: &BTreeMap<String, EocDefinitionV1>,
+    effects: &[EocEffectV1],
+) -> bool {
+    fn visit_effects(
+        catalog: &BTreeMap<String, EocDefinitionV1>,
+        effects: &[EocEffectV1],
+        visiting: &mut BTreeSet<String>,
+        accepted: &mut BTreeSet<String>,
+    ) -> bool {
+        effects.iter().all(|effect| match effect {
+            EocEffectV1::AddTargetEffect { .. } => false,
+            EocEffectV1::Conditional {
+                then_effects,
+                else_effects,
+                ..
+            }
+            | EocEffectV1::Confirmation {
+                accept_effects: then_effects,
+                decline_effects: else_effects,
+                ..
+            } => {
+                visit_effects(catalog, then_effects, visiting, accepted)
+                    && visit_effects(catalog, else_effects, visiting, accepted)
+            }
+            EocEffectV1::RunEocs { eoc_ids, .. } => eoc_ids.iter().all(|eoc_id| {
+                if accepted.contains(eoc_id) || visiting.contains(eoc_id) {
+                    return true;
+                }
+                let Some(definition) = catalog.get(eoc_id) else {
+                    return false;
+                };
+                visiting.insert(eoc_id.clone());
+                let supported = visit_effects(catalog, &definition.effects, visiting, accepted)
+                    && visit_effects(catalog, &definition.false_effects, visiting, accepted);
+                visiting.remove(eoc_id);
+                if supported {
+                    accepted.insert(eoc_id.clone());
+                }
+                supported
+            }),
+            _ => true,
+        })
+    }
+
+    visit_effects(catalog, effects, &mut BTreeSet::new(), &mut BTreeSet::new())
+}
+
+fn unbiased_eoc_choice(rng: &mut ChaCha8Rng, choices: usize) -> Result<usize, SimError> {
+    let bound = u32::try_from(choices)
+        .ok()
+        .filter(|bound| *bound != 0)
+        .ok_or(SimError::InvalidItem)?;
+    let threshold = bound.wrapping_neg() % bound;
+    loop {
+        let value = rng.next_u32();
+        if value >= threshold {
+            return usize::try_from(value % bound).map_err(|_| SimError::NumericOverflow);
+        }
+    }
 }
 
 fn add_effect(

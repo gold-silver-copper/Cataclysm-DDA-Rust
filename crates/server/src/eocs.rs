@@ -367,6 +367,8 @@ pub(super) fn runtime_dialogue_eoc_ids(
                 && definition.event_trigger.is_none()
                 && !cdda_protocol::eoc_effects_contain_confirmation(&definition.effects)
                 && !cdda_protocol::eoc_effects_contain_confirmation(&definition.false_effects)
+                && dialogue_target_effect_applications_are_supported(&definition.effects)
+                && dialogue_target_effect_applications_are_supported(&definition.false_effects)
                 && dialogue_faction_references_are_supported(&definition.effects, faction_ids)
                 && dialogue_faction_references_are_supported(&definition.false_effects, faction_ids)
         })
@@ -397,6 +399,30 @@ pub(super) fn runtime_dialogue_eoc_ids(
         }
     }
     available.keys().map(|id| (*id).to_owned()).collect()
+}
+
+fn dialogue_target_effect_applications_are_supported(effects: &[EocEffectV1]) -> bool {
+    effects.iter().all(|effect| match effect {
+        // The current EOC wire form does not carry the resolved effect-type
+        // duration caps, blockers, or stat modifiers. Admitting a raw target
+        // application would fabricate semantics, so keep it fail-closed until
+        // the shared application profile is represented.
+        EocEffectV1::AddTargetEffect { .. } => false,
+        EocEffectV1::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        }
+        | EocEffectV1::Confirmation {
+            accept_effects: then_effects,
+            decline_effects: else_effects,
+            ..
+        } => {
+            dialogue_target_effect_applications_are_supported(then_effects)
+                && dialogue_target_effect_applications_are_supported(else_effects)
+        }
+        _ => true,
+    })
 }
 
 pub(super) fn dialogue_faction_references_are_supported(
@@ -596,6 +622,7 @@ pub(super) fn runtime_dialogue_effects_are_supported(
     };
     cdda_protocol::eoc_effects_are_valid(&runtime)
         && runtime_effect_body_parts_are_supported(&runtime, &valid_part)
+        && dialogue_target_effect_applications_are_supported(&runtime)
         && dialogue_mission_references_are_supported(effects, mission_ids)
 }
 

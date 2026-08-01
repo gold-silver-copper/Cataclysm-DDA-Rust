@@ -172,6 +172,13 @@ pub(super) struct Npc {
 }
 
 impl Npc {
+    pub(super) fn set_faction(&mut self, faction_id: String) {
+        for item in self.inventory.values_mut() {
+            item.set_owner_recursive(&faction_id);
+        }
+        self.faction_id = faction_id;
+    }
+
     pub(super) fn snapshot(&self) -> NpcSnapshotV1 {
         NpcSnapshotV1 {
             id: self.id,
@@ -712,7 +719,7 @@ impl WorldState {
         }
         let template_id = npc.template_id.clone();
         let reset_talk_attitude = npc.attitude == 1;
-        let will_talk = self.npc_will_talk_to_player_faction(npc);
+        let will_talk = self.npc_will_talk_to_actor(npc, actor_id);
         let topic_id = self
             .npc_templates
             .get(&template_id)
@@ -764,7 +771,7 @@ impl WorldState {
         let Some((npc_position, will_talk)) = self
             .npcs
             .get(&npc_id)
-            .map(|npc| (npc.position, self.npc_will_talk_to_player_faction(npc)))
+            .map(|npc| (npc.position, self.npc_will_talk_to_actor(npc, actor_id)))
         else {
             return self.invalidate_npc_dialogue(
                 actor_id,
@@ -1420,7 +1427,7 @@ impl WorldState {
                 return Ok(false);
             };
             if !adjacent(actor.position, npc.position)
-                || !self.npc_will_talk_to_player_faction(npc)
+                || !self.npc_will_talk_to_actor(npc, *actor_id)
                 || !topic_stack
                     .iter()
                     .all(|topic_id| self.dialogue_topics.contains_key(topic_id))

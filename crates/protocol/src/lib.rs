@@ -68,10 +68,11 @@ pub use npc_dialogue::{
     npc_template_runtime_ai_is_supported, opinion_delta_cannot_trigger_hostility, opinion_is_valid,
 };
 pub use npc_faction::{
-    FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,
-    FactionTemplateV1, MAX_FACTION_DESCRIPTION_BYTES, MAX_FACTION_FOOD_SUPPLY_ENTRIES,
-    MAX_FACTION_ID_BYTES, MAX_FACTION_NAME_BYTES, MAX_FACTION_RELATIONS, MAX_FACTION_TEMPLATES,
-    NO_FACTION_ID, PLAYER_FACTION_ID, faction_catalog_is_valid, faction_template_is_valid,
+    ActorFactionStandingV1, FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1,
+    FactionStateV1, FactionTemplateV1, MAX_ACTOR_FACTION_STANDINGS, MAX_FACTION_DESCRIPTION_BYTES,
+    MAX_FACTION_FOOD_SUPPLY_ENTRIES, MAX_FACTION_ID_BYTES, MAX_FACTION_NAME_BYTES,
+    MAX_FACTION_RELATIONS, MAX_FACTION_TEMPLATES, NO_FACTION_ID, PLAYER_FACTION_ID,
+    actor_faction_standings_are_valid, faction_catalog_is_valid, faction_template_is_valid,
 };
 
 pub use item_groups::{
@@ -151,7 +152,7 @@ pub use weather::{
     weather_state_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 138;
+pub const PROTOCOL_VERSION: u16 = 139;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -2973,6 +2974,9 @@ pub struct ActorSnapshot {
     pub effects: Vec<ActorEffectSnapshotV1>,
     /// Stable actor-scoped CDDA dialogue/EOC string variables.
     pub eoc_variables: BTreeMap<String, String>,
+    /// Faction-ID-sorted per-character standing. This is the multiplayer
+    /// adaptation of upstream's single-avatar faction opinion fields.
+    pub faction_standings: Vec<ActorFactionStandingV1>,
     /// Monotonic high-water sequence for stable delayed-EOC ordering.
     pub next_eoc_schedule_sequence: u64,
     /// Due-tick/sequence sorted server-authoritative delayed activations.

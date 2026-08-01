@@ -145,7 +145,7 @@ impl WorldState {
         let forms_hostile_attitude = !matches!(
             attitude,
             NPC_ATTITUDE_KILL | NPC_ATTITUDE_FLEE | NPC_ATTITUDE_FLEE_TEMPORARY
-        ) && self.npc_is_hostile_to_player_faction(npc);
+        ) && self.npc_is_hostile_to_any_actor(npc);
         let mut target = if forms_hostile_attitude {
             self.npc_actor_target(npc_id, NpcTurnBehavior::Attack)?
         } else if behavior == NpcTurnBehavior::Pause {
@@ -167,14 +167,6 @@ impl WorldState {
                 NpcTurnBehavior::Flee
             } else {
                 NpcTurnBehavior::Attack
-            };
-            self.npcs
-                .get_mut(&npc_id)
-                .ok_or(SimError::UnknownNpc)?
-                .attitude = if behavior == NpcTurnBehavior::Flee {
-                NPC_ATTITUDE_FLEE_TEMPORARY
-            } else {
-                NPC_ATTITUDE_KILL
             };
         }
         if behavior == NpcTurnBehavior::Pause {
@@ -284,6 +276,11 @@ impl WorldState {
                 || (requires_connection && !actor.connected)
                 || ranged_distance(position, actor.position) > MAX_NPC_ROUTE_DISTANCE
                 || (requires_sight && !self.npc_can_see_position(npc_id, actor.position)?)
+                || (behavior == NpcTurnBehavior::Attack
+                    && !self.npc_is_hostile_to_actor(
+                        self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?,
+                        actor.id,
+                    ))
             {
                 continue;
             }

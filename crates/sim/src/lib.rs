@@ -32,47 +32,48 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt;
 
 use cdda_protocol::{
-    ActorBodyPartSnapshotV1, ActorConnectionUpdateV1, ActorEffectSnapshotV1, ActorId,
-    ActorSnapshot, AmmunitionContainerPocketPrototypeV1, AmmunitionContainerPocketSnapshotV1,
-    AnatomyDefinitionV1, BashTargetKindV1, BookStudyActivitySnapshotV1,
-    BookStudyInterruptionReason, BookStudyV1, CRAFT_PRACTICE_ACTION_POINTS,
-    CRAFT_PROFICIENCY_SCALE, CharacterCreationStatsV1, ChunkCoord, ChunkSnapshot, ClientCommand,
-    CommandKind, CommandRejection, CommandSequence, ConstructionActivitySnapshotV1,
-    ConstructionInterruptionReason, ConstructionRecipeV1, ConstructionResultV1,
-    CraftActivitySnapshotV1, CraftConsumedItemV1, CraftItemPrototypeV1, CraftProficiencyV1,
-    CraftRecipeV1, CraftSkillRequirementV1, CreatureCorpsePrototypeV1, CreatureCorpseSnapshotV1,
-    CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot, CreatureSoundGoalV1,
-    CreatureSpecialAttackStateV1, DialogueTopicV1, DisassemblyActivitySnapshotV1,
-    DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason, DisassemblyRecipeV1,
-    EocDefinitionV1, EocItemUseTypeV1, EventId, FactionStateV1, FactionTemplateV1, FieldSnapshotV1,
-    FieldTypeSnapshotV1, FurnitureBashTypeV1, FurnitureTileSnapshot, GroundItemSnapshot,
-    HealingItemTypeV1, HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1,
-    HorizontalDirection, IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1,
-    ItemComponentSnapshotV1, ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId,
-    ItemPlaceMonsterTypeV1, ItemSnapshot, ItemTransformTypeV1, LocalTileCoord, MAX_ACTOR_BASE_STAT,
-    MAX_AMMUNITION_CONTAINER_CONTENTS, MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES,
-    MAX_CHARACTER_CREATION_STAT, MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES,
-    MAX_CRAFT_COMPONENT_ALTERNATIVES, MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES,
-    MAX_CRAFT_PROFICIENCIES, MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS,
-    MAX_CRAFT_RECIPE_ID_BYTES, MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS,
-    MAX_DISASSEMBLY_COMPONENT_TYPES, MAX_ITEM_AMMUNITION_CONTAINER_POCKETS,
-    MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS, MAX_ITEM_DAMAGE_LEVEL,
-    MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS, MAX_LEARNED_RECIPES,
-    MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES, MAX_PROFICIENCY_ID_BYTES,
-    MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES, MAX_SKILL_LEVEL, MAX_SKILLS,
-    MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1, MagazineWellSnapshotV1,
-    MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1, MissionId,
-    MissionSnapshotV1, NaturalLightSnapshot, NpcClassV1, NpcId, NpcTemplateV1, PoweredToolStateV1,
-    PoweredToolTransitionReason, ProficiencyLevelSnapshot, QueuedActionSnapshot, RangedTarget,
-    RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick, SkillLevelSnapshot, SleepReason,
-    SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot, VehicleId, VehicleSnapshotV1,
-    WakeReason, WearableArmorTypeV1, WeatherCatalogV1, WeatherObservationV1, WeatherStateV1,
-    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, WorldgenCatalogV1,
-    adjusted_book_study_time_moves, eoc_catalog_is_valid, healing_item_catalog_is_valid,
-    item_group_catalog_is_valid, item_group_source_max_outputs, item_group_sources_are_valid,
-    item_place_monster_catalog_is_valid, item_snapshot_is_compatible_with_spawn_rules,
-    item_snapshots_can_combine_for_containment, item_transform_catalog_is_valid,
-    weather_catalog_is_valid, weather_state_is_valid, worldgen_catalog_is_valid,
+    ActorBodyPartSnapshotV1, ActorConnectionUpdateV1, ActorEffectSnapshotV1,
+    ActorFactionStandingV1, ActorId, ActorSnapshot, AmmunitionContainerPocketPrototypeV1,
+    AmmunitionContainerPocketSnapshotV1, AnatomyDefinitionV1, BashTargetKindV1,
+    BookStudyActivitySnapshotV1, BookStudyInterruptionReason, BookStudyV1,
+    CRAFT_PRACTICE_ACTION_POINTS, CRAFT_PROFICIENCY_SCALE, CharacterCreationStatsV1, ChunkCoord,
+    ChunkSnapshot, ClientCommand, CommandKind, CommandRejection, CommandSequence,
+    ConstructionActivitySnapshotV1, ConstructionInterruptionReason, ConstructionRecipeV1,
+    ConstructionResultV1, CraftActivitySnapshotV1, CraftConsumedItemV1, CraftItemPrototypeV1,
+    CraftProficiencyV1, CraftRecipeV1, CraftSkillRequirementV1, CreatureCorpsePrototypeV1,
+    CreatureCorpseSnapshotV1, CreatureId, CreaturePathSettingsV1, CreatureSizeV1, CreatureSnapshot,
+    CreatureSoundGoalV1, CreatureSpecialAttackStateV1, DialogueTopicV1,
+    DisassemblyActivitySnapshotV1, DisassemblyDestroyedComponentV1, DisassemblyInterruptionReason,
+    DisassemblyRecipeV1, EocDefinitionV1, EocItemUseTypeV1, EventId, FactionStateV1,
+    FactionTemplateV1, FieldSnapshotV1, FieldTypeSnapshotV1, FurnitureBashTypeV1,
+    FurnitureTileSnapshot, GroundItemSnapshot, HealingItemTypeV1, HeldInputSequence,
+    HeldMovementUpdateSource, HeldMovementUpdateV1, HorizontalDirection,
+    IntegralMagazinePocketPrototypeV1, IntegralMagazinePocketSnapshotV1, ItemComponentSnapshotV1,
+    ItemGroupDefinitionV1, ItemGroupSourceV1, ItemId, ItemPlaceMonsterTypeV1, ItemSnapshot,
+    ItemTransformTypeV1, LocalTileCoord, MAX_ACTOR_BASE_STAT, MAX_AMMUNITION_CONTAINER_CONTENTS,
+    MAX_AMMUNITION_CONTAINER_TYPES, MAX_BOOK_STUDY_MOVES, MAX_CHARACTER_CREATION_STAT,
+    MAX_CRAFT_BOOK_REQUIREMENTS, MAX_CRAFT_BYPRODUCT_TYPES, MAX_CRAFT_COMPONENT_ALTERNATIVES,
+    MAX_CRAFT_COMPONENT_GROUPS, MAX_CRAFT_OUTPUT_INSTANCES, MAX_CRAFT_PROFICIENCIES,
+    MAX_CRAFT_PROFICIENCY_MULTIPLIER, MAX_CRAFT_QUALITY_PROVIDERS, MAX_CRAFT_RECIPE_ID_BYTES,
+    MAX_CRAFT_SUPPORT_ALTERNATIVES, MAX_CRAFT_SUPPORT_GROUPS, MAX_DISASSEMBLY_COMPONENT_TYPES,
+    MAX_ITEM_AMMUNITION_CONTAINER_POCKETS, MAX_ITEM_COMPONENT_DEPTH, MAX_ITEM_COMPONENTS,
+    MAX_ITEM_DAMAGE_LEVEL, MAX_ITEM_INTEGRAL_MAGAZINES, MAX_ITEM_MAGAZINE_WELLS,
+    MAX_LEARNED_RECIPES, MAX_MAGAZINE_COMPATIBLE_TYPES, MAX_PROFICIENCIES,
+    MAX_PROFICIENCY_ID_BYTES, MAX_PROFICIENCY_PRACTICE_ACTION_POINTS, MAX_SKILL_ID_BYTES,
+    MAX_SKILL_LEVEL, MAX_SKILLS, MILLIJOULES_PER_BATTERY_CHARGE, MagazineWellPrototypeV1,
+    MagazineWellSnapshotV1, MemorizedChunkSnapshot, MemorizedTileSnapshot, MissionDefinitionV1,
+    MissionId, MissionSnapshotV1, NaturalLightSnapshot, NpcClassV1, NpcId, NpcTemplateV1,
+    PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
+    QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick,
+    SkillLevelSnapshot, SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
+    VehicleId, VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WeatherCatalogV1,
+    WeatherObservationV1, WeatherStateV1, WorldEvent, WorldEventKind, WorldPosition,
+    WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
+    healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
+    item_group_sources_are_valid, item_place_monster_catalog_is_valid,
+    item_snapshot_is_compatible_with_spawn_rules, item_snapshots_can_combine_for_containment,
+    item_transform_catalog_is_valid, weather_catalog_is_valid, weather_state_is_valid,
+    worldgen_catalog_is_valid,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -2771,6 +2772,7 @@ struct Actor {
     body_parts: Vec<ActorBodyPartSnapshotV1>,
     effects: Vec<ActorEffectSnapshotV1>,
     eoc_variables: BTreeMap<String, String>,
+    faction_standings: BTreeMap<String, ActorFactionStandingV1>,
     next_eoc_schedule_sequence: u64,
     scheduled_eocs: Vec<ScheduledEocV1>,
     inactive_recurring_eocs: Vec<String>,
@@ -2818,6 +2820,7 @@ impl Actor {
             body_parts: self.body_parts.clone(),
             effects: self.effects.clone(),
             eoc_variables: self.eoc_variables.clone(),
+            faction_standings: self.faction_standings.values().cloned().collect(),
             next_eoc_schedule_sequence: self.next_eoc_schedule_sequence,
             scheduled_eocs: self.scheduled_eocs.clone(),
             inactive_recurring_eocs: self.inactive_recurring_eocs.clone(),
@@ -6013,6 +6016,7 @@ impl WorldState {
                 body_parts,
                 effects: Vec::new(),
                 eoc_variables: BTreeMap::new(),
+                faction_standings: self.initial_actor_faction_standings(),
                 next_eoc_schedule_sequence,
                 scheduled_eocs,
                 inactive_recurring_eocs: Vec::new(),
@@ -6151,6 +6155,10 @@ impl WorldState {
             || self.actors.contains_key(&actor.id)
             || actor.id.counter() != self.allocator.next()
             || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
+            || !cdda_protocol::actor_faction_standings_are_valid(
+                &actor.faction_standings,
+                &self.factions.keys().map(String::as_str).collect(),
+            )
             || !valid_actor_schedule(&actor, self.tick, &self.actor_anatomy)
             || actor
                 .scheduled_eocs
@@ -6321,6 +6329,11 @@ impl WorldState {
                 body_parts: actor.body_parts,
                 effects: actor.effects,
                 eoc_variables: actor.eoc_variables,
+                faction_standings: actor
+                    .faction_standings
+                    .into_iter()
+                    .map(|standing| (standing.faction_id.clone(), standing))
+                    .collect(),
                 next_eoc_schedule_sequence: actor.next_eoc_schedule_sequence,
                 scheduled_eocs: actor.scheduled_eocs,
                 inactive_recurring_eocs: actor.inactive_recurring_eocs,
@@ -15641,6 +15654,7 @@ impl WorldState {
             return Err(SimError::InvalidSnapshot);
         }
         let mut actors = BTreeMap::new();
+        let faction_ids = factions.keys().map(String::as_str).collect::<BTreeSet<_>>();
         let snapshot_npc_ids = snapshot
             .npcs
             .iter()
@@ -15657,6 +15671,10 @@ impl WorldState {
                 || !stable_counters.insert(actor.id.counter())
                 || actors.contains_key(&actor.id)
                 || actor.inventory.len() > MAX_ACTOR_INVENTORY_ITEMS
+                || !cdda_protocol::actor_faction_standings_are_valid(
+                    &actor.faction_standings,
+                    &faction_ids,
+                )
                 || !valid_actor_schedule(actor, snapshot.tick, &snapshot.actor_anatomy)
                 || !missions::actor_missions_are_valid(
                     &actor.missions,
@@ -15890,6 +15908,12 @@ impl WorldState {
                     body_parts: actor.body_parts.clone(),
                     effects: actor.effects.clone(),
                     eoc_variables: actor.eoc_variables.clone(),
+                    faction_standings: actor
+                        .faction_standings
+                        .iter()
+                        .cloned()
+                        .map(|standing| (standing.faction_id.clone(), standing))
+                        .collect(),
                     next_eoc_schedule_sequence: actor.next_eoc_schedule_sequence,
                     scheduled_eocs: actor.scheduled_eocs.clone(),
                     inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -16372,7 +16396,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV113");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV114");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -23359,6 +23383,7 @@ mod tests {
             }],
             effects: Vec::new(),
             eoc_variables: BTreeMap::new(),
+            faction_standings: Vec::new(),
             next_eoc_schedule_sequence: 0,
             scheduled_eocs: Vec::new(),
             inactive_recurring_eocs: Vec::new(),
@@ -23411,6 +23436,7 @@ mod tests {
                 }],
                 effects: Vec::new(),
                 eoc_variables: BTreeMap::new(),
+                faction_standings: Vec::new(),
                 next_eoc_schedule_sequence: 0,
                 scheduled_eocs: Vec::new(),
                 inactive_recurring_eocs: Vec::new(),
