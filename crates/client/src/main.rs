@@ -6035,9 +6035,10 @@ fn gameplay_status(
         .iter()
         .map(|definition| (definition.mission_type_id.as_str(), definition))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let missions = actor
-        .missions
-        .iter()
+    let mut ordered_missions = actor.missions.iter().collect::<Vec<_>>();
+    ordered_missions.sort_by_key(|mission| (mission.assignment_sequence, mission.mission_id));
+    let missions = ordered_missions
+        .into_iter()
         .map(|mission| {
             let definition = mission_definitions
                 .get(mission.mission_type_id.as_str())
