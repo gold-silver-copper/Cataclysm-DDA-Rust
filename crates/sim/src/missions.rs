@@ -7,6 +7,22 @@ use cdda_protocol::{
 
 use crate::{Actor, SimError, WorldState};
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct MissionItemState {
+    pub(super) inventory: BTreeMap<cdda_protocol::ItemId, crate::items::ItemInstance>,
+    pub(super) worn: Vec<cdda_protocol::ItemId>,
+    pub(super) wielded: Option<cdda_protocol::ItemId>,
+    pub(super) vehicles: BTreeMap<cdda_protocol::VehicleId, VehicleSnapshotV1>,
+    pub(super) worldgen: Option<cdda_protocol::WorldgenCatalogV1>,
+    pub(super) source_positions: Vec<WorldPosition>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MissionOperationTarget {
+    Existing(MissionId),
+    AssignedByOperation(usize),
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum MissionOperation {
     Assign {
@@ -16,9 +32,9 @@ pub(super) enum MissionOperation {
     },
     Finish {
         mission_type_id: String,
-        mission_id: Option<MissionId>,
+        target: MissionOperationTarget,
         success: bool,
-        allow_partial_item_turn_in: bool,
+        item_state_after: Option<Box<MissionItemState>>,
     },
 }
 
@@ -52,6 +68,16 @@ impl WorldState {
                 definitions.iter(),
                 &self.actor_anatomy,
             )
+            || !crate::eocs::mission_start_self_finish_is_absent(
+                definitions.iter(),
+                self.eoc_definitions.values(),
+            )
+            || (!self.eoc_definitions.is_empty()
+                && !crate::eocs::mission_phase_eoc_closure_is_valid(
+                    definitions.iter(),
+                    self.eoc_definitions.values(),
+                    &self.actor_anatomy,
+                ))
             || !crate::eocs::mission_references_are_valid_for_ids(
                 self.eoc_definitions.values(),
                 self.dialogue_topics.values(),
@@ -82,11 +108,11 @@ impl WorldState {
             .cloned()
             .ok_or(SimError::UnknownActor)?;
         let mut allocator = self.allocator.clone();
-        let mut ground_items = None;
         let mut vehicles = None;
         let mut npc_updates = BTreeMap::new();
+        let mut assigned_mission_ids = BTreeMap::new();
         let mut lifecycle = Vec::with_capacity(operations.len());
-        for operation in operations {
+        for (operation_index, operation) in operations.into_iter().enumerate() {
             match operation {
                 MissionOperation::Assign {
                     mission_type_id,
@@ -160,32 +186,21 @@ impl WorldState {
                         mission_id,
                         mission_type_id,
                     }));
+                    assigned_mission_ids.insert(operation_index, mission_id);
                 }
                 MissionOperation::Finish {
                     mission_type_id,
-                    mission_id,
+                    target,
                     success,
-                    allow_partial_item_turn_in,
+                    item_state_after,
                 } => {
-                    let definition = self
-                        .mission_definitions
-                        .get(&mission_type_id)
-                        .ok_or(SimError::InvalidMission)?;
-                    let mission_id = mission_id.or_else(|| {
-                        actor
-                            .missions
-                            .iter()
-                            .find(|(_id, mission)| {
-                                mission.mission_type_id == mission_type_id
-                                    && mission.status == MissionStatusV1::InProgress
-                            })
-                            .map(|(id, _mission)| *id)
-                    });
-                    let Some(mission_id) = mission_id else {
-                        // Pinned `finish_mission` silently does nothing when no
-                        // active mission of the requested type exists.
-                        lifecycle.push(None);
-                        continue;
+                    let mission_id = match target {
+                        MissionOperationTarget::Existing(mission_id) => mission_id,
+                        MissionOperationTarget::AssignedByOperation(assign_index) => {
+                            *assigned_mission_ids
+                                .get(&assign_index)
+                                .ok_or(SimError::InvalidMission)?
+                        }
                     };
                     if actor.missions.get(&mission_id).is_none_or(|mission| {
                         mission.mission_type_id != mission_type_id
@@ -193,14 +208,14 @@ impl WorldState {
                     }) {
                         return Err(SimError::InvalidMission);
                     }
-                    if success {
-                        self.consume_mission_items(
-                            &mut actor,
-                            ground_items.get_or_insert_with(|| self.ground_items.clone()),
-                            vehicles.get_or_insert_with(|| self.vehicles.clone()),
-                            &definition.goal,
-                            allow_partial_item_turn_in,
-                        )?;
+                    if let Some(item_state) = item_state_after {
+                        if !success {
+                            return Err(SimError::InvalidMission);
+                        }
+                        actor.inventory = item_state.inventory;
+                        actor.worn = item_state.worn;
+                        actor.wielded = item_state.wielded;
+                        vehicles = Some(item_state.vehicles);
                     }
                     let mission = actor
                         .missions
@@ -222,9 +237,6 @@ impl WorldState {
         }
         self.allocator = allocator;
         self.actors.insert(actor_id, actor);
-        if let Some(ground_items) = ground_items {
-            self.ground_items = ground_items;
-        }
         if let Some(vehicles) = vehicles {
             self.vehicles = vehicles;
         }
@@ -518,34 +530,52 @@ impl WorldState {
         source_positions
     }
 
-    fn consume_mission_items(
+    pub(super) fn mission_item_state(&self, actor: &Actor) -> MissionItemState {
+        MissionItemState {
+            inventory: actor.inventory.clone(),
+            worn: actor.worn.clone(),
+            wielded: actor.wielded,
+            vehicles: self.vehicles.clone(),
+            worldgen: self.worldgen.clone(),
+            source_positions: self.mission_turn_in_source_positions(actor.position),
+        }
+    }
+
+    pub(super) fn active_mission_operations(
         &self,
-        actor: &mut Actor,
-        _ground_items: &mut BTreeMap<cdda_protocol::ItemId, crate::GroundItem>,
-        vehicles: &mut BTreeMap<cdda_protocol::VehicleId, VehicleSnapshotV1>,
+        actor: &Actor,
+    ) -> Vec<(MissionOperationTarget, String)> {
+        let mut missions = actor
+            .missions
+            .values()
+            .filter(|mission| mission.status == MissionStatusV1::InProgress)
+            .collect::<Vec<_>>();
+        missions.sort_by_key(|mission| (mission.assigned_at_tick, mission.mission_id));
+        missions
+            .into_iter()
+            .map(|mission| {
+                (
+                    MissionOperationTarget::Existing(mission.mission_id),
+                    mission.mission_type_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn consume_mission_items(
+        state: &mut MissionItemState,
         goal: &MissionGoalV1,
-        allow_partial: bool,
+        require_complete: bool,
     ) -> Result<(), SimError> {
-        let MissionGoalV1::FindItem {
-            item_type_id,
-            count,
-            count_by_charges,
-        } = goal
-        else {
-            return Ok(());
-        };
-        let source_positions = self.mission_turn_in_source_positions(actor.position);
-        crate::mission_items::consume_mission_items_from_sources(
-            &mut actor.inventory,
-            &mut actor.worn,
-            &mut actor.wielded,
-            vehicles,
-            self.worldgen.as_ref(),
-            &source_positions,
-            item_type_id,
-            *count_by_charges,
-            *count,
-            !allow_partial,
+        crate::mission_items::consume_mission_items_from_preview(
+            &mut state.inventory,
+            &mut state.worn,
+            &mut state.wielded,
+            &mut state.vehicles,
+            state.worldgen.as_ref(),
+            &state.source_positions,
+            goal,
+            require_complete,
         )
     }
 
@@ -563,6 +593,16 @@ impl WorldState {
             }
         }
         for (actor_id, mission_id) in candidates {
+            let still_automatic_and_active = self
+                .actors
+                .get(&actor_id)
+                .and_then(|actor| actor.missions.get(&mission_id))
+                .is_some_and(|mission| {
+                    mission.status == MissionStatusV1::InProgress && mission.origin_npc_id.is_none()
+                });
+            if !still_automatic_and_active {
+                continue;
+            }
             if !self.mission_goal_is_complete(actor_id, mission_id)? {
                 continue;
             }
@@ -619,15 +659,6 @@ fn prune_finished_mission_history(actor: &mut Actor) -> Result<(), SimError> {
     };
     actor.missions.remove(&mission_id);
     Ok(())
-}
-
-pub(super) fn active_mission_types(actor: &Actor) -> Vec<String> {
-    actor
-        .missions
-        .values()
-        .filter(|mission| mission.status == MissionStatusV1::InProgress)
-        .map(|mission| mission.mission_type_id.clone())
-        .collect()
 }
 
 fn current_kill_count(

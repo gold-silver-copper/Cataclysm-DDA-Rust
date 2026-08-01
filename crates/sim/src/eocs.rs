@@ -17,8 +17,8 @@ use rand_core::Rng;
 
 use crate::{
     SLEEPINESS_MAX, SimError, WorldState, inclusive_rng_u64,
-    items::{InventoryTypeSummary, ItemInstance, summarize_inventory_by_type},
-    missions::MissionOperation,
+    items::{InventoryTypeSummary, summarize_inventory_by_type},
+    missions::{MissionItemState, MissionOperation, MissionOperationTarget},
 };
 
 const MAX_EOC_ACTIVATIONS_PER_COMMAND: usize = 4_096;
@@ -764,9 +764,9 @@ impl WorldState {
             &self.eoc_definitions,
             &self.mission_definitions,
             &mission_type_id,
-            Some(mission_id),
+            Some(MissionOperationTarget::Existing(mission_id)),
             success,
-            false,
+            true,
             &mut execution,
             0,
         )?;
@@ -1272,17 +1272,12 @@ enum EocOutput {
 #[derive(Clone, Debug, Default)]
 struct EocActorContext {
     inventory: BTreeMap<String, InventoryTypeSummary>,
-    mission_inventory: BTreeMap<ItemId, ItemInstance>,
-    mission_worn: Vec<ItemId>,
-    mission_wielded: Option<ItemId>,
-    mission_vehicles: BTreeMap<cdda_protocol::VehicleId, cdda_protocol::VehicleSnapshotV1>,
-    mission_worldgen: Option<cdda_protocol::WorldgenCatalogV1>,
-    mission_source_positions: Vec<cdda_protocol::WorldPosition>,
+    mission_items: MissionItemState,
     worn_item_types: BTreeSet<String>,
     has_weapon: bool,
     learned_recipes: BTreeSet<String>,
     learned_proficiencies: BTreeSet<String>,
-    active_mission_types: Vec<String>,
+    active_missions: Vec<(MissionOperationTarget, String)>,
     base_strength: u16,
     base_dexterity: u16,
     base_intelligence: u16,
@@ -1296,12 +1291,7 @@ struct EocActorContext {
 fn eoc_actor_context(world: &WorldState, actor: &crate::Actor) -> EocActorContext {
     EocActorContext {
         inventory: summarize_inventory_by_type(actor.inventory.values()),
-        mission_inventory: actor.inventory.clone(),
-        mission_worn: actor.worn.clone(),
-        mission_wielded: actor.wielded,
-        mission_vehicles: world.vehicles.clone(),
-        mission_worldgen: world.worldgen.clone(),
-        mission_source_positions: world.mission_turn_in_source_positions(actor.position),
+        mission_items: world.mission_item_state(actor),
         worn_item_types: actor
             .worn
             .iter()
@@ -1316,7 +1306,7 @@ fn eoc_actor_context(world: &WorldState, actor: &crate::Actor) -> EocActorContex
             .filter(|(_id, proficiency)| proficiency.learned)
             .map(|(id, _proficiency)| id.clone())
             .collect(),
-        active_mission_types: crate::missions::active_mission_types(actor),
+        active_missions: world.active_mission_operations(actor),
         base_strength: actor.base_strength,
         base_dexterity: actor.base_dexterity,
         base_intelligence: actor.base_intelligence,
@@ -1488,9 +1478,9 @@ fn evaluate_condition(
         }
         EocConditionV1::KnowsRecipe { recipe_id } => actor.learned_recipes.contains(recipe_id),
         EocConditionV1::HasMission { mission_type_id } => actor
-            .active_mission_types
+            .active_missions
             .iter()
-            .any(|active| active == mission_type_id),
+            .any(|(_target, active)| active == mission_type_id),
         EocConditionV1::StatAtLeast { stat, minimum } => {
             let actual = i32::from(match stat {
                 EocActorStatV1::Strength => actor.base_strength,
@@ -1775,7 +1765,7 @@ fn queue_mission_assignment(
     execution: &mut EocExecution,
     depth: usize,
 ) -> Result<(), SimError> {
-    if execution.actor.active_mission_types.len() >= cdda_protocol::MAX_ACTOR_MISSIONS {
+    if execution.actor.active_missions.len() >= cdda_protocol::MAX_ACTOR_MISSIONS {
         return Err(SimError::InvalidMission);
     }
     let start_effects = mission_catalog
@@ -1783,16 +1773,19 @@ fn queue_mission_assignment(
         .ok_or(SimError::InvalidMission)?
         .start_effects
         .clone();
-    execution
-        .actor
-        .active_mission_types
-        .push(mission_type_id.to_owned());
     let operation_index = execution.mission_operations.len();
     execution.mission_operations.push(MissionOperation::Assign {
         mission_type_id: mission_type_id.to_owned(),
         mission_id,
         origin_npc_id,
     });
+    execution.actor.active_missions.push((
+        MissionOperationTarget::AssignedByOperation(operation_index),
+        mission_type_id.to_owned(),
+    ));
+    execution
+        .outputs
+        .push(EocOutput::MissionLifecycle(operation_index));
     // Pinned `mission::assign` exposes the mission through the avatar's active
     // list while the start callback runs, then changes the mission status to
     // in-progress after the callback returns.
@@ -1803,9 +1796,6 @@ fn queue_mission_assignment(
         execution,
         depth + 1,
     )?;
-    execution
-        .outputs
-        .push(EocOutput::MissionLifecycle(operation_index));
     Ok(())
 }
 
@@ -1813,17 +1803,20 @@ fn queue_mission_finish(
     catalog: &BTreeMap<String, EocDefinitionV1>,
     mission_catalog: &BTreeMap<String, MissionDefinitionV1>,
     mission_type_id: &str,
-    mission_id: Option<cdda_protocol::MissionId>,
+    requested_target: Option<MissionOperationTarget>,
     success: bool,
-    allow_partial_item_turn_in: bool,
+    require_complete: bool,
     execution: &mut EocExecution,
     depth: usize,
 ) -> Result<(), SimError> {
     let Some(index) = execution
         .actor
-        .active_mission_types
+        .active_missions
         .iter()
-        .position(|active| active == mission_type_id)
+        .position(|(target, active)| {
+            active == mission_type_id
+                && requested_target.is_none_or(|requested| requested == *target)
+        })
     else {
         // Pinned dynamic `finish_mission` is a no-op when no active mission of
         // the requested type exists.
@@ -1837,26 +1830,28 @@ fn queue_mission_finish(
     } else {
         definition.fail_effects.clone()
     };
-    execution.actor.active_mission_types.remove(index);
+    let (target, _active_type) = execution.actor.active_missions.remove(index);
+    let mut item_state_after = None;
     if success {
-        crate::mission_items::consume_mission_items_from_preview(
-            &mut execution.actor.mission_inventory,
-            &mut execution.actor.mission_worn,
-            &mut execution.actor.mission_wielded,
-            &mut execution.actor.mission_vehicles,
-            execution.actor.mission_worldgen.as_ref(),
-            &execution.actor.mission_source_positions,
-            &definition.goal,
-            !allow_partial_item_turn_in,
-        )?;
-        refresh_eoc_item_context(&mut execution.actor);
+        if matches!(
+            definition.goal,
+            cdda_protocol::MissionGoalV1::FindItem { .. }
+        ) {
+            WorldState::consume_mission_items(
+                &mut execution.actor.mission_items,
+                &definition.goal,
+                require_complete,
+            )?;
+            refresh_eoc_item_context(&mut execution.actor);
+            item_state_after = Some(Box::new(execution.actor.mission_items.clone()));
+        }
     }
     let operation_index = execution.mission_operations.len();
     execution.mission_operations.push(MissionOperation::Finish {
         mission_type_id: mission_type_id.to_owned(),
-        mission_id,
+        target,
         success,
-        allow_partial_item_turn_in,
+        item_state_after,
     });
     // Pinned completion/failure removes the mission from the active list and
     // publishes its terminal state before running the corresponding callback.
@@ -2120,7 +2115,7 @@ fn execute_effects(
                     mission_type_id,
                     None,
                     *success,
-                    *success,
+                    false,
                     execution,
                     depth,
                 )?;
@@ -2191,14 +2186,15 @@ fn schedule_eoc(
 }
 
 fn refresh_eoc_item_context(actor: &mut EocActorContext) {
-    actor.inventory = summarize_inventory_by_type(actor.mission_inventory.values());
+    actor.inventory = summarize_inventory_by_type(actor.mission_items.inventory.values());
     actor.worn_item_types = actor
-        .mission_worn
+        .mission_items
+        .worn
         .iter()
-        .filter_map(|item_id| actor.mission_inventory.get(item_id))
+        .filter_map(|item_id| actor.mission_items.inventory.get(item_id))
         .map(|item| item.type_id.clone())
         .collect();
-    actor.has_weapon = actor.mission_wielded.is_some();
+    actor.has_weapon = actor.mission_items.wielded.is_some();
 }
 
 fn add_effect(
@@ -2367,6 +2363,31 @@ pub(super) fn mission_phase_effects_are_actor_only<'a>(
     })
 }
 
+pub(super) fn mission_start_self_finish_is_absent<'a>(
+    mission_definitions: impl IntoIterator<Item = &'a MissionDefinitionV1>,
+    eoc_definitions: impl IntoIterator<Item = &'a EocDefinitionV1>,
+) -> bool {
+    let mission_definitions = mission_definitions.into_iter().collect::<Vec<_>>();
+    let mission_by_id = mission_definitions
+        .iter()
+        .map(|definition| (definition.mission_type_id.as_str(), *definition))
+        .collect::<BTreeMap<_, _>>();
+    let eoc_by_id = eoc_definitions
+        .into_iter()
+        .map(|definition| (definition.eoc_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    mission_definitions.iter().all(|definition| {
+        !synchronous_effects_can_finish_mission(
+            &definition.start_effects,
+            &definition.mission_type_id,
+            &mission_by_id,
+            &eoc_by_id,
+            &mut BTreeSet::from([definition.mission_type_id.as_str()]),
+            &mut BTreeSet::new(),
+        )
+    })
+}
+
 pub(super) fn mission_phase_eoc_closure_is_valid<'a>(
     mission_definitions: impl IntoIterator<Item = &'a cdda_protocol::MissionDefinitionV1>,
     eoc_definitions: impl IntoIterator<Item = &'a EocDefinitionV1>,
@@ -2404,6 +2425,10 @@ pub(super) fn mission_phase_eoc_closure_is_valid<'a>(
             available.remove(id);
         }
     }
+    let mission_by_id = mission_definitions
+        .iter()
+        .map(|definition| (definition.mission_type_id.as_str(), *definition))
+        .collect::<BTreeMap<_, _>>();
     mission_definitions.iter().all(|definition| {
         [
             definition.start_effects.as_slice(),
@@ -2413,6 +2438,99 @@ pub(super) fn mission_phase_eoc_closure_is_valid<'a>(
         .into_iter()
         .flat_map(cdda_protocol::eoc_effect_referenced_ids)
         .all(|reference| available.contains_key(reference))
+            && !synchronous_effects_can_finish_mission(
+                &definition.start_effects,
+                &definition.mission_type_id,
+                &mission_by_id,
+                &available,
+                &mut BTreeSet::from([definition.mission_type_id.as_str()]),
+                &mut BTreeSet::new(),
+            )
+    })
+}
+
+fn synchronous_effects_can_finish_mission<'a>(
+    effects: &'a [EocEffectV1],
+    target_mission_type_id: &str,
+    mission_by_id: &BTreeMap<&'a str, &'a MissionDefinitionV1>,
+    eoc_by_id: &BTreeMap<&'a str, &'a EocDefinitionV1>,
+    visiting_missions: &mut BTreeSet<&'a str>,
+    visiting_eocs: &mut BTreeSet<&'a str>,
+) -> bool {
+    effects.iter().any(|effect| match effect {
+        EocEffectV1::FinishMission {
+            mission_type_id, ..
+        } => mission_type_id == target_mission_type_id,
+        EocEffectV1::AssignMission { mission_type_id } => mission_by_id
+            .get(mission_type_id.as_str())
+            .is_some_and(|definition| {
+                if !visiting_missions.insert(definition.mission_type_id.as_str()) {
+                    return false;
+                }
+                let found = synchronous_effects_can_finish_mission(
+                    &definition.start_effects,
+                    target_mission_type_id,
+                    mission_by_id,
+                    eoc_by_id,
+                    visiting_missions,
+                    visiting_eocs,
+                );
+                visiting_missions.remove(definition.mission_type_id.as_str());
+                found
+            }),
+        EocEffectV1::RunEocs { eoc_ids, delay } if delay.is_none() => {
+            eoc_ids.iter().any(|eoc_id| {
+                eoc_by_id.get(eoc_id.as_str()).is_some_and(|definition| {
+                    if !visiting_eocs.insert(definition.eoc_id.as_str()) {
+                        return false;
+                    }
+                    let found = synchronous_effects_can_finish_mission(
+                        &definition.effects,
+                        target_mission_type_id,
+                        mission_by_id,
+                        eoc_by_id,
+                        visiting_missions,
+                        visiting_eocs,
+                    ) || synchronous_effects_can_finish_mission(
+                        &definition.false_effects,
+                        target_mission_type_id,
+                        mission_by_id,
+                        eoc_by_id,
+                        visiting_missions,
+                        visiting_eocs,
+                    );
+                    visiting_eocs.remove(definition.eoc_id.as_str());
+                    found
+                })
+            })
+        }
+        EocEffectV1::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        }
+        | EocEffectV1::Confirmation {
+            accept_effects: then_effects,
+            decline_effects: else_effects,
+            ..
+        } => {
+            synchronous_effects_can_finish_mission(
+                then_effects,
+                target_mission_type_id,
+                mission_by_id,
+                eoc_by_id,
+                visiting_missions,
+                visiting_eocs,
+            ) || synchronous_effects_can_finish_mission(
+                else_effects,
+                target_mission_type_id,
+                mission_by_id,
+                eoc_by_id,
+                visiting_missions,
+                visiting_eocs,
+            )
+        }
+        _ => false,
     })
 }
 
