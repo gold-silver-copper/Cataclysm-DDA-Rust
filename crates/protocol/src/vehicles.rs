@@ -47,6 +47,15 @@ pub struct WorldgenVehiclePartTypeV1 {
     pub location: String,
     pub durability: u32,
     pub cargo_capacity_milliliters: u64,
+    pub power_milliwatts: i64,
+    /// Empty means no fuel type. The first ordinary movement family admits
+    /// only exact `muscle` engines and retains other types fail-closed.
+    pub fuel_type: String,
+    pub muscle_power_factor_milliwatts: i64,
+    pub rolling_resistance_millionths: u32,
+    pub contact_area: u32,
+    pub wheel_offroad_rating_millionths: u32,
+    pub wheel_terrain_modifiers_json: String,
     /// Finalized, sorted upstream flags. Runtime families admit only the flags
     /// whose behavior they implement, while canonical content retains the
     /// exact set needed by later families.
@@ -166,6 +175,12 @@ pub struct VehicleSnapshotV1 {
     pub prototype_index: u16,
     pub origin: WorldPosition,
     pub facing_degrees: i16,
+    /// Pinned 15-degree steering target. This remains distinct from the
+    /// vehicle's current facing until an authoritative movement succeeds.
+    pub turn_direction_degrees: i16,
+    /// Error accumulator for the persistent pinned `tileray` used to advance
+    /// non-cardinal movement without platform floating-point drift.
+    pub movement_ray_leftover: u16,
     /// Empty means no faction owner.
     pub owner_faction_id: String,
     /// Pinned global ignition state, distinct from per-part enablement.
@@ -241,6 +256,60 @@ fn sin_degrees_times_100(degrees: i16) -> i16 {
     }
 }
 
+/// Advances the pinned infinite vehicle `tileray` by one tile. The returned
+/// leftover must be persisted because repeated 15-degree steps deliberately
+/// alternate between cardinal and diagonal deltas.
+#[must_use]
+pub fn advance_vehicle_tileray(
+    direction_degrees: i16,
+    leftover: u16,
+    reverse: bool,
+) -> Option<(i8, i8, u16)> {
+    let direction = direction_degrees.rem_euclid(360);
+    let delta_x = i32::from(sin_degrees_times_100((90_i16 + direction).rem_euclid(360)));
+    let delta_y = i32::from(sin_degrees_times_100(direction));
+    let abs_x = delta_x.unsigned_abs();
+    let abs_y = delta_y.unsigned_abs();
+    let major = abs_x.max(abs_y);
+    if major == 0 || u32::from(leftover) >= major {
+        return None;
+    }
+    let mut next_leftover = u32::from(leftover);
+    let (mut dx, mut dy) = if abs_x <= abs_y {
+        next_leftover = next_leftover.checked_add(abs_x)?;
+        let minor = u8::from(next_leftover >= abs_y);
+        if minor != 0 {
+            next_leftover = next_leftover.checked_sub(abs_y)?;
+        }
+        (i8::try_from(minor).ok()?, 1_i8)
+    } else {
+        next_leftover = next_leftover.checked_add(abs_y)?;
+        let minor = u8::from(next_leftover >= abs_x);
+        if minor != 0 {
+            next_leftover = next_leftover.checked_sub(abs_x)?;
+        }
+        (1_i8, i8::try_from(minor).ok()?)
+    };
+    let quadrant = usize::try_from(direction / 90).ok()?;
+    const SX: [i8; 4] = [1, -1, -1, 1];
+    const SY: [i8; 4] = [1, 1, -1, -1];
+    dx = dx.checked_mul(SX[quadrant])?;
+    dy = dy.checked_mul(SY[quadrant])?;
+    if reverse {
+        dx = dx.checked_neg()?;
+        dy = dy.checked_neg()?;
+    }
+    Some((dx, dy, u16::try_from(next_leftover).ok()?))
+}
+
+fn valid_vehicle_tileray_leftover(direction_degrees: i16, leftover: u16) -> bool {
+    let direction = direction_degrees.rem_euclid(360);
+    let abs_x =
+        i32::from(sin_degrees_times_100((90_i16 + direction).rem_euclid(360))).unsigned_abs();
+    let abs_y = i32::from(sin_degrees_times_100(direction)).unsigned_abs();
+    u32::from(leftover) < abs_x.max(abs_y)
+}
+
 /// Canonical zero-pivot `vehicle::coord_translate` used both while creating a
 /// vehicle and while validating recovered authoritative geometry.
 #[must_use]
@@ -309,6 +378,18 @@ fn valid_part_type(part: &WorldgenVehiclePartTypeV1) -> bool {
         && valid_id(&part.location)
         && part.durability > 0
         && part.cargo_capacity_milliliters <= MAX_VEHICLE_CARGO_VOLUME_MILLILITERS
+        && part.power_milliwatts.unsigned_abs() <= 1_000_000_000_000
+        && valid_optional_id(&part.fuel_type)
+        && part.muscle_power_factor_milliwatts >= 0
+        && part.muscle_power_factor_milliwatts <= 1_000_000_000_000
+        && part.rolling_resistance_millionths > 0
+        && part.contact_area > 0
+        && part.wheel_offroad_rating_millionths <= 1_000_000
+        && part.wheel_terrain_modifiers_json.len() <= 16_384
+        && !part
+            .wheel_terrain_modifiers_json
+            .chars()
+            .any(char::is_control)
         && (part.cargo_capacity_milliliters == 0
             || part
                 .flags
@@ -637,6 +718,11 @@ pub fn vehicle_snapshots_are_valid(
             || vehicle.id.world_namespace() != world_namespace
             || !stable_counters.insert(vehicle.id.counter())
             || !(0..360).contains(&vehicle.facing_degrees)
+            || !(0..360).contains(&vehicle.turn_direction_degrees)
+            || !valid_vehicle_tileray_leftover(
+                vehicle.facing_degrees,
+                vehicle.movement_ray_leftover,
+            )
             || !valid_optional_id(&vehicle.owner_faction_id)
             || vehicle.parts.len() != prototype.parts.len()
             || vehicle.parts.len() > MAX_WORLDGEN_VEHICLE_PARTS_PER_PROTOTYPE

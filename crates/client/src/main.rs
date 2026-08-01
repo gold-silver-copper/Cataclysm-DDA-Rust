@@ -80,6 +80,11 @@ enum ClientAction {
         prototype_part_index: u16,
         open: bool,
     },
+    DriveVehicle {
+        vehicle_id: VehicleId,
+        steering: i8,
+        propulsion: i8,
+    },
     Wield {
         item_id: ItemId,
     },
@@ -1072,6 +1077,15 @@ async fn run_game_session(
                         prototype_part_index,
                         open,
                     }),
+                    Some(ClientAction::DriveVehicle {
+                        vehicle_id,
+                        steering,
+                        propulsion,
+                    }) => Some(CommandKind::DriveVehicle {
+                        vehicle_id,
+                        steering,
+                        propulsion,
+                    }),
                     Some(ClientAction::Wield { item_id }) => {
                         Some(CommandKind::Wield { item_id })
                     }
@@ -1932,6 +1946,14 @@ fn handle_item_menu(
     let Some(snapshot) = &game.snapshot else {
         return;
     };
+    if snapshot.vehicles.iter().any(|vehicle| {
+        vehicle
+            .tiles
+            .iter()
+            .any(|tile| tile.passenger == Some(snapshot.controlled_actor.id))
+    }) {
+        return;
+    }
     if keys.just_pressed(KeyCode::KeyX) && snapshot.controlled_actor.disassembly_activity.is_some()
     {
         let _send_result = game.actions.try_send(ClientAction::CancelDisassembly);
@@ -4282,6 +4304,16 @@ fn handle_movement_input(
     game: Option<Res<GameClient>>,
 ) {
     held_sender.since_send = held_sender.since_send.saturating_add(time.delta());
+    let boarded_vehicle = game.as_ref().and_then(|game| {
+        let actor_id = game.controlled_actor?;
+        game.snapshot.as_ref()?.vehicles.iter().find_map(|vehicle| {
+            vehicle
+                .tiles
+                .iter()
+                .any(|tile| tile.passenger == Some(actor_id))
+                .then_some(vehicle.id)
+        })
+    });
     let direction = if game
         .as_ref()
         .is_none_or(|game| game.controlled_actor.is_none())
@@ -4306,16 +4338,35 @@ fn handle_movement_input(
         current_held_direction(&keys)
     };
     let changed = direction != held_sender.last;
-    let refresh_due = direction.is_some() && held_sender.since_send >= Duration::from_millis(100);
-    if (changed || refresh_due)
-        && let Some(game) = &game
-        && game
-            .actions
-            .try_send(ClientAction::HeldMovement { direction })
-            .is_ok()
-    {
-        held_sender.last = direction;
-        held_sender.since_send = Duration::ZERO;
+    let refresh_due = direction.is_some()
+        && held_sender.since_send
+            >= if boarded_vehicle.is_some() {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(100)
+            };
+    if changed || refresh_due {
+        let sent = game.as_ref().is_some_and(|game| {
+            if let Some(vehicle_id) = boarded_vehicle {
+                direction.is_none_or(|direction| {
+                    game.actions
+                        .try_send(ClientAction::DriveVehicle {
+                            vehicle_id,
+                            steering: direction.dx,
+                            propulsion: -direction.dy,
+                        })
+                        .is_ok()
+                })
+            } else {
+                game.actions
+                    .try_send(ClientAction::HeldMovement { direction })
+                    .is_ok()
+            }
+        });
+        if sent {
+            held_sender.last = direction;
+            held_sender.since_send = Duration::ZERO;
+        }
     }
     if character_menu.is_active()
         || interaction_menu.is_active()
@@ -4770,6 +4821,21 @@ fn event_message(event: &WorldEvent) -> String {
                 String::from("Opened the vehicle part.")
             } else {
                 String::from("Closed the vehicle part.")
+            }
+        }
+        WorldEventKind::VehicleControlled {
+            from,
+            to,
+            turn_direction_degrees,
+            reverse,
+            ..
+        } => {
+            if from == to {
+                format!("Set the vehicle steering to {turn_direction_degrees}°.")
+            } else if *reverse {
+                String::from("Reversed the vehicle.")
+            } else {
+                String::from("Drove the vehicle forward.")
             }
         }
         WorldEventKind::ActorMoved { .. } => String::from("Moved."),

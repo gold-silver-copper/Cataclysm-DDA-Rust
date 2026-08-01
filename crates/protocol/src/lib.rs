@@ -139,9 +139,9 @@ pub use vehicles::{
     WorldgenVehicleDirectItemSpawnV1, WorldgenVehicleGroupEntryV1, WorldgenVehicleGroupV1,
     WorldgenVehicleItemSpawnV1, WorldgenVehiclePartTypeV1, WorldgenVehiclePartVariantV1,
     WorldgenVehiclePlacementV1, WorldgenVehiclePrototypePartV1, WorldgenVehiclePrototypeV1,
-    expected_vehicle_part_position, insert_vehicle_stable_counters, vehicle_snapshots_are_valid,
-    visible_vehicle_snapshots_are_valid, worldgen_vehicle_catalog_is_valid,
-    worldgen_vehicle_placement_is_valid,
+    advance_vehicle_tileray, expected_vehicle_part_position, insert_vehicle_stable_counters,
+    vehicle_snapshots_are_valid, visible_vehicle_snapshots_are_valid,
+    worldgen_vehicle_catalog_is_valid, worldgen_vehicle_placement_is_valid,
 };
 pub use weather::{
     MAX_WEATHER_CONDITION_NODES, MAX_WEATHER_DURATION_SECONDS, MAX_WEATHER_ID_BYTES,
@@ -152,7 +152,7 @@ pub use weather::{
     weather_state_is_valid,
 };
 
-pub const PROTOCOL_VERSION: u16 = 139;
+pub const PROTOCOL_VERSION: u16 = 140;
 pub const BASELINE_COMMIT: &str = "4dfd36038b16650dc1b5cb9d79a3e42363174b05";
 pub const GAME_ALPN: &[u8] = b"cdda-rust/game/1";
 pub const ENROLL_ALPN: &[u8] = b"cdda-rust/enroll/1";
@@ -1791,6 +1791,13 @@ pub enum CommandKind {
         prototype_part_index: u16,
         open: bool,
     },
+    /// Authoritative direct controls for an occupied vehicle. Steering and
+    /// propulsion are each normalized to -1, 0, or 1 by the client boundary.
+    DriveVehicle {
+        vehicle_id: VehicleId,
+        steering: i8,
+        propulsion: i8,
+    },
     ShootActor {
         target: ActorId,
     },
@@ -2092,6 +2099,15 @@ pub enum WorldEventKind {
         prototype_part_index: u16,
         position: WorldPosition,
         open: bool,
+    },
+    VehicleControlled {
+        actor_id: ActorId,
+        vehicle_id: VehicleId,
+        from: WorldPosition,
+        to: WorldPosition,
+        facing_degrees: i16,
+        turn_direction_degrees: i16,
+        reverse: bool,
     },
     ActorMoved {
         actor_id: ActorId,
@@ -4890,6 +4906,17 @@ fn valid_client_command(command: &ClientCommand) -> bool {
         CommandKind::SetVehiclePartOpen { vehicle_id, .. } => {
             vehicle_id.counter() > 0
                 && vehicle_id.world_namespace() == command.actor_id.world_namespace()
+        }
+        CommandKind::DriveVehicle {
+            vehicle_id,
+            steering,
+            propulsion,
+        } => {
+            vehicle_id.counter() > 0
+                && vehicle_id.world_namespace() == command.actor_id.world_namespace()
+                && (-1..=1).contains(steering)
+                && (-1..=1).contains(propulsion)
+                && (*steering != 0 || *propulsion != 0)
         }
         CommandKind::RespondInteraction {
             interaction_id,

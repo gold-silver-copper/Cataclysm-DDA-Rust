@@ -25,6 +25,13 @@ const PART_FIELDS: &[&str] = &[
     "location",
     "durability",
     "size",
+    "fuel_type",
+    "power",
+    "muscle_power_factor",
+    "rolling_resistance",
+    "contact_area",
+    "wheel_offroad_rating",
+    "wheel_terrain_modifiers",
     "flags",
     "variants",
     "variants_bases",
@@ -66,6 +73,16 @@ pub struct VehiclePartDefinition {
     pub location: String,
     pub durability: u32,
     pub cargo_capacity_milliliters: u64,
+    /// Finalized upstream power in integer milliwatts.
+    pub power_milliwatts: i64,
+    pub fuel_type: String,
+    /// Finalized manual-engine contribution per strength point, in milliwatts.
+    pub muscle_power_factor_milliwatts: i64,
+    pub rolling_resistance_millionths: u32,
+    pub contact_area: u32,
+    pub wheel_offroad_rating_millionths: u32,
+    /// Canonical compact JSON retained for the later terrain-traction kernel.
+    pub wheel_terrain_modifiers_json: String,
     pub flags: BTreeSet<String>,
     pub variants: Vec<VehiclePartVariantDefinition>,
     pub default_variant_id: String,
@@ -695,6 +712,58 @@ fn parse_part(
         .map(|value| parse_vehicle_volume_milliliters(value, source))
         .transpose()?
         .unwrap_or(0);
+    let power_milliwatts = object
+        .get("power")
+        .map(|value| parse_vehicle_power_milliwatts(value, source))
+        .transpose()?
+        .unwrap_or(0);
+    let fuel_type = object
+        .get("fuel_type")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_source(source, "fuel_type"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let muscle_power_factor_milliwatts = object
+        .get("muscle_power_factor")
+        .map(|value| {
+            value
+                .as_i64()
+                .and_then(|value| value.checked_mul(1_000))
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| invalid_source(source, "muscle_power_factor"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let rolling_resistance_millionths = object
+        .get("rolling_resistance")
+        .map(|value| parse_nonnegative_decimal_millionths(value, source, "rolling_resistance"))
+        .transpose()?
+        .unwrap_or(1_000_000);
+    let contact_area = object
+        .get("contact_area")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| invalid_source(source, "contact_area"))
+        })
+        .transpose()?
+        .unwrap_or(1);
+    let wheel_offroad_rating_millionths = object
+        .get("wheel_offroad_rating")
+        .map(|value| parse_nonnegative_decimal_millionths(value, source, "wheel_offroad_rating"))
+        .transpose()?
+        .unwrap_or(500_000);
+    let wheel_terrain_modifiers_json = object
+        .get("wheel_terrain_modifiers")
+        .map(|value| parse_wheel_terrain_modifiers_json(value, source))
+        .transpose()?
+        .unwrap_or_default();
     let flags = string_set(object.get("flags"), source, "flags")?;
     let (variants, default_variant_id) =
         parse_variants(object.get("variants"), object.get("variants_bases"), source)?;
@@ -718,12 +787,156 @@ fn parse_part(
         location,
         durability,
         cargo_capacity_milliliters,
+        power_milliwatts,
+        fuel_type,
+        muscle_power_factor_milliwatts,
+        rolling_resistance_millionths,
+        contact_area,
+        wheel_offroad_rating_millionths,
+        wheel_terrain_modifiers_json,
         flags,
         variants,
         default_variant_id,
         unsupported_fields,
         source: source.to_owned(),
         abstract_definition,
+    })
+}
+
+fn parse_wheel_terrain_modifiers_json(
+    value: &Value,
+    source: &str,
+) -> Result<String, VehicleRegistryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_source(source, "wheel_terrain_modifiers"))?;
+    if object.len() > 256
+        || object.iter().any(|(terrain_flag, modifier)| {
+            terrain_flag.is_empty()
+                || terrain_flag.len() > 512
+                || terrain_flag.chars().any(char::is_control)
+                || modifier.as_array().is_none_or(|values| {
+                    values.len() != 2 || values.iter().any(|value| value.as_i64().is_none())
+                })
+        })
+    {
+        return Err(invalid_source(source, "wheel_terrain_modifiers"));
+    }
+    serde_json::to_string(value).map_err(|_| invalid_source(source, "wheel_terrain_modifiers"))
+}
+
+fn invalid_source(source: &str, field: &str) -> VehicleRegistryError {
+    VehicleRegistryError::InvalidDefinition {
+        source: source.to_owned(),
+        field: field.to_owned(),
+    }
+}
+
+fn parse_nonnegative_decimal_millionths(
+    value: &Value,
+    source: &str,
+    field: &str,
+) -> Result<u32, VehicleRegistryError> {
+    let text = value.to_string();
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 6
+    {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: field.to_owned(),
+        });
+    }
+    let whole = whole
+        .parse::<u64>()
+        .ok()
+        .and_then(|whole| whole.checked_mul(1_000_000));
+    let fraction = if fraction.is_empty() {
+        Some(0_u64)
+    } else {
+        let fraction_digits = fraction.len();
+        fraction.parse::<u64>().ok().and_then(|fraction| {
+            let scale = 10_u64.checked_pow(u32::try_from(6 - fraction_digits).ok()?)?;
+            fraction.checked_mul(scale)
+        })
+    };
+    whole
+        .zip(fraction)
+        .and_then(|(whole, fraction)| whole.checked_add(fraction))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: field.to_owned(),
+        })
+}
+
+fn parse_vehicle_power_milliwatts(
+    value: &Value,
+    source: &str,
+) -> Result<i64, VehicleRegistryError> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("power"),
+        })?;
+    let (number, multiplier) = if let Some(number) = text.strip_suffix(" kW") {
+        (number.trim(), 1_000_000_i64)
+    } else if let Some(number) = text.strip_suffix(" W") {
+        (number.trim(), 1_000_i64)
+    } else {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("power"),
+        });
+    };
+    let negative = number.starts_with('-');
+    let unsigned = number
+        .strip_prefix('-')
+        .or_else(|| number.strip_prefix('+'))
+        .unwrap_or(number);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 6
+    {
+        return Err(VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("power"),
+        });
+    }
+    let whole = whole
+        .parse::<i64>()
+        .ok()
+        .and_then(|whole| whole.checked_mul(multiplier));
+    let fraction_scale = 10_i64.checked_pow(u32::try_from(fraction.len()).unwrap_or(u32::MAX));
+    let fraction = if fraction.is_empty() {
+        Some(0)
+    } else {
+        fraction.parse::<i64>().ok().and_then(|fraction| {
+            fraction
+                .checked_mul(multiplier)
+                .and_then(|value| value.checked_div(fraction_scale?))
+        })
+    };
+    let magnitude = whole
+        .zip(fraction)
+        .and_then(|(whole, fraction)| whole.checked_add(fraction))
+        .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+            source: source.to_owned(),
+            field: String::from("power"),
+        })?;
+    if negative {
+        magnitude.checked_neg()
+    } else {
+        Some(magnitude)
+    }
+    .ok_or_else(|| VehicleRegistryError::InvalidDefinition {
+        source: source.to_owned(),
+        field: String::from("power"),
     })
 }
 

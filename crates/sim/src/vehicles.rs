@@ -653,6 +653,10 @@ impl WorldState {
             .and_then(|vehicle| vehicle.parts.get_mut(usize::from(prototype_part_index)))
             .ok_or(SimError::InvalidTerrain)?
             .passenger = Some(actor_id);
+        self.actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?
+            .held_movement = None;
         events.push(self.make_event(WorldEventKind::ActorBoardedVehicle {
             actor_id,
             vehicle_id,
@@ -1001,6 +1005,285 @@ impl WorldState {
             item_id,
             position,
         })?);
+        Ok(())
+    }
+
+    pub(super) fn apply_drive_vehicle(
+        &mut self,
+        actor_id: ActorId,
+        sequence: CommandSequence,
+        vehicle_id: VehicleId,
+        steering: i8,
+        propulsion: i8,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        if !(-1..=1).contains(&steering)
+            || !(-1..=1).contains(&propulsion)
+            || (steering == 0 && propulsion == 0)
+        {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::InvalidMovement)?);
+            return Ok(());
+        }
+        let Some(vehicle) = self.vehicles.get(&vehicle_id).cloned() else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::VehicleMissing)?);
+            return Ok(());
+        };
+        if !Self::vehicle_allows_player_use(&vehicle) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        let (prototype, part_types) = {
+            let catalog = self.worldgen.as_ref().ok_or(SimError::InvalidTerrain)?;
+            (
+                catalog
+                    .vehicle_prototypes
+                    .get(usize::from(vehicle.prototype_index))
+                    .cloned()
+                    .ok_or(SimError::InvalidTerrain)?,
+                catalog.vehicle_part_types.clone(),
+            )
+        };
+        let Some(driver_part_index) = vehicle
+            .parts
+            .iter()
+            .position(|part| part.passenger == Some(actor_id))
+        else {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::ActorNotBoarded)?);
+            return Ok(());
+        };
+        let driver_part = vehicle
+            .parts
+            .get(driver_part_index)
+            .ok_or(SimError::InvalidTerrain)?;
+        let Some(driver) = self.actors.get(&actor_id) else {
+            return Err(SimError::UnknownActor);
+        };
+        if driver_part.hp == 0 || driver.hp <= 0 || driver.position != driver_part.position {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        let working_limb_count = |limb_type: &str| {
+            driver
+                .body_parts
+                .iter()
+                .filter(|part| {
+                    part.current_hp > 0
+                        && self.actor_anatomy.parts.iter().any(|prototype| {
+                            prototype.body_part_id == part.body_part_id
+                                && prototype
+                                    .limb_types
+                                    .binary_search_by(|candidate| candidate.as_str().cmp(limb_type))
+                                    .is_ok()
+                        })
+                })
+                .count()
+        };
+        let working_arms = working_limb_count("arm");
+        let working_legs = working_limb_count("leg");
+        let driver_mount = prototype
+            .parts
+            .get(driver_part_index)
+            .map(|part| (part.mount_x, part.mount_y))
+            .ok_or(SimError::InvalidTerrain)?;
+        let live_part_at_driver_mount_with = |wanted: &str| {
+            vehicle.parts.iter().enumerate().any(|(index, part)| {
+                let Some(prototype_part) = prototype.parts.get(index) else {
+                    return false;
+                };
+                let Some(part_type) = part_types.get(usize::from(prototype_part.part_type_index))
+                else {
+                    return false;
+                };
+                part.hp > 0
+                    && (prototype_part.mount_x, prototype_part.mount_y) == driver_mount
+                    && vehicle_part_has_flag(part_type, wanted)
+            })
+        };
+        let live_flag = |wanted: &str| {
+            vehicle.parts.iter().enumerate().any(|(index, part)| {
+                prototype.parts.get(index).is_some_and(|prototype_part| {
+                    part_types
+                        .get(usize::from(prototype_part.part_type_index))
+                        .is_some_and(|part_type| {
+                            part.hp > 0 && vehicle_part_has_flag(part_type, wanted)
+                        })
+                })
+            })
+        };
+        let live_muscle_engine_at_driver = vehicle.parts.iter().enumerate().any(|(index, part)| {
+            let Some(prototype_part) = prototype.parts.get(index) else {
+                return false;
+            };
+            let Some(part_type) = part_types.get(usize::from(prototype_part.part_type_index))
+            else {
+                return false;
+            };
+            part.hp > 0
+                && (prototype_part.mount_x, prototype_part.mount_y) == driver_mount
+                && vehicle_part_has_flag(part_type, "ENGINE")
+                && part_type.fuel_type == "muscle"
+                && part_type.power_milliwatts > 0
+                && ((vehicle_part_has_flag(part_type, "MUSCLE_ARMS") && working_arms >= 2)
+                    || (vehicle_part_has_flag(part_type, "MUSCLE_LEGS") && working_legs >= 2))
+        });
+        if !live_part_at_driver_mount_with("CONTROLS")
+            || !live_muscle_engine_at_driver
+            || !live_flag("WHEEL")
+            || !live_flag("STRUCTURE")
+                && !prototype
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .any(|(index, prototype_part)| {
+                        vehicle.parts.get(index).is_some_and(|part| part.hp > 0)
+                            && part_types
+                                .get(usize::from(prototype_part.part_type_index))
+                                .is_some_and(|part_type| part_type.location == "structure")
+                    })
+        {
+            // Powered engines, boats, rails, animals, and broken controls stay
+            // fail-closed until their complete movement kernels are admitted.
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+
+        let steering = if propulsion < 0 {
+            steering.checked_neg().ok_or(SimError::NumericOverflow)?
+        } else {
+            steering
+        };
+        let mut turn_direction_degrees = vehicle
+            .turn_direction_degrees
+            .checked_add(i16::from(steering) * 15)
+            .ok_or(SimError::NumericOverflow)?
+            .rem_euclid(360);
+        if steering != 0 {
+            turn_direction_degrees = ((turn_direction_degrees + 7) / 15 * 15).rem_euclid(360);
+        }
+        let from = vehicle.origin;
+        let (to, facing_degrees, movement_ray_leftover) = if propulsion == 0 {
+            (from, vehicle.facing_degrees, vehicle.movement_ray_leftover)
+        } else {
+            let initial_leftover = if turn_direction_degrees == vehicle.facing_degrees {
+                vehicle.movement_ray_leftover
+            } else {
+                0
+            };
+            let (dx, dy, leftover) = cdda_protocol::advance_vehicle_tileray(
+                turn_direction_degrees,
+                initial_leftover,
+                propulsion < 0,
+            )
+            .ok_or(SimError::InvalidTerrain)?;
+            let to = from
+                .checked_offset(dx, dy, 0)
+                .ok_or(SimError::NumericOverflow)?;
+            (to, turn_direction_degrees, leftover)
+        };
+
+        let mut target_positions = Vec::with_capacity(vehicle.parts.len());
+        for prototype_part in &prototype.parts {
+            target_positions.push(vehicle_part_position(
+                to,
+                prototype_part.mount_x,
+                prototype_part.mount_y,
+                facing_degrees,
+            )?);
+        }
+        if propulsion != 0 {
+            for position in target_positions
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if !self.ensure_active_bubble_generated(position)?
+                    || !super::is_passable_in_chunks(&self.chunks, position)
+                {
+                    events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+                    return Ok(());
+                }
+            }
+            let passenger_ids = vehicle
+                .parts
+                .iter()
+                .filter_map(|part| part.passenger)
+                .collect::<std::collections::BTreeSet<_>>();
+            let blocked = target_positions.iter().any(|position| {
+                self.actors.values().any(|actor| {
+                    actor.hp > 0
+                        && actor.position == *position
+                        && !passenger_ids.contains(&actor.id)
+                }) || self
+                    .creatures
+                    .values()
+                    .any(|creature| creature.hp > 0 && creature.position == *position)
+                    || self.npcs.values().any(|npc| npc.position == *position)
+                    || self.vehicles.iter().any(|(other_id, other)| {
+                        *other_id != vehicle_id
+                            && other
+                                .parts
+                                .iter()
+                                .any(|part| part.hp > 0 && part.position == *position)
+                    })
+            });
+            let mut structural_positions = std::collections::BTreeSet::new();
+            let structure_overlaps = prototype.parts.iter().enumerate().any(|(index, part)| {
+                vehicle.parts.get(index).is_some_and(|state| state.hp > 0)
+                    && part_types
+                        .get(usize::from(part.part_type_index))
+                        .is_some_and(|part_type| part_type.location == "structure")
+                    && !structural_positions.insert(target_positions[index])
+            });
+            if blocked || structure_overlaps {
+                // Collision damage is intentionally not guessed. The complete
+                // collision family will replace this deterministic hard stop.
+                events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+                return Ok(());
+            }
+        }
+
+        let event = self.make_event(WorldEventKind::VehicleControlled {
+            actor_id,
+            vehicle_id,
+            from,
+            to,
+            facing_degrees,
+            turn_direction_degrees,
+            reverse: propulsion < 0,
+        })?;
+        let vehicle = self
+            .vehicles
+            .get_mut(&vehicle_id)
+            .ok_or(SimError::InvalidTerrain)?;
+        vehicle.turn_direction_degrees = turn_direction_degrees;
+        if propulsion != 0 {
+            vehicle.origin = to;
+            vehicle.facing_degrees = facing_degrees;
+            vehicle.movement_ray_leftover = movement_ray_leftover;
+            vehicle.engine_on = true;
+            for (index, (part, position)) in
+                vehicle.parts.iter_mut().zip(target_positions).enumerate()
+            {
+                part.position = position;
+                if prototype.parts.get(index).is_some_and(|prototype_part| {
+                    (prototype_part.mount_x, prototype_part.mount_y) == driver_mount
+                        && part_types
+                            .get(usize::from(prototype_part.part_type_index))
+                            .is_some_and(|part_type| {
+                                vehicle_part_has_flag(part_type, "ENGINE")
+                                    && part_type.fuel_type == "muscle"
+                            })
+                }) {
+                    part.enabled = true;
+                }
+                if let Some(passenger) = part.passenger
+                    && let Some(actor) = self.actors.get_mut(&passenger)
+                {
+                    actor.position = position;
+                }
+            }
+        }
+        events.push(event);
         Ok(())
     }
 }

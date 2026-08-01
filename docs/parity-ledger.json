@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 139,
-  "persistence_schema_version": 116,
+  "protocol_version": 140,
+  "persistence_schema_version": 117,
   "replay_format_version": 4,
-  "active_milestone": "npcs-social",
+  "active_milestone": "vehicles-ordinary-controls",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",

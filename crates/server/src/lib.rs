@@ -3811,24 +3811,24 @@ pub async fn handle_game_connection_with_sessions(
                         }
                     };
                     let actor_id = selected_actor.ok_or(NetworkError::ServerBusy)?;
-                    let visible_event_npcs = if batch.events.iter().any(|event| {
+                    let needs_interest_snapshot = batch.events.iter().any(|event| {
                         matches!(
                             &event.kind,
                             WorldEventKind::NpcDamagedByEffect { .. }
                                 | WorldEventKind::NpcKilledByEffect { .. }
                                 | WorldEventKind::NpcOpenedTerrain { .. }
+                                | WorldEventKind::VehicleControlled { .. }
                         )
-                    }) {
-                        Some(
-                            interest_snapshot(simulation_snapshot(&simulation).await?, actor_id)?
-                                .npcs
-                                .into_iter()
-                                .map(|npc| npc.id)
-                                .collect::<BTreeSet<_>>(),
-                        )
-                    } else {
-                        None
-                    };
+                    });
+                    let interest = if needs_interest_snapshot {
+                        Some(interest_snapshot(simulation_snapshot(&simulation).await?, actor_id)?)
+                    } else { None };
+                    let visible_event_npcs = interest.as_ref().map(|snapshot| {
+                        snapshot.npcs.iter().map(|npc| npc.id).collect::<BTreeSet<_>>()
+                    });
+                    let visible_event_vehicles = interest.as_ref().map(|snapshot| {
+                        snapshot.vehicles.iter().map(|vehicle| vehicle.id).collect::<BTreeSet<_>>()
+                    });
                     let events = batch
                         .events
                         .into_iter()
@@ -3838,6 +3838,11 @@ pub async fn handle_game_connection_with_sessions(
                                     visible_event_npcs
                                         .as_ref()
                                         .is_some_and(|visible| visible.contains(&npc_id))
+                                })
+                                || vehicle_event_target(event).is_some_and(|vehicle_id| {
+                                    visible_event_vehicles
+                                        .as_ref()
+                                        .is_some_and(|visible| visible.contains(&vehicle_id))
                                 })
                         })
                         .collect::<Vec<_>>();
@@ -5195,6 +5200,10 @@ fn event_involves_actor(event: &WorldEvent, actor_id: ActorId) -> bool {
             actor_id: event_actor,
             ..
         }
+        | WorldEventKind::VehicleControlled {
+            actor_id: event_actor,
+            ..
+        }
         | WorldEventKind::ActorMoved {
             actor_id: event_actor,
             ..
@@ -5477,6 +5486,13 @@ fn npc_event_target(event: &WorldEvent) -> Option<cdda_protocol::NpcId> {
         WorldEventKind::NpcDamagedByEffect { npc_id, .. }
         | WorldEventKind::NpcKilledByEffect { npc_id, .. }
         | WorldEventKind::NpcOpenedTerrain { npc_id, .. } => Some(*npc_id),
+        _ => None,
+    }
+}
+
+fn vehicle_event_target(event: &WorldEvent) -> Option<cdda_protocol::VehicleId> {
+    match event.kind {
+        WorldEventKind::VehicleControlled { vehicle_id, .. } => Some(vehicle_id),
         _ => None,
     }
 }

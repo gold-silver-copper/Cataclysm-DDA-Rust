@@ -16,6 +16,35 @@ pub(super) struct RuntimeVehicleCatalog {
     pub group_indices: BTreeMap<String, u16>,
 }
 
+fn unsupported_part_field_changes_runtime(field: &str) -> bool {
+    // These finalized fields affect installation, repair, disassembly, UI, or
+    // collision damage, none of which the ordinary clear-terrain manual-drive
+    // boundary exposes. Movement-affecting fields are deliberately absent and
+    // therefore continue to fail admission.
+    !matches!(
+        field,
+        "bonus"
+            | "breaks_into"
+            | "broken_color"
+            | "categories"
+            | "color"
+            | "comfort"
+            | "damage_modifier"
+            | "damage_reduction"
+            | "description"
+            | "exclusions"
+            | "folded_volume"
+            | "folding_time"
+            | "floor_bedding_warmth"
+            | "looks_like"
+            | "m2c"
+            | "noise_factor"
+            | "qualities"
+            | "requirements"
+            | "unfolding_time"
+    )
+}
+
 fn ensure_static_prototype_is_supported(
     prototype: &VehiclePrototypeDefinition,
     vehicles: &VehicleRegistry,
@@ -51,7 +80,10 @@ fn ensure_static_prototype_is_supported(
             )
         })?;
         if definition.abstract_definition
-            || !definition.unsupported_fields.is_empty()
+            || definition
+                .unsupported_fields
+                .iter()
+                .any(|field| unsupported_part_field_changes_runtime(field))
             || definition.durability == 0
             || definition.variants.is_empty()
         {
@@ -72,14 +104,27 @@ fn ensure_static_prototype_is_supported(
             )
             .into());
         }
-        const UNREPRESENTED_INITIAL_STATE_FLAGS: [&str; 19] = [
+        if definition.flags.contains("ENGINE")
+            && (definition.fuel_type != "muscle"
+                || definition.power_milliwatts <= 0
+                || definition.muscle_power_factor_milliwatts < 0
+                || !definition.flags.contains("CONTROLS")
+                || !(definition.flags.contains("MUSCLE_ARMS")
+                    || definition.flags.contains("MUSCLE_LEGS")))
+        {
+            return Err(format!(
+                "reachable vehicle {} part {} is not an admitted manual engine",
+                prototype.id, definition.id
+            )
+            .into());
+        }
+        const UNREPRESENTED_INITIAL_STATE_FLAGS: [&str; 17] = [
             "AISLE_LIGHT",
             "ATOMIC_LIGHT",
             "BATTERY",
             "CIRCLE_LIGHT",
             "CONE_LIGHT",
             "DOME_LIGHT",
-            "ENGINE",
             "FREEZER",
             "FRIDGE",
             "FUEL_STORE",
@@ -90,7 +135,6 @@ fn ensure_static_prototype_is_supported(
             "TURRET",
             "WATER_PURIFIER",
             "WIDE_CONE_LIGHT",
-            "WHEEL",
             "WIND_TURBINE",
         ];
         if let Some(flag) = UNREPRESENTED_INITIAL_STATE_FLAGS
@@ -191,6 +235,13 @@ pub(super) fn runtime_vehicle_catalog(
                 cargo_capacity_milliliters: part
                     .cargo_capacity_milliliters
                     .min(cdda_protocol::MAX_VEHICLE_CARGO_VOLUME_MILLILITERS),
+                power_milliwatts: part.power_milliwatts,
+                fuel_type: part.fuel_type.clone(),
+                muscle_power_factor_milliwatts: part.muscle_power_factor_milliwatts,
+                rolling_resistance_millionths: part.rolling_resistance_millionths,
+                contact_area: part.contact_area,
+                wheel_offroad_rating_millionths: part.wheel_offroad_rating_millionths,
+                wheel_terrain_modifiers_json: part.wheel_terrain_modifiers_json.clone(),
                 flags: part.flags.iter().cloned().collect(),
                 variants: part
                     .variants

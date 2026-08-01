@@ -1502,6 +1502,8 @@ fn initial_vehicle_parts(
             .is_some_and(|part_type| {
                 vehicle_part_has_flag(part_type, "ENGINE")
                     && !vehicle_part_has_flag(part_type, "MUSCLE")
+                    && !vehicle_part_has_flag(part_type, "MUSCLE_ARMS")
+                    && !vehicle_part_has_flag(part_type, "MUSCLE_LEGS")
             })
     });
     let mut engine_on = false;

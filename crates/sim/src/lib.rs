@@ -4958,7 +4958,7 @@ pub struct ActorSpawn {
 
 pub fn canonical_events_hash(events: &[WorldEvent]) -> Result<[u8; 32], SimError> {
     let encoded = postcard::to_stdvec(events).map_err(SimError::Postcard)?;
-    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV31");
+    let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalEventsV32");
     hasher.update(&encoded);
     Ok(*hasher.finalize().as_bytes())
 }
@@ -8049,7 +8049,8 @@ impl WorldState {
             CommandKind::TalkToNpc { .. } => Ok(0),
             CommandKind::BoardVehicle { .. }
             | CommandKind::UnboardVehicle { .. }
-            | CommandKind::SetVehiclePartOpen { .. } => Ok(self.vehicle_board_action_cost()),
+            | CommandKind::SetVehiclePartOpen { .. }
+            | CommandKind::DriveVehicle { .. } => Ok(self.vehicle_board_action_cost()),
             CommandKind::InsertPocketItem {
                 owner_item,
                 pocket_index,
@@ -8441,6 +8442,12 @@ impl WorldState {
                 open,
                 events,
             ),
+            CommandKind::DriveVehicle {
+                vehicle_id,
+                steering,
+                propulsion,
+            } => self
+                .apply_drive_vehicle(actor_id, sequence, vehicle_id, steering, propulsion, events),
             CommandKind::ShootActor { target } => {
                 self.apply_ranged_attack(actor_id, sequence, RangedTarget::Actor(target), events)
             }
@@ -9968,6 +9975,7 @@ impl WorldState {
             | WorldEventKind::ItemPickedUp { .. }
             | WorldEventKind::ItemDropped { .. }
             | WorldEventKind::VehiclePartOpenChanged { .. }
+            | WorldEventKind::VehicleControlled { .. }
             | WorldEventKind::VehicleSpawned { .. } => true,
             WorldEventKind::ActorMoved { actor_id, .. } => {
                 self.actors.get(&actor_id).is_some_and(|actor| {
@@ -10545,6 +10553,8 @@ impl WorldState {
                 prototype_index: vehicle.prototype_index,
                 origin: vehicle.origin,
                 facing_degrees: vehicle.facing_degrees,
+                turn_direction_degrees: vehicle.facing_degrees,
+                movement_ray_leftover: 0,
                 owner_faction_id: vehicle.owner_faction_id,
                 engine_on: vehicle.engine_on,
                 security_locked: vehicle.security_locked,
@@ -16396,7 +16406,7 @@ impl WorldState {
             actor.connected = false;
         }
         let encoded = postcard::to_stdvec(&snapshot).map_err(SimError::Postcard)?;
-        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV114");
+        let mut hasher = blake3::Hasher::new_derive_key("cdda-rust CanonicalStateV115");
         hasher.update(&encoded);
         Ok(*hasher.finalize().as_bytes())
     }
