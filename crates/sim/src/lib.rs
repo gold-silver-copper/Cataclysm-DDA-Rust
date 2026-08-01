@@ -66,7 +66,7 @@ use cdda_protocol::{
     PoweredToolStateV1, PoweredToolTransitionReason, ProficiencyLevelSnapshot,
     QueuedActionSnapshot, RangedTarget, RangedWeaponSnapshot, SUBMAP_SIZE, ScheduledEocV1, SimTick,
     SkillLevelSnapshot, SleepReason, SmashItemTypeV1, TerrainBashTypeV1, TerrainTileSnapshot,
-    VehicleId, VehicleSnapshotV1, WakeReason, WearableArmorTypeV1, WeatherCatalogV1,
+    VehicleId, VehicleSnapshotV1, WEATHER_SCALE, WakeReason, WearableArmorTypeV1, WeatherCatalogV1,
     WeatherObservationV1, WeatherStateV1, WorldEvent, WorldEventKind, WorldPosition,
     WorldSnapshotV1, WorldgenCatalogV1, adjusted_book_study_time_moves, eoc_catalog_is_valid,
     healing_item_catalog_is_valid, item_group_catalog_is_valid, item_group_source_max_outputs,
@@ -128,6 +128,18 @@ pub fn weather_observation_from_snapshot(
         snapshot.weather_state.as_ref()?,
         snapshot.tick,
     )
+}
+
+#[must_use]
+pub fn weather_observation_at_from_snapshot(
+    snapshot: &WorldSnapshotV1,
+    position: WorldPosition,
+) -> Option<WeatherObservationV1> {
+    let mut observation = weather_observation_from_snapshot(snapshot)?;
+    observation.wind_band = weather::wind_band(
+        WorldState::snapshot_local_windpower(snapshot, position).saturating_mul(WEATHER_SCALE),
+    );
+    Some(observation)
 }
 
 #[must_use]
