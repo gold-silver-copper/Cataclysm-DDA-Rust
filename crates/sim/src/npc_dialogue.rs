@@ -148,6 +148,7 @@ pub(super) struct Npc {
     pub(super) hp: i32,
     pub(super) body_parts: Vec<ActorBodyPartSnapshotV1>,
     pub(super) effects: Vec<ActorEffectSnapshotV1>,
+    pub(super) eoc_variables: BTreeMap<String, String>,
     pub(super) base_strength: u16,
     pub(super) base_dexterity: u16,
     pub(super) base_intelligence: u16,
@@ -184,6 +185,7 @@ impl Npc {
             hp: self.hp,
             body_parts: self.body_parts.clone(),
             effects: self.effects.clone(),
+            eoc_variables: self.eoc_variables.clone(),
             base_strength: self.base_strength,
             base_dexterity: self.base_dexterity,
             base_intelligence: self.base_intelligence,
@@ -534,6 +536,7 @@ impl WorldState {
                 hp,
                 body_parts,
                 effects: Vec::new(),
+                eoc_variables: BTreeMap::new(),
                 base_strength: stats.strength,
                 base_dexterity: stats.dexterity,
                 base_intelligence: stats.intelligence,
@@ -758,7 +761,7 @@ impl WorldState {
         if let Some(condition) = response
             .as_ref()
             .and_then(|response| response.condition.as_ref())
-            && !self.dialogue_condition_matches(actor_id, condition)?
+            && !self.dialogue_condition_matches(actor_id, npc_id, condition)?
         {
             return self.invalidate_npc_dialogue(
                 actor_id,
@@ -916,7 +919,7 @@ impl WorldState {
             .iter()
             .map(|response| {
                 let matches = response.condition.as_ref().map_or(Ok(true), |condition| {
-                    self.dialogue_condition_matches(actor_id, condition)
+                    self.dialogue_condition_matches(actor_id, npc_id, condition)
                 })?;
                 Ok(matches.then(|| InteractionChoiceV1 {
                     choice_id: response.response_id.clone(),

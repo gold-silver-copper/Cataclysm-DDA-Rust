@@ -1,6 +1,6 @@
 //! Canonical NPC identity, dialogue programs, and per-player social state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -177,6 +177,7 @@ pub struct NpcSnapshotV1 {
     pub hp: i32,
     pub body_parts: Vec<ActorBodyPartSnapshotV1>,
     pub effects: Vec<ActorEffectSnapshotV1>,
+    pub eoc_variables: BTreeMap<String, String>,
     pub base_strength: u16,
     pub base_dexterity: u16,
     pub base_intelligence: u16,
@@ -438,6 +439,7 @@ pub fn npc_snapshot_is_valid_for_template(
         && npc.speed > 0
         && npc.action_points >= super::MIN_ACTION_POINTS
         && npc.action_points <= i64::from(super::ACTION_POINT_THRESHOLD)
+        && super::actor_eoc_variables_are_valid(&npc.eoc_variables)
         && (npc.hp > 0 || (npc.dodge_attempts_remaining == 0 && npc.action_points == 0))
         && npc.inventory.len() <= 256
         && npc.inventory.windows(2).all(|pair| pair[0].id < pair[1].id)

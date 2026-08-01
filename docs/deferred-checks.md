@@ -103,7 +103,8 @@ Run only when the user explicitly requests a verification checkpoint.
   skill-order, base-stat/personality/age/height, template-override, dodge,
   armor, effect, resource, death, attitude scheduling, talk/follow pathing,
   KOS pursuit, timed flee, protocol-138/schema-115/replay-4 recovery,
-  canonical-state-V113/event-V31, production admission, and two-client combat traces.
+  dialogue alpha/beta condition/effect/variable closure, canonical-state-V113/event-V31,
+  production admission, and two-client combat/dialogue traces.
 - Vehicle checkpoint: run pinned vehicle inheritance/group selection, mapgen
   phase/RNG order, arbitrary-angle tileray mounts, initialization damage/state,
   collision, cargo capacity/spawning/rot/corpse recovery, contiguous openable

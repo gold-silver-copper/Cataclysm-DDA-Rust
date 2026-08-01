@@ -352,6 +352,90 @@ pub(super) fn runtime_actor_only_eoc_ids(definitions: &[EocDefinitionV1]) -> BTr
     available.keys().map(|id| (*id).to_owned()).collect()
 }
 
+pub(super) fn runtime_dialogue_eoc_ids(
+    definitions: &[EocDefinitionV1],
+    actor_only_ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut available = definitions
+        .iter()
+        .filter(|definition| {
+            definition.recurrence.is_none()
+                && definition.event_trigger.is_none()
+                && !cdda_protocol::eoc_effects_contain_confirmation(&definition.effects)
+                && !cdda_protocol::eoc_effects_contain_confirmation(&definition.false_effects)
+        })
+        .map(|definition| (definition.eoc_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    loop {
+        let immediate_ids = available.keys().copied().collect::<BTreeSet<_>>();
+        let unavailable = available
+            .iter()
+            .filter(|(_id, definition)| {
+                !dialogue_effect_references_are_available(
+                    &definition.effects,
+                    &immediate_ids,
+                    actor_only_ids,
+                ) || !dialogue_effect_references_are_available(
+                    &definition.false_effects,
+                    &immediate_ids,
+                    actor_only_ids,
+                )
+            })
+            .map(|(id, _definition)| *id)
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            break;
+        }
+        for id in unavailable {
+            available.remove(id);
+        }
+    }
+    available.keys().map(|id| (*id).to_owned()).collect()
+}
+
+pub(super) fn dialogue_effect_references_are_available(
+    effects: &[EocEffectV1],
+    immediate_ids: &BTreeSet<impl AsRef<str>>,
+    delayed_ids: &BTreeSet<String>,
+) -> bool {
+    effects.iter().all(|effect| match effect {
+        EocEffectV1::RunEocs { eoc_ids, delay } => eoc_ids.iter().all(|id| {
+            if delay.is_some() {
+                delayed_ids.contains(id)
+            } else {
+                immediate_ids
+                    .iter()
+                    .any(|available| available.as_ref() == id)
+            }
+        }),
+        EocEffectV1::Conditional {
+            then_effects,
+            else_effects,
+            ..
+        } => {
+            dialogue_effect_references_are_available(then_effects, immediate_ids, delayed_ids)
+                && dialogue_effect_references_are_available(
+                    else_effects,
+                    immediate_ids,
+                    delayed_ids,
+                )
+        }
+        EocEffectV1::Confirmation { .. } => false,
+        EocEffectV1::Message { .. }
+        | EocEffectV1::AddEffect { .. }
+        | EocEffectV1::RemoveEffects { .. }
+        | EocEffectV1::SetActorVariable { .. }
+        | EocEffectV1::RemoveActorVariable { .. }
+        | EocEffectV1::AddTargetEffect { .. }
+        | EocEffectV1::RemoveTargetEffects { .. }
+        | EocEffectV1::SetTargetVariable { .. }
+        | EocEffectV1::RemoveTargetVariable { .. }
+        | EocEffectV1::MathAssignment { .. }
+        | EocEffectV1::AssignMission { .. }
+        | EocEffectV1::FinishMission { .. } => true,
+    })
+}
+
 fn runtime_eoc_body_parts_are_supported(
     definition: &EocDefinitionV1,
     anatomy: &AnatomyDefinitionV1,

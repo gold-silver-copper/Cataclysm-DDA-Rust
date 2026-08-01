@@ -15736,6 +15736,7 @@ impl WorldState {
                         hp: npc.hp,
                         body_parts: npc.body_parts.clone(),
                         effects: npc.effects.clone(),
+                        eoc_variables: npc.eoc_variables.clone(),
                         base_strength: npc.base_strength,
                         base_dexterity: npc.base_dexterity,
                         base_intelligence: npc.base_intelligence,

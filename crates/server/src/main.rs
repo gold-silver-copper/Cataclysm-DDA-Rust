@@ -86,8 +86,9 @@ mod worldgen;
 
 use anatomy::{runtime_actor_anatomy, runtime_wearable_armor_types};
 use eocs::{
-    runtime_actor_only_eoc_ids, runtime_condition, runtime_dialogue_condition_is_supported,
-    runtime_dialogue_effects_are_supported, runtime_effect, runtime_eoc_catalog,
+    dialogue_effect_references_are_available, runtime_actor_only_eoc_ids, runtime_condition,
+    runtime_dialogue_condition_is_supported, runtime_dialogue_effects_are_supported,
+    runtime_dialogue_eoc_ids, runtime_effect, runtime_eoc_catalog,
 };
 use item_groups::{
     RuntimeItemGroupContent, merge_item_group_catalogs, runtime_ammunition_containers,
@@ -1880,38 +1881,8 @@ fn runtime_npc_dialogue(
     ),
     Box<dyn std::error::Error>,
 > {
-    let eocs = eoc_definitions
-        .iter()
-        .map(|definition| (definition.eoc_id.as_str(), definition))
-        .collect::<BTreeMap<_, _>>();
-    let mut unavailable_dialogue_eocs = eoc_definitions
-        .iter()
-        .filter(|definition| {
-            definition.recurrence.is_some()
-                || definition.event_trigger.is_some()
-                || cdda_protocol::eoc_definition_requires_target_context(definition)
-                || cdda_protocol::eoc_effects_contain_confirmation(&definition.effects)
-                || cdda_protocol::eoc_effects_contain_confirmation(&definition.false_effects)
-        })
-        .map(|definition| definition.eoc_id.as_str())
-        .collect::<BTreeSet<_>>();
-    loop {
-        let inherited = eoc_definitions
-            .iter()
-            .filter(|definition| {
-                !unavailable_dialogue_eocs.contains(definition.eoc_id.as_str())
-                    && definition
-                        .referenced_eocs()
-                        .iter()
-                        .any(|id| unavailable_dialogue_eocs.contains(*id))
-            })
-            .map(|definition| definition.eoc_id.as_str())
-            .collect::<Vec<_>>();
-        if inherited.is_empty() {
-            break;
-        }
-        unavailable_dialogue_eocs.extend(inherited);
-    }
+    let actor_only_eocs = runtime_actor_only_eoc_ids(eoc_definitions);
+    let dialogue_eocs = runtime_dialogue_eoc_ids(eoc_definitions, &actor_only_eocs);
     let mut topics = registry
         .topic_iter()
         .filter(|(topic_id, topic)| {
@@ -1949,14 +1920,12 @@ fn runtime_npc_dialogue(
                                 .iter()
                                 .map(runtime_effect)
                                 .collect::<Vec<_>>();
-                            !cdda_protocol::eoc_effects_require_target_context(&effects)
-                                && !cdda_protocol::eoc_effects_contain_confirmation(&effects)
-                                && cdda_protocol::eoc_effect_referenced_ids(&effects)
-                                    .iter()
-                                    .all(|id| {
-                                        eocs.contains_key(id)
-                                            && !unavailable_dialogue_eocs.contains(*id)
-                                    })
+                            !cdda_protocol::eoc_effects_contain_confirmation(&effects)
+                                && dialogue_effect_references_are_available(
+                                    &effects,
+                                    &dialogue_eocs,
+                                    &actor_only_eocs,
+                                )
                         }
                         && response.condition.as_ref().is_none_or(|condition| {
                             runtime_dialogue_condition_is_supported(
@@ -1966,8 +1935,6 @@ fn runtime_npc_dialogue(
                                 proficiencies,
                                 recipes,
                                 mission_ids,
-                            ) && !cdda_protocol::eoc_condition_requires_target_context(
-                                &runtime_condition(condition),
                             )
                         })
                 })

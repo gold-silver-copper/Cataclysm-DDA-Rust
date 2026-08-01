@@ -9,8 +9,8 @@ use cdda_protocol::{
     EocStringValueV1, InteractionId, ItemId, MAX_ACTOR_BASE_STAT, MAX_ACTOR_SCHEDULED_EOCS,
     MAX_EOC_ACTOR_VARIABLES, MAX_EOC_SAFE_INTEGER, MissionDefinitionV1, NpcId, ScheduledEocV1,
     SimTick, WORLDGEN_OMT_SIZE, WorldEvent, WorldEventKind, eoc_catalog_is_valid,
-    eoc_condition_is_valid, eoc_condition_requires_target_context, eoc_effects_are_valid,
-    eoc_effects_contain_confirmation, eoc_effects_require_target_context,
+    eoc_condition_is_valid, eoc_effects_are_valid, eoc_effects_contain_confirmation,
+    eoc_effects_require_target_context,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::Rng;
@@ -31,19 +31,21 @@ impl WorldState {
     pub(super) fn dialogue_condition_matches(
         &self,
         actor_id: ActorId,
+        npc_id: NpcId,
         condition: &EocConditionV1,
     ) -> Result<bool, SimError> {
-        if !eoc_condition_is_valid(condition) || eoc_condition_requires_target_context(condition) {
+        if !eoc_condition_is_valid(condition) {
             return Err(SimError::InvalidNpcDialogue);
         }
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
         evaluate_condition(
             condition,
             &eoc_actor_context(actor),
             &actor.effects,
             &actor.eoc_variables,
-            None,
-            None,
+            Some(&npc.effects),
+            Some(&npc.eoc_variables),
             &mut 0,
         )
         .map_err(|_error| SimError::InvalidNpcDialogue)
@@ -521,19 +523,19 @@ impl WorldState {
             })
         };
         if !eoc_effects_are_valid(effects)
-            || eoc_effects_require_target_context(effects)
             || eoc_effects_contain_confirmation(effects)
             || !effects_body_parts_are_valid(effects, &valid_part)
         {
             return Ok(false);
         }
         let actor = self.actors.get(&actor_id).ok_or(SimError::UnknownActor)?;
+        let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
         let mut execution = EocExecution {
             actor: eoc_actor_context(actor),
             effects: actor.effects.clone(),
             variables: actor.eoc_variables.clone(),
-            target_effects: None,
-            target_variables: None,
+            target_effects: Some(npc.effects.clone()),
+            target_variables: Some(npc.eoc_variables.clone()),
             next_schedule_sequence: actor.next_eoc_schedule_sequence,
             scheduled_eocs: actor.scheduled_eocs.clone(),
             inactive_recurring_eocs: actor.inactive_recurring_eocs.clone(),
@@ -563,6 +565,14 @@ impl WorldState {
         )
         .is_err()
             || execution.effects.len() > 1_024
+            || execution
+                .target_effects
+                .as_ref()
+                .is_none_or(|effects| effects.len() > 1_024)
+            || execution
+                .target_variables
+                .as_ref()
+                .is_none_or(|variables| !cdda_protocol::actor_eoc_variables_are_valid(variables))
             || execution.confirmation.is_some()
         {
             return Ok(false);
@@ -573,7 +583,25 @@ impl WorldState {
         execution
             .scheduled_eocs
             .sort_by_key(|entry| (entry.due_tick, entry.sequence));
+        execution
+            .target_effects
+            .as_mut()
+            .ok_or(SimError::InvalidNpcDialogue)?
+            .sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
+        let target_effects = execution
+            .target_effects
+            .take()
+            .ok_or(SimError::InvalidNpcDialogue)?;
+        let target_variables = execution
+            .target_variables
+            .take()
+            .ok_or(SimError::InvalidNpcDialogue)?;
         self.commit_eoc_execution_state(actor_id, &mut execution, events)?;
+        let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
+        npc.effects = target_effects;
+        npc.eoc_variables = target_variables;
         Ok(true)
     }
 
