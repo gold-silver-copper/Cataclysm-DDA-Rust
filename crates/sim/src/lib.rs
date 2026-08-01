@@ -6676,11 +6676,11 @@ impl WorldState {
                     remaining_hp: outcome.remaining_hp,
                 })?);
                 if outcome.remaining_hp <= 0 {
+                    self.finish_npc_death(npc_id, events)?;
                     events.push(self.make_event(WorldEventKind::NpcKilledByEffect {
                         npc_id,
                         effect_id: effect.effect_id,
                     })?);
-                    self.cancel_dialogues_with_npc(npc_id, events)?;
                 }
             }
         }
@@ -7915,9 +7915,9 @@ impl WorldState {
         match &action.kind {
             CommandKind::Move { dx, dy, dz } => self.movement_action_cost(actor_id, *dx, *dy, *dz),
             CommandKind::Smash { .. } => self.actor_smash_action_cost(actor_id),
-            CommandKind::Attack { .. } | CommandKind::AttackCreature { .. } => {
-                self.actor_melee_action_cost(actor_id)
-            }
+            CommandKind::Attack { .. }
+            | CommandKind::AttackCreature { .. }
+            | CommandKind::AttackNpc { .. } => self.actor_melee_action_cost(actor_id),
             CommandKind::TalkToNpc { .. } => Ok(0),
             CommandKind::BoardVehicle { .. }
             | CommandKind::UnboardVehicle { .. }
@@ -8662,6 +8662,7 @@ impl WorldState {
             events.push(self.rejection(source, sequence, CommandRejection::WeaponNotMelee)?);
             return Ok(());
         };
+        self.npc_on_attacked_by_actor(target, source)?;
         self.charge_actor_melee_stamina(source)?;
         if dodge_attempted {
             self.consume_npc_dodge_attempt(target)?;
@@ -8686,15 +8687,11 @@ impl WorldState {
             remaining_hp: outcome.remaining_hp,
         })?);
         if outcome.remaining_hp <= 0 {
-            if let Some(npc) = self.npcs.get_mut(&target) {
-                npc.dodge_attempts_remaining = 0;
-                npc.action_points = 0;
-            }
+            self.finish_npc_death(target, events)?;
             events.push(self.make_event(WorldEventKind::NpcDied {
                 npc_id: target,
                 killer: source,
             })?);
-            self.cancel_dialogues_with_npc(target, events)?;
         }
         Ok(())
     }
@@ -8793,6 +8790,9 @@ impl WorldState {
                 )?);
                 return Ok(());
             }
+        }
+        if let RangedTarget::Npc(target_id) = target {
+            self.npc_on_attacked_by_actor(target_id, source)?;
         }
         self.actors
             .get_mut(&source)
@@ -8904,15 +8904,11 @@ impl WorldState {
                     remaining_hp: outcome.remaining_hp,
                 })?);
                 if outcome.remaining_hp <= 0 {
-                    if let Some(npc) = self.npcs.get_mut(&target_id) {
-                        npc.dodge_attempts_remaining = 0;
-                        npc.action_points = 0;
-                    }
+                    self.finish_npc_death(target_id, events)?;
                     events.push(self.make_event(WorldEventKind::NpcDied {
                         npc_id: target_id,
                         killer: source,
                     })?);
-                    self.cancel_dialogues_with_npc(target_id, events)?;
                 }
             }
         }
@@ -15676,11 +15672,14 @@ impl WorldState {
         let mut npcs = BTreeMap::new();
         for npc in &snapshot.npcs {
             if npc_templates.get(&npc.template_id).is_none_or(|template| {
-                !cdda_protocol::npc_snapshot_is_valid_for_template(
-                    npc,
-                    snapshot.world_namespace,
-                    template,
-                ) || npc
+                npc_classes.get(&template.class_id).is_none_or(|class| {
+                    !cdda_protocol::npc_snapshot_is_valid_for_template(
+                        npc,
+                        snapshot.world_namespace,
+                        template,
+                        class,
+                    )
+                }) || npc
                     .mission_offers
                     .iter()
                     .any(|offer| !template.mission_offered.contains(&offer.mission_type_id))
@@ -15742,6 +15741,7 @@ impl WorldState {
                         name: npc.name.clone(),
                         faction_id: npc.faction_id.clone(),
                         attitude: npc.attitude,
+                        hit_by_player: npc.hit_by_player,
                         position: npc.position,
                         class_id: npc.class_id.clone(),
                         profession: npc.profession.clone(),

@@ -60,11 +60,11 @@ pub use npc_dialogue::{
     MAX_DIALOGUE_TEXT_BYTES, MAX_DIALOGUE_TOPIC_STACK, MAX_NPC_MISSION_OFFERS, MAX_NPC_NAME_BYTES,
     MAX_NPC_OPINION_ABS, MAX_NPC_TEMPLATES, MAX_NPCS, NPC_BUILTIN_MISSION_TOPICS, NpcClassSkillV1,
     NpcClassV1, NpcDistributionV1, NpcMissionOfferV1, NpcOpinionV1, NpcPersonalityV1,
-    NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1, VisibleNpcSnapshotV1,
+    NpcSnapshotV1, NpcSocialStateV1, NpcTemplateV1, VisibleNpcSnapshotV1, distribution_i32_bounds,
     npc_class_catalog_is_valid, npc_dialogue_catalog_is_valid, npc_snapshot_is_valid,
     npc_snapshot_is_valid_for_template, npc_template_attitude_is_supported,
-    npc_template_attitude_will_talk, npc_template_runtime_ai_is_supported,
-    opinion_delta_cannot_trigger_hostility, opinion_is_valid,
+    npc_template_attitude_will_talk, npc_template_is_spawn_safe,
+    npc_template_runtime_ai_is_supported, opinion_delta_cannot_trigger_hostility, opinion_is_valid,
 };
 pub use npc_faction::{
     FactionFoodSupplyV1, FactionRelationFlagsV1, FactionRelationshipV1, FactionStateV1,

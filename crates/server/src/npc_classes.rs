@@ -14,10 +14,13 @@ pub(crate) fn runtime_npc_classes(
             let class_skills = skills
                 .skill_list_order_ids()
                 .iter()
-                .filter_map(|skill_id| {
+                .enumerate()
+                .filter_map(|(load_order, skill_id)| {
                     class.skills.get(skill_id).map(|distribution| {
+                        let load_order = u16::try_from(load_order)?;
                         Ok(NpcClassSkillV1 {
                             skill_id: skill_id.clone(),
+                            load_order,
                             distribution: runtime_distribution(distribution)?,
                         })
                     })

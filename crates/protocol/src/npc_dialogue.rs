@@ -80,6 +80,9 @@ pub struct NpcPersonalityV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NpcClassSkillV1 {
     pub skill_id: String,
+    /// Index in the pinned `Skill::skills` factory vector.  The order is part
+    /// of NPC generation because every skill roll consumes RNG in this order.
+    pub load_order: u16,
     pub distribution: NpcDistributionV1,
 }
 
@@ -170,6 +173,8 @@ pub struct NpcSnapshotV1 {
     pub name: String,
     pub faction_id: String,
     pub attitude: i32,
+    /// Pinned innocent/attacked marker used by later murder consequences.
+    pub hit_by_player: bool,
     pub position: WorldPosition,
     pub class_id: String,
     pub profession: String,
@@ -240,15 +245,164 @@ pub fn npc_class_catalog_is_valid(classes: &[NpcClassV1]) -> bool {
                 && distribution_is_valid(&class.bonus_collector)
                 && distribution_is_valid(&class.bonus_altruism)
                 && class.skills.len() <= MAX_NPC_CLASS_SKILLS
+                && class
+                    .skills
+                    .windows(2)
+                    .all(|pair| pair[0].load_order < pair[1].load_order)
                 && {
                     let mut skill_ids = BTreeSet::new();
                     class.skills.iter().all(|skill| {
                         valid_id(&skill.skill_id)
                             && skill_ids.insert(skill.skill_id.as_str())
                             && distribution_is_valid(&skill.distribution)
+                            && distribution_i32_bounds(&skill.distribution).is_some_and(
+                                |(_minimum, maximum)| maximum.max(0) <= i32::from(MAX_SKILL_LEVEL),
+                            )
                     })
                 }
         })
+}
+
+/// Inclusive bounds after the pinned float expression has been evaluated and
+/// truncated to `int`.  `None` rejects expressions whose finite leaves can
+/// overflow an intermediate or whose result cannot be represented by C++'s
+/// destination type.
+#[must_use]
+pub fn distribution_i32_bounds(distribution: &NpcDistributionV1) -> Option<(i32, i32)> {
+    fn float_bounds(distribution: &NpcDistributionV1) -> Option<(f32, f32)> {
+        match distribution {
+            NpcDistributionV1::Constant { value_bits } => {
+                let value = f32::from_bits(*value_bits);
+                value.is_finite().then_some((value, value))
+            }
+            NpcDistributionV1::OneIn { .. } => Some((0.0, 1.0)),
+            NpcDistributionV1::Range { first, second } => {
+                Some(((*first).min(*second) as f32, (*first).max(*second) as f32))
+            }
+            NpcDistributionV1::Dice { count, sides } => {
+                let maximum = count.checked_mul(*sides)?;
+                Some((*count as f32, maximum as f32))
+            }
+            NpcDistributionV1::Sum(children) => {
+                let mut children = children.iter();
+                let mut bounds = float_bounds(children.next()?)?;
+                for child in children {
+                    let child = float_bounds(child)?;
+                    bounds = (bounds.0 + child.0, bounds.1 + child.1);
+                    if !bounds.0.is_finite() || !bounds.1.is_finite() {
+                        return None;
+                    }
+                }
+                Some(bounds)
+            }
+            NpcDistributionV1::Multiply(children) => {
+                let mut children = children.iter();
+                let mut bounds = float_bounds(children.next()?)?;
+                for child in children {
+                    let child = float_bounds(child)?;
+                    let products = [
+                        bounds.0 * child.0,
+                        bounds.0 * child.1,
+                        bounds.1 * child.0,
+                        bounds.1 * child.1,
+                    ];
+                    if products.iter().any(|value| !value.is_finite()) {
+                        return None;
+                    }
+                    bounds = products.into_iter().fold(
+                        (f32::INFINITY, f32::NEG_INFINITY),
+                        |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
+                    );
+                }
+                Some(bounds)
+            }
+        }
+    }
+
+    let (minimum, maximum) = float_bounds(distribution)?;
+    let exclusive_maximum = 2_147_483_648.0_f32;
+    if minimum < i32::MIN as f32 || maximum >= exclusive_maximum {
+        return None;
+    }
+    Some((minimum as i32, maximum as i32))
+}
+
+#[must_use]
+pub fn npc_template_is_spawn_safe(template: &NpcTemplateV1, class: &NpcClassV1) -> bool {
+    fn stat_is_safe(base: Option<u16>, distribution: &NpcDistributionV1) -> bool {
+        let (minimum, maximum) = match distribution_i32_bounds(distribution) {
+            Some(bounds) => bounds,
+            None => return false,
+        };
+        let (base_minimum, base_maximum) = base.map_or((4_i32, 12_i32), |value| {
+            let value = i32::from(value);
+            (value, value)
+        });
+        base_minimum
+            .checked_add(minimum)
+            .is_some_and(|value| value > 0)
+            && base_maximum
+                .checked_add(maximum)
+                .is_some_and(|value| value <= i32::from(MAX_ACTOR_BASE_STAT))
+    }
+
+    template.class_id == class.class_id
+        && stat_is_safe(template.base_strength, &class.bonus_strength)
+        && stat_is_safe(template.base_dexterity, &class.bonus_dexterity)
+        && stat_is_safe(template.base_intelligence, &class.bonus_intelligence)
+        && stat_is_safe(template.base_perception, &class.bonus_perception)
+        && [
+            &class.bonus_aggression,
+            &class.bonus_bravery,
+            &class.bonus_collector,
+            &class.bonus_altruism,
+        ]
+        .into_iter()
+        .all(|distribution| {
+            distribution_i32_bounds(distribution).is_some_and(|(minimum, maximum)| {
+                i32::from(NPC_PERSONALITY_MIN)
+                    .checked_add(minimum)
+                    .is_some()
+                    && i32::from(NPC_PERSONALITY_MAX)
+                        .checked_add(maximum)
+                        .is_some()
+            })
+        })
+}
+
+fn generated_stat_is_possible(
+    value: u16,
+    fixed_base: Option<u16>,
+    distribution: &NpcDistributionV1,
+) -> bool {
+    distribution_i32_bounds(distribution).is_some_and(|(minimum, maximum)| {
+        let (base_minimum, base_maximum) = fixed_base.map_or((4_i32, 12_i32), |base| {
+            let base = i32::from(base);
+            (base, base)
+        });
+        i32::from(value) >= base_minimum.saturating_add(minimum)
+            && i32::from(value) <= base_maximum.saturating_add(maximum)
+    })
+}
+
+fn generated_personality_is_possible(
+    value: i8,
+    fixed_base: Option<i8>,
+    random_bounds: (i8, i8),
+    distribution: &NpcDistributionV1,
+) -> bool {
+    distribution_i32_bounds(distribution).is_some_and(|(minimum, maximum)| {
+        let (base_minimum, base_maximum) = fixed_base.map_or(random_bounds, |base| (base, base));
+        let minimum = i32::from(base_minimum).saturating_add(minimum).clamp(
+            i32::from(NPC_PERSONALITY_MIN),
+            i32::from(NPC_PERSONALITY_MAX),
+        );
+        let maximum = i32::from(base_maximum).saturating_add(maximum).clamp(
+            i32::from(NPC_PERSONALITY_MIN),
+            i32::from(NPC_PERSONALITY_MAX),
+        );
+        (minimum..=maximum).contains(&i32::from(value))
+    })
 }
 
 fn distribution_is_valid(root: &NpcDistributionV1) -> bool {
@@ -387,11 +541,19 @@ pub fn npc_snapshot_is_valid(
     npc: &NpcSnapshotV1,
     world_namespace: u64,
     templates: &[NpcTemplateV1],
+    classes: &[NpcClassV1],
 ) -> bool {
     templates
         .iter()
         .find(|template| template.template_id == npc.template_id)
-        .is_some_and(|template| npc_snapshot_is_valid_for_template(npc, world_namespace, template))
+        .is_some_and(|template| {
+            classes
+                .iter()
+                .find(|class| class.class_id == template.class_id)
+                .is_some_and(|class| {
+                    npc_snapshot_is_valid_for_template(npc, world_namespace, template, class)
+                })
+        })
 }
 
 #[must_use]
@@ -399,6 +561,7 @@ pub fn npc_snapshot_is_valid_for_template(
     npc: &NpcSnapshotV1,
     world_namespace: u64,
     template: &NpcTemplateV1,
+    class: &NpcClassV1,
 ) -> bool {
     npc.id.counter() > 0
         && npc.id.world_namespace() == world_namespace
@@ -410,8 +573,14 @@ pub fn npc_snapshot_is_valid_for_template(
             .is_none_or(|name| npc.name == *name)
         && optional_id_is_valid(&npc.faction_id)
         && npc.class_id == template.class_id
+        && class.class_id == template.class_id
+        && npc.profession == *template.name_suffix.as_ref().unwrap_or(&class.name)
         && valid_text(&npc.profession, MAX_NPC_NAME_BYTES)
         && matches!(npc.gender.as_str(), "male" | "female")
+        && template
+            .gender
+            .as_ref()
+            .is_none_or(|gender| npc.gender == *gender)
         && !npc.body_parts.is_empty()
         && {
             let mut body_part_ids = BTreeSet::new();
@@ -424,15 +593,63 @@ pub fn npc_snapshot_is_valid_for_template(
         }
         && npc.base_strength > 0
         && npc.base_strength <= MAX_ACTOR_BASE_STAT
+        && generated_stat_is_possible(
+            npc.base_strength,
+            template.base_strength,
+            &class.bonus_strength,
+        )
         && npc.base_dexterity > 0
         && npc.base_dexterity <= MAX_ACTOR_BASE_STAT
+        && generated_stat_is_possible(
+            npc.base_dexterity,
+            template.base_dexterity,
+            &class.bonus_dexterity,
+        )
         && npc.base_intelligence > 0
         && npc.base_intelligence <= MAX_ACTOR_BASE_STAT
+        && generated_stat_is_possible(
+            npc.base_intelligence,
+            template.base_intelligence,
+            &class.bonus_intelligence,
+        )
         && npc.base_perception > 0
         && npc.base_perception <= MAX_ACTOR_BASE_STAT
+        && generated_stat_is_possible(
+            npc.base_perception,
+            template.base_perception,
+            &class.bonus_perception,
+        )
         && personality_is_valid(&npc.personality)
+        && generated_personality_is_possible(
+            npc.personality.aggression,
+            template.personality.as_ref().map(|value| value.aggression),
+            (NPC_PERSONALITY_MIN, NPC_PERSONALITY_MAX),
+            &class.bonus_aggression,
+        )
+        && generated_personality_is_possible(
+            npc.personality.bravery,
+            template.personality.as_ref().map(|value| value.bravery),
+            (-3, NPC_PERSONALITY_MAX),
+            &class.bonus_bravery,
+        )
+        && generated_personality_is_possible(
+            npc.personality.collector,
+            template.personality.as_ref().map(|value| value.collector),
+            (-1, NPC_PERSONALITY_MAX),
+            &class.bonus_collector,
+        )
+        && generated_personality_is_possible(
+            npc.personality.altruism,
+            template.personality.as_ref().map(|value| value.altruism),
+            (NPC_PERSONALITY_MIN, NPC_PERSONALITY_MAX),
+            &class.bonus_altruism,
+        )
         && (1..=200).contains(&npc.age_years)
+        && template.age_years.is_none_or(|age| npc.age_years == age)
         && (50..=400).contains(&npc.height_centimeters)
+        && template
+            .height_centimeters
+            .is_none_or(|height| npc.height_centimeters == height)
         && npc.maximum_stamina > 0
         && npc.stamina <= npc.maximum_stamina
         && npc.dodge_attempts_remaining <= 1
@@ -441,6 +658,8 @@ pub fn npc_snapshot_is_valid_for_template(
         && npc.action_points <= i64::from(super::ACTION_POINT_THRESHOLD)
         && super::actor_eoc_variables_are_valid(&npc.eoc_variables)
         && (npc.hp > 0 || (npc.dodge_attempts_remaining == 0 && npc.action_points == 0))
+        && (npc.hp > 0
+            || (npc.inventory.is_empty() && npc.wielded.is_none() && npc.worn.is_empty()))
         && npc.inventory.len() <= 256
         && npc.inventory.windows(2).all(|pair| pair[0].id < pair[1].id)
         && npc.inventory.iter().all(valid_item_snapshot)
@@ -448,6 +667,7 @@ pub fn npc_snapshot_is_valid_for_template(
             npc.inventory.iter().any(|item| item.id == id) && !npc.worn.contains(&id)
         })
         && npc.worn.len() <= npc.inventory.len()
+        && npc.worn.iter().copied().collect::<BTreeSet<_>>().len() == npc.worn.len()
         && npc
             .worn
             .iter()
@@ -472,7 +692,9 @@ pub fn npc_snapshot_is_valid_for_template(
             .all(|proficiency| valid_id(&proficiency.proficiency_id))
         && (npc.attitude == template.attitude
             || (template.attitude == 1 && npc.attitude == 0)
-            || (template.attitude == 11 && matches!(npc.attitude, 0 | 17)))
+            || (template.attitude == 11 && matches!(npc.attitude, 0 | 17))
+            || (npc.hit_by_player && matches!(npc.attitude, 10 | 17)))
+        && (!npc.hit_by_player || matches!(npc.attitude, 10 | 17) || npc.hp <= 0)
         && npc
             .social
             .windows(2)

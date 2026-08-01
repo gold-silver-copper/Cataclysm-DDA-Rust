@@ -141,6 +141,7 @@ pub(super) struct Npc {
     pub(super) name: String,
     pub(super) faction_id: String,
     pub(super) attitude: i32,
+    pub(super) hit_by_player: bool,
     pub(super) position: WorldPosition,
     pub(super) class_id: String,
     pub(super) profession: String,
@@ -178,6 +179,7 @@ impl Npc {
             name: self.name.clone(),
             faction_id: self.faction_id.clone(),
             attitude: self.attitude,
+            hit_by_player: self.hit_by_player,
             position: self.position,
             class_id: self.class_id.clone(),
             profession: self.profession.clone(),
@@ -260,6 +262,67 @@ impl WorldState {
         Ok(())
     }
 
+    /// Finalizes the durable state shared by direct and effect-driven NPC
+    /// deaths.  The canonical NPC remains as a dead identity so assigned
+    /// missions retain a stable origin; carried roots become ordinary ground
+    /// items on the death tile in their existing stable-ID order.
+    pub(super) fn finish_npc_death(
+        &mut self,
+        npc_id: NpcId,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let position = self
+            .npcs
+            .get(&npc_id)
+            .filter(|npc| npc.hp <= 0)
+            .map(|npc| npc.position)
+            .ok_or(SimError::UnknownNpc)?;
+        let failed_missions = self
+            .actors
+            .iter()
+            .flat_map(|(actor_id, actor)| {
+                actor.missions.values().filter_map(|mission| {
+                    (mission.origin_npc_id == Some(npc_id)
+                        && mission.status == cdda_protocol::MissionStatusV1::InProgress)
+                        .then_some((*actor_id, mission.mission_id))
+                })
+            })
+            .collect::<Vec<_>>();
+        for (actor_id, mission_id) in failed_missions {
+            self.apply_mission_finish(
+                actor_id,
+                mission_id,
+                false,
+                b"npc-death-mission-fail",
+                self.tick.0,
+                events,
+            )?;
+        }
+        if self
+            .npcs
+            .get(&npc_id)
+            .ok_or(SimError::UnknownNpc)?
+            .inventory
+            .keys()
+            .any(|item_id| self.ground_items.contains_key(item_id))
+        {
+            return Err(SimError::InvalidItem);
+        }
+        let inventory = {
+            let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
+            npc.dodge_attempts_remaining = 0;
+            npc.action_points = 0;
+            npc.wielded = None;
+            npc.worn.clear();
+            std::mem::take(&mut npc.inventory)
+        };
+        for (item_id, item) in inventory {
+            self.ground_items
+                .insert(item_id, super::GroundItem { item, position });
+        }
+        self.cancel_dialogues_with_npc(npc_id, events)
+    }
+
     pub fn register_npc_dialogue_catalog(
         &mut self,
         classes: Vec<NpcClassV1>,
@@ -283,6 +346,12 @@ impl WorldState {
             || templates
                 .iter()
                 .any(|template| !class_ids.contains(template.class_id.as_str()))
+            || templates.iter().any(|template| {
+                classes
+                    .iter()
+                    .find(|class| class.class_id == template.class_id)
+                    .is_none_or(|class| !cdda_protocol::npc_template_is_spawn_safe(template, class))
+            })
             || templates.iter().any(|template| {
                 !template.faction_id.is_empty()
                     && template.faction_id != NO_FACTION_ID
@@ -475,15 +544,14 @@ impl WorldState {
             intelligence: u16::try_from(intelligence).map_err(|_| SimError::InvalidNpcDialogue)?,
             perception: u16::try_from(perception).map_err(|_| SimError::InvalidNpcDialogue)?,
         };
-        if !stats.is_valid()
-            || [
-                stats.strength,
-                stats.dexterity,
-                stats.intelligence,
-                stats.perception,
-            ]
-            .into_iter()
-            .any(|value| value > MAX_ACTOR_BASE_STAT)
+        if [
+            stats.strength,
+            stats.dexterity,
+            stats.intelligence,
+            stats.perception,
+        ]
+        .into_iter()
+        .any(|value| value == 0 || value > MAX_ACTOR_BASE_STAT)
         {
             return Err(SimError::InvalidNpcDialogue);
         }
@@ -493,9 +561,10 @@ impl WorldState {
         let mut skills = BTreeMap::new();
         for skill in &class.skills {
             let level = roll_npc_distribution_i32(&skill.distribution, &mut rng)?.max(0);
-            let level = u8::try_from(level)
-                .map_err(|_| SimError::InvalidNpcDialogue)?
-                .min(cdda_protocol::MAX_SKILL_LEVEL);
+            let level = u8::try_from(level).map_err(|_| SimError::InvalidNpcDialogue)?;
+            if level > cdda_protocol::MAX_SKILL_LEVEL {
+                return Err(SimError::InvalidNpcDialogue);
+            }
             if level > 0 {
                 skills.insert(
                     skill.skill_id.clone(),
@@ -526,6 +595,7 @@ impl WorldState {
                 name,
                 faction_id: template.faction_id,
                 attitude: template.attitude,
+                hit_by_player: false,
                 position,
                 class_id: class.class_id,
                 profession: template.name_suffix.unwrap_or(class.name),
