@@ -1,5 +1,7 @@
 use cdda_content::ItemRegistry;
-use cdda_protocol::{ItemPlaceMonsterTypeV1, ItemTransformTypeV1, WorldgenCatalogV1};
+use cdda_protocol::{
+    CreatureSizeV1, ItemPlaceMonsterTypeV1, ItemTransformTypeV1, WorldgenCatalogV1,
+};
 
 use crate::item_groups::{RuntimeItemGroupContent, runtime_item_group_item};
 
@@ -91,7 +93,13 @@ pub(super) fn runtime_item_place_monster_types(
                 .monster_prototypes
                 .iter()
                 .find(|prototype| prototype.base.monster_type_id == action.monster_id)
-                .filter(|prototype| prototype.runtime_spawnable)?;
+                .filter(|prototype| {
+                    prototype.runtime_spawnable
+                        // The canonical terrain DTO does not yet retain
+                        // SMALL_PASSAGE. Large and huge deployment would
+                        // therefore bypass `monster::will_move_to`.
+                        && prototype.base.size <= CreatureSizeV1::Medium
+                })?;
             let runtime_item = runtime_item_group_item(source, None, content).ok()?;
             let move_cost_moves = u32::try_from(action.moves).ok()?;
             let required_charges = u32::try_from(action.need_charges).ok()?;

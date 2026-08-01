@@ -13,9 +13,10 @@ use rand_core::Rng;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    SimError, UNARMED_DAMAGE, WorldState, combat::ActorDamageUnit, horizontal_distance_squared,
+    CREATURE_ACTION_THRESHOLD, CreatureStepAction, SimError, UNARMED_DAMAGE, WorldState,
+    combat::ActorDamageUnit, euclidean_progress_q30, horizontal_distance_squared,
     horizontally_adjacent, mapgen::creature_spawn_from_worldgen, ranged_distance,
-    ranged_sound_description,
+    ranged_sound_description, squares_closer_steps, tile_distance,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,6 +25,24 @@ pub(super) enum CreatureAttitude {
     Ignore,
     Follow,
     Attack,
+}
+
+/// One live target that the current non-wire monster kernel can resolve
+/// without lying about event ownership. NPC targets intentionally remain
+/// outside this enum until the protocol has Creature->NPC lifecycle events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CreatureCombatTarget {
+    Actor(ActorId),
+    Creature(CreatureId),
+}
+
+impl CreatureCombatTarget {
+    fn actor(self) -> Option<ActorId> {
+        match self {
+            Self::Actor(actor) => Some(actor),
+            Self::Creature(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -585,6 +604,15 @@ pub(super) fn special_state_matches_catalog(
                 }
         })
     });
+    let faction_matches = if snapshot.friendly == -1 {
+        // Successful deployment is the explicit multiplayer adaptation that
+        // assigns the player faction. A later pinned polymorph resets faction
+        // to the destination prototype while retaining friendliness.
+        snapshot.faction_id == cdda_protocol::PLAYER_FACTION_ID
+            || snapshot.faction_id == prototype.default_faction_id
+    } else {
+        snapshot.faction_id == prototype.default_faction_id
+    };
     attacks_match
         && ammunition_matches
         && hp_matches
@@ -613,6 +641,7 @@ pub(super) fn special_state_matches_catalog(
         && snapshot.can_open_doors == base.can_open_doors
         && snapshot.path_settings == base.path_settings
         && snapshot.blood_field_type_id == base.blood_field_type_id
+        && faction_matches
         && corpse_matches
 }
 
@@ -666,8 +695,11 @@ impl WorldState {
                 let cooldown_turns = if attack.cooldown_turns == 0 {
                     0
                 } else {
-                    u32::try_from(rng.next_u64() % (u64::from(attack.cooldown_turns) + 1))
-                        .map_err(|_| SimError::NumericOverflow)?
+                    u32::try_from(uniform_bounded_u64(
+                        &mut rng,
+                        u64::from(attack.cooldown_turns) + 1,
+                    )?)
+                    .map_err(|_| SimError::NumericOverflow)?
                 };
                 Ok(CreatureSpecialAttackStateV1 {
                     attack_id: attack.attack_id,
@@ -803,7 +835,8 @@ impl WorldState {
             if effect.requires_cut_or_stab_damage && !dealt_cut_or_stab_damage {
                 continue;
             }
-            let chance_roll = rng.next_u32() % 1_000_000;
+            let chance_roll = u32::try_from(uniform_bounded_u64(rng, 1_000_000)?)
+                .map_err(|_| SimError::NumericOverflow)?;
             if chance_roll >= effect.chance_millionths {
                 continue;
             }
@@ -824,7 +857,8 @@ impl WorldState {
             if effect.requires_cut_or_stab_damage && !dealt_cut_or_stab_damage {
                 continue;
             }
-            let chance_roll = rng.next_u32() % 1_000_000;
+            let chance_roll = u32::try_from(uniform_bounded_u64(rng, 1_000_000)?)
+                .map_err(|_| SimError::NumericOverflow)?;
             if chance_roll >= effect.chance_millionths {
                 continue;
             }
@@ -963,6 +997,147 @@ impl WorldState {
         Ok(())
     }
 
+    pub(super) fn apply_creature_attack_effects_to_creature(
+        &mut self,
+        source: CreatureId,
+        target: CreatureId,
+        dealt_cut_or_stab_damage: bool,
+        rng: &mut impl Rng,
+    ) -> Result<(), SimError> {
+        let effects = self
+            .creature_prototype(source)?
+            .map(|prototype| prototype.attack_effects.clone())
+            .unwrap_or_default();
+        self.apply_monster_attack_effects_to_creature(
+            target,
+            dealt_cut_or_stab_damage,
+            &effects,
+            rng,
+        )
+    }
+
+    fn apply_monster_attack_effects_to_creature(
+        &mut self,
+        target: CreatureId,
+        dealt_cut_or_stab_damage: bool,
+        effects: &[WorldgenMonsterAttackEffectV1],
+        rng: &mut impl Rng,
+    ) -> Result<(), SimError> {
+        for effect in effects {
+            if effect.requires_cut_or_stab_damage && !dealt_cut_or_stab_damage {
+                continue;
+            }
+            let chance_roll = u32::try_from(uniform_bounded_u64(rng, 1_000_000)?)
+                .map_err(|_| SimError::NumericOverflow)?;
+            if chance_roll >= effect.chance_millionths {
+                continue;
+            }
+            let duration_turns = roll_inclusive_u32(
+                effect.duration_minimum_turns,
+                effect.duration_maximum_turns,
+                rng,
+            )?;
+            let intensity =
+                roll_inclusive_u32(effect.intensity_minimum, effect.intensity_maximum, rng)?;
+            self.apply_monster_attack_effect_to_creature_resolved(
+                target,
+                effect,
+                duration_turns,
+                intensity,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn apply_monster_attack_effect_to_creature_resolved(
+        &mut self,
+        target: CreatureId,
+        effect: &WorldgenMonsterAttackEffectV1,
+        duration_turns: u32,
+        intensity: u32,
+    ) -> Result<(), SimError> {
+        if (duration_turns == 0 && !effect.permanent) || intensity == 0 {
+            return Ok(());
+        }
+        let application_index = intensity
+            .checked_sub(effect.intensity_minimum)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or(SimError::InvalidCreature)?;
+        let application = effect
+            .intensity_applications
+            .get(application_index)
+            .ok_or(SimError::InvalidCreature)?;
+        let blocked = self.creatures.get(&target).is_some_and(|creature| {
+            creature.effects.iter().any(|active| {
+                active.expires_at_tick > self.tick
+                    && effect
+                        .blocked_by_effect_ids
+                        .binary_search(&active.effect_id)
+                        .is_ok()
+            })
+        });
+        if blocked {
+            return Ok(());
+        }
+        let duration_ticks = u64::from(duration_turns.max(u32::from(effect.permanent)))
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let maximum_duration_ticks = u64::from(effect.maximum_accumulated_duration_turns)
+            .checked_mul(SimTick::HZ)
+            .ok_or(SimError::NumericOverflow)?;
+        let current_tick = self.tick;
+        let creature = self
+            .creatures
+            .get_mut(&target)
+            .ok_or(SimError::UnknownCreature)?;
+        if let Some(existing) = creature.effects.iter_mut().find(|existing| {
+            existing.effect_id == effect.effect_id && existing.body_part_id.is_none()
+        }) {
+            existing.intensity = application.intensity;
+            existing.modifiers = application.modifiers.clone();
+            if existing.expires_at_tick != SimTick(u64::MAX) {
+                let remaining = existing.expires_at_tick.0.saturating_sub(current_tick.0);
+                let added_turns = u128::from(duration_turns)
+                    .checked_mul(u128::from(effect.duration_add_percent))
+                    .and_then(|value| value.checked_div(100))
+                    .and_then(|value| u64::try_from(value).ok())
+                    .ok_or(SimError::NumericOverflow)?;
+                let added = added_turns
+                    .checked_mul(SimTick::HZ)
+                    .ok_or(SimError::NumericOverflow)?;
+                existing.expires_at_tick = SimTick(
+                    current_tick
+                        .0
+                        .saturating_add(remaining.saturating_add(added).min(maximum_duration_ticks))
+                        .min(u64::MAX - 1),
+                );
+            }
+        } else if creature.effects.len() < 1_024 {
+            creature.effects.push(ActorEffectSnapshotV1 {
+                effect_id: effect.effect_id.clone(),
+                // Monster effects are whole-creature state in the frozen
+                // canonical representation, including hit-body-part effects.
+                body_part_id: None,
+                intensity: application.intensity,
+                expires_at_tick: if effect.permanent {
+                    SimTick(u64::MAX)
+                } else {
+                    SimTick(
+                        current_tick
+                            .0
+                            .saturating_add(duration_ticks.min(maximum_duration_ticks))
+                            .min(u64::MAX - 1),
+                    )
+                },
+                modifiers: application.modifiers.clone(),
+            });
+            creature.effects.sort_by(|left, right| {
+                (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
+            });
+        }
+        Ok(())
+    }
+
     fn apply_creature_spell_status_effects(
         &mut self,
         target: ActorId,
@@ -990,25 +1165,51 @@ impl WorldState {
         Ok(())
     }
 
-    pub(super) fn try_creature_special_attacks(
-        &mut self,
+    fn creature_combat_target_position(
+        &self,
+        target: CreatureCombatTarget,
+    ) -> Option<WorldPosition> {
+        match target {
+            CreatureCombatTarget::Actor(actor) => self
+                .actors
+                .get(&actor)
+                .filter(|actor| actor.hp > 0)
+                .map(|actor| actor.position),
+            CreatureCombatTarget::Creature(creature) => self
+                .creatures
+                .get(&creature)
+                .filter(|creature| creature.hp > 0)
+                .map(|creature| creature.position),
+        }
+    }
+
+    fn creature_can_act_with_budget(
+        &self,
         source: CreatureId,
-        visible_target: Option<(ActorId, WorldPosition)>,
-        destination: Option<WorldPosition>,
-        turn_sequence: u64,
-        events: &mut Vec<WorldEvent>,
-    ) -> Result<i64, SimError> {
-        if self.creatures.get(&source).is_some_and(|creature| {
-            creature.effects.iter().any(|effect| {
+        available_action_points: i64,
+    ) -> Result<bool, SimError> {
+        let creature = self
+            .creatures
+            .get(&source)
+            .ok_or(SimError::UnknownCreature)?;
+        Ok(available_action_points > 0
+            && !creature.effects.iter().any(|effect| {
                 effect.expires_at_tick > self.tick
                     && matches!(
                         effect.effect_id.as_str(),
                         "stunned" | "psi_stunned" | "downed" | "webbed"
                     )
-            })
-        }) {
-            return Ok(0);
-        }
+            }))
+    }
+
+    pub(super) fn try_creature_special_attacks(
+        &mut self,
+        source: CreatureId,
+        visible_target: Option<CreatureCombatTarget>,
+        destination: Option<WorldPosition>,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<i64, SimError> {
         let profiles = self
             .creature_prototype(source)?
             .map(|prototype| prototype.special_attacks.clone())
@@ -1036,11 +1237,29 @@ impl WorldState {
                 !self
                     .creature_eoc_condition_matches(
                         source,
-                        visible_target.map(|(target, _position)| target),
+                        visible_target.and_then(CreatureCombatTarget::actor),
                         condition,
                     )
                     .unwrap_or(false)
             }) {
+                continue;
+            }
+            let available_action_points = self
+                .creatures
+                .get(&source)
+                .ok_or(SimError::UnknownCreature)?
+                .action_points
+                .checked_sub(total_cost)
+                .ok_or(SimError::NumericOverflow)?;
+            let requires_can_act = matches!(
+                profile.kind,
+                WorldgenMonsterSpecialAttackKindV1::Leap
+                    | WorldgenMonsterSpecialAttackKindV1::Eoc
+                    | WorldgenMonsterSpecialAttackKindV1::Spell
+            );
+            if requires_can_act
+                && !self.creature_can_act_with_budget(source, available_action_points)?
+            {
                 continue;
             }
             let sequence = turn_sequence
@@ -1050,7 +1269,10 @@ impl WorldState {
             let used = match profile.kind {
                 WorldgenMonsterSpecialAttackKindV1::Melee
                 | WorldgenMonsterSpecialAttackKindV1::Bite => {
-                    let Some((target, target_position)) = visible_target else {
+                    let Some(target) = visible_target else {
+                        continue;
+                    };
+                    let Some(target_position) = self.creature_combat_target_position(target) else {
                         continue;
                     };
                     let source_position = self
@@ -1065,16 +1287,37 @@ impl WorldState {
                         || distance > profile.range
                         || (profile.range > 1
                             && !self.has_clear_shot(source_position, target_position))
-                        || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
                     {
                         continue;
                     }
-                    self.execute_creature_special_attack(
-                        source, target, profile, sequence, events,
-                    )?;
-                    if !profile.eoc_ids.is_empty() {
-                        let _ =
-                            self.apply_creature_eocs(source, target, &profile.eoc_ids, sequence)?;
+                    match target {
+                        CreatureCombatTarget::Actor(target) => {
+                            self.execute_creature_special_attack(
+                                source, target, profile, sequence, events,
+                            )?;
+                            if !profile.eoc_ids.is_empty() {
+                                let _ = self.apply_creature_eocs(
+                                    source,
+                                    target,
+                                    &profile.eoc_ids,
+                                    sequence,
+                                )?;
+                            }
+                        }
+                        CreatureCombatTarget::Creature(target) => {
+                            // Creature-target EOC context and bite infection
+                            // require representation not present in this hard
+                            // boundary; do not execute a partial special.
+                            if !profile.eoc_ids.is_empty()
+                                || (profile.kind == WorldgenMonsterSpecialAttackKindV1::Bite
+                                    && profile.infection_chance_millionths > 0)
+                            {
+                                continue;
+                            }
+                            self.execute_creature_special_attack_against_creature(
+                                source, target, profile, sequence, events,
+                            )?;
+                        }
                     }
                     true
                 }
@@ -1082,16 +1325,24 @@ impl WorldState {
                     let Some(destination) = destination else {
                         continue;
                     };
-                    let has_live_target = visible_target.is_some_and(|(target, _position)| {
-                        self.actors.get(&target).is_some_and(|actor| actor.hp > 0)
-                    });
+                    let has_live_target = visible_target
+                        .and_then(|target| self.creature_combat_target_position(target))
+                        .is_some();
                     if !has_live_target && !profile.leap_allow_no_target {
                         continue;
                     }
                     self.execute_creature_leap(source, destination, profile, sequence, events)?
                 }
                 WorldgenMonsterSpecialAttackKindV1::Eoc => {
-                    let Some((target, target_position)) = visible_target else {
+                    let Some(CreatureCombatTarget::Actor(target)) = visible_target else {
+                        continue;
+                    };
+                    let Some(target_position) = self
+                        .actors
+                        .get(&target)
+                        .filter(|actor| actor.hp > 0)
+                        .map(|actor| actor.position)
+                    else {
                         continue;
                     };
                     let source_position = self
@@ -1106,7 +1357,6 @@ impl WorldState {
                             && !horizontally_adjacent(source_position, target_position))
                         || (profile.range > 1
                             && !self.has_clear_shot(source_position, target_position))
-                        || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
                     {
                         continue;
                     }
@@ -1114,7 +1364,15 @@ impl WorldState {
                     true
                 }
                 WorldgenMonsterSpecialAttackKindV1::Gun => {
-                    let Some((target, target_position)) = visible_target else {
+                    let Some(CreatureCombatTarget::Actor(target)) = visible_target else {
+                        continue;
+                    };
+                    let Some(target_position) = self
+                        .actors
+                        .get(&target)
+                        .filter(|actor| actor.hp > 0)
+                        .map(|actor| actor.position)
+                    else {
                         continue;
                     };
                     let source_position = self
@@ -1131,7 +1389,6 @@ impl WorldState {
                         || distance > profile.gun_item_range
                         || selected_range.is_none()
                         || !self.has_clear_shot(source_position, target_position)
-                        || self.actors.get(&target).is_none_or(|actor| actor.hp <= 0)
                     {
                         continue;
                     }
@@ -1190,7 +1447,14 @@ impl WorldState {
                 }
                 WorldgenMonsterSpecialAttackKindV1::Spell => self.execute_creature_spell_program(
                     source,
-                    visible_target,
+                    visible_target.and_then(|target| {
+                        target.actor().and_then(|actor| {
+                            self.actors
+                                .get(&actor)
+                                .filter(|actor| actor.hp > 0)
+                                .map(|actor| (actor.id, actor.position))
+                        })
+                    }),
                     profile,
                     sequence,
                     events,
@@ -2074,6 +2338,10 @@ impl WorldState {
         creature.pacifist = target.base.pacifist;
         creature.can_open_doors = target.base.can_open_doors;
         creature.path_settings = target.base.path_settings;
+        // `monster::poly` resets the live faction to the destination type's
+        // default even when the source was friendly. Friendliness remains a
+        // separate relationship override in the pinned model.
+        creature.faction_id = target.default_faction_id.clone();
         creature.action_points = 0;
         creature.special_attacks = target
             .special_attacks
@@ -2262,7 +2530,7 @@ impl WorldState {
                 .checked_div(u64::from(profile.gun_item_range))
                 .ok_or(SimError::NumericOverflow)?
                 .min(900);
-            let hit = u64::from(rng.next_u32() % 1_000) >= miss_per_thousand;
+            let hit = uniform_bounded_u64(&mut rng, 1_000)? >= miss_per_thousand;
             events.push(
                 self.make_event(WorldEventKind::CreatureRangedAttackResolved {
                     source,
@@ -2372,7 +2640,7 @@ impl WorldState {
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
         for effect in &profile.gun_projectile_effects {
-            if rng.next_u32() % 100 >= u32::from(effect.trigger_chance_percent) {
+            if uniform_bounded_u64(rng, 100)? >= u64::from(effect.trigger_chance_percent) {
                 continue;
             }
             for field in &effect.area_fields {
@@ -2402,7 +2670,7 @@ impl WorldState {
         rng: &mut impl Rng,
         events: &mut Vec<WorldEvent>,
     ) -> Result<(), SimError> {
-        if rng.next_u32() % 100 >= u32::from(field.chance_percent) {
+        if uniform_bounded_u64(rng, 100)? >= u64::from(field.chance_percent) {
             return Ok(());
         }
         if field.check_passable && !self.is_passable(position) {
@@ -2533,8 +2801,11 @@ impl WorldState {
         if sensor_parts.is_empty() {
             return Ok(());
         }
-        let sensor_index = usize::try_from(rng.next_u64() % sensor_parts.len() as u64)
-            .map_err(|_| SimError::NumericOverflow)?;
+        let sensor_index = usize::try_from(uniform_bounded_u64(
+            rng,
+            u64::try_from(sensor_parts.len()).map_err(|_| SimError::NumericOverflow)?,
+        )?)
+        .map_err(|_| SimError::NumericOverflow)?;
         let body_part_id = sensor_parts[sensor_index].clone();
         let duration_turns = roll_inclusive_u32(3, 10, rng)?;
         let duration_ticks = u64::from(duration_turns)
@@ -2661,8 +2932,11 @@ impl WorldState {
             candidates.retain(|(distance, _position)| *distance == best);
         }
         let mut rng = self.named_rng(b"creature-special-leap", &[source.as_u128()], turn_sequence);
-        let index = usize::try_from(rng.next_u64() % candidates.len() as u64)
-            .map_err(|_| SimError::NumericOverflow)?;
+        let index = usize::try_from(uniform_bounded_u64(
+            &mut rng,
+            u64::try_from(candidates.len()).map_err(|_| SimError::NumericOverflow)?,
+        )?)
+        .map_err(|_| SimError::NumericOverflow)?;
         let to = candidates[index].1;
         self.creatures
             .get_mut(&source)
@@ -2674,6 +2948,110 @@ impl WorldState {
             to,
         })?);
         Ok(true)
+    }
+
+    fn execute_creature_special_attack_against_creature(
+        &mut self,
+        source: CreatureId,
+        target: CreatureId,
+        profile: &WorldgenMonsterSpecialAttackV1,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let accuracy = profile.accuracy.unwrap_or(i32::from(
+            self.creatures
+                .get(&source)
+                .ok_or(SimError::UnknownCreature)?
+                .melee_skill,
+        ));
+        let spread =
+            self.creature_creature_special_attack_roll(source, target, turn_sequence, accuracy)?;
+        // The frozen event domain has no creature-to-creature miss event.
+        // Preserve the miss without fabricating an actor-owned event.
+        if profile.dodgeable && spread < 0 {
+            return Ok(());
+        }
+        let mut rng = self.named_rng(
+            b"creature-special-melee-damage-creature",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let attack_amount = roll_inclusive_u32(
+            u32::from(profile.attack_amount_minimum),
+            u32::from(profile.attack_amount_maximum),
+            &mut rng,
+        )?;
+        if attack_amount == 0 {
+            return Err(SimError::InvalidCreature);
+        }
+        let multiplier = roll_inclusive_i32(
+            profile.minimum_damage_multiplier_millionths,
+            profile.maximum_damage_multiplier_millionths,
+            &mut rng,
+        )?;
+        let damage = profile
+            .damage
+            .iter()
+            .map(|unit| ActorDamageUnit {
+                damage_type_id: unit.damage_type_id.clone(),
+                amount_milli: unit.amount_milli,
+                armor_penetration_milli: unit.armor_penetration_milli,
+                armor_multiplier_millionths: unit.armor_multiplier_millionths,
+                damage_multiplier_millionths: unit.damage_multiplier_millionths,
+                damage_multiplier_adjustment_millionths: multiplier,
+                damage_multiplier_divisor: attack_amount,
+                constant_armor_multiplier_millionths: unit.constant_armor_multiplier_millionths,
+                constant_damage_multiplier_millionths: unit.constant_damage_multiplier_millionths,
+            })
+            .collect::<Vec<_>>();
+        let mut aggregate_amount = 0_u16;
+        let mut dealt_cut_or_stab = false;
+        for _ in 0..attack_amount {
+            let (amount, hit_cut_or_stab) =
+                self.creature_damage_units_against_creature_outcome(target, &damage)?;
+            aggregate_amount = aggregate_amount
+                .checked_add(amount)
+                .ok_or(SimError::NumericOverflow)?;
+            dealt_cut_or_stab |= hit_cut_or_stab;
+        }
+        if self.creature_death_needs_corpse_id(target, aggregate_amount)?
+            && !self.allocator.can_allocate()
+        {
+            return Ok(());
+        }
+        if aggregate_amount > 0 || !profile.effects_require_damage {
+            self.apply_monster_attack_effects_to_creature(
+                target,
+                dealt_cut_or_stab,
+                &profile.effects,
+                &mut rng,
+            )?;
+        }
+        let remaining_hp = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .hp
+            .checked_sub(i32::from(aggregate_amount))
+            .ok_or(SimError::NumericOverflow)?;
+        self.creatures
+            .get_mut(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .hp = remaining_hp;
+        events.push(self.make_event(WorldEventKind::CreatureDamagedByCreature {
+            source,
+            target,
+            amount: aggregate_amount,
+            remaining_hp,
+        })?);
+        if remaining_hp <= 0 {
+            events.push(self.make_event(WorldEventKind::CreatureKilledByCreature {
+                creature_id: target,
+                killer: source,
+            })?);
+            self.finish_creature_death(target, remaining_hp, events)?;
+        }
+        Ok(())
     }
 
     fn execute_creature_special_attack(
@@ -2837,7 +3215,7 @@ impl WorldState {
         chance_millionths: u32,
         rng: &mut impl Rng,
     ) -> Result<(), SimError> {
-        if rng.next_u32() % 1_000_000 >= chance_millionths {
+        if uniform_bounded_u64(rng, 1_000_000)? >= u64::from(chance_millionths) {
             return Ok(());
         }
         let actor = self.actors.get_mut(&target).ok_or(SimError::UnknownActor)?;
@@ -2859,6 +3237,322 @@ impl WorldState {
             actor.effects.sort_by(|left, right| {
                 (&left.effect_id, &left.body_part_id).cmp(&(&right.effect_id, &right.body_part_id))
             });
+        }
+        Ok(())
+    }
+
+    pub(super) fn take_friendly_creature_turn(
+        &mut self,
+        creature_id: CreatureId,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<i64, SimError> {
+        let (position, owner, pet) = self
+            .creatures
+            .get(&creature_id)
+            .map(|creature| (creature.position, creature.deploying_owner, creature.pet))
+            .ok_or(SimError::UnknownCreature)?;
+        let owner = owner.ok_or(SimError::InvalidCreature)?;
+        let owner_position = self
+            .actors
+            .get(&owner)
+            .filter(|actor| actor.hp > 0)
+            .map(|actor| actor.position);
+        let light_sources = self.active_light_sources();
+        let mut target = None;
+        for candidate in self.creatures.values().filter(|candidate| {
+            candidate.id != creature_id
+                && candidate.hp > 0
+                && candidate.friendly == 0
+                && candidate.position.z == position.z
+                && creature_attitude(
+                    candidate.morale,
+                    candidate.aggression,
+                    candidate.hp,
+                    candidate.max_hp,
+                ) == CreatureAttitude::Attack
+        }) {
+            if !self.creature_can_see_position(creature_id, candidate.position, &light_sources)? {
+                continue;
+            }
+            let key = (tile_distance(position, candidate.position), candidate.id);
+            if target.as_ref().is_none_or(|(best, _position)| key < *best) {
+                target = Some((key, candidate.position));
+            }
+        }
+        let special_destination = target
+            .map(|(_key, target_position)| target_position)
+            .or_else(|| {
+                pet.then_some(owner_position)
+                    .flatten()
+                    .filter(|owner| tile_distance(position, *owner) > 2)
+            });
+        let special_cost = self.try_creature_special_attacks(
+            creature_id,
+            target.map(|((_, target_id), _position)| CreatureCombatTarget::Creature(target_id)),
+            special_destination,
+            turn_sequence,
+            events,
+        )?;
+        let Some(current_action_points) = self
+            .creatures
+            .get(&creature_id)
+            .map(|creature| creature.action_points)
+        else {
+            return Ok(special_cost);
+        };
+        if current_action_points < i64::from(CREATURE_ACTION_THRESHOLD)
+            || current_action_points
+                .checked_sub(special_cost)
+                .ok_or(SimError::NumericOverflow)?
+                < 0
+        {
+            return Ok(special_cost);
+        }
+        if target.is_some_and(|((_distance, target_id), _position)| {
+            self.creatures
+                .get(&target_id)
+                .is_none_or(|creature| creature.hp <= 0)
+        }) {
+            target = None;
+        }
+        let position = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .position;
+        if self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .immobile
+        {
+            return Ok(self
+                .creatures
+                .get(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .action_points);
+        }
+        let pacifist = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .pacifist;
+        if let Some(((_distance, target_id), target_position)) = target
+            && horizontally_adjacent(position, target_position)
+            && !pacifist
+        {
+            let attack_cost = i64::from(
+                self.creatures
+                    .get(&creature_id)
+                    .ok_or(SimError::UnknownCreature)?
+                    .attack_cost_moves,
+            )
+            .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+            .ok_or(SimError::NumericOverflow)?;
+            self.creature_attack_creature(creature_id, target_id, turn_sequence, events)?;
+            return attack_cost
+                .checked_add(special_cost)
+                .ok_or(SimError::NumericOverflow);
+        }
+        let destination = target.map(|(_key, position)| position).or_else(|| {
+            pet.then_some(owner_position)
+                .flatten()
+                .filter(|owner| tile_distance(position, *owner) > 2)
+        });
+        let Some(destination) = destination else {
+            return i64::from(CREATURE_ACTION_THRESHOLD)
+                .checked_add(special_cost)
+                .ok_or(SimError::NumericOverflow);
+        };
+        let stumbles = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .stumbles;
+        let can_open_doors = self
+            .creatures
+            .get(&creature_id)
+            .ok_or(SimError::UnknownCreature)?
+            .can_open_doors;
+        let route_step = self.creature_route_step(creature_id, position, destination)?;
+        let movement_destination = route_step.unwrap_or(destination);
+        let mut rng = self.named_rng(
+            b"friendly-creature-stumble",
+            &[creature_id.as_u128()],
+            turn_sequence,
+        );
+        let mut switch_weight = 0_u64;
+        let mut selected: Option<(WorldPosition, CreatureStepAction, bool)> = None;
+        for (step_x, step_y) in squares_closer_steps(position, movement_destination) {
+            let Some(to) = position.checked_offset(step_x, step_y, 0) else {
+                continue;
+            };
+            if self.actor_at(to).is_some()
+                || self.creature_at(to).is_some()
+                || self.npc_at(to).is_some()
+            {
+                continue;
+            }
+            let (action, bad_choice) = if self.is_passable(to) {
+                (CreatureStepAction::Move, false)
+            } else if can_open_doors && self.projected_open_terrain(to).is_some() {
+                selected = Some((to, CreatureStepAction::OpenTerrain, true));
+                continue;
+            } else {
+                let Some(rating) = self.creature_bash_rating(creature_id, to)? else {
+                    continue;
+                };
+                if rating == 0 {
+                    continue;
+                }
+                (CreatureStepAction::Bash, rating < 5)
+            };
+            let Some(progress) = euclidean_progress_q30(position, movement_destination, to)? else {
+                continue;
+            };
+            switch_weight = switch_weight
+                .checked_add(progress.checked_mul(2).ok_or(SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+            let may_switch = stumbles || selected.is_some_and(|selected| selected.2);
+            if selected.is_none()
+                || (may_switch && uniform_bounded_u64(&mut rng, switch_weight)? < progress)
+            {
+                selected = Some((to, action, bad_choice));
+                if !stumbles && !bad_choice {
+                    break;
+                }
+            }
+        }
+        if let Some((to, action, _bad_choice)) = selected {
+            match action {
+                CreatureStepAction::OpenTerrain => {
+                    self.perform_creature_open_terrain(creature_id, to, events)?;
+                    return Ok(special_cost);
+                }
+                CreatureStepAction::Bash => {
+                    self.perform_creature_bash(creature_id, to, turn_sequence, events)?;
+                    let speed = self
+                        .creatures
+                        .get(&creature_id)
+                        .ok_or(SimError::UnknownCreature)?
+                        .speed;
+                    return i64::from(speed)
+                        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+                        .and_then(|cost| cost.checked_add(special_cost))
+                        .ok_or(SimError::NumericOverflow);
+                }
+                CreatureStepAction::Move => {}
+            }
+            let action_cost = self
+                .creature_movement_action_cost(position, to, movement_destination)?
+                .ok_or(SimError::InvalidCreature)?;
+            self.creatures
+                .get_mut(&creature_id)
+                .ok_or(SimError::UnknownCreature)?
+                .position = to;
+            events.push(self.make_event(WorldEventKind::CreatureMoved {
+                creature_id,
+                from: position,
+                to,
+            })?);
+            return action_cost
+                .checked_add(special_cost)
+                .ok_or(SimError::NumericOverflow);
+        }
+        i64::from(CREATURE_ACTION_THRESHOLD)
+            .checked_add(special_cost)
+            .ok_or(SimError::NumericOverflow)
+    }
+
+    pub(super) fn creature_attack_creature(
+        &mut self,
+        source: CreatureId,
+        target: CreatureId,
+        turn_sequence: u64,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let Some((spread, stumbled)) =
+            self.creature_creature_attack_roll(source, target, turn_sequence)?
+        else {
+            return Ok(());
+        };
+        if spread < 0 {
+            if stumbled {
+                let until = self
+                    .tick
+                    .0
+                    .checked_add(2 * SimTick::HZ)
+                    .map(SimTick)
+                    .ok_or(SimError::NumericOverflow)?;
+                self.creatures
+                    .get_mut(&source)
+                    .ok_or(SimError::UnknownCreature)?
+                    .downed_until_tick = Some(until);
+            }
+            // The frozen event domain has no creature-to-creature miss event.
+            return Ok(());
+        }
+        let (melee_dice, melee_dice_sides) = self
+            .creatures
+            .get(&source)
+            .map(|creature| (creature.melee_dice, creature.melee_dice_sides))
+            .ok_or(SimError::UnknownCreature)?;
+        if melee_dice_sides == 0 {
+            return Err(SimError::InvalidCreature);
+        }
+        let mut rng = self.named_rng(
+            b"creature-creature-melee",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let mut rolled = 0_u32;
+        for _ in 0..melee_dice {
+            let die = uniform_bounded_u64(&mut rng, u64::from(melee_dice_sides))?
+                .checked_add(1)
+                .ok_or(SimError::NumericOverflow)?;
+            rolled = rolled
+                .checked_add(u32::try_from(die).map_err(|_| SimError::NumericOverflow)?)
+                .ok_or(SimError::NumericOverflow)?;
+        }
+        let rolled = u16::try_from(rolled).map_err(|_| SimError::NumericOverflow)?;
+        let damage_units = self.creature_melee_damage_units(source, rolled)?;
+        let (damage, dealt_cut_or_stab) =
+            self.creature_damage_units_against_creature_outcome(target, &damage_units)?;
+        if self.creature_death_needs_corpse_id(target, damage)? && !self.allocator.can_allocate() {
+            return Ok(());
+        }
+        if damage > 0 {
+            self.apply_creature_attack_effects_to_creature(
+                source,
+                target,
+                dealt_cut_or_stab,
+                &mut rng,
+            )?;
+        }
+        let remaining_hp = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .hp
+            .checked_sub(i32::from(damage))
+            .ok_or(SimError::NumericOverflow)?;
+        self.creatures
+            .get_mut(&target)
+            .ok_or(SimError::UnknownCreature)?
+            .hp = remaining_hp;
+        events.push(self.make_event(WorldEventKind::CreatureDamagedByCreature {
+            source,
+            target,
+            amount: damage,
+            remaining_hp,
+        })?);
+        if remaining_hp <= 0 {
+            events.push(self.make_event(WorldEventKind::CreatureKilledByCreature {
+                creature_id: target,
+                killer: source,
+            })?);
+            self.finish_creature_death(target, remaining_hp, events)?;
         }
         Ok(())
     }
@@ -2908,14 +3602,13 @@ impl WorldState {
         u16::try_from(rounded).map_err(|_| SimError::NumericOverflow)
     }
 
-    pub(super) fn creature_melee_damage_against_creature(
+    fn creature_damage_units_against_creature_outcome(
         &self,
-        source: CreatureId,
         target: CreatureId,
-        rolled_bash_damage: u16,
-    ) -> Result<u16, SimError> {
-        let units = self.creature_melee_damage_units(source, rolled_bash_damage)?;
+        units: &[ActorDamageUnit],
+    ) -> Result<(u16, bool), SimError> {
         let mut total = 0_u32;
+        let mut dealt_cut_or_stab = false;
         for unit in units {
             let armor = i128::from(self.creature_armor_milli(target, &unit.damage_type_id)?);
             let penetration = i128::from(unit.armor_penetration_milli);
@@ -2948,9 +3641,14 @@ impl WorldState {
                 .and_then(|value| value.checked_div(denominator))
                 .and_then(|value| u32::try_from(value / 1_000).ok())
                 .ok_or(SimError::NumericOverflow)?;
+            dealt_cut_or_stab |=
+                dealt > 0 && matches!(unit.damage_type_id.as_str(), "cut" | "stab");
             total = total.checked_add(dealt).ok_or(SimError::NumericOverflow)?;
         }
-        u16::try_from(total).map_err(|_| SimError::NumericOverflow)
+        Ok((
+            u16::try_from(total).map_err(|_| SimError::NumericOverflow)?,
+            dealt_cut_or_stab,
+        ))
     }
 }
 
@@ -2967,7 +3665,7 @@ fn roll_inclusive_u32(minimum: u32, maximum: u32, rng: &mut impl Rng) -> Result<
         .checked_sub(u64::from(minimum))
         .and_then(|span| span.checked_add(1))
         .ok_or(SimError::NumericOverflow)?;
-    let offset = rng.next_u64() % span;
+    let offset = uniform_bounded_u64(rng, span)?;
     u32::try_from(u64::from(minimum) + offset).map_err(|_| SimError::NumericOverflow)
 }
 
@@ -2977,7 +3675,8 @@ fn roll_inclusive_i32(minimum: i32, maximum: i32, rng: &mut impl Rng) -> Result<
         .and_then(|span| span.checked_add(1))
         .and_then(|span| u64::try_from(span).ok())
         .ok_or(SimError::NumericOverflow)?;
-    let offset = i64::try_from(rng.next_u64() % span).map_err(|_| SimError::NumericOverflow)?;
+    let offset =
+        i64::try_from(uniform_bounded_u64(rng, span)?).map_err(|_| SimError::NumericOverflow)?;
     i32::try_from(i64::from(minimum) + offset).map_err(|_| SimError::NumericOverflow)
 }
 
@@ -3015,7 +3714,7 @@ fn roll_spell_inclusive_i32(
     i32::try_from(i64::from(minimum) + offset).map_err(|_| SimError::NumericOverflow)
 }
 
-fn uniform_bounded_u64(rng: &mut impl Rng, bound: u64) -> Result<u64, SimError> {
+pub(super) fn uniform_bounded_u64(rng: &mut impl Rng, bound: u64) -> Result<u64, SimError> {
     if bound == 0 {
         return Err(SimError::NumericOverflow);
     }

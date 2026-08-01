@@ -11467,18 +11467,21 @@ impl WorldState {
             10..=19 => 1,
             _ => 0,
         };
-        let random_offset = |rng: &mut ChaCha8Rng| -> i8 {
+        let random_offset = |rng: &mut ChaCha8Rng| -> Result<i8, SimError> {
             if max_error == 0 {
-                0
+                Ok(0)
             } else {
                 let width =
                     u32::from(u8::try_from(max_error).expect("positive sound error")) * 2 + 1;
-                i8::try_from(rng.next_u32() % width).expect("sound error fits i8") - max_error
+                let offset = monsters::uniform_bounded_u64(rng, u64::from(width))?;
+                i8::try_from(offset)
+                    .map(|offset| offset - max_error)
+                    .map_err(|_| SimError::NumericOverflow)
             }
         };
         let target = WorldPosition {
-            x: source.x.saturating_add(i32::from(random_offset(&mut rng))),
-            y: source.y.saturating_add(i32::from(random_offset(&mut rng))),
+            x: source.x.saturating_add(i32::from(random_offset(&mut rng)?)),
+            y: source.y.saturating_add(i32::from(random_offset(&mut rng)?)),
             z: source.z,
         };
         let remaining_actions = u32::try_from(perceived)
@@ -11581,27 +11584,6 @@ impl WorldState {
         {
             return self.take_friendly_creature_turn(creature_id, turn_sequence, events);
         }
-        let candidates = self
-            .actors
-            .values()
-            .filter(|actor| actor.hp > 0 && actor.position.z == creature_position.z)
-            .map(|actor| (actor.id, actor.position))
-            .collect::<Vec<_>>();
-        let light_sources = self.active_light_sources();
-        let mut target = None;
-        for (actor_id, actor_position) in candidates {
-            if !self.creature_can_see_position(creature_id, actor_position, &light_sources)? {
-                continue;
-            }
-            let key = (tile_distance(creature_position, actor_position), actor_id);
-            if target
-                .as_ref()
-                .is_none_or(|(best_key, _id, _position)| key < *best_key)
-            {
-                target = Some((key, actor_id, actor_position));
-            }
-        }
-        let mut visible_target = target.map(|(_key, actor_id, position)| (actor_id, position));
         let attitude = {
             let creature = self
                 .creatures
@@ -11614,7 +11596,71 @@ impl WorldState {
                 creature.max_hp,
             )
         };
-        if let Some((_target_id, target_position)) = visible_target {
+        let light_sources = self.active_light_sources();
+        let mut target = None;
+        let actor_candidates = self
+            .actors
+            .values()
+            .filter(|actor| actor.hp > 0 && actor.position.z == creature_position.z)
+            .map(|actor| (actor.id, actor.position))
+            .collect::<Vec<_>>();
+        for (actor_id, actor_position) in actor_candidates {
+            if !self.creature_can_see_position(creature_id, actor_position, &light_sources)? {
+                continue;
+            }
+            // The pinned planner considers the avatar before other creatures;
+            // retain that tie priority while all IDs remain stable.
+            let key = (
+                tile_distance(creature_position, actor_position),
+                0_u8,
+                actor_id.as_u128(),
+            );
+            if target
+                .as_ref()
+                .is_none_or(|(best_key, _target, _position)| key < *best_key)
+            {
+                target = Some((
+                    key,
+                    monsters::CreatureCombatTarget::Actor(actor_id),
+                    actor_position,
+                ));
+            }
+        }
+        if attitude == monsters::CreatureAttitude::Attack {
+            let friendly_candidates = self
+                .creatures
+                .values()
+                .filter(|candidate| {
+                    candidate.id != creature_id
+                        && candidate.hp > 0
+                        && candidate.friendly != 0
+                        && candidate.position.z == creature_position.z
+                })
+                .map(|candidate| (candidate.id, candidate.position))
+                .collect::<Vec<_>>();
+            for (target_id, target_position) in friendly_candidates {
+                if !self.creature_can_see_position(creature_id, target_position, &light_sources)? {
+                    continue;
+                }
+                let key = (
+                    tile_distance(creature_position, target_position),
+                    1_u8,
+                    target_id.as_u128(),
+                );
+                if target
+                    .as_ref()
+                    .is_none_or(|(best_key, _target, _position)| key < *best_key)
+                {
+                    target = Some((
+                        key,
+                        monsters::CreatureCombatTarget::Creature(target_id),
+                        target_position,
+                    ));
+                }
+            }
+        }
+        let mut visible_target = target.map(|(_key, target, position)| (target, position));
+        if let Some((_target, target_position)) = visible_target {
             let goal = match attitude {
                 monsters::CreatureAttitude::Attack => Some(target_position),
                 monsters::CreatureAttitude::Flee => {
@@ -11643,29 +11689,25 @@ impl WorldState {
                     .goal = Some(goal);
             }
         }
-        let special_destination = visible_target.map(|(_id, position)| position).or_else(|| {
-            self.creatures.get(&creature_id).and_then(|creature| {
-                creature
-                    .goal
-                    .or_else(|| creature.sound_goal.map(|goal| goal.position))
-            })
-        });
-        let special_cost = if self
-            .creatures
-            .get(&creature_id)
-            .ok_or(SimError::UnknownCreature)?
-            .pacifist
-        {
-            0
-        } else {
-            self.try_creature_special_attacks(
-                creature_id,
-                visible_target,
-                special_destination,
-                turn_sequence,
-                events,
-            )?
-        };
+        let special_destination =
+            visible_target
+                .map(|(_target, position)| position)
+                .or_else(|| {
+                    self.creatures.get(&creature_id).and_then(|creature| {
+                        creature
+                            .goal
+                            .or_else(|| creature.sound_goal.map(|goal| goal.position))
+                    })
+                });
+        // Pinned PACIFIST suppresses only the ordinary adjacent attack; it
+        // does not suppress monster attack actors.
+        let special_cost = self.try_creature_special_attacks(
+            creature_id,
+            visible_target.map(|(target, _position)| target),
+            special_destination,
+            turn_sequence,
+            events,
+        )?;
         let Some(current_action_points) = self
             .creatures
             .get(&creature_id)
@@ -11683,10 +11725,15 @@ impl WorldState {
         {
             return Ok(special_cost);
         }
-        if visible_target.is_some_and(|(target_id, _position)| {
-            self.actors
+        if visible_target.is_some_and(|(target, _position)| match target {
+            monsters::CreatureCombatTarget::Actor(target_id) => self
+                .actors
                 .get(&target_id)
-                .is_none_or(|actor| actor.hp <= 0)
+                .is_none_or(|actor| actor.hp <= 0),
+            monsters::CreatureCombatTarget::Creature(target_id) => self
+                .creatures
+                .get(&target_id)
+                .is_none_or(|creature| creature.hp <= 0),
         }) {
             visible_target = None;
         }
@@ -11749,7 +11796,7 @@ impl WorldState {
                 .checked_add(special_cost)
                 .ok_or(SimError::NumericOverflow);
         }
-        if let Some((target_id, target_position)) = visible_target
+        if let Some((target, target_position)) = visible_target
             && horizontally_adjacent(creature_position, target_position)
             && attitude == monsters::CreatureAttitude::Attack
             && !self
@@ -11766,7 +11813,14 @@ impl WorldState {
             )
             .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
             .ok_or(SimError::NumericOverflow)?;
-            self.creature_attack(creature_id, target_id, turn_sequence, events)?;
+            match target {
+                monsters::CreatureCombatTarget::Actor(target_id) => {
+                    self.creature_attack(creature_id, target_id, turn_sequence, events)?;
+                }
+                monsters::CreatureCombatTarget::Creature(target_id) => {
+                    self.creature_attack_creature(creature_id, target_id, turn_sequence, events)?;
+                }
+            }
             return attack_cost
                 .checked_add(special_cost)
                 .ok_or(SimError::NumericOverflow);
@@ -11822,7 +11876,10 @@ impl WorldState {
                 .checked_add(progress.checked_mul(2).ok_or(SimError::NumericOverflow)?)
                 .ok_or(SimError::NumericOverflow)?;
             let may_switch = stumbles || selected.is_some_and(|selected| selected.2);
-            if selected.is_none() || (may_switch && rng.next_u64() % switch_weight < progress) {
+            if selected.is_none()
+                || (may_switch
+                    && monsters::uniform_bounded_u64(&mut rng, switch_weight)? < progress)
+            {
                 selected = Some((to, action, bad_choice));
                 if !stumbles && !bad_choice {
                     break;
@@ -11876,147 +11933,6 @@ impl WorldState {
         i64::from(CREATURE_ACTION_THRESHOLD)
             .checked_add(special_cost)
             .ok_or(SimError::NumericOverflow)
-    }
-
-    fn take_friendly_creature_turn(
-        &mut self,
-        creature_id: CreatureId,
-        turn_sequence: u64,
-        events: &mut Vec<WorldEvent>,
-    ) -> Result<i64, SimError> {
-        let creature = self
-            .creatures
-            .get(&creature_id)
-            .ok_or(SimError::UnknownCreature)?;
-        let position = creature.position;
-        let owner = creature.deploying_owner.ok_or(SimError::InvalidCreature)?;
-        let owner_position = self
-            .actors
-            .get(&owner)
-            .filter(|actor| actor.hp > 0)
-            .map(|actor| actor.position);
-        let light_sources = self.active_light_sources();
-        let mut target = None;
-        for candidate in self.creatures.values().filter(|candidate| {
-            candidate.id != creature_id
-                && candidate.hp > 0
-                && candidate.friendly == 0
-                && candidate.position.z == position.z
-                && monsters::creature_attitude(
-                    candidate.morale,
-                    candidate.aggression,
-                    candidate.hp,
-                    candidate.max_hp,
-                ) == monsters::CreatureAttitude::Attack
-        }) {
-            if !self.creature_can_see_position(creature_id, candidate.position, &light_sources)? {
-                continue;
-            }
-            let key = (tile_distance(position, candidate.position), candidate.id);
-            if target.as_ref().is_none_or(|(best, _position)| key < *best) {
-                target = Some((key, candidate.position));
-            }
-        }
-        if let Some(((_distance, target_id), target_position)) = target
-            && horizontally_adjacent(position, target_position)
-            && !creature.pacifist
-        {
-            let attack_cost = i64::from(creature.attack_cost_moves)
-                .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
-                .ok_or(SimError::NumericOverflow)?;
-            if self
-                .creature_creature_attack_roll(creature_id, target_id, turn_sequence)?
-                .is_some_and(|spread| spread >= 0)
-            {
-                let mut rng = self.named_rng(
-                    b"creature-creature-melee",
-                    &[creature_id.as_u128(), target_id.as_u128()],
-                    self.next_event_counter,
-                );
-                let mut rolled = 0_u32;
-                for _ in 0..creature.melee_dice {
-                    rolled = rolled
-                        .checked_add(1 + rng.next_u32() % u32::from(creature.melee_dice_sides))
-                        .ok_or(SimError::NumericOverflow)?;
-                }
-                let damage = self.creature_melee_damage_against_creature(
-                    creature_id,
-                    target_id,
-                    u16::try_from(rolled).map_err(|_| SimError::NumericOverflow)?,
-                )?;
-                if self.creature_death_needs_corpse_id(target_id, damage)?
-                    && !self.allocator.can_allocate()
-                {
-                    return Ok(attack_cost);
-                }
-                let remaining_hp = self
-                    .creatures
-                    .get(&target_id)
-                    .ok_or(SimError::UnknownCreature)?
-                    .hp
-                    .checked_sub(i32::from(damage))
-                    .ok_or(SimError::NumericOverflow)?;
-                self.creatures
-                    .get_mut(&target_id)
-                    .ok_or(SimError::UnknownCreature)?
-                    .hp = remaining_hp;
-                events.push(self.make_event(WorldEventKind::CreatureDamagedByCreature {
-                    source: creature_id,
-                    target: target_id,
-                    amount: damage,
-                    remaining_hp,
-                })?);
-                if remaining_hp <= 0 {
-                    events.push(self.make_event(WorldEventKind::CreatureKilledByCreature {
-                        creature_id: target_id,
-                        killer: creature_id,
-                    })?);
-                    self.finish_creature_death(target_id, remaining_hp, events)?;
-                }
-            }
-            return Ok(attack_cost);
-        }
-
-        let destination = target
-            .map(|(_key, position)| position)
-            .or_else(|| owner_position.filter(|owner| tile_distance(position, *owner) > 2));
-        let Some(destination) = destination else {
-            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
-        };
-        if creature.immobile {
-            return Ok(i64::from(CREATURE_ACTION_THRESHOLD));
-        }
-        let route = self.creature_route_step(creature_id, position, destination)?;
-        let movement_destination = route.unwrap_or(destination);
-        for (dx, dy) in squares_closer_steps(position, movement_destination) {
-            let Some(to) = position.checked_offset(dx, dy, 0) else {
-                continue;
-            };
-            if !self.is_passable(to)
-                || self.actor_at(to).is_some()
-                || self.creature_at(to).is_some()
-                || self.npc_at(to).is_some()
-                || self.vehicle_blocks_actor_at(to)
-            {
-                continue;
-            }
-            let Some(cost) =
-                self.creature_movement_action_cost(position, to, movement_destination)?
-            else {
-                continue;
-            };
-            self.creatures
-                .get_mut(&creature_id)
-                .ok_or(SimError::UnknownCreature)?
-                .position = to;
-            events.push(self.make_event(WorldEventKind::CreatureMoved {
-                creature_id,
-                from: position,
-                to,
-            })?);
-            return Ok(cost);
-        }
-        Ok(i64::from(CREATURE_ACTION_THRESHOLD))
     }
 
     fn creature_route_step(
@@ -12281,12 +12197,16 @@ impl WorldState {
         let mut rng = self.named_rng(
             b"creature-melee",
             &[source.as_u128(), target.as_u128()],
-            self.next_event_counter,
+            turn_sequence,
         );
         let mut damage = 0_u32;
         for _ in 0..creature.melee_dice {
+            let die =
+                monsters::uniform_bounded_u64(&mut rng, u64::from(creature.melee_dice_sides))?
+                    .checked_add(1)
+                    .ok_or(SimError::NumericOverflow)?;
             damage = damage
-                .checked_add(1 + rng.next_u32() % u32::from(creature.melee_dice_sides))
+                .checked_add(u32::try_from(die).map_err(|_| SimError::NumericOverflow)?)
                 .ok_or(SimError::NumericOverflow)?;
         }
         let damage = u16::try_from(damage).map_err(|_| SimError::NumericOverflow)?;

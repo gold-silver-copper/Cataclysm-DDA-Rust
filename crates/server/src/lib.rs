@@ -25,15 +25,15 @@ use cdda_protocol::{
     AdminRejection, AdminRequest, AdminResponse, BashTargetKindV1, BookStudyV1, CalendarSnapshot,
     CharacterCreationStatsV1, CharacterRequest, CharacterSummary, ChatMessage, ChatRejection,
     ClientCommand, ClientDatagramV1, CommandKind, ConstructionRecipeV1, ContentIdentity,
-    ControlMessage, CraftRecipeV1, DisassemblyRecipeV1, ENROLL_ALPN, EndpointBindingSummary,
-    EndpointIdentity, EnrollmentAccepted, EnrollmentRejection, FrameError, GAME_ALPN,
-    GameplayRejection, HeldInputSequence, HeldMovementUpdateSource, HeldMovementUpdateV1, ItemId,
-    MAX_DATAGRAM_SIZE, ModerationKind, NaturalLightSnapshot, ObservedTerrainSnapshot,
-    PROTOCOL_VERSION, PlayerReport, PrivateCharacterInspection, REQUIRED_DATAGRAM_SIZE,
-    ReplicationSnapshotV1, ReportId, ReportRejection, ReportResponse, ReportState, ReportSummary,
-    ServerHello, SimTick, VisibleActorSnapshot, VisibleChunkSnapshot, VisibleCreatureSnapshot,
-    VisibleNpcSnapshotV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1, WorldEvent,
-    WorldEventKind, WorldPosition, WorldSnapshotV1, actor_body_part_summary_hp,
+    ControlMessage, CraftRecipeV1, CreatureId, DisassemblyRecipeV1, ENROLL_ALPN,
+    EndpointBindingSummary, EndpointIdentity, EnrollmentAccepted, EnrollmentRejection, FrameError,
+    GAME_ALPN, GameplayRejection, HeldInputSequence, HeldMovementUpdateSource,
+    HeldMovementUpdateV1, ItemId, MAX_DATAGRAM_SIZE, ModerationKind, NaturalLightSnapshot,
+    ObservedTerrainSnapshot, PROTOCOL_VERSION, PlayerReport, PrivateCharacterInspection,
+    REQUIRED_DATAGRAM_SIZE, ReplicationSnapshotV1, ReportId, ReportRejection, ReportResponse,
+    ReportState, ReportSummary, ServerHello, SimTick, VisibleActorSnapshot, VisibleChunkSnapshot,
+    VisibleCreatureSnapshot, VisibleNpcSnapshotV1, VisibleVehicleSnapshotV1, VisibleVehicleTileV1,
+    WorldEvent, WorldEventKind, WorldPosition, WorldSnapshotV1, actor_body_part_summary_hp,
     decode_client_datagram, encode_control,
 };
 use cdda_sim::{ActorSpawn, ReservedIdBlock, TickOutcome, WorldState};
@@ -3811,24 +3811,63 @@ pub async fn handle_game_connection_with_sessions(
                         }
                     };
                     let actor_id = selected_actor.ok_or(NetworkError::ServerBusy)?;
-                    let needs_interest_snapshot = batch.events.iter().any(|event| {
-                        matches!(
-                            &event.kind,
-                            WorldEventKind::NpcDamagedByEffect { .. }
-                                | WorldEventKind::NpcKilledByEffect { .. }
-                                | WorldEventKind::NpcOpenedTerrain { .. }
-                                | WorldEventKind::VehicleControlled { .. }
+                    let needs_interest = batch.events.iter().any(|event| {
+                        npc_event_target(event).is_some()
+                            || creature_event_targets(event) != (None, None)
+                            || vehicle_event_target(event).is_some()
+                    });
+                    let (visible_event_npcs, visible_event_creatures, visible_event_positions, visible_event_vehicles) = if needs_interest {
+                        let interest =
+                            interest_snapshot(simulation_snapshot(&simulation).await?, actor_id)?;
+                        let position_is_visible = |position: WorldPosition| {
+                            let (coord, local) = position.chunk_and_local();
+                            let index = usize::from(local.y)
+                                * cdda_protocol::SUBMAP_SIZE as usize
+                                + usize::from(local.x);
+                            interest
+                                .chunks
+                                .iter()
+                                .find(|chunk| chunk.coord == coord)
+                                .and_then(|chunk| chunk.tiles.get(index))
+                                .and_then(Option::as_ref)
+                                .is_some_and(|tile| tile.currently_visible)
+                        };
+                        let visible_positions = batch
+                            .events
+                            .iter()
+                            .flat_map(|event| {
+                                let (first, second) = creature_event_positions(event);
+                                [first, second].into_iter().flatten()
+                            })
+                            .filter(|position| position_is_visible(*position))
+                            .collect::<BTreeSet<_>>();
+                        (
+                            Some(
+                                interest
+                                    .npcs
+                                    .into_iter()
+                                    .map(|npc| npc.id)
+                                    .collect::<BTreeSet<_>>(),
+                            ),
+                            Some(
+                                interest
+                                    .creatures
+                                    .into_iter()
+                                    .map(|creature| creature.id)
+                                    .collect::<BTreeSet<_>>(),
+                            ),
+                            Some(visible_positions),
+                            Some(
+                                interest
+                                    .vehicles
+                                    .into_iter()
+                                    .map(|vehicle| vehicle.id)
+                                    .collect::<BTreeSet<_>>(),
+                            ),
                         )
-                    });
-                    let interest = if needs_interest_snapshot {
-                        Some(interest_snapshot(simulation_snapshot(&simulation).await?, actor_id)?)
-                    } else { None };
-                    let visible_event_npcs = interest.as_ref().map(|snapshot| {
-                        snapshot.npcs.iter().map(|npc| npc.id).collect::<BTreeSet<_>>()
-                    });
-                    let visible_event_vehicles = interest.as_ref().map(|snapshot| {
-                        snapshot.vehicles.iter().map(|vehicle| vehicle.id).collect::<BTreeSet<_>>()
-                    });
+                    } else {
+                        (None, None, None, None)
+                    };
                     let events = batch
                         .events
                         .into_iter()
@@ -3844,6 +3883,21 @@ pub async fn handle_game_connection_with_sessions(
                                         .as_ref()
                                         .is_some_and(|visible| visible.contains(&vehicle_id))
                                 })
+                                || {
+                                    let (first, second) = creature_event_targets(event);
+                                    visible_event_creatures.as_ref().is_some_and(|visible| {
+                                        first.is_some_and(|id| visible.contains(&id))
+                                            || second.is_some_and(|id| visible.contains(&id))
+                                    })
+                                }
+                                || {
+                                    let (first, second) = creature_event_positions(event);
+                                    visible_event_positions.as_ref().is_some_and(|visible| {
+                                        first.is_some_and(|position| visible.contains(&position))
+                                            || second
+                                                .is_some_and(|position| visible.contains(&position))
+                                    })
+                                }
                         })
                         .collect::<Vec<_>>();
                     if !events.is_empty() {
@@ -5494,6 +5548,74 @@ fn vehicle_event_target(event: &WorldEvent) -> Option<cdda_protocol::VehicleId> 
     match event.kind {
         WorldEventKind::VehicleControlled { vehicle_id, .. } => Some(vehicle_id),
         _ => None,
+    }
+}
+
+fn creature_event_targets(event: &WorldEvent) -> (Option<CreatureId>, Option<CreatureId>) {
+    match &event.kind {
+        WorldEventKind::CreatureMoved { creature_id, .. }
+        | WorldEventKind::CreatureDamaged {
+            target: creature_id,
+            ..
+        }
+        | WorldEventKind::ActorMissedCreature {
+            target: creature_id,
+            ..
+        }
+        | WorldEventKind::CreatureDied { creature_id, .. }
+        | WorldEventKind::CreatureCorpseCreated { creature_id, .. }
+        | WorldEventKind::CreatureRevived { creature_id, .. }
+        | WorldEventKind::CreaturePolymorphed { creature_id, .. }
+        | WorldEventKind::CreatureBashed { creature_id, .. }
+        | WorldEventKind::CreatureOpenedTerrain { creature_id, .. }
+        | WorldEventKind::ActorDamagedByCreature {
+            source: creature_id,
+            ..
+        }
+        | WorldEventKind::CreatureMissedActor {
+            source: creature_id,
+            ..
+        }
+        | WorldEventKind::ActorKilledByCreature {
+            killer: creature_id,
+            ..
+        }
+        | WorldEventKind::CreatureRangedAttackResolved {
+            source: creature_id,
+            ..
+        }
+        | WorldEventKind::CreatureTargetedActor {
+            source: creature_id,
+            ..
+        } => (Some(*creature_id), None),
+        WorldEventKind::CreatureDamagedByCreature { source, target, .. } => {
+            (Some(*source), Some(*target))
+        }
+        WorldEventKind::CreatureKilledByCreature {
+            creature_id,
+            killer,
+        } => (Some(*creature_id), Some(*killer)),
+        WorldEventKind::CreatureSummoned {
+            caster,
+            creature_id,
+            ..
+        } => (Some(*caster), Some(*creature_id)),
+        _ => (None, None),
+    }
+}
+
+fn creature_event_positions(event: &WorldEvent) -> (Option<WorldPosition>, Option<WorldPosition>) {
+    match &event.kind {
+        WorldEventKind::CreatureMoved { from, to, .. } => (Some(*from), Some(*to)),
+        WorldEventKind::CreatureCorpseCreated { position, .. }
+        | WorldEventKind::CreatureRevived { position, .. }
+        | WorldEventKind::CreaturePolymorphed { position, .. }
+        | WorldEventKind::CreatureSummoned { position, .. }
+        | WorldEventKind::CreatureOpenedTerrain { position, .. } => (Some(*position), None),
+        WorldEventKind::CreatureBashed { target, .. } => (Some(*target), None),
+        WorldEventKind::CreatureRangedAttackResolved { origin, .. }
+        | WorldEventKind::CreatureTargetedActor { origin, .. } => (Some(*origin), None),
+        _ => (None, None),
     }
 }
 

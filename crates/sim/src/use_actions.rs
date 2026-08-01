@@ -266,31 +266,6 @@ impl WorldState {
                 .max(1),
         )
         .map_err(|_| SimError::NumericOverflow)?;
-        let creature_id = self.spawn_creature(spawn)?;
-        let creature = self
-            .creatures
-            .get_mut(&creature_id)
-            .ok_or(SimError::UnknownCreature)?;
-        creature.friendly = if friendly { -1 } else { 0 };
-        creature.pet = friendly && profile.is_pet;
-        creature.deploying_owner = friendly.then_some(actor_id);
-        if friendly {
-            creature.faction_id = String::from("player");
-        }
-        creature.hp = deployed_hp;
-        creature.ammunition = ammunition;
-        let actor = self
-            .actors
-            .get_mut(&actor_id)
-            .ok_or(SimError::UnknownActor)?;
-        actor.inventory = inventory;
-        if actor
-            .wielded
-            .is_some_and(|id| !actor.inventory.contains_key(&id))
-        {
-            actor.wielded = None;
-        }
-        actor.worn.retain(|id| actor.inventory.contains_key(id));
         let message = if friendly {
             if profile.friendly_message.is_empty() {
                 format!("You deploy the {}.", prototype.display_name)
@@ -305,21 +280,43 @@ impl WorldState {
         } else {
             profile.hostile_message
         };
-        if !ammunition_feedback.is_empty() {
-            let feedback = ammunition_feedback.join(" ");
-            let message = format!("{feedback} {message}");
-            events.push(self.make_event(WorldEventKind::CreatureDeployed {
-                actor_id,
-                item_id,
-                creature_id,
-                position,
-                friendly,
-                pet: friendly && profile.is_pet,
-                message,
-            })?);
-            return Ok(true);
+        let message = if ammunition_feedback.is_empty() {
+            message
+        } else {
+            format!("{} {message}", ammunition_feedback.join(" "))
+        };
+
+        // Deployment consumes an item, allocates a creature identity, mutates
+        // two canonical owners, and emits one lifecycle event. Stage all of it
+        // so allocator/event exhaustion cannot leave a creature without its
+        // corresponding item debit or event.
+        let mut staged = self.clone();
+        let creature_id = staged.spawn_creature(spawn)?;
+        let creature = staged
+            .creatures
+            .get_mut(&creature_id)
+            .ok_or(SimError::UnknownCreature)?;
+        creature.friendly = if friendly { -1 } else { 0 };
+        creature.pet = friendly && profile.is_pet;
+        creature.deploying_owner = friendly.then_some(actor_id);
+        if friendly {
+            creature.faction_id = String::from("player");
         }
-        events.push(self.make_event(WorldEventKind::CreatureDeployed {
+        creature.hp = deployed_hp;
+        creature.ammunition = ammunition;
+        let actor = staged
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(SimError::UnknownActor)?;
+        actor.inventory = inventory;
+        if actor
+            .wielded
+            .is_some_and(|id| !actor.inventory.contains_key(&id))
+        {
+            actor.wielded = None;
+        }
+        actor.worn.retain(|id| actor.inventory.contains_key(id));
+        let event = staged.make_event(WorldEventKind::CreatureDeployed {
             actor_id,
             item_id,
             creature_id,
@@ -327,7 +324,9 @@ impl WorldState {
             friendly,
             pet: friendly && profile.is_pet,
             message,
-        })?);
+        })?;
+        *self = staged;
+        events.push(event);
         Ok(true)
     }
 
@@ -360,6 +359,12 @@ impl WorldState {
         }) else {
             return false;
         };
+        if prototype.base.size > cdda_protocol::CreatureSizeV1::Medium {
+            // SMALL_PASSAGE is not yet canonical. This is intentionally
+            // stricter than the pinned placement kernel rather than allowing
+            // a large deployment to bypass `will_move_to`.
+            return false;
+        }
         self.is_passable(position)
             && self.actor_at(position).is_none()
             && self.creature_at(position).is_none()

@@ -857,7 +857,7 @@ impl WorldState {
         source: CreatureId,
         target: CreatureId,
         turn_sequence: u64,
-    ) -> Result<Option<i64>, SimError> {
+    ) -> Result<Option<(i64, bool)>, SimError> {
         let attacker = self
             .creatures
             .get(&source)
@@ -886,9 +886,9 @@ impl WorldState {
                 })
             })
             .ok_or(SimError::NumericOverflow)?;
-        hit.checked_sub(dodge)
-            .map(Some)
-            .ok_or(SimError::NumericOverflow)
+        let spread = hit.checked_sub(dodge).ok_or(SimError::NumericOverflow)?;
+        let stumbled = spread < 0 && attacker.clumsy_attacks && rng.next_u32().is_multiple_of(4);
+        Ok(Some((spread, stumbled)))
     }
 
     pub(super) fn creature_actor_special_attack_roll(
@@ -911,6 +911,37 @@ impl WorldState {
                 .ok_or(SimError::NumericOverflow)?,
             dodge_attempted,
         ))
+    }
+
+    pub(super) fn creature_creature_special_attack_roll(
+        &self,
+        source: CreatureId,
+        target: CreatureId,
+        turn_sequence: u64,
+        accuracy: i32,
+    ) -> Result<i64, SimError> {
+        let defender = self
+            .creatures
+            .get(&target)
+            .ok_or(SimError::UnknownCreature)?;
+        let mut rng = self.named_rng(
+            b"creature-special-melee-hit",
+            &[source.as_u128(), target.as_u128()],
+            turn_sequence,
+        );
+        let hit = pinned_melee_hit_roll(i64::from(accuracy), 1, &mut rng)?;
+        let dodge = i64::from(defender.dodge)
+            .checked_mul(5)
+            .and_then(|value| value.checked_add(super::creature_size_melee_penalty(defender.size)))
+            .and_then(|value| {
+                value.checked_sub(if defender.immobile {
+                    super::IMMOBILE_MELEE_HIT_BONUS
+                } else {
+                    0
+                })
+            })
+            .ok_or(SimError::NumericOverflow)?;
+        hit.checked_sub(dodge).ok_or(SimError::NumericOverflow)
     }
 
     /// Retained as a direct characterization boundary for the already pinned
