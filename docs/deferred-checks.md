@@ -16,6 +16,6 @@ Current affected contract: `P142/S119/R4/CS117/CE32`.
 - `NPC-MISSION`: deferred
 - `NPC-OWNERSHIP`: deferred
 - `NPC-SOCIAL`: deferred
-- `VEHICLE-ORDINARY`: deferred
+- `VEHICLE-ORDINARY@P142/S119/R4/CS117/CE32`: deferred
 - `ENVIRONMENT-FIELD-CONTACT`: deferred
 - `CONTENT-TEST-TARGET`: blocked-by-preexisting-material-fixture

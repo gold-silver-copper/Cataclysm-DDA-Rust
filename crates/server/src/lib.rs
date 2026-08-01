@@ -4662,7 +4662,8 @@ fn visible_vehicles(
                     .entry(part.position)
                     .or_insert(part.prototype_part_index);
             }
-            if !part.locked
+            if part.hp > 0
+                && !part.locked
                 && part.position.z == controlled_position.z
                 && part.position.x.abs_diff(controlled_position.x) <= 1
                 && part.position.y.abs_diff(controlled_position.y) <= 1

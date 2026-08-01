@@ -527,7 +527,7 @@
       "title": "Ordinary vehicle simulation",
       "state": "implementation_in_progress",
       "submilestones": [
-        { "id": "static-vehicles-boarding-cargo-and-manual-controls", "state": "implementation_complete_review_pending" },
+        { "id": "static-vehicles-boarding-cargo-and-manual-controls", "state": "implementation_complete_verification_deferred" },
         { "id": "powered-propulsion-collision-damage-and-repair", "state": "planned" }
       ],
       "priority": 27,

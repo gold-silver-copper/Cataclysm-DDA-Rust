@@ -128,6 +128,126 @@ pub(crate) fn connected_openable_vehicle_parts(
     Ok(connected.into_iter().collect())
 }
 
+fn vehicle_mount_cross(origin: (i16, i16), left: (i16, i16), right: (i16, i16)) -> i64 {
+    let left_x = i64::from(left.0) - i64::from(origin.0);
+    let left_y = i64::from(left.1) - i64::from(origin.1);
+    let right_x = i64::from(right.0) - i64::from(origin.0);
+    let right_y = i64::from(right.1) - i64::from(origin.1);
+    left_x * right_y - left_y * right_x
+}
+
+fn mount_is_on_segment(point: (i16, i16), start: (i16, i16), end: (i16, i16)) -> bool {
+    vehicle_mount_cross(start, end, point) == 0
+        && point.0 >= start.0.min(end.0)
+        && point.0 <= start.0.max(end.0)
+        && point.1 >= start.1.min(end.1)
+        && point.1 <= start.1.max(end.1)
+}
+
+fn wheel_hull_contains_mounts(
+    mut wheel_mounts: Vec<(i16, i16)>,
+    part_mounts: &std::collections::BTreeSet<(i16, i16)>,
+) -> bool {
+    wheel_mounts.sort_unstable();
+    wheel_mounts.dedup();
+    match wheel_mounts.as_slice() {
+        [] => return false,
+        [only] => return part_mounts.iter().all(|mount| mount == only),
+        [start, end] => {
+            return part_mounts
+                .iter()
+                .all(|mount| mount_is_on_segment(*mount, *start, *end));
+        }
+        _ => {}
+    }
+
+    let mut lower = Vec::with_capacity(wheel_mounts.len());
+    for point in wheel_mounts.iter().copied() {
+        while lower.len() >= 2
+            && vehicle_mount_cross(lower[lower.len() - 2], lower[lower.len() - 1], point) <= 0
+        {
+            lower.pop();
+        }
+        lower.push(point);
+    }
+    let mut upper = Vec::with_capacity(wheel_mounts.len());
+    for point in wheel_mounts.iter().rev().copied() {
+        while upper.len() >= 2
+            && vehicle_mount_cross(upper[upper.len() - 2], upper[upper.len() - 1], point) <= 0
+        {
+            upper.pop();
+        }
+        upper.push(point);
+    }
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    if lower.len() < 3 {
+        let Some(start) = lower.first().copied() else {
+            return false;
+        };
+        let Some(end) = lower.last().copied() else {
+            return false;
+        };
+        return part_mounts
+            .iter()
+            .all(|mount| mount_is_on_segment(*mount, start, end));
+    }
+    part_mounts.iter().all(|mount| {
+        lower.iter().enumerate().all(|(index, start)| {
+            let end = lower[(index + 1) % lower.len()];
+            vehicle_mount_cross(*start, end, *mount) >= 0
+        })
+    })
+}
+
+/// Conservative mass-independent subset of pinned `valid_wheel_config`.
+/// Requiring every live part mount inside the wheel hull guarantees that any
+/// nonnegative part-mass center lies inside it without inventing missing part
+/// masses. Valid upstream configurations outside this subset remain closed.
+fn vehicle_has_pinned_safe_wheel_configuration(
+    prototype: &cdda_protocol::WorldgenVehiclePrototypeV1,
+    part_types: &[cdda_protocol::WorldgenVehiclePartTypeV1],
+    is_live: impl Fn(usize) -> bool,
+) -> Result<bool, SimError> {
+    let mut wheel_mounts = Vec::new();
+    let mut part_mounts = std::collections::BTreeSet::new();
+    let mut live_structure_count = 0_usize;
+    let mut single_wheel_is_stable = false;
+    for (index, part) in prototype.parts.iter().enumerate() {
+        let part_type = part_types
+            .get(usize::from(part.part_type_index))
+            .ok_or(SimError::InvalidTerrain)?;
+        // Broken parts remain installed and keep contributing mass in the
+        // pinned implementation, so their mounts must also lie in the wheel
+        // hull even though they cannot provide wheels or structure support.
+        part_mounts.insert((part.mount_x, part.mount_y));
+        if part_type.location == "structure" {
+            live_structure_count += 1;
+        }
+        if !is_live(index) {
+            continue;
+        }
+        if vehicle_part_has_flag(part_type, "WHEEL") {
+            wheel_mounts.push((part.mount_x, part.mount_y));
+            single_wheel_is_stable = vehicle_part_has_flag(part_type, "STABLE");
+        }
+    }
+    if wheel_mounts.is_empty() || live_structure_count == 0 {
+        return Ok(false);
+    }
+    if wheel_mounts.len() == 1 && (!single_wheel_is_stable || live_structure_count > 3) {
+        return Ok(false);
+    }
+    Ok(wheel_hull_contains_mounts(wheel_mounts, &part_mounts))
+}
+
+fn manual_vehicle_stamina_cost(load_thousandths: u32) -> u32 {
+    let effective_load = load_thousandths / 10;
+    let base_burn = super::combat::BASE_STAMINA_REGEN_PER_SECOND.saturating_sub(3);
+    base_burn.max(effective_load / 3)
+}
+
 impl WorldState {
     pub(super) fn actor_is_boarded(&self, actor_id: ActorId) -> bool {
         self.vehicles.values().any(|vehicle| {
@@ -913,10 +1033,11 @@ impl WorldState {
             .vehicle_part_types
             .get(usize::from(prototype_part.part_type_index))
             .ok_or(SimError::InvalidTerrain)?;
-        if part_type
-            .flags
-            .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
-            .is_err()
+        if part.hp == 0
+            || part_type
+                .flags
+                .binary_search_by(|flag| flag.as_str().cmp("CARGO"))
+                .is_err()
         {
             events.push(self.rejection(
                 actor_id,
@@ -1062,24 +1183,6 @@ impl WorldState {
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
         }
-        let working_limb_count = |limb_type: &str| {
-            driver
-                .body_parts
-                .iter()
-                .filter(|part| {
-                    part.current_hp > 0
-                        && self.actor_anatomy.parts.iter().any(|prototype| {
-                            prototype.body_part_id == part.body_part_id
-                                && prototype
-                                    .limb_types
-                                    .binary_search_by(|candidate| candidate.as_str().cmp(limb_type))
-                                    .is_ok()
-                        })
-                })
-                .count()
-        };
-        let working_arms = working_limb_count("arm");
-        let working_legs = working_limb_count("leg");
         let driver_mount = prototype
             .parts
             .get(driver_part_index)
@@ -1110,55 +1213,102 @@ impl WorldState {
                 })
             })
         };
-        let live_muscle_engine_at_driver = vehicle.parts.iter().enumerate().any(|(index, part)| {
-            let Some(prototype_part) = prototype.parts.get(index) else {
-                return false;
-            };
-            let Some(part_type) = part_types.get(usize::from(prototype_part.part_type_index))
-            else {
-                return false;
-            };
-            part.hp > 0
-                && (prototype_part.mount_x, prototype_part.mount_y) == driver_mount
-                && vehicle_part_has_flag(part_type, "ENGINE")
-                && part_type.fuel_type == "muscle"
-                && part_type.power_milliwatts > 0
-                && ((vehicle_part_has_flag(part_type, "MUSCLE_ARMS") && working_arms >= 2)
-                    || (vehicle_part_has_flag(part_type, "MUSCLE_LEGS") && working_legs >= 2))
-        });
-        if !live_part_at_driver_mount_with("CONTROLS")
-            || !live_muscle_engine_at_driver
-            || !live_flag("WHEEL")
-            || !live_flag("STRUCTURE")
-                && !prototype
-                    .parts
-                    .iter()
-                    .enumerate()
-                    .any(|(index, prototype_part)| {
-                        vehicle.parts.get(index).is_some_and(|part| part.hp > 0)
-                            && part_types
-                                .get(usize::from(prototype_part.part_type_index))
-                                .is_some_and(|part_type| part_type.location == "structure")
+        let live_engines = vehicle
+            .parts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, part)| {
+                let prototype_part = prototype.parts.get(index)?;
+                let part_type = part_types.get(usize::from(prototype_part.part_type_index))?;
+                (part.hp > 0 && vehicle_part_has_flag(part_type, "ENGINE")).then_some((
+                    index,
+                    part,
+                    prototype_part,
+                    part_type,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let only_driver_is_boarded = vehicle
+            .parts
+            .iter()
+            .filter_map(|part| part.passenger)
+            .eq(std::iter::once(actor_id));
+        let forbidden_movement_family =
+            ["ANIMAL_CTRL", "CONTROL_ANIMAL", "FLOATS", "RAIL", "TRACKED"]
+                .into_iter()
+                .any(|flag| live_flag(flag));
+        let pinned_safe_wheels =
+            vehicle_has_pinned_safe_wheel_configuration(&prototype, &part_types, |index| {
+                vehicle.parts.get(index).is_some_and(|part| part.hp > 0)
+            })?;
+        let full_strength_legs = driver
+            .body_parts
+            .iter()
+            .filter(|part| {
+                part.current_hp == part.maximum_hp
+                    && part.current_hp > 0
+                    && self.actor_anatomy.parts.iter().any(|prototype| {
+                        prototype.body_part_id == part.body_part_id
+                            && prototype
+                                .limb_types
+                                .binary_search_by(|candidate| candidate.as_str().cmp("leg"))
+                                .is_ok()
                     })
+            })
+            .count();
+        let muscle_engine_is_supported = live_engines.as_slice().first().is_some_and(
+            |(index, part, prototype_part, part_type)| {
+                live_engines.len() == 1
+                    && *index < vehicle.parts.len()
+                    && (prototype_part.mount_x, prototype_part.mount_y) == driver_mount
+                    && part.hp == part_type.durability
+                    && part_type.fuel_type == "muscle"
+                    && vehicle_part_has_flag(part_type, "MUSCLE_LEGS")
+                    && !vehicle_part_has_flag(part_type, "MUSCLE_ARMS")
+                    && full_strength_legs >= 2
+                    && i128::from(part_type.power_milliwatts)
+                        .checked_add(
+                            i128::from(part_type.muscle_power_factor_milliwatts)
+                                * (i128::from(super::actor_effective_strength(driver)) - 8),
+                        )
+                        .is_some_and(|power| power > 0)
+            },
+        );
+        if !live_part_at_driver_mount_with("CONTROLS")
+            || !live_flag("STEERABLE")
+            || !muscle_engine_is_supported
+            || !pinned_safe_wheels
+            || forbidden_movement_family
+            || !only_driver_is_boarded
         {
-            // Powered engines, boats, rails, animals, and broken controls stay
-            // fail-closed until their complete movement kernels are admitted.
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        if steering != 0 {
+            // Steering effectiveness, driver fumbles, and the wheel/center-of-
+            // mass pivot are not canonical yet. Straight propulsion remains
+            // independent of those missing state families.
             events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
             return Ok(());
         }
 
-        let steering = if propulsion < 0 {
-            steering.checked_neg().ok_or(SimError::NumericOverflow)?
-        } else {
-            steering
-        };
-        let mut turn_direction_degrees = vehicle
-            .turn_direction_degrees
-            .checked_add(i16::from(steering) * 15)
-            .ok_or(SimError::NumericOverflow)?
-            .rem_euclid(360);
-        if steering != 0 {
-            turn_direction_degrees = ((turn_direction_degrees + 7) / 15 * 15).rem_euclid(360);
+        let turn_direction_degrees = vehicle.turn_direction_degrees;
+        if propulsion != 0 && turn_direction_degrees != vehicle.facing_degrees {
+            // The canonical pivot follows the wheel geometry or center of
+            // mass. It is not represented, so translating a turning vehicle
+            // remains closed rather than rotating around the origin.
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
+        }
+        let stamina_cost = (propulsion != 0).then(|| manual_vehicle_stamina_cost(1_000));
+        if stamina_cost.is_some_and(|cost| {
+            driver.stamina < cost
+                || driver.effects.iter().any(|effect| {
+                    effect.effect_id == "winded" && effect.expires_at_tick > self.tick
+                })
+        }) {
+            events.push(self.rejection(actor_id, sequence, CommandRejection::Blocked)?);
+            return Ok(());
         }
         let from = vehicle.origin;
         let (to, facing_degrees, movement_ray_leftover) = if propulsion == 0 {
@@ -1251,6 +1401,16 @@ impl WorldState {
             turn_direction_degrees,
             reverse: propulsion < 0,
         })?;
+        if let Some(stamina_cost) = stamina_cost {
+            let driver = self
+                .actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?;
+            driver.stamina = driver
+                .stamina
+                .checked_sub(stamina_cost)
+                .ok_or(SimError::NumericOverflow)?;
+        }
         let vehicle = self
             .vehicles
             .get_mut(&vehicle_id)

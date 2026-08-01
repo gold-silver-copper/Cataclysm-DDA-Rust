@@ -1472,14 +1472,15 @@ fn initial_vehicle_parts(
     unowned: bool,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<PlannedVehiclePartState>, bool, bool), SimError> {
-    let disabled_failure = if status == VehicleSpawnStatusV1::Disabled {
-        u8::try_from(inclusive_rng_u64(rng, 1, 5)).map_err(|_| SimError::NumericOverflow)?
-    } else {
-        0
-    };
+    if status == VehicleSpawnStatusV1::Disabled {
+        // Disabled initialization depends on item fault state, the exact
+        // center-of-mass wheel invalidation loop, and randomized heavy part
+        // damage. Those states are not all represented in this contract.
+        return Err(SimError::InvalidTerrain);
+    }
     let mut has_no_key = one_in_mapgen(rng, 3);
     let mut destroy_alarm = !one_in_mapgen(rng, 3);
-    let mut destroy_engine = disabled_failure == 4 || one_in_mapgen(rng, 3);
+    let mut destroy_engine = one_in_mapgen(rng, 3);
     if status == VehicleSpawnStatusV1::Pristine {
         has_no_key = false;
         destroy_alarm = false;
@@ -1554,17 +1555,7 @@ fn initial_vehicle_parts(
         if !undamaged {
             if destroy_engine && vehicle_part_has_flag(part_type, "ENGINE") {
                 hp = 0;
-            } else if (disabled_failure == 1
-                && (vehicle_part_has_flag(part_type, "SEAT")
-                    || vehicle_part_has_flag(part_type, "SEATBELT")))
-                || (disabled_failure == 2
-                    && (vehicle_part_has_flag(part_type, "CONTROLS")
-                        || vehicle_part_has_flag(part_type, "SECURITY")))
-                || (destroy_alarm && vehicle_part_has_flag(part_type, "SECURITY"))
-                || (disabled_failure == 3
-                    && (vehicle_part_has_flag(part_type, "FUEL_TANK")
-                        || vehicle_part_has_flag(part_type, "FUEL_STORE")))
-            {
+            } else if destroy_alarm && vehicle_part_has_flag(part_type, "SECURITY") {
                 hp = 0;
             }
             if vehicle_part_has_flag(part_type, "SOLAR_PANEL") && one_in_mapgen(rng, 4) {
@@ -1633,25 +1624,6 @@ fn initial_vehicle_parts(
             cargo: Vec::new(),
         });
     }
-    if status == VehicleSpawnStatusV1::Disabled {
-        if disabled_failure == 5 {
-            for (index, part) in output.iter_mut().enumerate() {
-                let prototype_part = prototype.parts.get(index).ok_or(SimError::InvalidTerrain)?;
-                let part_type = catalog
-                    .vehicle_part_types
-                    .get(usize::from(prototype_part.part_type_index))
-                    .ok_or(SimError::InvalidTerrain)?;
-                if vehicle_part_has_flag(part_type, "WHEEL") {
-                    part.hp = 0;
-                }
-            }
-        }
-        if one_in_mapgen(rng, 2) {
-            for part in &mut output {
-                part.hp /= 2;
-            }
-        }
-    }
     Ok((output, engine_on, security_locked))
 }
 
@@ -1680,7 +1652,14 @@ fn plan_vehicle_cargo(
         let Some(mut stored_volume) = stored_volume.take() else {
             return Err(SimError::InvalidItem);
         };
-        let spawn_count = usize::from(x_in_y_percent_mapgen(rng, spawn.chance_percent));
+        // Pinned `roll_remainder` consumes no RNG for integral zero and one.
+        // The generic x-in-y helper intentionally retains the always-draw
+        // behavior used by mapgen placement chances.
+        let spawn_count = match spawn.chance_percent {
+            0 => 0,
+            100 => 1,
+            chance => usize::from(x_in_y_percent_mapgen(rng, chance)),
+        };
         for _ in 0..spawn_count {
             let broken = cargo_part.hp == 0;
             if broken && one_in_mapgen(rng, 2) {
@@ -1710,6 +1689,12 @@ fn plan_vehicle_cargo(
                     spawn.with_magazine_percent,
                     rng,
                 )?;
+                // Pinned `vehicle::add_item` rejects a broken cargo part after
+                // construction, damage, and dressing have consumed their
+                // ordered RNG. Never admit the resulting item canonically.
+                if broken {
+                    continue;
+                }
                 if cargo_part.cargo.len() >= cdda_protocol::MAX_VEHICLE_CARGO_ITEMS_PER_PART {
                     continue;
                 }

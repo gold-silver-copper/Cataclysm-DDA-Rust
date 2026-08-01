@@ -10445,6 +10445,9 @@ impl WorldState {
                 return Err(SimError::InvalidItem);
             }
             for (part, planned_cargo) in vehicle.parts.iter_mut().zip(vehicle.cargo) {
+                if part.hp == 0 && !planned_cargo.is_empty() {
+                    return Err(SimError::InvalidItem);
+                }
                 for planned_item in planned_cargo {
                     let item_id = self.allocator.allocate_item()?;
                     let mut item = item_from_planned_spawn(
