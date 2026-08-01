@@ -152,7 +152,15 @@ impl WorldState {
                     == Some(true);
             self.weather_state = Some(next);
             if became_dangerous {
-                let actor_ids = self.actors.keys().copied().collect::<Vec<_>>();
+                let actor_ids = self
+                    .actors
+                    .iter()
+                    .filter_map(|(actor_id, actor)| {
+                        let inside_vehicle = self.actor_vehicle_context(*actor_id).1;
+                        (!inside_vehicle && self.position_is_outside(actor.position))
+                            .then_some(*actor_id)
+                    })
+                    .collect::<Vec<_>>();
                 for actor_id in actor_ids {
                     self.interrupt_craft(actor_id, events)?;
                     self.interrupt_book_study(
