@@ -35,10 +35,9 @@ impl WorldState {
 
     pub(super) fn npc_is_hostile_to_player_faction(&self, npc: &Npc) -> bool {
         npc.attitude == 10
-            || self
-                .factions
-                .get(&npc.faction_id)
-                .is_some_and(|faction| faction.relation_to(PLAYER_FACTION_ID).kill_on_sight)
+            || self.factions.get(&npc.faction_id).is_some_and(|faction| {
+                faction.likes_u < -10 || faction.relation_to(PLAYER_FACTION_ID).kill_on_sight
+            })
     }
 
     pub(super) fn npc_will_talk_to_player_faction(&self, npc: &Npc) -> bool {

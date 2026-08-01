@@ -6376,6 +6376,18 @@ impl WorldState {
             }
             actor.connected = false;
             actor.held_movement = None;
+            if actor
+                .pending_interaction
+                .as_ref()
+                .is_some_and(|interaction| {
+                    matches!(
+                        interaction.context,
+                        cdda_protocol::InteractionContextV1::NpcDialogue { .. }
+                    )
+                })
+            {
+                actor.pending_interaction = None;
+            }
         }
         updates
     }
@@ -6388,6 +6400,18 @@ impl WorldState {
         actor.connected = connected;
         if !connected {
             actor.held_movement = None;
+            if actor
+                .pending_interaction
+                .as_ref()
+                .is_some_and(|interaction| {
+                    matches!(
+                        interaction.context,
+                        cdda_protocol::InteractionContextV1::NpcDialogue { .. }
+                    )
+                })
+            {
+                actor.pending_interaction = None;
+            }
         }
         Ok(())
     }
@@ -6478,6 +6502,7 @@ impl WorldState {
         self.advance_creatures(&mut events)?;
         self.drain_pending_mapgen_events(&mut events)?;
         self.advance_creature_hearing(&events[creature_sound_start..])?;
+        self.invalidate_moved_npc_dialogues(&mut events)?;
         self.advance_event_eocs(
             &mut event_eoc_cursor,
             &mut event_eoc_activations,
@@ -9831,6 +9856,11 @@ impl WorldState {
         for actor in self.actors.values() {
             for item in actor.inventory.values() {
                 add_source(actor.position, item);
+            }
+        }
+        for npc in self.npcs.values() {
+            for item in npc.inventory.values() {
+                add_source(npc.position, item);
             }
         }
         for ground in self.ground_items.values() {

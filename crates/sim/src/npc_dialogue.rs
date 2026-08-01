@@ -230,6 +230,61 @@ impl Npc {
 }
 
 impl WorldState {
+    pub(super) fn invalidate_moved_npc_dialogues(
+        &mut self,
+        events: &mut Vec<WorldEvent>,
+    ) -> Result<(), SimError> {
+        let mut last_movement = BTreeMap::<ActorId, usize>::new();
+        let mut last_dialogue_request = BTreeMap::<ActorId, usize>::new();
+        for (index, event) in events.iter().enumerate() {
+            match &event.kind {
+                WorldEventKind::ActorMoved { actor_id, .. } => {
+                    last_movement.insert(*actor_id, index);
+                }
+                WorldEventKind::InteractionRequested {
+                    actor_id,
+                    interaction,
+                } if matches!(
+                    interaction.context,
+                    InteractionContextV1::NpcDialogue { .. }
+                ) =>
+                {
+                    last_dialogue_request.insert(*actor_id, index);
+                }
+                _ => {}
+            }
+        }
+        let invalidated = last_movement
+            .into_iter()
+            .filter_map(|(actor_id, moved_at)| {
+                let actor = self.actors.get(&actor_id)?;
+                let interaction = actor.pending_interaction.as_ref()?;
+                if !matches!(
+                    interaction.context,
+                    InteractionContextV1::NpcDialogue { .. }
+                ) || last_dialogue_request
+                    .get(&actor_id)
+                    .is_some_and(|requested_at| *requested_at > moved_at)
+                {
+                    return None;
+                }
+                Some((actor_id, interaction.interaction_id))
+            })
+            .collect::<Vec<_>>();
+        for (actor_id, interaction_id) in invalidated {
+            self.actors
+                .get_mut(&actor_id)
+                .ok_or(SimError::UnknownActor)?
+                .pending_interaction = None;
+            events.push(self.make_event(WorldEventKind::InteractionCanceled {
+                actor_id,
+                interaction_id,
+                reason: InteractionCancellationReasonV1::Invalidated,
+            })?);
+        }
+        Ok(())
+    }
+
     pub(super) fn cancel_dialogues_with_npc(
         &mut self,
         npc_id: NpcId,

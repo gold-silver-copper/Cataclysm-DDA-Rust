@@ -7,6 +7,7 @@ use cdda_protocol::{
     ActorEffectSnapshotV1, ActorId, InteractionContextV1, NpcId, SimTick, WorldEvent,
     WorldEventKind, WorldPosition,
 };
+use rand_core::Rng;
 
 use super::{
     ACTOR_ACTION_THRESHOLD, BookStudyInterruptionReason, ConstructionInterruptionReason,
@@ -40,15 +41,17 @@ impl WorldState {
         let npc_ids = self.npcs.keys().copied().collect::<Vec<_>>();
         for npc_id in npc_ids {
             self.advance_npc_flee_state(npc_id)?;
-            let Some(npc) = self.npcs.get_mut(&npc_id) else {
+            let Some(npc) = self.npcs.get(&npc_id) else {
                 continue;
             };
             if npc.hp <= 0 {
                 continue;
             }
+            let gained_action_points = i64::from(super::combat::npc_effective_speed(npc));
+            let npc = self.npcs.get_mut(&npc_id).ok_or(SimError::UnknownNpc)?;
             npc.action_points = npc
                 .action_points
-                .checked_add(i64::from(npc.speed))
+                .checked_add(gained_action_points)
                 .ok_or(SimError::NumericOverflow)?;
             let mut turn_sequence = 0_u64;
             while self.npcs.get(&npc_id).is_some_and(|npc| {
@@ -123,26 +126,64 @@ impl WorldState {
         turn_sequence: u64,
         events: &mut Vec<WorldEvent>,
     ) -> Result<i64, SimError> {
+        if self.npc_turn_is_disabled(npc_id)? {
+            return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+        }
         if self.npc_has_active_dialogue(npc_id) {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         }
         let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
-        let behavior = if self.npc_is_hostile_to_player_faction(npc) {
-            NpcTurnBehavior::Attack
-        } else {
-            match npc.attitude {
-                NPC_ATTITUDE_NULL | NPC_ATTITUDE_WAIT => NpcTurnBehavior::Pause,
-                NPC_ATTITUDE_TALK => NpcTurnBehavior::Talk,
-                NPC_ATTITUDE_FOLLOW => NpcTurnBehavior::Follow,
-                NPC_ATTITUDE_KILL => NpcTurnBehavior::Attack,
-                NPC_ATTITUDE_FLEE | NPC_ATTITUDE_FLEE_TEMPORARY => NpcTurnBehavior::Flee,
-                _ => return Err(SimError::InvalidNpcDialogue),
-            }
+        let attitude = npc.attitude;
+        let mut behavior = match attitude {
+            NPC_ATTITUDE_NULL | NPC_ATTITUDE_WAIT => NpcTurnBehavior::Pause,
+            NPC_ATTITUDE_TALK => NpcTurnBehavior::Talk,
+            NPC_ATTITUDE_FOLLOW => NpcTurnBehavior::Follow,
+            NPC_ATTITUDE_KILL => NpcTurnBehavior::Attack,
+            NPC_ATTITUDE_FLEE | NPC_ATTITUDE_FLEE_TEMPORARY => NpcTurnBehavior::Flee,
+            _ => return Err(SimError::InvalidNpcDialogue),
         };
+        let forms_hostile_attitude = !matches!(
+            attitude,
+            NPC_ATTITUDE_KILL | NPC_ATTITUDE_FLEE | NPC_ATTITUDE_FLEE_TEMPORARY
+        ) && self.npc_is_hostile_to_player_faction(npc);
+        let mut target = if forms_hostile_attitude {
+            self.npc_actor_target(npc_id, NpcTurnBehavior::Attack)?
+        } else if behavior == NpcTurnBehavior::Pause {
+            None
+        } else {
+            self.npc_actor_target(npc_id, behavior)?
+        };
+        if forms_hostile_attitude {
+            let Some((target_id, _)) = target else {
+                return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+            };
+            let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
+            let fear = npc.social.get(&target_id).map_or(0, |opinion| opinion.fear);
+            let flee_threshold = 10_i32
+                .checked_add(i32::from(npc.personality.aggression))
+                .and_then(|value| value.checked_add(i32::from(npc.personality.bravery)))
+                .ok_or(SimError::NumericOverflow)?;
+            behavior = if fear > flee_threshold {
+                NpcTurnBehavior::Flee
+            } else {
+                NpcTurnBehavior::Attack
+            };
+            self.npcs
+                .get_mut(&npc_id)
+                .ok_or(SimError::UnknownNpc)?
+                .attitude = if behavior == NpcTurnBehavior::Flee {
+                NPC_ATTITUDE_FLEE_TEMPORARY
+            } else {
+                NPC_ATTITUDE_KILL
+            };
+        }
         if behavior == NpcTurnBehavior::Pause {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         }
-        let Some((target_id, target_position)) = self.npc_actor_target(npc_id, behavior)? else {
+        if target.is_none() {
+            target = self.npc_actor_target(npc_id, behavior)?;
+        }
+        let Some((target_id, target_position)) = target else {
             return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
         };
         let npc_position = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?.position;
@@ -150,8 +191,9 @@ impl WorldState {
         match behavior {
             NpcTurnBehavior::Attack => {
                 if horizontally_adjacent(npc_position, target_position) {
+                    let action_cost = self.npc_melee_action_cost(npc_id)?;
                     self.npc_attack_actor(npc_id, target_id, turn_sequence, events)?;
-                    return Ok(i64::from(ACTOR_ACTION_THRESHOLD));
+                    return Ok(action_cost);
                 }
                 self.npc_approach(npc_id, npc_position, target_position, events)
             }
@@ -172,30 +214,54 @@ impl WorldState {
                 }
             }
             NpcTurnBehavior::Flee => {
-                let maximum_hp = self.npc_maximum_vital_hp(npc_id)?;
-                let current_hp = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?.hp;
-                if distance <= 1 && i64::from(current_hp) * 100 > i64::from(maximum_hp) * 30 {
+                if distance <= 1 && self.npc_hp_percentage(npc_id)? > 30 {
+                    let action_cost = self.npc_melee_action_cost(npc_id)?;
                     self.npc_attack_actor(npc_id, target_id, turn_sequence, events)?;
-                    Ok(i64::from(ACTOR_ACTION_THRESHOLD))
+                    Ok(action_cost)
                 } else {
-                    self.npc_flee_step(npc_id, npc_position, target_position, events)
+                    self.npc_flee_step(
+                        npc_id,
+                        target_id,
+                        turn_sequence,
+                        npc_position,
+                        target_position,
+                        events,
+                    )
                 }
             }
             NpcTurnBehavior::Pause => Ok(i64::from(ACTOR_ACTION_THRESHOLD)),
         }
     }
 
+    fn npc_turn_is_disabled(&self, npc_id: NpcId) -> Result<bool, SimError> {
+        let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
+        Ok(npc.effects.iter().any(|effect| {
+            effect.expires_at_tick > self.tick
+                && matches!(
+                    effect.effect_id.as_str(),
+                    "sleep" | "downed" | "fearparalyze" | "narcosis"
+                )
+        }))
+    }
+
     fn npc_has_active_dialogue(&self, npc_id: NpcId) -> bool {
+        let Some(npc) = self.npcs.get(&npc_id) else {
+            return false;
+        };
         self.actors.values().any(|actor| {
-            actor
-                .pending_interaction
-                .as_ref()
-                .is_some_and(|interaction| {
-                    matches!(
-                        interaction.context,
-                        InteractionContextV1::NpcDialogue { npc_id: target, .. } if target == npc_id
-                    )
-                })
+            actor.connected
+                && actor.position.z == npc.position.z
+                && ranged_distance(actor.position, npc.position) <= 1
+                && actor.position != npc.position
+                && actor
+                    .pending_interaction
+                    .as_ref()
+                    .is_some_and(|interaction| {
+                        matches!(
+                            interaction.context,
+                            InteractionContextV1::NpcDialogue { npc_id: target, .. } if target == npc_id
+                        )
+                    })
         })
     }
 
@@ -217,7 +283,7 @@ impl WorldState {
                 || actor.position.z != position.z
                 || (requires_connection && !actor.connected)
                 || ranged_distance(position, actor.position) > MAX_NPC_ROUTE_DISTANCE
-                || (requires_sight && !self.has_clear_shot(position, actor.position))
+                || (requires_sight && !self.npc_can_see_position(npc_id, actor.position)?)
             {
                 continue;
             }
@@ -230,6 +296,33 @@ impl WorldState {
             }
         }
         Ok(selected.map(|((_, actor_id), position)| (actor_id, position)))
+    }
+
+    fn npc_can_see_position(&self, npc_id: NpcId, target: WorldPosition) -> Result<bool, SimError> {
+        let npc = self.npcs.get(&npc_id).ok_or(SimError::UnknownNpc)?;
+        let origin = npc.position;
+        let distance = ranged_distance(origin, target);
+        if npc.effects.iter().any(|effect| {
+            effect.expires_at_tick > self.tick
+                && matches!(effect.effect_id.as_str(), "blind" | "no_sight")
+        }) {
+            return Ok(distance == 0);
+        }
+        if origin.z != target.z
+            || distance > super::TERRAIN_MEMORY_RADIUS_TILES
+            || !self.has_clear_shot(origin, target)
+        {
+            return Ok(false);
+        }
+        let natural_radius =
+            u32::from(super::NaturalLightSnapshot::at_tick(self.tick).sight_radius);
+        if distance <= natural_radius {
+            return Ok(true);
+        }
+        Ok(self.active_light_sources().into_iter().any(|source| {
+            ranged_distance(source.position, target) <= source.sight_radius
+                && self.has_clear_shot(source.position, target)
+        }))
     }
 
     fn npc_approach(
@@ -248,6 +341,8 @@ impl WorldState {
     fn npc_flee_step(
         &mut self,
         npc_id: NpcId,
+        target_id: ActorId,
+        turn_sequence: u64,
         from: WorldPosition,
         threat: WorldPosition,
         events: &mut Vec<WorldEvent>,
@@ -263,6 +358,12 @@ impl WorldState {
             (1, 1),
         ];
         let mut selected = None;
+        let mut tie_chance = 2_u32;
+        let mut rng = self.named_rng(
+            b"npc-flee-step",
+            &[npc_id.as_u128(), target_id.as_u128()],
+            turn_sequence,
+        );
         for (dx, dy) in NEIGHBORS {
             let Some(next) = from.checked_offset(dx, dy, 0) else {
                 continue;
@@ -274,9 +375,24 @@ impl WorldState {
             {
                 continue;
             }
-            let distance = ranged_distance(next, threat);
-            if selected.is_none_or(|(best, _)| distance > best) {
-                selected = Some((distance, next));
+            let Some(cost) = self.loaded_movement_action_cost(from, next, dx, dy)? else {
+                continue;
+            };
+            let distance = u64::from(next.x.abs_diff(threat.x))
+                .checked_add(u64::from(next.y.abs_diff(threat.y)))
+                .ok_or(SimError::NumericOverflow)?;
+            let rating = i128::from(distance)
+                .checked_mul(1_000)
+                .and_then(|value| value.checked_div(i128::from(cost)))
+                .ok_or(SimError::NumericOverflow)?;
+            if selected.is_none_or(|(best, _)| rating > best) {
+                selected = Some((rating, next));
+                tie_chance = 2;
+            } else if selected.is_some_and(|(best, _)| rating == best)
+                && rng.next_u32() % tie_chance == 0
+            {
+                selected = Some((rating, next));
+                tie_chance = tie_chance.checked_add(1).ok_or(SimError::NumericOverflow)?;
             }
         }
         let Some((_distance, next)) = selected else {
@@ -428,18 +544,43 @@ impl WorldState {
             .transpose()
     }
 
-    fn npc_maximum_vital_hp(&self, npc_id: NpcId) -> Result<i32, SimError> {
-        let mut parts = self
+    fn npc_hp_percentage(&self, npc_id: NpcId) -> Result<i32, SimError> {
+        let parts = &self
             .npcs
             .get(&npc_id)
             .ok_or(SimError::UnknownNpc)?
-            .body_parts
-            .clone();
-        for part in &mut parts {
-            part.current_hp = part.maximum_hp;
+            .body_parts;
+        let mut current = 0_i64;
+        let mut maximum = 0_i64;
+        for part in parts {
+            let weight = match part.body_part_id.as_str() {
+                "head" => 3_i64,
+                "torso" => 2_i64,
+                _ => 1_i64,
+            };
+            current = current
+                .checked_add(
+                    i64::from(part.current_hp)
+                        .checked_mul(weight)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .ok_or(SimError::NumericOverflow)?;
+            maximum = maximum
+                .checked_add(
+                    i64::from(part.maximum_hp)
+                        .checked_mul(weight)
+                        .ok_or(SimError::NumericOverflow)?,
+                )
+                .ok_or(SimError::NumericOverflow)?;
         }
-        cdda_protocol::actor_body_part_summary_hp(&self.actor_anatomy, &parts)
-            .ok_or(SimError::InvalidActorAnatomy)
+        if maximum <= 0 {
+            return Err(SimError::InvalidActorAnatomy);
+        }
+        current
+            .checked_mul(100)
+            .and_then(|value| value.checked_div(maximum))
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or(SimError::NumericOverflow)
     }
 
     fn npc_attack_actor(

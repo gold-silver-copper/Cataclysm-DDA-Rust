@@ -6,7 +6,8 @@ use rand_core::Rng;
 use super::{
     SimError, WorldState, actor_effective_dexterity, actor_effective_speed, actor_skill_level,
     anatomy, apply_actor_effect_applications, pinned_bash_weapon_melee_accuracy_twelfths,
-    pinned_melee_hit_roll, pinned_unarmed_melee_accuracy_quarters, runtime_armor_is_supported,
+    pinned_melee_attack_speed_moves, pinned_melee_hit_roll, pinned_unarmed_melee_accuracy_quarters,
+    runtime_armor_is_supported,
 };
 
 pub(super) const DEFAULT_MAXIMUM_STAMINA: u32 = 8_500;
@@ -34,7 +35,7 @@ fn npc_effective_dexterity(npc: &super::npc_dialogue::Npc) -> u16 {
         .expect("clamped NPC dexterity fits u16")
 }
 
-fn npc_effective_speed(npc: &super::npc_dialogue::Npc) -> u32 {
+pub(super) fn npc_effective_speed(npc: &super::npc_dialogue::Npc) -> u32 {
     let bonus = npc.effects.iter().fold(0_i64, |value, effect| {
         value.saturating_add(i64::from(effect.modifiers.speed))
     });
@@ -144,6 +145,30 @@ pub(super) fn melee_stamina_cost(weight_milligrams: u64, melee_skill: u8) -> u32
 }
 
 impl WorldState {
+    pub(super) fn npc_melee_action_cost(&self, source: NpcId) -> Result<i64, SimError> {
+        let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
+        let attack_time_moves = match npc.wielded {
+            None => 65,
+            Some(item_id) => {
+                if self.npc_bash_strength(source)?.is_none() {
+                    return Ok(i64::from(super::ACTOR_ACTION_THRESHOLD));
+                }
+                let weapon = npc.inventory.get(&item_id).ok_or(SimError::UnknownItem)?;
+                self.smash_item_types
+                    .get(&weapon.type_id)
+                    .ok_or(SimError::InvalidItem)?
+                    .attack_time_moves
+            }
+        };
+        i64::from(pinned_melee_attack_speed_moves(
+            attack_time_moves,
+            npc_effective_dexterity(npc),
+            npc_skill_level(npc, "melee"),
+        )?)
+        .checked_mul(cdda_protocol::ACTION_POINTS_PER_UPSTREAM_MOVE)
+        .ok_or(SimError::NumericOverflow)
+    }
+
     pub(super) fn npc_melee_damage(&self, source: NpcId) -> Result<u16, SimError> {
         let npc = self.npcs.get(&source).ok_or(SimError::InvalidNpcDialogue)?;
         let Some(item) = npc.wielded.and_then(|item_id| npc.inventory.get(&item_id)) else {
