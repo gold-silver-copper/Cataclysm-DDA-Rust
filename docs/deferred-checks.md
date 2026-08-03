@@ -1,21 +1,19 @@
 # Deferred checks
 
-Run only when the user explicitly requests a verification checkpoint.
+Run only when the user explicitly requests a verification checkpoint. These
+entries identify consolidated subsystem gates, not individual semantic commits.
 
 Current affected contract: `P142/S119/R4/CS117/CE32`.
 
-- `MAPGEN-REGIONAL`: deferred
-- `OVERMAP-RIVER-BRIDGE`: deferred
-- `OVERMAP-SPECIAL`: deferred
-- `MONSTER-SPAWN`: deferred
-- `ANATOMY-COMBAT`: deferred
-- `MONSTER-SPECIAL`: deferred
-- `MONSTER-SPELL`: deferred
-- `EOC-USE-ACTION`: deferred
-- `MONSTER-DEPLOYABLE`: deferred
-- `NPC-MISSION`: deferred
-- `NPC-OWNERSHIP`: deferred
-- `NPC-SOCIAL`: deferred
+- `MAPGEN-PRODUCTION@P142/S119/R4/CS117/CE32`: deferred
+- `ANATOMY-COMBAT@P142/S119/R4/CS117/CE32`: deferred
+- `EOC-INTERACTION@P142/S119/R4/CS117/CE32`: deferred
+- `MONSTER-FAMILY@P142/S119/R4/CS117/CE32`: deferred
+- `NPC-SOCIAL@P142/S119/R4/CS117/CE32`: deferred
 - `VEHICLE-ORDINARY@P142/S119/R4/CS117/CE32`: deferred
-- `ENVIRONMENT-FIELD-CONTACT`: deferred
-- `CONTENT-TEST-TARGET`: blocked-by-preexisting-material-fixture
+- `ENVIRONMENT@P142/S119/R4/CS117/CE32`: deferred
+- `CONTENT-TEST-TARGET@P142/S119/R4/CS117/CE32`:
+  blocked-by-preexisting-material-fixture
+
+This list records required work only. None of these checks is claimed to have
+passed at the current contract.

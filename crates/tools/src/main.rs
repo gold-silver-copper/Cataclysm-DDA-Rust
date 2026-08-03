@@ -77,6 +77,8 @@ struct ParityMilestone {
     id: String,
     title: String,
     state: ParityState,
+    #[serde(default)]
+    submilestones: Vec<ParitySubmilestone>,
     priority: u16,
     depends_on: Vec<String>,
     upstream_sources: Vec<String>,
@@ -85,6 +87,13 @@ struct ParityMilestone {
     differential_oracle: DifferentialState,
     multiplayer_adaptation: String,
     unlocks: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParitySubmilestone {
+    id: String,
+    state: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq)]
@@ -169,6 +178,7 @@ enum ParityState {
 enum DifferentialState {
     Verified,
     Active,
+    Deferred,
     Planned,
     NotApplicable,
 }
@@ -778,6 +788,14 @@ fn validate_parity_ledger(
                 milestone.id
             )
             .into());
+        }
+        let mut submilestone_ids = BTreeSet::new();
+        if milestone.submilestones.iter().any(|submilestone| {
+            submilestone.id.is_empty()
+                || submilestone.state.is_empty()
+                || !submilestone_ids.insert(submilestone.id.as_str())
+        }) {
+            return Err(format!("milestone {} has an invalid submilestone", milestone.id).into());
         }
     }
 

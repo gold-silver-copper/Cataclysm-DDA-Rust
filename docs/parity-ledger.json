@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "baseline_commit": "4dfd36038b16650dc1b5cb9d79a3e42363174b05",
-  "protocol_version": 140,
-  "persistence_schema_version": 117,
+  "protocol_version": 142,
+  "persistence_schema_version": 119,
   "replay_format_version": 4,
-  "active_milestone": "vehicles-ordinary-controls",
+  "active_milestone": "vehicles",
   "completion_gate": [
     "pinned C++ characterization with exact boundary traces where applicable",
     "generalized Rust engine",
@@ -248,7 +248,7 @@
     {
       "id": "overmap-rivers",
       "title": "River network generation",
-      "state": "implementation_complete_verification_deferred",
+      "state": "in_progress",
       "priority": 10,
       "depends_on": ["regional-terrain-base"],
       "upstream_sources": ["../Cataclysm-DDA/src/overmap_water.cpp", "../Cataclysm-DDA/src/mapgen_functions.cpp", "../Cataclysm-DDA/src/regional_settings.cpp"],
@@ -261,7 +261,7 @@
     {
       "id": "overmap-specials",
       "title": "Overmap special placement",
-      "state": "implementation_complete_verification_deferred",
+      "state": "in_progress",
       "priority": 11,
       "depends_on": ["regional-terrain-base", "overmap-cities", "overmap-roads", "overmap-rivers"],
       "upstream_sources": ["../Cataclysm-DDA/src/overmap_special.cpp", "../Cataclysm-DDA/src/overmap.cpp"],
@@ -274,7 +274,7 @@
     {
       "id": "mapgen-spawning",
       "title": "General mapgen spawning and populations",
-      "state": "implementation_complete_verification_deferred",
+      "state": "in_progress",
       "priority": 12,
       "depends_on": ["regional-terrain-base", "item-groups", "overmap-specials"],
       "upstream_sources": ["../Cataclysm-DDA/src/mapgen.cpp", "../Cataclysm-DDA/src/mongroup.cpp"],
@@ -502,11 +502,11 @@
     {
       "id": "npcs-social",
       "title": "NPCs, dialogue, missions, and factions",
-      "state": "implementation_in_progress",
+      "state": "in_progress",
       "submilestones": [
         { "id": "stable-npc-identity-and-factions", "state": "implementation_complete_verification_deferred" },
         { "id": "leased-dialogue-and-mission-lifecycle", "state": "implementation_complete_verification_deferred" },
-        { "id": "find-item-owned-world-source-turn-in", "state": "review_fixes_in_progress" },
+        { "id": "find-item-owned-world-source-turn-in", "state": "implementation_complete_review_pending" },
         { "id": "mission-phase-eoc-callbacks", "state": "implementation_complete_review_pending" },
         { "id": "npc-class-generation-and-ordinary-ai", "state": "implementation_complete_review_pending" },
         { "id": "npc-class-generation-canonical-vulnerability-and-client-combat", "state": "implementation_complete_review_pending" },
@@ -525,7 +525,7 @@
     {
       "id": "vehicles",
       "title": "Ordinary vehicle simulation",
-      "state": "implementation_in_progress",
+      "state": "in_progress",
       "submilestones": [
         { "id": "static-vehicles-boarding-cargo-and-manual-controls", "state": "implementation_complete_verification_deferred" },
         { "id": "powered-propulsion-collision-damage-and-repair", "state": "planned" }
@@ -533,7 +533,7 @@
       "priority": 27,
       "depends_on": ["item-containment", "overmap-roads", "anatomy-combat"],
       "upstream_sources": ["../Cataclysm-DDA/src/vehicle.cpp", "../Cataclysm-DDA/src/veh_type.cpp"],
-      "rust_paths": ["crates/content/src/lib.rs", "crates/sim/src/lib.rs", "crates/protocol/src/lib.rs"],
+      "rust_paths": ["crates/content/src/lib.rs", "crates/protocol/src/lib.rs", "crates/sim/src/vehicles.rs", "crates/server/src/lib.rs", "crates/client/src/main.rs"],
       "scenario_families": ["vehicle-parts-and-cargo", "movement-collision-and-controls", "fuel-and-battery-network"],
       "differential_oracle": "planned",
       "multiplayer_adaptation": "The server resolves control leases, movement, collisions, cargo ownership, and power networks in persistent world time.",
@@ -554,7 +554,7 @@
       "priority": 28,
       "depends_on": ["regional-terrain-base", "anatomy-combat", "eoc-use-actions"],
       "upstream_sources": ["../Cataclysm-DDA/src/weather.cpp", "../Cataclysm-DDA/src/field.cpp", "../Cataclysm-DDA/src/character.cpp"],
-      "rust_paths": ["crates/content/src/field.rs", "crates/content/src/anatomy.rs", "crates/protocol/src/lib.rs", "crates/protocol/src/anatomy.rs", "crates/server/src/main.rs", "crates/sim/src/fields.rs", "crates/sim/src/combat.rs"],
+      "rust_paths": ["crates/content/src/field.rs", "crates/content/src/anatomy.rs", "crates/protocol/src/lib.rs", "crates/protocol/src/anatomy.rs", "crates/server/src/main.rs", "crates/sim/src/fields.rs", "crates/sim/src/weather.rs", "crates/sim/src/combat.rs", "crates/client/src/main.rs"],
       "scenario_families": ["weather-and-exposure", "field-processing", "needs-and-long-duration-time"],
       "differential_oracle": "planned",
       "multiplayer_adaptation": "World processes continue under a bounded persistent scheduler when nobody is connected; catch-up work is deterministic and budgeted.",

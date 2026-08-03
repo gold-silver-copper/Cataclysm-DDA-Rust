@@ -1,8 +1,9 @@
 # Goal Prompt
 
 From the repository root, paste the following entire block into Codex. It is
-short enough to be the `/goal` objective; the referenced files contain the
-detailed binding specification.
+the long-lived release objective, not a progress snapshot; the referenced files
+contain the binding specification and the live status documents control where
+work resumes.
 
 ```text
 /goal Deliver a complete, production-quality, fully playable persistent multiplayer Rust port of the pinned Cataclysm: Dark Days Ahead baseline in this repository.

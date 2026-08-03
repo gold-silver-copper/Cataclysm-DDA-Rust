@@ -1,101 +1,156 @@
 # Implementation Status
 
-Upstream is fixed at commit `4dfd36038b16650dc1b5cb9d79a3e42363174b05`,
-tree `210f31db2e8b2f0caed1809f1a66781859f9d129`.
+Updated 2026-08-02 for commit
+`a3e6bfcf6a68285ea95205b1794f228985a38a1f`.
+
+The upstream baseline is fixed at
+`4dfd36038b16650dc1b5cb9d79a3e42363174b05`, tree
+`210f31db2e8b2f0caed1809f1a66781859f9d129`.
 
 ## Live checkpoint
 
-- Verified green commit: `db09119e73a68d1f67dd2276c6989b37e1ad7bf5`.
-- Reviewed tree: `60b1f097a51abedd88735c27bf7b706a64e8c025`.
-- `overmap-cities` is complete. The active dependency boundary and next
-  playable unlock is the complete `overmap-roads` family.
-- Representation is protocol 96, persistence schema/minimum recoverable schema
-  74, CanonicalStateV72, CanonicalEventsV18, replay format 3, worldgen
-  algorithm 2, scenario format 8, and observation format 6.
-- Hosts remain macOS, Linux, and Windows. Bevy 0.19 is client-only; server and
-  simulation are plain Rust. Iroh 1.0.3 owns networking and authentication.
+- Implemented tree: `a3e6bfcf6a68285ea95205b1794f228985a38a1f`.
+- Cheap compilation checkpoint: the same commit passed the affected-client,
+  server, and simulation checks listed below, and a later full
+  `cargo check --workspace` with one pre-existing dead-code warning.
+- Current representation: protocol 142, persistence schema and minimum
+  recoverable schema 119, replay format 4, CanonicalStateV117,
+  CanonicalEventsV32, and worldgen algorithm 2.
+- `origin/main`, local `main`, and `acceleration/generalized-subsystems` pointed
+  to the implemented tree when this status was written.
+- Current work boundary: the reviewed bounded ordinary-vehicle family is
+  provisionally complete. No next family is authorized by the last scoped
+  instruction; obtain a new user direction before expanding powered vehicles,
+  NPC/social, environment, or another subsystem.
 
-## Runnable city-backed world
+This is not a comprehensively verified green release. Expensive acceptance,
+oracle, content, recovery/replay, workspace, and platform gates remain deferred.
+Implementation state and verification state are intentionally reported
+separately.
 
-Selected core content admits the placement-affecting `default` and `no_cities`
-city settings. A focused deterministic engine generates the pinned default
-9-or-10 city centers, bounded 2..55 sizes, two-tile spacing exclusion,
-no-city/megacity branches, dense stable city IDs, and immutable center/size
-metadata from the world seed. City-aware starts apply the pinned city-size and
-double-subtracted edge-distance intervals under server authority.
+## Runnable implementation
 
-Production now uses the real regional field with persistent `road_nesw` city
-center identities. Their local 24x24 tiles deliberately use the upstream
-`field` fallback predecessor until the connected-road family is implemented;
-unsupported road nesting, collisions, and loot are not fabricated. The pinned
-acceptance seed reaches 208 durable chunks, 59 top-level ground items, one
-nested ground owner, and 45 distinct item definitions. Two independently
-Iroh-authenticated clients create/select durable characters, explore, pick up
-a generated corpse, remove nested loot, disconnect, restart, recover from
-SQLite, and verify an encoded portable replay.
+The project remains an incomplete multiplayer CDDA port, but the cumulative
+implementation includes:
 
-- Final state hash:
-  `7ba9468989ab159d59f20f065133c08aa796ce3c55a40d611aee28ad01797778`.
-- Event trace hash:
-  `f30e045311d976b128bb696dd97151ede4c8cc75f3565da9503c3e0dbf5ff70c`.
+- a standalone persistent authoritative server using Tokio and Iroh, with a
+  Bevy-only graphical client and no Bevy dependency in server/shared crates;
+- passwordless Iroh endpoint enrollment and authorization, persistent
+  characters, server-owned commands/events, stable IDs, SQLite recovery, and
+  portable replay infrastructure;
+- chunked production regional world generation, deterministic cities and
+  connected roads, plus provisionally implemented rivers, bridges, overmap
+  specials, and content-driven monster spawning;
+- the mature containment/item-group baseline and ordinary client inventory,
+  loot, crafting, study, disassembly, consumption, equipment, and interaction
+  paths described in the parity matrix;
+- canonical anatomy, armor, effects, stamina, dodge, healing, ordinary combat,
+  and a generalized monster boundary covering ordinary and several data-driven
+  special-attack families;
+- substantial authoritative NPC dialogue, mission, faction, generation,
+  vulnerability, AI, and client presentation paths, with final family closure
+  and independent review still pending;
+- static vehicles, boarding, cargo transfer, doors, client-visible controls,
+  and a conservative straight leg-muscle movement subset; and
+- deterministic weather, local wind and shelter, field contact effects, gas
+  spread, precipitation effects, and exact tick-based downtime processing; and
+- canonical per-item temperature for actor, NPC, ground, and vehicle-cargo
+  items, with pinned temperature-dependent shelf-life rot that removes rotten
+  ground and vehicle-cargo items. Rot-bearing crafting and construction results
+  still fail closed, so only item-group-sourced perishables and corpses carry
+  rot state today.
 
-The state hash changes because V72 retains cities, start intervals, and the
-heterogeneous overmap. The event hash changes without a wire change because
-heterogeneous start selection intentionally removes the uniform bootstrap's
-origin bias, changing the second survivor's deterministic movement position
-and expanding the active bubble from 144 to 208 chunks.
+Disconnected characters remain physically present and vulnerable, and the
+world continues advancing with zero connected players. Unsupported content
+branches remain explicit and fail closed.
 
-## Runtime progress
+## Family state
 
-Parser coverage remains separate from runtime credit. Core ordinary-gameplay
-evidence is now 50 generated definitions and 305 of 263,435 weighted points
-(0.1158%); selectable bundled mods remain 0 of 113,373. The city milestone
-credits one production city-settings definition at all five evidence levels:
-generation, authoritative use, persistence, client accessibility, and
-four-mode conformance.
+| Family | Implemented state | Verification state / boundary |
+| --- | --- | --- |
+| Containment, item groups, mapgen foundations, regional field, cities, roads | Complete at their recorded baselines | Mature completion evidence is retained in `docs/parity-ledger.json`; later extensions do not reopen the foundation. |
+| Rivers, bridges, overmap specials, spawning | Generalized production paths implemented | Consolidated regional/mapgen verification deferred. |
+| Anatomy and ordinary combat | Generalized production paths implemented | Comprehensive family checks deferred. |
+| EOCs and use actions | Bounded conditions, effects, scheduling, variables, actor math, event dispatch, confirmations, transforms, and item activation implemented | Dynamic-value and broader interaction closure remains; verification deferred. |
+| Monsters | Hard implementation boundary established | Rare/unsupported spell-target and field-immunity branches stay fail closed; family verification deferred. Do not expand rare variants indefinitely. |
+| NPCs, dialogue, missions, factions | Substantial production wiring implemented | Final dialogue/effect closure and two interrupted independent reviews remain; do not call the family complete. |
+| Vehicles | Static/boarding/cargo/doors and bounded manual controls implemented | Ordinary-vehicle gate deferred. Powered propulsion, general steering, collision/damage, fuel/power, repair, and part mutation remain planned. |
+| Environment | Weather, shelter/wind, field effects, gas spread, precipitation, and downtime tick processing implemented | Gas/environment review and consolidated verification remain; agriculture and broader inactive-region catch-up are planned. |
 
-## Cumulative module ownership
+The definition-level states, explicit fail-closed boundaries, and dependency
+graph live in `docs/parity-ledger.json`. Weighted progress in
+`docs/runtime-progress.json` is a verified historical evidence floor, not a
+claim that later implemented families passed four-mode or production gates.
 
-Growth remains measured from fixed extraction baseline
-`40037fbb1db9eaac8d4889b811d29f8c00380e6b`.
+## Latest exact verification
 
-- New placement behavior lives in `sim/cities.rs` (486 lines) and selected
-  content loading in `content/city.rs` (297 lines).
-- Central `sim/lib.rs` is 29,745 lines (+153 cumulative); central
-  `protocol/lib.rs` is 10,399 (+426); server executable is 7,176 (+106).
-  City-family growth there is limited to exports, serialized representation,
-  validation, startup wiring, and focused tests.
-- Persistence is 13,103 lines (+26) for schema/literal/recovery coverage;
-  `server/worldgen.rs` is 729 (+218) for the production constructor boundary.
-- Items, containment, and item-group behavior remain in their extracted
-  ownership modules. Roads should grow focused overmap/worldgen modules rather
-  than the central simulation or protocol files.
+The following passed at `a3e6bfcf6a68285ea95205b1794f228985a38a1f`
+before it was pushed:
 
-## Exact verification
+```text
+cargo fmt --all -- --check
+cargo check -p cdda-sim -p cdda-server -p cdda-client
+git diff --check
+```
 
-- `cargo fmt --all -- --check` and `git diff --check` passed.
-- Affected-crate all-target Clippy passed with warnings denied.
-- 382 affected library tests passed: content 91, protocol 48, simulation 171,
-  persistence 40, conformance 10, and server 22.
-- The milestone production gate passed in 689.85 seconds through direct,
-  declared snapshot, SQLite recovery, portable replay, and real-Iroh
-  two-client disconnect/restart execution.
-- `cargo xtask cpp-oracle-check docs/oracles/mapgen-static-semantics-v1.json`
-  passed 1,179 C++ assertions plus direct Rust comparison.
-- Content validation passed all 7,992 vendored files; inventory remained current
-  at 6,571 JSON files, 93,779 objects, and 180 definition types.
-- Dependency-boundary, 31-milestone parity-ledger, and runtime-progress gates
-  passed. The final fixed-tree review is recorded in
-  `docs/reviews/overmap-cities.md` and has no unresolved P0/P1 finding.
+The affected Cargo check completed in 3.47 seconds and emitted only existing
+unused-function warnings in `crates/server/src/npc_faction.rs`.
 
-Tiered verification did not redundantly run full workspace rustdoc, every
-oracle, platform CI, fuzzing, or soak tests; those remain release gates. No
-test failure is known.
+A later documentation pass additionally ran a full workspace check against the
+same implementation tree:
 
-## Next playable unlock
+```text
+cargo check --workspace
+```
 
-Implement `overmap-roads` as one generalized production family: pinned road
-connections, city-to-city topology, boundary continuity, stable persisted
-ownership, local road mapgen admission, and the evolving two-client gameplay
-scenario. Rivers, specials, spawning, anatomy, and EOCs remain out of scope
-until the road family is green.
+It finished in 1 minute 7 seconds with exactly one warning: the never-used
+`visible_npc_faction` function at `crates/server/src/npc_faction.rs:60`. This
+confirms that every crate, including the Bevy client, compiles at the current
+contract. It is still only a compilation checkpoint. No gameplay,
+C++ differential, real-Iroh, content-inventory, recovery/replay, platform, fuzz,
+benchmark, or soak result is implied by this compilation checkpoint.
+
+## Deferred verification
+
+Run the compact subsystem gates in `docs/deferred-checks.md` only when the user
+explicitly requests a verification checkpoint. Do not claim a deferred gate
+passed. The last fully documented long production checkpoint predates the
+current representation and therefore cannot verify the current tree.
+
+## Module ownership
+
+The fixed extraction baseline is
+`40037fbb1db9eaac8d4889b811d29f8c00380e6b`. Current central file sizes are:
+
+- `crates/sim/src/lib.rs`: 32,362 lines (+2,770 from baseline);
+- `crates/protocol/src/lib.rs`: 13,416 lines (+3,443);
+- `crates/persistence/src/lib.rs`: 13,196 lines (+119); and
+- `crates/server/src/lib.rs`: 9,436 lines (+629).
+
+The workspace currently holds 182,434 lines of Rust across nine crates
+(`sim`, `server`, `protocol`, `persistence`, `content`, `client`, `net`,
+`tools`, `conformance`) and 435 `#[test]` functions.
+
+The largest specialized ownership modules outside the four central files are:
+
+- simulation: `items.rs` (7,582 lines), `monsters.rs` (3,776), `mapgen.rs`
+  (3,335), `eocs.rs` (2,881), `npc_dialogue.rs` (1,660), `vehicles.rs` (1,449),
+  `roads.rs` (1,333), `weather.rs` (1,003), `combat.rs` (967), `specials.rs`
+  (922), `rivers.rs` (912), `missions.rs` (727), `fields.rs` (709), `npcs.rs`
+  (709), plus `anatomy.rs`, `cities.rs`, `interactions.rs`, `mission_items.rs`,
+  `npc_faction.rs`, `overmap.rs`, and `use_actions.rs`;
+- server: `main.rs` (7,994), `worldgen.rs` (4,336), `item_groups.rs` (3,024),
+  `eocs.rs` (1,106), `regional_field_acceptance.rs` (1,073), plus `anatomy.rs`,
+  `missions.rs`, `npc_classes.rs`, `npc_faction.rs`, `use_actions.rs`,
+  `vehicles.rs`, and `weather.rs`;
+- protocol: `item_groups.rs` (3,158), `eocs.rs` (1,077), plus `anatomy.rs`,
+  `astronomy_table.rs`, `interactions.rs`, `missions.rs`, `npc_dialogue.rs`,
+  `npc_faction.rs`, `use_actions.rs`, `vehicles.rs`, and `weather.rs`; and
+- content: 34 definition modules led by `item.rs` (5,226), `monster.rs`
+  (3,061), `recipe.rs` (2,853), `mapgen.rs` (2,834), `item_group.rs` (2,330),
+  `vehicle.rs` (1,564), and `eoc.rs` (1,483).
+
+`crates/persistence` remains a single 13,196-line `lib.rs` with no extracted
+modules and is the least-decomposed crate. Future work should grow the focused
+modules above and keep central-file changes to unavoidable wiring or canonical
+representation.

@@ -1,8 +1,14 @@
 # Content schema inventory
 
 `content-schema-inventory.json` is a deterministic inventory of every top-level
-definition type and field observed in the pinned vendored JSON. Regenerate and
-verify it with:
+definition type and field observed in the pinned vendored JSON. This file is a
+generated parser/schema snapshot for the unchanged pinned
+baseline, not live gameplay status. It was not regenerated for the
+`P142/S119/R4/CS117/CE32` documentation reconciliation because the vendored
+corpus did not change. Use `PORTING_MATRIX.md` and `docs/parity-ledger.json` for
+runtime admission and verification state.
+
+Regenerate and verify it with:
 
 ```sh
 cargo xtask content-inventory

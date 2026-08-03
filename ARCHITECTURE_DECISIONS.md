@@ -1,7 +1,20 @@
 # CDDA Rust Multiplayer Port Architecture Decisions
 
 Status: Living design record
-Last updated: 2026-07-26
+Last updated: 2026-07-31
+
+## Current implementation checkpoint
+
+The architecture remains unchanged: Bevy is client-only, the server and
+simulation are plain Rust, and Iroh owns transport and endpoint identity. The
+implemented tree at `a3e6bfc` uses `P142/S119/R4/CS117/CE32`. That tree has an
+affected-crate compilation checkpoint, not a comprehensive verification
+checkpoint; long gates are listed in `docs/deferred-checks.md`.
+
+The protocol-specific sections below are a chronological decision record. They
+remain valid evidence for the boundary they introduced but do not supersede the
+current contract or the live family states in `IMPLEMENTATION_STATUS.md` and
+`docs/parity-ledger.json`.
 
 ## Purpose
 

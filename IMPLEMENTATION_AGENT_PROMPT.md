@@ -10,8 +10,8 @@ scaffolding, a prototype, or one vertical slice is not completion.
 At every fresh or resumed session:
 
 1. Read every applicable `AGENTS.md` and `ARCHITECTURE_DECISIONS.md` completely.
-2. Read `IMPLEMENTATION_STATUS.md`, `PORTING_MATRIX.md`, and recent ADRs when
-   present; create the required status files before implementation if absent.
+2. Read the live status, matrix, parity/runtime ledgers, deferred-check list,
+   and recent ADRs; create a required live status file if absent.
 3. Inspect staged, unstaged, and untracked files; preserve user work.
 4. Verify the read-only reference checkout at `../Cataclysm-DDA/` and continue
    existing work rather than recreating it.

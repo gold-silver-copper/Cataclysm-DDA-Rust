@@ -1,5 +1,10 @@
 # Pinned C++ differential oracle bootstrap
 
+The oracle remains a required checkpoint/release tool. Its build and scenarios
+are intentionally deferred during the current implementation-only mode; run it
+only when the user explicitly requests a verification checkpoint. No current
+oracle result is implied by this document.
+
 This development-only adapter executes real CDDA C++ behavior at the Rust
 runtime's pinned upstream commit. `cargo xtask cpp-oracle-check` validates the
 versioned scenario, verifies the checkout commit and Git tree, exports that

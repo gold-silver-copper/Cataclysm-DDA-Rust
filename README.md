@@ -9,7 +9,43 @@ Only `crates/client` may depend on Bevy. Canonical simulation, persistence,
 network framing, protocol, content loading, tooling, and the server remain
 renderer-free.
 
-## Playable foundation slice
+## Current implementation checkpoint
+
+At commit `a3e6bfc`, the runtime contract is
+`P142/S119/R4/CS117/CE32`. The bounded ordinary-vehicle family has completed
+adversarial review and cheap affected-crate compilation. Comprehensive gameplay,
+oracle, real-Iroh, recovery/replay, content, workspace, and platform gates for
+the post-road families remain deferred, so this is not a verified release.
+
+Current production wiring extends through regional fields, cities, roads,
+rivers, overmap specials, spawning, anatomy/combat, bounded EOCs/use actions,
+a hard monster-family boundary, substantial NPC/social behavior, static vehicle
+ownership and bounded manual controls, weather/field/environment processing, and
+temperature-driven item rot for ground and vehicle-cargo items.
+Unsupported branches remain explicit and fail closed. Powered vehicles,
+NPC/social closure, agriculture and broader inactive-region catch-up, full CDDA
+content parity, release packaging, and cross-platform release evidence remain.
+
+Use these sources in order:
+
+1. `IMPLEMENTATION_STATUS.md` for the exact commit, runnable behavior, and
+   latest checks;
+2. `PORTING_MATRIX.md` for human-readable family status;
+3. `docs/parity-ledger.json` for definition-level dependencies and fail-closed
+   boundaries; and
+4. `docs/deferred-checks.md` for gates that have not passed.
+
+The long protocol narrative below is cumulative historical context. A section
+that says a boundary was complete at an earlier protocol does not claim that
+the current representation has passed its deferred gates. The narrative is also
+deliberately incomplete: it stops at Protocol 97, while the current contract is
+Protocol 142. Families introduced after Protocol 97 — rivers, overmap specials,
+content-driven spawning, anatomy/combat, EOCs and use actions, the monster
+boundary, NPC/social, vehicles, and weather/fields/environment — are described
+only in `IMPLEMENTATION_STATUS.md`, `PORTING_MATRIX.md`, and
+`docs/parity-ledger.json`, which are the live sources for them.
+
+## Cumulative implementation narrative
 
 The current slice is not CDDA-complete, but it supports passwordless iroh
 enrollment, persistent character creation/selection, two graphical clients,
@@ -1033,18 +1069,27 @@ target/debug/cdda-client --profile player-one \
 
 # Once connected, move cardinally with WASD/arrows or the numpad; numpad
 # 1/3/7/9 and Home/PageUp/End/PageDown move diagonally, while . or numpad 5 waits.
-# G picks up, Q drops, E/R
-# wields/unwields, U reloads a wielded gun from matching carried ammunition, C
-# consumes carried food/drink, P activates/deactivates powered items, B crafts or resumes, V reads or resumes, N
-# disassembles or resumes, X cancels the current craft, book study, or
+# G picks up, Q drops, E/R wields/unwields, W wears, D takes off,
+# U reloads a wielded gun from matching carried ammunition, C
+# consumes carried food/drink, P activates/deactivates powered items, B crafts or resumes,
+# M builds an available construction or resumes one, V reads or resumes, N
+# disassembles or resumes, I inserts carried ammunition into the first fitting
+# carried container pocket, Y removes the first removable carried pocket item,
+# X cancels the current craft, construction, book study, or
 # disassembly, O/L
-# opens/closes adjacent terrain, H smashes an adjacent visible registered
+# opens/closes adjacent terrain and O also toggles the nearest adjacent openable
+# vehicle door, H smashes an adjacent visible registered
 # structure with a supported wielded bash-only item, Z sleeps
 # or wakes, F selects an adjacent melee target, and T selects a visible target in
-# the wielded gun's range. Enter opens chat; Enter sends and Escape
+# the wielded gun's range. With no menu open, K talks to the nearest adjacent NPC,
+# otherwise boards the vehicle part underfoot, and unboards when already a
+# passenger. While boarded, WASD/arrows issue authoritative vehicle steering and
+# propulsion instead of walking, and G/Q in the item menu take from and store
+# into adjacent vehicle cargo. Enter opens chat; Enter sends and Escape
 # cancels the current message. In chat, `/report-last <details>` durably reports
 # the latest other character who spoke; the server returns a typed result.
-# When an item, target, terrain, crafting, reading, or disassembly command has multiple valid choices, arrows or
+# When an item, target, terrain, crafting, reading, disassembly, or
+# server-driven interaction command has multiple valid choices, arrows or
 # J/K select the entry, Enter confirms, and Escape cancels; one choice stays immediate.
 ```
 
@@ -1156,6 +1201,12 @@ definition has been behaviorally ported; current support is tracked in
 
 ## Developer verification
 
+The commands below are release/checkpoint gates. Under the current
+implementation-only directive, do not run the long workspace, oracle, content,
+recovery/replay, real-Iroh, platform, fuzz, benchmark, or soak gates unless the
+user explicitly requests a verification checkpoint. Cheap affected-package
+formatting and `cargo check` remain appropriate during implementation.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -1245,8 +1296,8 @@ that are generated, authoritatively interacted with, persisted,
 client-accessible, and four-mode verified earn the corresponding points; loaded
 JSON alone earns none. The denominator is independently derived from the pinned
 manifest and split between core-DDA ordinary gameplay (13,865 definitions,
-263,435 possible weighted points; currently 50 generated definitions and 305
-weighted points, or 0.1158%) and selectable
+263,435 possible weighted points; the current recorded evidence floor is 52
+generated definitions and 343 weighted points, or 0.1302%) and selectable
 bundled mods (5,967 definitions, 113,373 possible points; currently zero).
 The mod target is the union of nonobsolete pinned mods that can participate in
 at least one valid new-world selection; mutually exclusive configurations still
